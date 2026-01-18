@@ -11,7 +11,7 @@ use crate::sync::UPSafeCell;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bitflags::*;
-use easy_fs::{EasyFileSystem, Inode};
+use crate::easy_fs::{EasyFileSystem, Inode};
 use lazy_static::*;
 
 /// inode in memory
