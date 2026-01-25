@@ -69,8 +69,9 @@ use process::*;
 
 use crate::{fs::Stat, task::SignalAction};
 
+#[no_mangle]
 /// handle syscall exception with `syscall_id` and other arguments
-pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
+pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_OPEN => sys_open(args[1] as *const u8, args[2] as u32),
@@ -96,7 +97,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
         SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize),
         SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
-        SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2]),
+        SYSCALL_MMAP => sys_mmap(
+            args[0], args[1], args[2] as i32, 
+            args[3] as i32, args[4] as i32, args[5]
+        ),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_SBRK => sys_sbrk(args[0] as i32),
         SYSCALL_SPAWN => sys_spawn(args[0] as *const u8),

@@ -13,7 +13,8 @@ mod action;
 mod context;
 mod manager;
 mod id;
-mod processor;
+/// 任务处理器，改为pub供外部调用
+pub mod processor;
 mod signal;
 mod switch;
 #[allow(clippy::module_inception)]

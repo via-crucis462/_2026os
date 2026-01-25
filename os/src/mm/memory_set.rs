@@ -387,6 +387,9 @@ impl MemorySet {
         let start_vpn = VirtAddr::from(start).floor();//目标起始页号
         let end_vpn = VirtAddr::from(end).ceil();//目标结束页号
 
+        // 可能存在的新area
+        let mut new_area: Option<MapArea> = None;
+
         for area in self.areas.iter_mut() {
             // 找到有重合部分的区域
             if area.vpn_range.get_start() < end_vpn && area.vpn_range.get_end() > start_vpn {// 有交集;
@@ -395,7 +398,6 @@ impl MemorySet {
                 let split = (!inc_left) & (!inc_right);//从中间分开成两个部分
                 let all = inc_left & inc_right;//删掉整个区域
 
-                let mut new_area: Option<MapArea> = None;
 
                 if all {
                     // 使其长度为0, 稍后再删除
@@ -433,8 +435,8 @@ impl MemorySet {
         }
 
         // 插入新area
-        if let Some(new_area) = new_area {
-            self.areas.push(new_area);
+        if let Some(area) = new_area {
+            self.areas.push(area);
         }
 
         // 删除长度为0的area
@@ -556,7 +558,7 @@ impl MapArea {
     }
     /// 返回这段中的数据（如果framed）
     /// u8的vec
-    pub fn get_data(&self, page_table: &mut PageTable) -> Option<Vec<u8>> {
+    pub fn _get_data(&self, page_table: &mut PageTable) -> Option<Vec<u8>> {
         if self.map_type != MapType::Framed {
             None
         }

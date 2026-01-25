@@ -7,6 +7,7 @@ use crate::{
     mm::{translated_refmut, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE},
     sync::UPSafeCell,
     trap::{trap_handler, TrapContext},
+    mm::mmap,
 };
 use alloc::{
     string::String,
@@ -14,7 +15,8 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::cell::RefMut;
+use core::{cell::RefMut};
+
 
 /// Task control block structure
 ///
@@ -109,6 +111,21 @@ impl TaskControlBlockInner {
             self.fd_table.push(None);
             self.fd_table.len() - 1
         }
+    }
+    pub fn mmap(//映射内存段
+        &mut self,
+        addr: usize,
+        length: usize,
+        prot: mmap::MMapProt
+    ) -> Result<usize, i32> {
+        self.memory_set.mmap(addr, length, prot)
+    }
+    pub fn munmap(&mut self, addr: usize, length: usize) -> Result<(), i32> {
+        self.memory_set.munmap(addr, length)
+    }
+    /// 未完成
+    pub fn brk(&mut self, _addr: usize) -> Result<usize, i32> {
+        Err(-1)
     }
 }
 

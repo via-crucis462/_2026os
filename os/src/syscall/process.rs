@@ -1,14 +1,15 @@
 //! Process management syscalls
 
 use crate::{
-    fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
-    task::{
+    fs::{*}, mm::{mmap, translated_ref, translated_refmut, translated_str}, task::{
         add_task, current_task, current_user_token, exit_current_and_run_next, pid2task,
         suspend_current_and_run_next, SignalAction, SignalFlags, MAX_SIG,
     },
+    syscall::sys_read
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
+
+
 
 #[repr(C)]
 #[derive(Debug)]
@@ -142,9 +143,32 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
 }
 
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: usize) -> isize {
     trace!("kernel:pid[{}] sys_mmap NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
+    let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
+    if let Ok(ret) = mmap::do_mmap(
+        start, 
+        len,
+        mmap_prot
+    ) {
+        match mmap_flags {
+            mmap::MMapFlags::MAP_ANONYMOUS => {},
+            mmap::MMapFlags::MAP_PRIVATE => {
+                // 按目前理解，拷贝文件内容到映射区即可？
+                sys_read(fd as usize, ret as *mut u8, len);
+            },
+            mmap::MMapFlags::MAP_SHARED => {
+                //尚未实现
+                //此此处似乎需要实现文件的同步回写
+            },
+            _ =>  {return -1;},
+        };
+        ret as isize
+    }
+    else {
+        -1
+    }
 }
 
 /// YOUR JOB: Implement munmap.
