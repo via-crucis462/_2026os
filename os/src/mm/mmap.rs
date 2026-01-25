@@ -38,4 +38,4 @@ pub fn do_mmap(addr: usize, length: usize, prot: MMapProt) -> Result<usize, i32>
 }
 
 // 尽管文件映射在syscall中实现，但此处设置一个shared区域
-// unimplemented
+// （未实现）
