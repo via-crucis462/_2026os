@@ -16,7 +16,7 @@ ifeq ($(MODE), release)
 endif
 ifeq ($(FS) , EFS)
 	FS_IMG := ../fs_img/$(ARCH)_efs.img
-else ifeq($(FS) , EXT4)
+else ifeq ($(FS) , EXT4)
 	FS_IMG := ../fs_img/$(ARCH)_ext4.img
 endif
 # KERNEL ENTRY
@@ -31,7 +31,6 @@ build: env $(KERNEL_BIN)
 env:
 ifeq ($(OFFLINE),)
 	(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)
-	cargo install cargo-binutils
 	rustup component add rust-src
 	rustup component add llvm-tools-preview
 endif
