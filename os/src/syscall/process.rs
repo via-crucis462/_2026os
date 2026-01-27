@@ -5,7 +5,6 @@ use crate::{
         add_task, current_task, current_user_token, exit_current_and_run_next, pid2task,
         suspend_current_and_run_next, SignalAction, SignalFlags, MAX_SIG,
     },
-    syscall::sys_read
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 
@@ -143,7 +142,7 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
 }
 
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: usize) -> isize {
+pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, _fd: i32, _off: usize) -> isize {
     trace!("kernel:pid[{}] sys_mmap NOT IMPLEMENTED", current_task().unwrap().pid.0);
     let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
     let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
@@ -156,7 +155,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
             mmap::MMapFlags::MAP_ANONYMOUS => {},
             mmap::MMapFlags::MAP_PRIVATE => {
                 // 按目前理解，拷贝文件内容到映射区即可？
-                sys_read(fd as usize, ret as *mut u8, len);
+                //sys_read(fd as usize, ret as *mut u8, len);
             },
             mmap::MMapFlags::MAP_SHARED => {
                 //尚未实现
