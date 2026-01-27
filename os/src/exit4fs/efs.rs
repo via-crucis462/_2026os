@@ -6,17 +6,22 @@ use super::BLOCK_SZ;
 use alloc::sync::Arc;
 use spin::Mutex;
 
-pub struct EasyFileSystem {
+/*pub struct EasyFileSystem {
     pub block_device: Arc<dyn BlockDevice>,
     pub inode_bitmap: Bitmap,
     pub data_bitmap: Bitmap,
     inode_area_start_block: u32,
     data_area_start_block: u32,
+}*/
+pub struct Ext4FileSystem {
+    pub block_device: Arc<dyn BlockDevice>,
+    pub super_block: Arc<Ext4_SuperBlock>,
+    pub block_groups: Vec<Arc<BlockGroup>>,
 }
 
 type DataBlock = [u8; BLOCK_SZ];
 
-impl EasyFileSystem {
+impl Ext4FileSystem {
     pub fn create(
         block_device: Arc<dyn BlockDevice>,
         total_blocks: u32,
