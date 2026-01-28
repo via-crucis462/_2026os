@@ -46,8 +46,8 @@ const SYSCALL_SET_PRIORITY: usize = 140;
 const SYSCALL_GET_TIME: usize = 169;
 /// getpid syscall
 const SYSCALL_GETPID: usize = 172;
-/// sbrk syscall
-const SYSCALL_SBRK: usize = 214;
+/// brk syscall
+const SYSCALL_BRK: usize = 214;
 /// munmap syscall
 const SYSCALL_MUNMAP: usize = 215;
 /// fork syscall
@@ -102,7 +102,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as i32, args[4] as i32, args[5]
         ),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
-        SYSCALL_SBRK => sys_sbrk(args[0] as i32),
+        SYSCALL_BRK => sys_brk(args[0] as usize),
         SYSCALL_SPAWN => sys_spawn(args[0] as *const u8),
         SYSCALL_SET_PRIORITY => sys_set_priority(args[0] as isize),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),

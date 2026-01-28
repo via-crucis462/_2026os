@@ -24,10 +24,10 @@ bitflags! {
     }
 }
 
+/// 修改断点
 pub fn do_brk(addr: usize) -> Result<usize, i32> {
     let task = PROCESSOR.exclusive_access().current().unwrap();
-    let mut task_inner = task.inner_exclusive_access();
-    task_inner.brk(addr)
+    task.change_program_brk(addr)
 }
 
 /// 处理mmap系统调用的分配部分

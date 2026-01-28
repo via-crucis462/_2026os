@@ -177,10 +177,10 @@ pub fn sys_munmap(_start: usize, _len: usize) -> isize {
 }
 
 /// change data segment size
-pub fn sys_sbrk(size: i32) -> isize {
-    trace!("kernel:pid[{}] sys_sbrk", current_task().unwrap().pid.0);
-    if let Some(old_brk) = current_task().unwrap().change_program_brk(size) {
-        old_brk as isize
+pub fn sys_brk(addr: usize) -> isize {
+    trace!("kernel:pid[{}] sys_brk", current_task().unwrap().pid.0);
+    if let Ok(res) = mmap::do_brk(addr){
+        res as isize
     } else {
         -1
     }

@@ -88,7 +88,7 @@ pub struct TaskControlBlockInner {
     pub heap_bottom: usize,
 
     /// Program break
-    pub program_brk: usize,
+    pub program_brk: usize,// 注意需要在exec中维护，rcore忽略了这点，运行测例时brk失效，已修复
 }
 
 impl TaskControlBlockInner {
@@ -112,7 +112,10 @@ impl TaskControlBlockInner {
             self.fd_table.len() - 1
         }
     }
-    pub fn mmap(//映射内存段
+    /// mmap系统调用的实现
+    /// 后续可能会放在tcb里，类似change_program_brk
+    /// 后续还可能弃置memset中的brk_index，改用传参传递断点
+    pub fn mmap(
         &mut self,
         addr: usize,
         length: usize,
@@ -122,10 +125,6 @@ impl TaskControlBlockInner {
     }
     pub fn munmap(&mut self, addr: usize, length: usize) -> Result<(), i32> {
         self.memory_set.munmap(addr, length)
-    }
-    /// 未完成
-    pub fn brk(&mut self, _addr: usize) -> Result<usize, i32> {
-        Err(-1)
     }
 }
 
@@ -198,6 +197,9 @@ impl TaskControlBlock {
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
             .ppn();
+        // 读取用户栈顶（堆区底）地址
+        let memory_top = user_sp;
+
         // push arguments on user stack
         user_sp -= (args.len() + 1) * core::mem::size_of::<usize>();
         let argv_base = user_sp;
@@ -229,6 +231,9 @@ impl TaskControlBlock {
         inner.memory_set = memory_set;
         // update trap_cx ppn
         inner.trap_cx_ppn = trap_cx_ppn;
+        // 更新断点
+        inner.heap_bottom = memory_top;
+        inner.program_brk = memory_top;
         // initialize trap_cx
         let mut trap_cx = TrapContext::app_init_context(
             entry_point,
@@ -311,13 +316,20 @@ impl TaskControlBlock {
     }
 
     /// change the location of the program break. return None if failed.
-    pub fn change_program_brk(&self, size: i32) -> Option<usize> {
+    /// rcore自带, 修改断点（增量形式）
+    pub fn change_program_brk(&self, addr: usize) -> Result<usize, i32> {
+        if addr == 0{
+            // 返回当前断点
+            return Ok(self.inner_exclusive_access().program_brk);
+        }
+        // 超范围panic
+        let size: i32 = i32::try_from(addr).unwrap() - self.inner_exclusive_access().program_brk as i32;
         let mut inner = self.inner_exclusive_access();
         let heap_bottom = inner.heap_bottom;
-        let old_break = inner.program_brk;
-        let new_brk = inner.program_brk as isize + size as isize;
+        let _old_break = inner.program_brk;
+        let new_brk = addr as isize;
         if new_brk < heap_bottom as isize {
-            return None;
+            return Err(-1);
         }
         let result = if size < 0 {
             inner
@@ -328,11 +340,13 @@ impl TaskControlBlock {
                 .memory_set
                 .append_to(VirtAddr(heap_bottom), VirtAddr(new_brk as usize))
         };
+        println!("brk: change from {:#x} to {:#x}", _old_break, new_brk);
         if result {
             inner.program_brk = new_brk as usize;
-            Some(old_break)
+            
+            Ok(addr)
         } else {
-            None
+            Err(-1)
         }
     }
 }
