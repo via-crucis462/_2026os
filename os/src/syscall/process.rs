@@ -143,7 +143,7 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
 
 /// YOUR JOB: Implement mmap.
 pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, _fd: i32, _off: usize) -> isize {
-    trace!("kernel:pid[{}] sys_mmap NOT IMPLEMENTED", current_task().unwrap().pid.0);
+    trace!("kernel:pid[{}] sys_mmap NOT COMPLITED", current_task().unwrap().pid.0);
     let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
     let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
     if let Ok(ret) = mmap::do_mmap(
@@ -171,9 +171,13 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, _fd: i32, _off:
 }
 
 /// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!("kernel:pid[{}] sys_munmap NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    trace!("kernel:pid[{}] sys_munmap NOT COMPLITED", current_task().unwrap().pid.0);
+    if let Ok(_) = mmap::do_munmap(start,len) {
+        0
+    } else {
+        -1
+    }
 }
 
 /// change data segment size

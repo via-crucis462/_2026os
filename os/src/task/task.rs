@@ -112,20 +112,6 @@ impl TaskControlBlockInner {
             self.fd_table.len() - 1
         }
     }
-    /// mmap系统调用的实现
-    /// 后续可能会放在tcb里，类似change_program_brk
-    /// 后续还可能弃置memset中的brk_index，改用传参传递断点
-    pub fn mmap(
-        &mut self,
-        addr: usize,
-        length: usize,
-        prot: mmap::MMapProt
-    ) -> Result<usize, i32> {
-        self.memory_set.mmap(addr, length, prot)
-    }
-    pub fn munmap(&mut self, addr: usize, length: usize) -> Result<(), i32> {
-        self.memory_set.munmap(addr, length)
-    }
 }
 
 impl TaskControlBlock {
@@ -231,7 +217,7 @@ impl TaskControlBlock {
         inner.memory_set = memory_set;
         // update trap_cx ppn
         inner.trap_cx_ppn = trap_cx_ppn;
-        // 更新断点
+        // 加载新程序后需要更新堆区底、断点
         inner.heap_bottom = memory_top;
         inner.program_brk = memory_top;
         // initialize trap_cx
@@ -348,6 +334,21 @@ impl TaskControlBlock {
         } else {
             Err(-1)
         }
+    }
+    /// 处理mmap
+    pub fn mmap(
+        &self,
+        addr: usize,
+        length: usize,
+        prot: mmap::MMapProt
+    ) -> Result<usize, i32> {
+        let mut inner = self.inner_exclusive_access();
+        inner.memory_set.mmap(addr, length, prot)
+    }
+    /// 处理munmap
+    pub fn munmap(&self, addr: usize, length: usize) -> Result<(), i32> {
+        let mut inner = self.inner_exclusive_access();
+        inner.memory_set.munmap(addr, length)
     }
 }
 

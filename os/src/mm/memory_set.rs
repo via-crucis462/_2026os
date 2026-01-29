@@ -70,7 +70,7 @@ impl MemorySet {
             None,
         );
     }
-    /// 预留，用于文件映射
+    /// 预留，用于文件映射, 目前只标记，啥都没做
     pub fn insert_file_area(
         &mut self,
         start_va: VirtAddr,
@@ -396,7 +396,6 @@ impl MemorySet {
     }
     /// munmap的实现
     /// 注意：不允许取消映射brk之前的区域
-
     pub fn munmap(&mut self, start: usize, length: usize) -> Result<(),i32> {
         let brk_idx = self.brk_index;
         let brk_area = &self.areas[brk_idx];// brk area
