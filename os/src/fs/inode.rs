@@ -1,9 +1,4 @@
-//! `Arc<Inode>` -> `OSInodeInner`: In order to open files concurrently
-//! we need to wrap `Inode` into `Arc`,but `Mutex` in `Inode` prevents
-//! file systems from being accessed simultaneously
-//!
-//! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
-//! need to wrap `OSInodeInner` into `UPSafeCell`
+#[allow(unused)]
 use super::File;
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
@@ -13,7 +8,7 @@ use alloc::vec::Vec;
 use bitflags::*;
 use crate::easy_fs::{EasyFileSystem, Inode};
 use lazy_static::*;
-
+use crate::ext4fs::superblock::{Ext4SuperBlockDisk, Ext4SuperBlock};
 /// inode in memory
 /// A wrapper around a filesystem inode
 /// to implement File trait atop
@@ -57,8 +52,10 @@ impl OSInode {
 
 lazy_static! {
     pub static ref ROOT_INODE: Arc<Inode> = {
+        let _ext4fs = Ext4SuperBlock::new(Ext4SuperBlockDisk::new(BLOCK_DEVICE.clone()));
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
         Arc::new(EasyFileSystem::root_inode(&efs))
+
     };
 }
 

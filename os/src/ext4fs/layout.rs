@@ -1,14 +1,20 @@
+#![allow(unused)]
 use super::{get_block_cache, BlockDevice, BLOCK_SZ};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::{Debug, Formatter, Result};
-
+#[allow(unused)]
 const EFS_MAGIC: u32 = 0x3b800001;
 const INODE_DIRECT_COUNT: usize = 28;
+#[allow(unused)]
 const NAME_LENGTH_LIMIT: usize = 27;
+#[allow(unused)]
 const INODE_INDIRECT1_COUNT: usize = BLOCK_SZ / 4;
+#[allow(unused)]
 const INODE_INDIRECT2_COUNT: usize = INODE_INDIRECT1_COUNT * INODE_INDIRECT1_COUNT;
+#[allow(unused)]
 const DIRECT_BOUND: usize = INODE_DIRECT_COUNT;
+#[allow(unused)]
 const INDIRECT1_BOUND: usize = DIRECT_BOUND + INODE_INDIRECT1_COUNT;
 #[allow(unused)]
 const INDIRECT2_BOUND: usize = INDIRECT1_BOUND + INODE_INDIRECT2_COUNT;

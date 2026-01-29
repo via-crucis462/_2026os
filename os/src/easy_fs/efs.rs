@@ -1,7 +1,8 @@
 use super::{
-    block_cache_sync_all, get_block_cache, Bitmap, BlockDevice, DiskInode, DiskInodeType, Inode,
-    SuperBlock,
+    Bitmap, DiskInode, DiskInodeType, Inode, SuperBlock,
 };
+use crate::ext4fs::block_dev::BlockDevice;
+use crate::ext4fs::block_cache::{block_cache_sync_all, get_block_cache};
 use super::BLOCK_SZ;
 use alloc::sync::Arc;
 use spin::Mutex;

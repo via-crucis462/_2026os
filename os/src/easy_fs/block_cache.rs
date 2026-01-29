@@ -1,4 +1,5 @@
-use super::{BlockDevice, BLOCK_SZ};
+use crate::ext4fs::block_dev::BlockDevice;
+use super::BLOCK_SZ;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec;

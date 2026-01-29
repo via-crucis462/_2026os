@@ -1,3 +1,4 @@
+#![allow(unused)]
 use super::{get_block_cache, BlockDevice, BLOCK_SZ};
 use alloc::sync::Arc;
 

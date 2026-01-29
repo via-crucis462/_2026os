@@ -36,6 +36,7 @@ mod console;
 pub mod config;
 pub mod drivers;
 pub mod easy_fs;
+pub mod ext4fs;
 pub mod fs;
 pub mod lang_items;
 pub mod logging;

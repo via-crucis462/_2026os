@@ -1,7 +1,9 @@
 use super::{
-    block_cache_sync_all, get_block_cache, BlockDevice, DirEntry, DiskInode, DiskInodeType,
+    DirEntry, DiskInode, DiskInodeType,
     EasyFileSystem, DIRENT_SZ,
 };
+use crate::ext4fs::block_dev::BlockDevice;
+use crate::ext4fs::block_cache::{block_cache_sync_all, get_block_cache};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
