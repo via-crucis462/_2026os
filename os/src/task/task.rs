@@ -15,7 +15,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{cell::RefMut};
+use core::cell::RefMut;
 
 
 /// Task control block structure
