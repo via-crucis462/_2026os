@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use bitflags::*;
 use crate::easy_fs::{EasyFileSystem, Inode};
 use lazy_static::*;
-use crate::ext4fs::superblock::{Ext4SuperBlockDisk, Ext4SuperBlock};
+use crate::ext4fs::ext4::Ext4FS;
 /// inode in memory
 /// A wrapper around a filesystem inode
 /// to implement File trait atop
@@ -52,7 +52,7 @@ impl OSInode {
 
 lazy_static! {
     pub static ref ROOT_INODE: Arc<Inode> = {
-        let _ext4fs = Ext4SuperBlock::new(Ext4SuperBlockDisk::new(BLOCK_DEVICE.clone()));
+        let _ext4fs = Ext4FS::open(BLOCK_DEVICE.clone());
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
         Arc::new(EasyFileSystem::root_inode(&efs))
 

@@ -1,5 +1,4 @@
 use super::*;
-use crate::ext4fs::block_cache::BLOCK_CACHE_MANAGER;
 use alloc::sync::Arc;
 
 pub const EXT4_MAGIC : usize = 0xEF53;
@@ -144,10 +143,10 @@ pub struct Ext4SuperBlockDisk {
 }
 impl Ext4SuperBlockDisk {
     pub fn new(block_device : Arc<dyn BlockDevice>) -> Self {
-        let block_cache = BLOCK_CACHE_MANAGER
-            .lock()
-            .get_block_cache(0, Arc::clone(&block_device));
-        let ptr = block_cache.lock().get_ref::<Ext4SuperBlockDisk>(EXT4_SUPERBLOCK_OFFSET) as *const Ext4SuperBlockDisk;
-        unsafe { core::ptr::read_unaligned(ptr) }
+        let block_cache_arc = get_block_cache(0, Arc::clone(&block_device));
+        let block_cache = block_cache_arc.lock();
+        block_cache.read(EXT4_SUPERBLOCK_OFFSET, |sb: &Ext4SuperBlockDisk| {
+            unsafe { core::ptr::read_unaligned(sb as *const _) }
+        })
     }
 }
