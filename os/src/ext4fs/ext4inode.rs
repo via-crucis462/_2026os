@@ -1,4 +1,5 @@
-
+use alloc::sync::Arc;
+use super::{ext4::Ext4FS};
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ext4InodeDisk {
@@ -33,5 +34,32 @@ impl Ext4InodeDisk {
     
     pub fn size(&self) -> u64 {
         ((self.i_size_high as u64) << 32) | (self.i_size_lo as u64)
+    }
+}
+pub struct Ext4Inode {
+    /// Inode 编号
+    pub inode_id: u32,
+    /// 文件类型（目录/普通文件）
+    pub mode: u16,
+    /// 文件大小
+    pub size: u64,
+    /// 数据块指针（直接块、间接块等）
+    pub i_block: [u32; 15],
+    /// 块设备
+    pub fs: Arc<Ext4FS>,
+    /// 父目录 Inode 编号（可选）
+    pub parent: Option<u32>,
+}
+
+impl Ext4Inode {
+    pub fn new(inode_id: u32, disk_inode: &Ext4InodeDisk, fs: Arc<Ext4FS>, parent: Option<u32>) -> Self {
+        Self {
+            inode_id,
+            mode: disk_inode.i_mode,
+            size: ((disk_inode.i_size_high as u64) << 32) | (disk_inode.i_size_lo as u64),
+            i_block: disk_inode.i_block,
+            fs,
+            parent,
+        }
     }
 }
