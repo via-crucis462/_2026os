@@ -1,10 +1,13 @@
 //! Process management syscalls
 
 use crate::{
-    fs::{*}, mm::{mmap, translated_ref, translated_refmut, translated_str}, task::{
+    fs::{*}, 
+    mm::{mmap, translated_ref, translated_refmut, translated_str}, 
+    task::{
         add_task, current_task, current_user_token, exit_current_and_run_next, pid2task,
         suspend_current_and_run_next, SignalAction, SignalFlags, MAX_SIG,
     },
+    task::fork::*,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 
@@ -34,10 +37,18 @@ pub fn sys_getpid() -> isize {
     current_task().unwrap().pid.0 as isize
 }
 
-pub fn sys_fork() -> isize {
+pub fn sys_getppid() -> isize {
+    let pid = current_task().unwrap().pid.0;
+    let ppid = current_task().unwrap().getppid();
+    trace!("kernel:pid[{}] sys_getppid:{}", pid, ppid);
+    ppid as isize
+}
+
+// 旧的 fork 实现，参考用
+pub fn _sys_fork() -> isize {
 	trace!("kernel:pid[{}] sys_fork", current_task().unwrap().pid.0);
     let current_task = current_task().unwrap();
-    let new_task = current_task.fork();
+    let new_task = current_task.fork(None);//此处添加了一个 None 参数
     let new_pid = new_task.pid.0;
     // modify trap context of new_task, because it returns immediately after switching
     let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
@@ -47,6 +58,12 @@ pub fn sys_fork() -> isize {
     // add new task to scheduler
     add_task(new_task);
     new_pid as isize
+}
+
+// 部分实现，暂未通过测例
+pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
+    trace!("kernel:pid[{}] sys_clone", current_task().unwrap().pid.0);
+    do_clone(func, stack, flags)
 }
 
 pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {

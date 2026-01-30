@@ -46,12 +46,14 @@ const SYSCALL_SET_PRIORITY: usize = 140;
 const SYSCALL_GET_TIME: usize = 169;
 /// getpid syscall
 const SYSCALL_GETPID: usize = 172;
+/// 获取parent的pid
+const SYSCALL_GETPPID: usize = 173;
 /// brk syscall
 const SYSCALL_BRK: usize = 214;
 /// munmap syscall
 const SYSCALL_MUNMAP: usize = 215;
-/// fork syscall
-const SYSCALL_FORK: usize = 220;
+/// clone syscall
+const SYSCALL_CLONE: usize = 220;
 /// exec syscall
 const SYSCALL_EXEC: usize = 221;
 /// mmap syscall
@@ -93,7 +95,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as u32),
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_GETPID => sys_getpid(),
-        SYSCALL_FORK => sys_fork(),
+        SYSCALL_GETPPID => sys_getppid(),
+        SYSCALL_CLONE => sys_clone(args[0], args[1], args[2]),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize),
         SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),

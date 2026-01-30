@@ -235,7 +235,8 @@ impl TaskControlBlock {
     }
 
     /// Fork from parent to child
-    pub fn fork(self: &Arc<TaskControlBlock>) -> Arc<TaskControlBlock> {
+    /// 已编辑，添加了stack参数
+    pub fn fork(self: &Arc<TaskControlBlock>, sp: Option<usize>) -> Arc<TaskControlBlock> {
         // ---- hold parent PCB lock
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
@@ -279,7 +280,7 @@ impl TaskControlBlock {
                     killed: false,
                     frozen: false,
                     trap_ctx_backup: None,
-                    heap_bottom: parent_inner.heap_bottom,
+                    heap_bottom: sp.unwrap_or(parent_inner.heap_bottom),
                     program_brk: parent_inner.program_brk,
                 })
             },
@@ -290,6 +291,9 @@ impl TaskControlBlock {
         // **** access child PCB exclusively
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
         trap_cx.kernel_sp = kernel_stack_top;
+        if let Some(sp) = sp {
+            trap_cx.set_sp(sp);
+        }
         // return
         task_control_block
         // **** release child PCB
@@ -299,6 +303,21 @@ impl TaskControlBlock {
     /// get pid of process
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+
+    /// 获取parent的pid
+    pub fn getppid(&self) -> usize {
+        let inner = self.inner_exclusive_access();
+        if let Some(parent_weak) = &inner.parent{
+            if let Some(parent) = parent_weak.upgrade(){
+                parent.pid.0
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    
     }
 
     /// change the location of the program break. return None if failed.
