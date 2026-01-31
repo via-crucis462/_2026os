@@ -16,5 +16,29 @@
 5. 准备开始完成其他系统调用的实现。
 ## 2026.1.30
 1. 调整了先前munmap等的调用层次，优化代码结构。
-2. 开始实现clone。在不影响原有功能的情况下，将原本不带参数的fork改为了带参数的clone，实现了部分功能。暂未过测，可能是因为waitpid实现不符合规范。
+2. 开始实现clone。在不影响原有功能的前提下，将原本不带参数的fork改为了带参数的clone，实现了部分功能。
 3. 对原有框架中的fork进行了修改。
+## 2026.1.31
+1. 初步实现wait4，已过测。但目前的实现十分简陋，仅实现WNOHANG（默认）且不完全符合规范。
+2. 在wait4实现后，clone也成功过测。
+3. ！！！引入bug：按测例修改后的ch7b_initproc会反复报错（不影响测试，只是运行用户程序需要按两次回车），下面给出测试时的部分输出：
+```bash
+[initproc] Released a zombie process, pid=1, exit_code=0
+[initproc] Released a zombie process, pid=1, exit_code=0
+[initproc] Released a zombie process, pid=1, exit_code=0
+[initproc] Released a zombie process, pid=1, exit_code=0
+[initproc] Released a zombie process, pid=1, exit_code=0
+[initproc] Released a zombie process, pid=1, exit_code=0
+[initproc] Released a zombie process, pid=1, exit_code=0
+[initproc] Released a zombie process, pid=1, exit_code=0
+[initproc] Released a zombie process, pid=1, exit_code=0
+[initproc] Released a zombie process, pid=1, exit_code=0
+[initproc] Released a zombie process, pid=1, exit_code=0
+========== START test_wait ==========
+[K] do_clone: func=0x11, stack=0x0, flags=0xc
+wait child success.
+wstatus: 0
+========== END test_wait ==========
+
+>> >> test_wait passed.
+```

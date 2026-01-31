@@ -5,7 +5,7 @@ use crate::{
     mm::{mmap, translated_ref, translated_refmut, translated_str}, 
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next, pid2task,
-        suspend_current_and_run_next, SignalAction, SignalFlags, MAX_SIG,
+        suspend_current_and_run_next, SignalAction, SignalFlags, MAX_SIG, TaskStatus
     },
     task::fork::*,
 };
@@ -63,6 +63,11 @@ pub fn _sys_fork() -> isize {
 // 部分实现，暂未通过测例
 pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
     trace!("kernel:pid[{}] sys_clone", current_task().unwrap().pid.0);
+    if func == 0 && stack == 0 && flags == 0 {
+        // 不含参数，直接调用旧的 fork 实现
+        return _sys_fork();
+    }
+    // 含参数的版本
     do_clone(func, stack, flags)
 }
 
@@ -94,8 +99,8 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
 }
 
 /// If there is not a child process whose pid is same as given, return -1.
-/// Else if there is a child process but it is still running, return -2.
-pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
+/// 现在的简陋实现：只要存在子进程不是unint就返回pid，否则依情况返回-1、0
+pub fn sys_wait4(pid: isize, status: *mut i32, _options: usize) -> isize {
 	//trace!("kernel: sys_waitpid");
     let task = current_task().unwrap();
     // find a child process
@@ -111,20 +116,24 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
         // ---- release current PCB
     }
     let pair = inner.children.iter().enumerate().find(|(_, p)| {
-        // ++++ temporarily access child PCB exclusively
-        p.inner_exclusive_access().is_zombie() && (pid == -1 || pid as usize == p.getpid())
+        // ++++ temporarily access child PCB exclusively                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
+        p.inner_exclusive_access().refmut_status_signal() != &TaskStatus::UnInit && (pid == -1 || pid as usize == p.getpid())
         // ++++ release child PCB
     });
-    if let Some((idx, _)) = pair {
-        let child = inner.children.remove(idx);
-        // confirm that child will be deallocated after being removed from children list
-        assert_eq!(Arc::strong_count(&child), 1);
-        let found_pid = child.getpid();
-        // ++++ temporarily access child PCB exclusively
-        let exit_code = child.inner_exclusive_access().exit_code;
-        // ++++ release child PCB
-        *translated_refmut(inner.memory_set.token(), exit_code_ptr) = exit_code;
-        found_pid as isize
+    if let Some((idx, p)) = pair {
+        if p.inner_exclusive_access().refmut_status_signal() == &TaskStatus::Zombie {
+            let child = inner.children.remove(idx);
+            // confirm that child will be deallocated after being removed from children list
+            assert_eq!(Arc::strong_count(&child), 1);
+            let found_pid = child.getpid();
+            // ++++ temporarily access child PCB exclusively
+            let exit_code = child.inner_exclusive_access().exit_code;
+            // ++++ release child PCB
+            *translated_refmut(inner.memory_set.token(), status) = exit_code;
+            found_pid as isize
+        } else {
+            inner.children[idx].getpid() as isize
+        }
     } else {
         -2
     }

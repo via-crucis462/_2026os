@@ -49,6 +49,7 @@ pub fn suspend_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
+    task_inner.status_signal = TaskStatus::Ready;
     drop(task_inner);
     // ---- release current PCB
 
@@ -81,6 +82,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let mut inner = task.inner_exclusive_access();
     // Change status to Zombie
     inner.task_status = TaskStatus::Zombie;
+    inner.status_signal = TaskStatus::Zombie;
     // Record exit code
     inner.exit_code = exit_code;
     // do not move to its parent but under initproc
