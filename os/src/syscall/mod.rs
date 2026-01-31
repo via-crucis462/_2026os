@@ -59,7 +59,7 @@ const SYSCALL_EXEC: usize = 221;
 /// mmap syscall
 const SYSCALL_MMAP: usize = 222;
 /// waitpid syscall
-const SYSCALL_WAITPID: usize = 260;
+const SYSCALL_WAIT4: usize = 260;
 /// spawn syscall
 const SYSCALL_SPAWN: usize = 400;
 
@@ -98,7 +98,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETPPID => sys_getppid(),
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2]),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize),
-        SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32),
+        SYSCALL_WAIT4 => sys_wait4(args[0] as isize, args[1] as *mut i32, args[2]),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_MMAP => sys_mmap(
             args[0], args[1], args[2] as i32, 
