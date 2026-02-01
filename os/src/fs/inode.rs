@@ -34,10 +34,12 @@ impl OSInode {
     pub fn read_all(&self) -> alloc::vec::Vec<u8> {
         // 1. 获取文件总大小
         let size = self.inode.get_size();
+        trace!("[kernel] read_all: size={}", size);
         // 2. 准备缓冲区
         let mut buffer = alloc::vec![0u8; size];
         // 3. 从偏移量 0 开始读取
         let read_len = self.inode.read_at(0, &mut buffer);
+        trace!("[kernel] read_all: read_len={}", read_len);
         
         // 理论上 read_len 应该等于 size
         if read_len != size {
@@ -124,11 +126,11 @@ pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
 }
 /// List all apps in the root directory
 pub fn list_apps() {
-    println!("/**** APPS ****");
+    info!("/**** APPS ****");
     for app in ROOT_INODE.inode.ls() {
         println!("{}", app.name);
     }
-    println!("**************/");
+    info!("**************/");
 }
 lazy_static! {
     pub static ref ROOT_INODE: Arc<OSInode> = {

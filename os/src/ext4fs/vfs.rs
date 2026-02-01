@@ -21,7 +21,7 @@ impl VfsInode for Ext4Inode {
         let file_size = self.size as usize;
 
         while offset < file_size {
-            let mut buf = [0u8; 4096];
+            let mut buf = alloc::vec![0u8; 4096];
             let read_len = self.read_at(offset, &mut buf);
             if read_len == 0 { break; }
 
@@ -74,9 +74,8 @@ impl VfsInode for Ext4Inode {
         self.read_at(offset, buf) // 调用 Ext4Inode 自身的方法
     }
 
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize {
-        // ext4 写入目前可以先返回 0 或 panic，等后续实现
-        0
+    fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+        self.write_at(offset, buf) // 调用 Ext4Inode 自身的方法
     }
     
     fn get_size(&self) -> usize {

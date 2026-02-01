@@ -25,8 +25,10 @@ impl Ext4FS {
             let group = block_cache1.read((i * 32) as usize, |x: &Ext4GroupDescDisk| {
                 Ext4Group::new(x)
             });
-            println!("[Ext4] Group {}: block_bitmap={}, inode_bitmap={}, inode_table={}, free_blocks={}",
-                i, group.block_bitmap_id, group.inode_bitmap_id, group.inode_table_id, group.free_blocks_count);
+            debug!(
+                "[Ext4] Group {}: block_bitmap={}, inode_bitmap={}, inode_table={}, free_blocks={}",
+                i, group.block_bitmap_id, group.inode_bitmap_id, group.inode_table_id, group.free_blocks_count
+            );
             block_groups.push(Arc::new(Mutex::new(group)));
         }
 

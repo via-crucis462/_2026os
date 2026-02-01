@@ -11,7 +11,9 @@
 //! submodules, and you should also implement syscalls this way.
 
 /// dup syscall
-const SYSCALL_DUP: usize = 24;
+const SYSCALL_DUP: usize = 23;
+/// dup2 syscall
+const SYSCALL_DUP2: usize = 24;
 /// unlinkat syscall
 const SYSCALL_UNLINKAT: usize = 35;
 /// linkat syscall
@@ -71,8 +73,10 @@ use crate::{fs::Stat, task::SignalAction};
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
+    trace!("[kernel] syscall: id={}, args={:?}", syscall_id, args);
     match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
+        SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
         SYSCALL_OPEN => sys_open(args[1] as *const u8, args[2] as u32),
         SYSCALL_CLOSE => sys_close(args[0]),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut usize),

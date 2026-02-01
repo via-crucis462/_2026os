@@ -15,9 +15,9 @@ pub struct Ext4SuperBlock {
 
 impl Ext4SuperBlock {
     pub fn new(ext4_superblock_disk: Ext4SuperBlockDisk) -> Self {
-        let magic = ext4_superblock_disk.s_magic;   //防止未对齐引用导致的编译问题
-        println!("EXT4 Magic from disk: 0x{:X}", magic);
-        
+        let magic = ext4_superblock_disk.s_magic; //防止未对齐引用导致的编译问题
+        debug!("EXT4 Magic from disk: 0x{:X}", magic);
+
         if magic != EXT4_MAGIC as u16 {
             panic!("Not a valid ext4 superblock: magic = 0x{:X}", magic);
         }

@@ -17,13 +17,13 @@ impl File for Stdin {
     fn writable(&self) -> bool {
         false
     }
-    fn read(&self, mut user_buf: UserBuffer) -> usize {
-        assert_eq!(user_buf.len(), 1);
+    fn read(&self, user_buf: UserBuffer) -> usize {
+        // assert_eq!(user_buf.len(), 1);
         // busy loop
         let mut c: usize;
         loop {
             c = console_getchar();
-            if c == 0 {
+            if c == 0 || c == 0xffffffffffffffff {
                 suspend_current_and_run_next();
                 continue;
             } else {
@@ -31,10 +31,15 @@ impl File for Stdin {
             }
         }
         let ch = c as u8;
-        unsafe {
-            user_buf.buffers[0].as_mut_ptr().write_volatile(ch);
+        let mut count = 0;
+        for byte_ref in user_buf.into_iter() {
+            unsafe {
+                *byte_ref = ch;
+            }
+            count += 1;
+            break; // Currently we only read 1 byte to match the busy loop logic
         }
-        1
+        count
     }
     fn write(&self, _user_buf: UserBuffer) -> usize {
         panic!("Cannot write to stdin!");

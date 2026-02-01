@@ -40,7 +40,7 @@ $(KERNEL_BIN): kernel
 
 kernel:
 	@echo Platform: $(BOARD)
-	@cargo build $(MODE_ARG)
+	@LOG=$(LOG) cargo build $(MODE_ARG)
 
 clean:
 	@cargo clean

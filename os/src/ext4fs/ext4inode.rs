@@ -137,7 +137,7 @@ impl Ext4Inode {
                 let mut name_buf = vec![0u8; name_len];
                 self.read_at(offset + 8, &mut name_buf);
                 let name = String::from_utf8_lossy(&name_buf);
-                println!("Found: {}", name);
+                trace!("Found: {}", name);
             }
 
             // 3. 将偏移量顺移到下一个目录项的起始位置
@@ -165,7 +165,7 @@ impl Ext4Inode {
             if physical_block_id == 0 { break; } // 空洞文件或超出范围
 
             // 3. 读取块数据
-            let mut temp_buf = [0u8; 4096];
+            let mut temp_buf = alloc::vec![0u8; 4096];
             self.fs.block_dev.read_block(physical_block_id as usize, &mut temp_buf);
 
             // 4. 拷贝到输出 buf
@@ -177,5 +177,44 @@ impl Ext4Inode {
         }
 
         actual_read
+    }
+
+    /// 从文件的 offset 字节处开始，将数据写入 buf 中，返回实际写入长度
+    pub fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+        let block_size = self.fs.superblock.block_size as usize;
+        let mut actual_write = 0;
+        let mut curr_offset = offset;
+
+        // 目前仅支持对已有数据块的覆盖写入，不支持自动增长文件大小
+        let end = core::cmp::min(offset + buf.len(), self.size as usize);
+        if curr_offset >= end {
+            return 0;
+        }
+
+        while curr_offset < end {
+            // 1. 计算逻辑块号
+            let inner_block_id = (curr_offset / block_size) as u32;
+            let block_pos = curr_offset % block_size;
+
+            // 2. 查找物理块号
+            let physical_block_id = self.find_physical_block(inner_block_id);
+            if physical_block_id == 0 {
+                break;
+            }
+
+            // 3. 读-改-写 (暂未实现更高效的缓存部分写入)
+            let mut temp_buf = alloc::vec![0u8; 4096];
+            self.fs.block_dev.read_block(physical_block_id as usize, &mut temp_buf);
+
+            let write_len = core::cmp::min(block_size - block_pos, end - curr_offset);
+            temp_buf[block_pos..block_pos + write_len].copy_from_slice(&buf[actual_write..actual_write + write_len]);
+
+            self.fs.block_dev.write_block(physical_block_id as usize, &temp_buf);
+
+            actual_write += write_len;
+            curr_offset += write_len;
+        }
+
+        actual_write
     }
 }
