@@ -1,6 +1,6 @@
 //! File and filesystem-related syscalls
-use crate::fs::{make_pipe, open_file, OpenFlags, Stat};
-use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
+use crate::fs::{make_pipe, /*OpenFlags,*/ Stat};
+use crate::mm::{translated_byte_buffer, translated_refmut, /*translated_str,*/ UserBuffer};
 use crate::task::{current_task, current_user_token};
 use alloc::sync::Arc;
 
@@ -47,7 +47,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     }
 }
 
-pub fn sys_open(path: *const u8, flags: u32) -> isize {
+/*pub fn sys_open(path: *const u8, flags: u32) -> isize {
 	trace!("kernel:pid[{}] sys_open", current_task().unwrap().pid.0);
     let task = current_task().unwrap();
     let token = current_user_token();
@@ -60,7 +60,7 @@ pub fn sys_open(path: *const u8, flags: u32) -> isize {
     } else {
         -1
     }
-}
+}*/
 
 pub fn sys_close(fd: usize) -> isize {
 	trace!("kernel:pid[{}] sys_close", current_task().unwrap().pid.0);

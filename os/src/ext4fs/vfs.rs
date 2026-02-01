@@ -1,13 +1,9 @@
-use super::{
-    block_cache_sync_all, get_block_cache, BlockDevice, DirEntry, DiskInode, DiskInodeType,
-    EasyFileSystem, DIRENT_SZ,
-};
+use super::ext4inode::Ext4Inode;
+use super::ext4_dir_entry::Ext4DirEntry;
+use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use spin::{Mutex, MutexGuard};
-
-pub struct Inode {
+use alloc::string::ToString;
+/*pub struct Inode {
     block_id: usize,
     block_offset: usize,
     fs: Arc<Mutex<EasyFileSystem>>,
@@ -182,5 +178,39 @@ impl Inode {
             }
         });
         block_cache_sync_all();
+    }
+}*/
+/// 支持的文件系统类型
+use crate::fs::VfsInode;
+impl VfsInode for Ext4Inode {
+    fn ls<'a>(&'a self) -> Box<dyn Iterator<Item = String> + 'a> {
+        if !self.is_dir() {
+            return Box::new(core::iter::empty());
+        }
+        let mut names = alloc::vec::Vec::new();
+        let mut offset = 0;
+        let file_size = self.size as usize;
+
+        while offset < file_size {
+            let mut buf = [0u8; 4096];
+            let read_len = self.read_at(offset, &mut buf);
+            if read_len == 0 { break; }
+
+            let mut block_offset = 0;
+            while block_offset < read_len {
+                if let Some(dirent) = Ext4DirEntry::from_bytes(&buf[block_offset..]) {
+                    if dirent.inode() != 0 && dirent.name_len() > 0 {
+                        names.push(dirent.name().to_string());
+                    }
+                    let rec_len = dirent.rec_len() as usize;
+                    if rec_len == 0 { break; }
+                    block_offset += rec_len;
+                } else {
+                    break;
+                }
+            }
+            offset += read_len;
+        }
+        Box::new(names.into_iter())
     }
 }

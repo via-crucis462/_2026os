@@ -3,7 +3,8 @@
 mod inode;
 mod pipe;
 mod stdio;
-
+use alloc::boxed::Box;
+use alloc::string::String;
 use crate::mm::UserBuffer;
 
 /// trait File for all file types
@@ -33,6 +34,9 @@ pub struct Stat {
     /// unused pad
     pad: [u64; 7],
 }
+pub trait VfsInode: Send + Sync {
+    fn ls<'a>(&'a self) -> Box<dyn Iterator<Item = String> + 'a>;
+}
 
 bitflags! {
     /// The mode of a inode
@@ -47,6 +51,6 @@ bitflags! {
     }
 }
 
-pub use inode::{list_apps, open_file, OSInode, OpenFlags};
+pub use inode::{list_apps, OpenFlags};
 pub use pipe::{make_pipe, Pipe};
 pub use stdio::{Stdin, Stdout};

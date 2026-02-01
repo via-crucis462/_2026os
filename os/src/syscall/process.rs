@@ -1,14 +1,14 @@
 //! Process management syscalls
 
 use crate::{
-    fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
+    /*fs::{open_file, OpenFlags},*/
+    mm::{translated_ref, translated_refmut, /*translated_str*/},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next, pid2task,
         suspend_current_and_run_next, SignalAction, SignalFlags, MAX_SIG,
     },
 };
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{/*string::String,*/ sync::Arc, /*vec::Vec*/};
 
 #[repr(C)]
 #[derive(Debug)]
@@ -49,7 +49,7 @@ pub fn sys_fork() -> isize {
     new_pid as isize
 }
 
-pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
+/*pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     trace!("kernel:pid[{}] sys_exec", current_task().unwrap().pid.0);
     let token = current_user_token();
     let path = translated_str(token, path);
@@ -74,7 +74,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     } else {
         -1
     }
-}
+}*/
 
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.

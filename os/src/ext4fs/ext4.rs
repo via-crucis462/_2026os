@@ -5,9 +5,9 @@ use spin::Mutex;
 
 #[allow(dead_code)]
 pub struct Ext4FS{
-    block_dev: Arc<dyn BlockDevice>,
-    superblock: Ext4SuperBlock,
-    block_groups: Vec<Arc<Mutex<Ext4Group>>>,
+    pub block_dev: Arc<dyn BlockDevice>,
+    pub superblock: Ext4SuperBlock,
+    pub block_groups: Vec<Arc<Mutex<Ext4Group>>>,
 }
 
 impl Ext4FS {
@@ -62,5 +62,10 @@ impl Ext4FS {
         block_cache.read(offset, |disk_inode: &Ext4InodeDisk| {
             disk_inode.clone()
         })
+        //返回指定inode_id的磁盘inode结构
     }
+    pub fn get_inode(self: &Arc<Self>, inode_id: u32) -> Arc<Ext4Inode> {
+        let disk_inode = self.get_disk_inode(inode_id);
+        Arc::new(Ext4Inode::new(inode_id, &disk_inode, self.clone(), None))
+    }//返回指定inode_id的内存inode结构
 }
