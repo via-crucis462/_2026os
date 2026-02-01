@@ -17,7 +17,7 @@ const SYSCALL_UNLINKAT: usize = 35;
 /// linkat syscall
 const SYSCALL_LINKAT: usize = 37;
 /// open syscall
-//const SYSCALL_OPEN: usize = 56;
+const SYSCALL_OPEN: usize = 56;
 /// close syscall
 const SYSCALL_CLOSE: usize = 57;
 /// pipe syscall
@@ -53,7 +53,7 @@ const SYSCALL_MUNMAP: usize = 215;
 /// fork syscall
 const SYSCALL_FORK: usize = 220;
 /// exec syscall
-//const SYSCALL_EXEC: usize = 221;
+const SYSCALL_EXEC: usize = 221;
 /// mmap syscall
 const SYSCALL_MMAP: usize = 222;
 /// waitpid syscall
@@ -73,7 +73,7 @@ use crate::{fs::Stat, task::SignalAction};
 pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
     match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
-        //SYSCALL_OPEN => sys_open(args[1] as *const u8, args[2] as u32),
+        SYSCALL_OPEN => sys_open(args[1] as *const u8, args[2] as u32),
         SYSCALL_CLOSE => sys_close(args[0]),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut usize),
         SYSCALL_LINKAT => sys_linkat(args[1] as *const u8, args[3] as *const u8),
@@ -93,7 +93,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_FORK => sys_fork(),
-        //SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize),
+        SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize),
         SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2]),
