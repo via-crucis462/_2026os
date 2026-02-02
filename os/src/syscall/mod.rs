@@ -50,8 +50,8 @@ const SYSCALL_GET_TIME: usize = 169;
 /// getpid syscall
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
-/// sbrk syscall
-const SYSCALL_SBRK: usize = 214;
+/// brk syscall
+const SYSCALL_BRK: usize = 214;
 /// munmap syscall
 const SYSCALL_MUNMAP: usize = 215;
 /// clone syscall

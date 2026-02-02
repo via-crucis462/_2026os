@@ -5,9 +5,9 @@ use crate::{
     mm::{mmap, translated_ref, translated_refmut, translated_str}, 
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next, pid2task,
-        suspend_current_and_run_next, SignalAction, SignalFlags, MAX_SIG, TaskStatus
+        suspend_current_and_run_next, SignalAction, SignalFlags, MAX_SIG
     },
-    timer::{get_time_ms,get_time_us}
+    timer::{get_time_ms,get_time_us},
     task::fork::*,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
@@ -52,7 +52,7 @@ pub fn sys_getppid() -> isize {
         None => 0, 
     }
 }
-pub fn sys_fork() -> isize {
+pub fn _sys_fork() -> isize {
 	trace!("kernel:pid[{}] sys_fork", current_task().unwrap().pid.0);
     let current_task = current_task().unwrap();
     let new_task = current_task.fork(None);//此处添加了一个 None 参数
@@ -114,7 +114,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
 
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
-pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
+pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, _options: usize) -> isize {
     let task = current_task().unwrap();
     
     // 开启一个死循环，直到找到僵尸才 return
