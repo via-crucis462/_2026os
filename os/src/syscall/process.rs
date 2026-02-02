@@ -72,28 +72,35 @@ pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
 }
 
 pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
-    trace!("kernel:pid[{}] sys_exec", current_task().unwrap().pid.0);
     let token = current_user_token();
     let path = translated_str(token, path);
+    info!("[kernel] sys_exec: path={}, args_ptr={:#x}", path, args as usize);
     let mut args_vec: Vec<String> = Vec::new();
     loop {
         let arg_str_ptr = *translated_ref(token, args);
         if arg_str_ptr == 0 {
             break;
         }
-        args_vec.push(translated_str(token, arg_str_ptr as *const u8));
+        let arg_str = translated_str(token, arg_str_ptr as *const u8);
+        debug!("[kernel] sys_exec: arg='{}'", arg_str);
+        args_vec.push(arg_str);
         unsafe {
             args = args.add(1);
         }
     }
+    trace!("[kernel] sys_exec: before open_file");
     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
         let argc = args_vec.len();
+        trace!("[kernel] sys_exec: before task.exec");
         task.exec(all_data.as_slice(), args_vec);
+        trace!("[kernel] sys_exec: after task.exec");
         // return argc because cx.x[10] will be covered with it later
         argc as isize
     } else {
+        warn!("[kernel] sys_exec: open_file failed");
         -1
     }
 }
