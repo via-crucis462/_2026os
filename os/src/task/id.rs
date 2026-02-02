@@ -3,7 +3,7 @@
 //! Assign PID to the process here. At the same time, the position of the application KernelStack
 //! is determined according to the PID.
 
-use crate::config::{KERNEL_STACK_SIZE, PAGE_SIZE, TRAMPOLINE};
+use crate::arch::config::{KERNEL_STACK_SIZE, PAGE_SIZE, TRAMPOLINE};
 use crate::mm::{MapPermission, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;

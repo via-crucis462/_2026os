@@ -1,5 +1,5 @@
 //! Implementation of [`TrapContext`]
-
+#![cfg(feature = "riscv")]
 use riscv::register::sstatus::{self, Sstatus, SPP};
 
 #[repr(C)]

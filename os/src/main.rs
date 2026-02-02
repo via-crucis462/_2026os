@@ -33,24 +33,30 @@ extern crate alloc;
 
 #[macro_use]
 mod console;
-pub mod config;
+pub mod arch;
 pub mod drivers;
 pub mod ext4fs;
 pub mod fs;
 pub mod lang_items;
 pub mod logging;
 pub mod mm;
-pub mod sbi;
 pub mod sync;
 pub mod syscall;
 pub mod task;
-pub mod timer;
-pub mod trap;
+use crate::arch::*;
 
+#[cfg(target_arch = "riscv64")]
+use core::arch::global_asm;
+#[cfg(target_arch = "loongarch64")]
 use core::arch::global_asm;
 
-global_asm!(include_str!("entry.asm"));
+#[cfg(target_arch = "riscv64")]
+global_asm!(include_str!("arch/riscv/entry.asm"));
+#[cfg(target_arch = "loongarch64")]
+global_asm!(include_str!("arch/loongarch/entry.asm"));
+
 /// clear BSS segment
+/// 两种架构应该是统一的
 fn clear_bss() {
     extern "C" {
         fn sbss();
@@ -62,6 +68,8 @@ fn clear_bss() {
     }
 }
 
+
+#[cfg(target_arch = "riscv64")]
 #[no_mangle]
 /// the rust entry-point of os
 pub fn rust_main() -> ! {
@@ -77,4 +85,11 @@ pub fn rust_main() -> ! {
     task::add_initproc();
     task::run_tasks();
     panic!("Unreachable in rust_main!");
+}
+
+#[cfg(target_arch = "loongarch")]
+#[no_mangle]
+pub fn rust_main() -> isize {
+    println!("Hello, LoongArch!");
+    0
 }

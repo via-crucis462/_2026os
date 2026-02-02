@@ -1,8 +1,10 @@
 //! RISC-V timer-related functionality
 
-use crate::config::CLOCK_FREQ;
-use crate::sbi::set_timer;
+use crate::arch::config::CLOCK_FREQ;
+use crate::arch::sbi::set_timer;
+
 use riscv::register::time;
+
 /// The number of ticks per second
 const TICKS_PER_SEC: usize = 100;
 /// The number of milliseconds per second
