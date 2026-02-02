@@ -6,21 +6,20 @@
 //!
 //! Every task or process has a memory_set to control its virtual memory.
 
-mod address;
+
 mod frame_allocator;
 mod heap_allocator;
 mod memory_set;
-mod page_table;
 /// mmap系统调用相关
 pub mod mmap;
 
-use address::VPNRange;
-pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use crate::arch::mm::address::VPNRange;
+pub use crate::arch::mm::address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 pub use frame_allocator::{frame_alloc, frame_dealloc, FrameTracker};
 pub use memory_set::remap_test;
 pub use memory_set::{kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
-use page_table::PTEFlags;
-pub use page_table::{
+use crate::arch::mm::page_table::PTEFlags;
+pub use crate::arch::mm::page_table::{
     translated_byte_buffer, translated_ref, translated_refmut, translated_str, PageTable,
     PageTableEntry, UserBuffer, UserBufferIterator,
 };

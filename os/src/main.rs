@@ -43,7 +43,6 @@ pub mod mm;
 pub mod sync;
 pub mod syscall;
 pub mod task;
-use crate::arch::*;
 
 #[cfg(target_arch = "riscv64")]
 use core::arch::global_asm;
@@ -78,9 +77,9 @@ pub fn rust_main() -> ! {
     info!("[kernel] Hello, world!");
     mm::init();
     mm::remap_test();
-    trap::init();
-    trap::enable_timer_interrupt();
-    timer::set_next_trigger();
+    arch::trap::init();
+    arch::trap::enable_timer_interrupt();
+    arch::timer::set_next_trigger();
     fs::list_apps();
     task::add_initproc();
     task::run_tasks();
