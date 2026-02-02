@@ -16,7 +16,7 @@ ifeq ($(MODE), release)
 endif
 ifeq ($(FS) , EFS)
 	FS_IMG := ../fs_img/$(ARCH)_efs.img
-else ifeq($(FS) , EXT4)
+else ifeq ($(FS) , EXT4)
 	FS_IMG := ../fs_img/$(ARCH)_ext4.img
 endif
 # KERNEL ENTRY
