@@ -1,6 +1,6 @@
 //! The panic handler
 
-use crate::sbi::shutdown;
+use crate::arch::sbi::shutdown;
 use core::panic::PanicInfo;
 
 #[panic_handler]

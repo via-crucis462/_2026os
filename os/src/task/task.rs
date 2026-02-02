@@ -2,11 +2,11 @@
 
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
 use crate::{
-    config::TRAP_CONTEXT_BASE,
+    arch::config::TRAP_CONTEXT_BASE,
     fs::{File, Stdin, Stdout},
     mm::{translated_refmut, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE},
     sync::UPSafeCell,
-    trap::{trap_handler, TrapContext},
+    arch::trap::{trap_handler, TrapContext},
     mm::mmap,
 };
 use alloc::{
