@@ -19,16 +19,41 @@ lazy_static! {
 
 impl BlockDevice for VirtIOBlock {
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        self.0
-            .exclusive_access()
-            .read_block(block_id, buf)
-            .expect("Error when reading VirtIOBlk");
+        let len = buf.len();
+        // 扇区大小
+        const SECTOR_SIZE: usize = 512;
+        // 4096 / 512 = 8
+        let sectors = len / SECTOR_SIZE;
+        
+        let mut driver = self.0.exclusive_access();
+        
+        let start_sector = block_id * sectors;
+        // 滑动窗口说是
+        for i in 0..sectors {
+            let offset = i * SECTOR_SIZE;
+            let sub_buf = &mut buf[offset..offset + SECTOR_SIZE];
+            driver
+                .read_block(start_sector + i, sub_buf)
+                .expect("Error when reading VirtIOBlk");
+        }
     }
+
     fn write_block(&self, block_id: usize, buf: &[u8]) {
-        self.0
-            .exclusive_access()
-            .write_block(block_id, buf)
-            .expect("Error when writing VirtIOBlk");
+        // 与 read_block 类似
+        let len = buf.len();
+        const SECTOR_SIZE: usize = 512;
+        let sectors = len / SECTOR_SIZE;
+        
+        let mut driver = self.0.exclusive_access();
+        let start_sector = block_id * sectors;
+
+        for i in 0..sectors {
+            let offset = i * SECTOR_SIZE;
+            let sub_buf = &buf[offset..offset + SECTOR_SIZE];
+            driver
+                .write_block(start_sector + i, sub_buf)
+                .expect("Error when writing VirtIOBlk");
+        }
     }
 }
 

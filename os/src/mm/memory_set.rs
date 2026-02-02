@@ -3,11 +3,13 @@ use super::{PTEFlags, PageTable, PageTableEntry};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
 use crate::config::{MEMORY_END, MMIO, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
+use crate::mm::mmap;
 use crate::sync::UPSafeCell;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::asm;
+use core::panic;
 use lazy_static::*;
 use riscv::register::satp;
 
@@ -36,9 +38,11 @@ pub fn kernel_token() -> usize {
 }
 
 /// address space
+/// 注意维护brk_index
 pub struct MemorySet {
     page_table: PageTable,
     areas: Vec<MapArea>,
+    brk_index: usize, //新增，用于记录brk所在area（堆区）的索引，请注意维护，后续可能会删除
 }
 
 impl MemorySet {
@@ -47,6 +51,7 @@ impl MemorySet {
         Self {
             page_table: PageTable::new(),
             areas: Vec::new(),
+            brk_index: 0,// 注意维护！！
         }
     }
     /// Get the page table token
@@ -62,6 +67,18 @@ impl MemorySet {
     ) {
         self.push(
             MapArea::new(start_va, end_va, MapType::Framed, permission),
+            None,
+        );
+    }
+    /// 预留，用于文件映射, 目前只标记，啥都没做
+    pub fn insert_file_area(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) {
+        self.push(
+            MapArea::new(start_va, end_va, MapType::File, permission),
             None,
         );
     }
@@ -152,7 +169,7 @@ impl MemorySet {
         memory_set.push(
             MapArea::new(
                 (ekernel as usize).into(),
-                MEMORY_END.into(),
+                (MEMORY_END - 4096).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::W,
             ),
@@ -225,6 +242,7 @@ impl MemorySet {
             None,
         );
         // used in sbrk
+        // 堆区空间设置在栈区之后
         memory_set.push(
             MapArea::new(
                 user_stack_top.into(),
@@ -234,6 +252,8 @@ impl MemorySet {
             ),
             None,
         );
+        memory_set.brk_index = memory_set.areas.len() - 1;// 此时brk在最后一个区域
+
         // map TrapContext
         memory_set.push(
             MapArea::new(
@@ -268,6 +288,8 @@ impl MemorySet {
                     .copy_from_slice(src_ppn.get_bytes_array());
             }
         }
+        // 复制brk_index
+        memory_set.brk_index = user_space.brk_index;
         memory_set
     }
     /// Change page table by writing satp CSR Register.
@@ -283,7 +305,7 @@ impl MemorySet {
         self.page_table.translate(vpn)
     }
 
-    ///Remove all `MapArea`
+    /// Remove all `MapArea`
     pub fn recycle_data_pages(&mut self) {
         self.areas.clear();
     }
@@ -317,6 +339,164 @@ impl MemorySet {
             false
         }
     }
+
+    /// 检查目标地址段是否与已有的映射冲突(存在交集)
+    fn has_conflict(&self, start: usize, len: usize) -> bool {
+        for area in self.areas.iter() {
+            // 暂时不考虑文件映射
+            if area.map_type == MapType::File {
+                continue;
+            }
+            // 以下均为页号
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            let target_start = VirtAddr::from(start).floor();
+            let target_end = VirtAddr::from(start + len).ceil();
+            if target_end > area_start && target_start < area_end {
+                return true;
+            }
+        }
+        false
+    }
+    /// mmap的实现（只分配内存，不加载文件）
+    pub fn mmap(
+        &mut self,
+        addr: usize,
+        length: usize,
+        prot: mmap::MMapProt
+    ) -> Result<usize, i32> {
+        // 检查冲突
+        if self.has_conflict(addr, length) {
+            return Err(-1);
+        }
+
+        // 设置权限
+        let mut permission = MapPermission::empty();
+        if prot.contains(mmap::MMapProt::PROT_READ) {
+            permission |= MapPermission::R;
+        }
+        if prot.contains(mmap::MMapProt::PROT_WRITE) {
+            permission |= MapPermission::W;
+        }
+        if prot.contains(mmap::MMapProt::PROT_EXEC) {
+            permission |= MapPermission::X;
+        }
+        if prot != mmap::MMapProt::PROT_NONE {
+            permission |= MapPermission::U;
+        }
+
+        // 映射区域
+        self.insert_file_area(
+            VirtAddr::from(addr),
+            VirtAddr::from(addr + length),
+            permission,
+        );
+
+        Ok(addr)
+    }
+    /// munmap的实现
+    /// 注意：不允许取消映射brk之前的区域
+    pub fn munmap(&mut self, start: usize, length: usize) -> Result<(),i32> {
+        let brk_idx = self.brk_index;
+        let brk_area = &self.areas[brk_idx];// brk area
+        let _brk_start = brk_area.vpn_range.get_start().0 * PAGE_SIZE;
+        let brk_end = brk_area.vpn_range.get_end().0 * PAGE_SIZE;
+
+        // 检查是否越界
+        if start < brk_area.vpn_range.get_end().0 * PAGE_SIZE {
+            return Err(-1);
+        }
+
+        let end = start + length;
+        let start_vpn = VirtAddr::from(start).floor();// 目标起始页号
+        let end_vpn = VirtAddr::from(end).ceil();// 目标结束页号
+
+        // 可能存在的新area，写在外面以避免for循环中self引用问题引发的报错
+        let mut new_area: Option<MapArea> = None;
+
+        // 注意只遍历brk之后的area
+        for area in self.areas[brk_idx+1..].iter_mut() {
+            // 暂时未检查是否：取消映射trap_context、trampoline
+
+            // 找到有重合部分的区域
+            if area.vpn_range.get_start() < end_vpn && area.vpn_range.get_end() > start_vpn {// 有交集;
+                let inc_left = area.vpn_range.get_start() >= start_vpn;// 删左边部分
+                let inc_right = area.vpn_range.get_end() <= end_vpn;// 删右边部分
+                let split = (!inc_left) & (!inc_right);// 从中间分开成两个部分
+                let all = inc_left & inc_right;// 删掉整个区域
+
+
+                if all {
+                    // 使其长度为0, 稍后再删除
+                    area.shrink_to(&mut self.page_table, area.vpn_range.get_start());
+                } else if split {
+                    // 缩短自身，成为新段的左边部分
+                    let old_end = area.vpn_range.get_end();
+                    let mut mid_ft = area.data_frames.split_off(&start_vpn);
+                    area.resize(area.vpn_range.get_start(), start_vpn);
+                    // 取出右边保留部分的ft
+                    let right_ft = mid_ft.split_off(&end_vpn);
+                    // 中间部分解除映射
+                    drop(mid_ft);
+                    // 新建右边部分
+                    new_area = Some(MapArea::new(
+                        VirtAddr::from(end),
+                        VirtAddr::from(old_end),
+                        area.map_type,
+                        area.map_perm,
+                    ));
+                    new_area.as_mut().unwrap().data_frames = right_ft;
+                } else if inc_left {
+                    // 解除映射左边部分
+                    for vpn in VPNRange::new(area.vpn_range.get_start(), end_vpn) {
+                        area.unmap_one(&mut self.page_table, vpn);
+                    }
+                    // 调整范围
+                    area.resize(end_vpn, area.vpn_range.get_end());
+                } else if inc_right {
+                    // 删右边部分
+                    area.shrink_to(&mut self.page_table, end_vpn);
+                }
+
+            }
+        }
+
+        // 如果有，插入新area
+        if let Some(area) = new_area {
+            self.areas.push(area);
+        }
+
+        // 删除长度为0的area
+        // 但不删除brk之前
+        self.areas.retain(
+            |area| area.vpn_range.get_start() < area.vpn_range.get_end()||
+            area.vpn_range.get_start() <= brk_end.into()//brk之前的全部保留
+            );
+        Ok(())
+    }
+    // brk的实现（通过调整brk区域大小实现）
+    // 注意到rcore已实现，不过其实现过简且用到了遍历，复杂度较高，这里重新实现一个更简单的版本
+    // 目前的实现有问题（必须页对齐）故暂时弃置
+    pub fn _brk(&mut self, addr: usize) -> Result<usize, i32> {        
+        let brk_area = &mut self.areas[self.brk_index];
+        let old_brk = brk_area.vpn_range.get_end().0 * PAGE_SIZE;
+        if addr == 0{
+            return Ok(old_brk);
+        } else {
+            if addr > old_brk {
+                // 扩大
+                brk_area.append_to(&mut self.page_table, VirtAddr::from(addr).ceil());
+            } else if addr < old_brk {
+                if addr < brk_area.vpn_range.get_start().0 * PAGE_SIZE {// 不允许缩小到起始地址之前
+                    return Err(-1);
+                }
+                // 缩小
+                brk_area.shrink_to(&mut self.page_table, VirtAddr::from(addr).ceil());
+            }
+        }
+        Ok(addr)
+    }
+
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
@@ -361,6 +541,10 @@ impl MapArea {
                 ppn = frame.ppn;
                 self.data_frames.insert(vpn, frame);
             }
+            // 文件映射没实现
+            MapType::File => {
+                panic!("Mmap File Error!");
+            }
         }
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         page_table.map(vpn, ppn, pte_flags);
@@ -395,6 +579,12 @@ impl MapArea {
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
     }
+    /// 只修改边界，不解除映射或新增映射
+    #[allow(unused)]
+    pub fn resize(&mut self, new_start: VirtPageNum, new_end: VirtPageNum) {
+        self.vpn_range = VPNRange::new(new_start, new_end);
+    }
+
     /// data: start-aligned but maybe with shorter length
     /// assume that all frames were cleared before
     pub fn copy_data(&mut self, page_table: &mut PageTable, data: &[u8]) {
@@ -417,6 +607,21 @@ impl MapArea {
             current_vpn.step();
         }
     }
+    /// 返回这段中的数据（如果framed）
+    /// u8的vec
+    pub fn _get_data(&self, page_table: &mut PageTable) -> Option<Vec<u8>> {
+        if self.map_type != MapType::Framed {
+            None
+        }
+        else {
+            let mut data = Vec::new();
+            for vpn in self.vpn_range {
+                let src = &page_table.translate(vpn).unwrap().ppn().get_bytes_array();
+                data.extend_from_slice(src);
+            }
+            Some(data)
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -424,6 +629,7 @@ impl MapArea {
 pub enum MapType {
     Identical,
     Framed,
+    File,
 }
 
 bitflags! {
