@@ -3,9 +3,14 @@
 mod inode;
 mod pipe;
 mod stdio;
+mod dir_entry;
+mod file_tree;
 
+pub use dir_entry::DirEntry;
+pub use file_tree::ROOT_DENTRY;
+use alloc::boxed::Box;
 use crate::mm::UserBuffer;
-
+use alloc::sync::Arc;
 /// trait File for all file types
 pub trait File: Send + Sync {
     /// the file readable?
@@ -33,6 +38,14 @@ pub struct Stat {
     /// unused pad
     pad: [u64; 7],
 }
+pub trait VfsInode: Send + Sync {
+    fn ls<'a>(&'a self) -> Box<dyn Iterator<Item = DirEntry> + 'a>;
+    fn init(&self);
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize;
+    fn write_at(&self, offset: usize, buf: &[u8]) -> usize;
+    fn get_size(&self) -> usize;
+    fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>>;
+}
 
 bitflags! {
     /// The mode of a inode
@@ -47,6 +60,6 @@ bitflags! {
     }
 }
 
-pub use inode::{list_apps, open_file, OSInode, OpenFlags};
+pub use inode::{list_apps, OpenFlags, open_file, ROOT_INODE};
 pub use pipe::{make_pipe, Pipe};
 pub use stdio::{Stdin, Stdout};

@@ -1,15 +1,18 @@
 //! Process management syscalls
 
 use crate::{
-    fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
+    fs::{*}, 
+    mm::{mmap, translated_ref, translated_refmut, translated_str}, 
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next, pid2task,
-        suspend_current_and_run_next, SignalAction, SignalFlags, MAX_SIG,
+        suspend_current_and_run_next, SignalAction, SignalFlags, MAX_SIG, TaskStatus
     },
     timer::{get_time_ms,get_time_us}
+    task::fork::*,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
+
+
 
 #[repr(C)]
 #[derive(Debug)]
@@ -52,7 +55,7 @@ pub fn sys_getppid() -> isize {
 pub fn sys_fork() -> isize {
 	trace!("kernel:pid[{}] sys_fork", current_task().unwrap().pid.0);
     let current_task = current_task().unwrap();
-    let new_task = current_task.fork();
+    let new_task = current_task.fork(None);//此处添加了一个 None 参数
     let new_pid = new_task.pid.0;
     // modify trap context of new_task, because it returns immediately after switching
     let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
@@ -64,29 +67,47 @@ pub fn sys_fork() -> isize {
     new_pid as isize
 }
 
+// 部分实现，暂未通过测例
+pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
+    trace!("kernel:pid[{}] sys_clone", current_task().unwrap().pid.0);
+    if func == 0 && stack == 0 && flags == 0 {
+        // 不含参数，直接调用旧的 fork 实现
+        return _sys_fork();
+    }
+    // 含参数的版本
+    do_clone(func, stack, flags)
+}
+
 pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
-    trace!("kernel:pid[{}] sys_exec", current_task().unwrap().pid.0);
     let token = current_user_token();
     let path = translated_str(token, path);
+    info!("[kernel] sys_exec: path={}, args_ptr={:#x}", path, args as usize);
     let mut args_vec: Vec<String> = Vec::new();
     loop {
         let arg_str_ptr = *translated_ref(token, args);
         if arg_str_ptr == 0 {
             break;
         }
-        args_vec.push(translated_str(token, arg_str_ptr as *const u8));
+        let arg_str = translated_str(token, arg_str_ptr as *const u8);
+        debug!("[kernel] sys_exec: arg='{}'", arg_str);
+        args_vec.push(arg_str);
         unsafe {
             args = args.add(1);
         }
     }
+    trace!("[kernel] sys_exec: before open_file");
     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
         let argc = args_vec.len();
+        trace!("[kernel] sys_exec: before task.exec");
         task.exec(all_data.as_slice(), args_vec);
+        trace!("[kernel] sys_exec: after task.exec");
         // return argc because cx.x[10] will be covered with it later
         argc as isize
     } else {
+        warn!("[kernel] sys_exec: open_file failed");
         -1
     }
 }
@@ -186,22 +207,49 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 }
 
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!("kernel:pid[{}] sys_mmap NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, _fd: i32, _off: usize) -> isize {
+    trace!("kernel:pid[{}] sys_mmap NOT COMPLITED", current_task().unwrap().pid.0);
+    let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
+    let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
+    if let Ok(ret) = mmap::do_mmap(
+        start, 
+        len,
+        mmap_prot
+    ) {
+        match mmap_flags {
+            mmap::MMapFlags::MAP_ANONYMOUS => {},
+            mmap::MMapFlags::MAP_PRIVATE => {
+                // 按目前理解，拷贝文件内容到映射区即可？
+                //sys_read(fd as usize, ret as *mut u8, len);
+            },
+            mmap::MMapFlags::MAP_SHARED => {
+                //尚未实现
+                //此此处似乎需要实现文件的同步回写
+            },
+            _ =>  {return -1;},
+        };
+        ret as isize
+    }
+    else {
+        -1
+    }
 }
 
 /// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!("kernel:pid[{}] sys_munmap NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    trace!("kernel:pid[{}] sys_munmap NOT COMPLITED", current_task().unwrap().pid.0);
+    if let Ok(_) = mmap::do_munmap(start,len) {
+        0
+    } else {
+        -1
+    }
 }
 
 /// change data segment size
-pub fn sys_sbrk(size: i32) -> isize {
-    trace!("kernel:pid[{}] sys_sbrk", current_task().unwrap().pid.0);
-    if let Some(old_brk) = current_task().unwrap().change_program_brk(size) {
-        old_brk as isize
+pub fn sys_brk(addr: usize) -> isize {
+    trace!("kernel:pid[{}] sys_brk", current_task().unwrap().pid.0);
+    if let Ok(res) = mmap::do_brk(addr){
+        res as isize
     } else {
         -1
     }

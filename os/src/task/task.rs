@@ -7,6 +7,7 @@ use crate::{
     mm::{translated_refmut, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE},
     sync::UPSafeCell,
     trap::{trap_handler, TrapContext},
+    mm::mmap,
 };
 use alloc::{
     string::String,
@@ -15,6 +16,7 @@ use alloc::{
     vec::Vec,
 };
 use core::cell::RefMut;
+
 
 /// Task control block structure
 ///
@@ -56,6 +58,8 @@ pub struct TaskControlBlockInner {
 
     /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
+    /// 用于和wait等的的状态标识
+    pub status_signal: TaskStatus,
 
     /// Application address space
     pub memory_set: MemorySet,
@@ -86,7 +90,7 @@ pub struct TaskControlBlockInner {
     pub heap_bottom: usize,
 
     /// Program break
-    pub program_brk: usize,
+    pub program_brk: usize,// 注意需要在exec中维护，rcore忽略了这点，运行测例时brk失效，已修复
 }
 
 impl TaskControlBlockInner {
@@ -98,6 +102,10 @@ impl TaskControlBlockInner {
     }
     fn get_status(&self) -> TaskStatus {
         self.task_status
+    }
+    // 获取状态信号的可变引用
+    pub fn refmut_status_signal(&mut self) -> &mut TaskStatus {
+        &mut self.status_signal
     }
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
@@ -137,6 +145,7 @@ impl TaskControlBlock {
                     base_size: user_sp,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
+                    status_signal: TaskStatus::Ready,
                     memory_set,
                     parent: None,
                     children: Vec::new(),
@@ -177,10 +186,17 @@ impl TaskControlBlock {
     pub fn exec(&self, elf_data: &[u8], args: Vec<String>) {
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (memory_set, mut user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        info!(
+            "[kernel] task::exec: entry_point={:#x}, user_sp={:#x}",
+            entry_point, user_sp
+        );
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
             .ppn();
+        // 读取用户栈顶（堆区底）地址
+        let memory_top = user_sp;
+
         // push arguments on user stack
         user_sp -= (args.len() + 1) * core::mem::size_of::<usize>();
         let argv_base = user_sp;
@@ -212,6 +228,9 @@ impl TaskControlBlock {
         inner.memory_set = memory_set;
         // update trap_cx ppn
         inner.trap_cx_ppn = trap_cx_ppn;
+        // 加载新程序后需要更新堆区底、断点
+        inner.heap_bottom = memory_top;
+        inner.program_brk = memory_top;
         // initialize trap_cx
         let mut trap_cx = TrapContext::app_init_context(
             entry_point,
@@ -227,7 +246,8 @@ impl TaskControlBlock {
     }
 
     /// Fork from parent to child
-    pub fn fork(self: &Arc<TaskControlBlock>) -> Arc<TaskControlBlock> {
+    /// 已编辑，添加了stack参数
+    pub fn fork(self: &Arc<TaskControlBlock>, sp: Option<usize>) -> Arc<TaskControlBlock> {
         // ---- hold parent PCB lock
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
@@ -258,6 +278,7 @@ impl TaskControlBlock {
                     base_size: parent_inner.base_size,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
+                    status_signal: TaskStatus::Ready,
                     memory_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
@@ -271,7 +292,7 @@ impl TaskControlBlock {
                     killed: false,
                     frozen: false,
                     trap_ctx_backup: None,
-                    heap_bottom: parent_inner.heap_bottom,
+                    heap_bottom: sp.unwrap_or(parent_inner.heap_bottom),
                     program_brk: parent_inner.program_brk,
                 })
             },
@@ -282,6 +303,9 @@ impl TaskControlBlock {
         // **** access child PCB exclusively
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
         trap_cx.kernel_sp = kernel_stack_top;
+        if let Some(sp) = sp {
+            trap_cx.set_sp(sp);
+        }
         // return
         task_control_block
         // **** release child PCB
@@ -293,14 +317,36 @@ impl TaskControlBlock {
         self.pid.0
     }
 
+    /// 获取parent的pid
+    pub fn getppid(&self) -> usize {
+        let inner = self.inner_exclusive_access();
+        if let Some(parent_weak) = &inner.parent{
+            if let Some(parent) = parent_weak.upgrade(){
+                parent.pid.0
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    
+    }
+
     /// change the location of the program break. return None if failed.
-    pub fn change_program_brk(&self, size: i32) -> Option<usize> {
+    /// rcore自带, 修改断点（增量形式）
+    pub fn change_program_brk(&self, addr: usize) -> Result<usize, i32> {
+        if addr == 0{
+            // 返回当前断点
+            return Ok(self.inner_exclusive_access().program_brk);
+        }
+        // 超范围panic
+        let size: i32 = i32::try_from(addr).unwrap() - self.inner_exclusive_access().program_brk as i32;
         let mut inner = self.inner_exclusive_access();
         let heap_bottom = inner.heap_bottom;
-        let old_break = inner.program_brk;
-        let new_brk = inner.program_brk as isize + size as isize;
+        let _old_break = inner.program_brk;
+        let new_brk = addr as isize;
         if new_brk < heap_bottom as isize {
-            return None;
+            return Err(-1);
         }
         let result = if size < 0 {
             inner
@@ -311,12 +357,29 @@ impl TaskControlBlock {
                 .memory_set
                 .append_to(VirtAddr(heap_bottom), VirtAddr(new_brk as usize))
         };
+        println!("brk: change from {:#x} to {:#x}", _old_break, new_brk);
         if result {
             inner.program_brk = new_brk as usize;
-            Some(old_break)
+            
+            Ok(addr)
         } else {
-            None
+            Err(-1)
         }
+    }
+    /// 处理mmap
+    pub fn mmap(
+        &self,
+        addr: usize,
+        length: usize,
+        prot: mmap::MMapProt
+    ) -> Result<usize, i32> {
+        let mut inner = self.inner_exclusive_access();
+        inner.memory_set.mmap(addr, length, prot)
+    }
+    /// 处理munmap
+    pub fn munmap(&self, addr: usize, length: usize) -> Result<(), i32> {
+        let mut inner = self.inner_exclusive_access();
+        inner.memory_set.munmap(addr, length)
     }
 }
 
