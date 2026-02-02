@@ -1,5 +1,5 @@
 [package]
-name = "scallop_os"
+name = "os"
 version = "0.2.0"
 authors = ["Xukun Cai<shinbokuow@163.com>"]
 edition = "2021"

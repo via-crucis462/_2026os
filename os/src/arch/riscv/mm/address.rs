@@ -1,4 +1,4 @@
-use super::PageTableEntry;
+use crate::mm::PageTableEntry;
 use crate::arch::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use core::fmt::{self, Debug, Formatter};
 
