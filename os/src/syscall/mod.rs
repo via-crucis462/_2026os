@@ -44,14 +44,14 @@ const SYSCALL_SIGPROCMASK: usize = 135;
 const SYSCALL_SIGRETURN: usize = 139;
 /// setpriority syscall
 const SYSCALL_SET_PRIORITY: usize = 140;
-/// gettime syscall
+const SYSCALL_TIMES: usize = 153;
+///const SYS_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 /// getpid syscall
 const SYSCALL_GETPID: usize = 172;
-/// 获取parent的pid
 const SYSCALL_GETPPID: usize = 173;
-/// brk syscall
-const SYSCALL_BRK: usize = 214;
+/// sbrk syscall
+const SYSCALL_SBRK: usize = 214;
 /// munmap syscall
 const SYSCALL_MUNMAP: usize = 215;
 /// clone syscall
@@ -112,6 +112,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_BRK => sys_brk(args[0] as usize),
         SYSCALL_SPAWN => sys_spawn(args[0] as *const u8),
         SYSCALL_SET_PRIORITY => sys_set_priority(args[0] as isize),
+        SYSCALL_TIMES => sys_times(args[0] as *mut usize),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
