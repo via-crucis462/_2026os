@@ -11,7 +11,9 @@
 //! submodules, and you should also implement syscalls this way.
 
 /// dup syscall
-const SYSCALL_DUP: usize = 24;
+const SYSCALL_DUP: usize = 23;
+/// dup2 syscall
+const SYSCALL_DUP2: usize = 24;
 /// unlinkat syscall
 const SYSCALL_UNLINKAT: usize = 35;
 /// linkat syscall
@@ -52,14 +54,14 @@ const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_SBRK: usize = 214;
 /// munmap syscall
 const SYSCALL_MUNMAP: usize = 215;
-/// fork syscall
-const SYSCALL_FORK: usize = 220;
+/// clone syscall
+const SYSCALL_CLONE: usize = 220;
 /// exec syscall
 const SYSCALL_EXEC: usize = 221;
 /// mmap syscall
 const SYSCALL_MMAP: usize = 222;
 /// waitpid syscall
-const SYSCALL_WAITPID: usize = 260;
+const SYSCALL_WAIT4: usize = 260;
 /// spawn syscall
 const SYSCALL_SPAWN: usize = 400;
 
@@ -71,10 +73,13 @@ use process::*;
 
 use crate::{fs::Stat, task::SignalAction};
 
+#[no_mangle]
 /// handle syscall exception with `syscall_id` and other arguments
-pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
+
+pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
+        SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
         SYSCALL_OPEN => sys_open(args[1] as *const u8, args[2] as u32),
         SYSCALL_CLOSE => sys_close(args[0]),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut usize),
@@ -95,13 +100,16 @@ pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
-        SYSCALL_FORK => sys_fork(),
+        SYSCALL_CLONE => sys_clone(args[0], args[1], args[2]),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize),
-        SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32),
+        SYSCALL_WAIT4 => sys_wait4(args[0] as isize, args[1] as *mut i32, args[2]),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
-        SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2]),
+        SYSCALL_MMAP => sys_mmap(
+            args[0], args[1], args[2] as i32, 
+            args[3] as i32, args[4] as i32, args[5]
+        ),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
-        SYSCALL_SBRK => sys_sbrk(args[0] as i32),
+        SYSCALL_BRK => sys_brk(args[0] as usize),
         SYSCALL_SPAWN => sys_spawn(args[0] as *const u8),
         SYSCALL_SET_PRIORITY => sys_set_priority(args[0] as isize),
         SYSCALL_TIMES => sys_times(args[0] as *mut usize),
