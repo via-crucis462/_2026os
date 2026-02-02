@@ -1,76 +1,83 @@
-//! `Arc<Inode>` -> `OSInodeInner`: In order to open files concurrently
-//! we need to wrap `Inode` into `Arc`,but `Mutex` in `Inode` prevents
-//! file systems from being accessed simultaneously
-//!
-//! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
-//! need to wrap `OSInodeInner` into `UPSafeCell`
+#[allow(unused)]
 use super::File;
 use crate::drivers::BLOCK_DEVICE;
-use crate::mm::UserBuffer;
-use crate::sync::UPSafeCell;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use bitflags::*;
-use crate::easy_fs::{EasyFileSystem, Inode};
 use lazy_static::*;
+use crate::ext4fs::ext4::Ext4FS;
+use crate::ext4fs::block_dev::BlockDevice;
+use crate::ext4fs::ext4inode::Ext4Inode;
+use super::VfsInode;
+use spin::Mutex;
+use crate::mm::UserBuffer;
 
-/// inode in memory
-/// A wrapper around a filesystem inode
-/// to implement File trait atop
 pub struct OSInode {
     readable: bool,
     writable: bool,
-    inner: UPSafeCell<OSInodeInner>,
+    inner: Mutex<OSInodeInner>,
+    pub inode: Arc<dyn VfsInode>,   //实现了VfsInode trait的具体文件系统的inode
 }
-/// The OS inode inner in 'UPSafeCell'
+
 pub struct OSInodeInner {
     offset: usize,
-    inode: Arc<Inode>,
 }
 
 impl OSInode {
-    /// create a new inode in memory
-    pub fn new(readable: bool, writable: bool, inode: Arc<Inode>) -> Self {
+    pub fn new(readable: bool, writable: bool, inode: Arc<dyn VfsInode>) -> Self {
         Self {
             readable,
             writable,
-            inner: unsafe { UPSafeCell::new(OSInodeInner { offset: 0, inode }) },
+            inner: Mutex::new(OSInodeInner { offset: 0 }),
+            inode,
         }
     }
-    /// read all data from the inode
-    pub fn read_all(&self) -> Vec<u8> {
-        let mut inner = self.inner.exclusive_access();
-        let mut buffer: Vec<u8> = Vec::with_capacity(512);
-        buffer.resize(512, 0);
-        let mut v: Vec<u8> = Vec::new();
-        loop {
-            let len = inner.inode.read_at(inner.offset, &mut buffer);
-            if len == 0 {
-                break;
-            }
-            inner.offset += len;
-            v.extend_from_slice(&buffer[..len]);
+    pub fn read_all(&self) -> alloc::vec::Vec<u8> {
+        // 1. 获取文件总大小
+        let size = self.inode.get_size();
+        trace!("[kernel] read_all: size={}", size);
+        // 2. 准备缓冲区
+        let mut buffer = alloc::vec![0u8; size];
+        // 3. 从偏移量 0 开始读取
+        let read_len = self.inode.read_at(0, &mut buffer);
+        trace!("[kernel] read_all: read_len={}", read_len);
+        
+        // 理论上 read_len 应该等于 size
+        if read_len != size {
+            buffer.truncate(read_len);
         }
-        v
+        buffer
     }
 }
 
-lazy_static! {
-    pub static ref ROOT_INODE: Arc<Inode> = {
-        let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
-        Arc::new(EasyFileSystem::root_inode(&efs))
-    };
-}
+impl File for OSInode {
+    fn readable(&self) -> bool { self.readable }
+    fn writable(&self) -> bool { self.writable }
 
-/// List all apps in the root directory
-pub fn list_apps() {
-    println!("/**** APPS ****");
-    for app in ROOT_INODE.ls() {
-        println!("{}", app);
+    fn read(&self, mut buf: UserBuffer) -> usize {
+        let mut inner = self.inner.lock();
+        let mut total_read = 0;
+        // 针对 UserBuffer 的每一段进行读取（处理跨页）
+        for slice in buf.buffers.iter_mut() {
+            let read_len = self.inode.read_at(inner.offset, *slice);
+            if read_len == 0 { break; }
+            inner.offset += read_len;
+            total_read += read_len;
+        }
+        total_read
     }
-    println!("**************/");
-}
 
+    fn write(&self, buf: UserBuffer) -> usize {
+        let mut inner = self.inner.lock();
+        let mut total_write = 0;
+        for slice in buf.buffers.iter() {
+            let write_len = self.inode.write_at(inner.offset, *slice);
+            if write_len == 0 { break; }
+            inner.offset += write_len;
+            total_write += write_len;
+        }
+        total_write
+    }
+}
 bitflags! {
     ///  The flags argument to the open() system call is constructed by ORing together zero or more of the following values:
     pub struct OpenFlags: u32 {
@@ -100,60 +107,35 @@ impl OpenFlags {
         }
     }
 }
-
-/// Open a file
-pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
-    let (readable, writable) = flags.read_write();
-    if flags.contains(OpenFlags::CREATE) {
-        if let Some(inode) = ROOT_INODE.find(name) {
-            // clear size
-            inode.clear();
-            Some(Arc::new(OSInode::new(readable, writable, inode)))
-        } else {
-            // create file
-            ROOT_INODE
-                .create(name)
-                .map(|inode| Arc::new(OSInode::new(readable, writable, inode)))
-        }
-    } else {
-        ROOT_INODE.find(name).map(|inode| {
-            if flags.contains(OpenFlags::TRUNC) {
-                inode.clear();
-            }
-            Arc::new(OSInode::new(readable, writable, inode))
-        })
-    }
+pub fn create_root_inode(device: Arc<dyn BlockDevice>) -> Arc<OSInode> {
+    let ext4fs = Ext4FS::open(device.clone());
+    let root_disk_inode = ext4fs.get_disk_inode(2); // ext4根目录通常是2号
+    let vfs_inode = Arc::new(Ext4Inode::new(2, &root_disk_inode, Arc::new(ext4fs), None));
+    Arc::new(OSInode::new(true, false, vfs_inode))
 }
+pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
+    // 使用全局 Dentry 树递归查找路径，并自动填充缓存
+    let target_dentry = crate::fs::ROOT_DENTRY.find_tree(path);
 
-impl File for OSInode {
-    fn readable(&self) -> bool {
-        self.readable
+    let (readable, writable) = flags.read_write();
+    Some(Arc::new(OSInode::new(
+        readable,
+        writable,
+        target_dentry.inode.clone(),
+    )))
+}
+/// List all apps in the root directory
+pub fn list_apps() {
+    info!("/**** APPS ****");
+    for app in ROOT_INODE.inode.ls() {
+        println!("{}", app.name);
     }
-    fn writable(&self) -> bool {
-        self.writable
-    }
-    fn read(&self, mut buf: UserBuffer) -> usize {
-        let mut inner = self.inner.exclusive_access();
-        let mut total_read_size = 0usize;
-        for slice in buf.buffers.iter_mut() {
-            let read_size = inner.inode.read_at(inner.offset, *slice);
-            if read_size == 0 {
-                break;
-            }
-            inner.offset += read_size;
-            total_read_size += read_size;
-        }
-        total_read_size
-    }
-    fn write(&self, buf: UserBuffer) -> usize {
-        let mut inner = self.inner.exclusive_access();
-        let mut total_write_size = 0usize;
-        for slice in buf.buffers.iter() {
-            let write_size = inner.inode.write_at(inner.offset, *slice);
-            assert_eq!(write_size, slice.len());
-            inner.offset += write_size;
-            total_write_size += write_size;
-        }
-        total_write_size
-    }
+    info!("**************/");
+}
+lazy_static! {
+    pub static ref ROOT_INODE: Arc<OSInode> = {
+        let root = create_root_inode(BLOCK_DEVICE.clone());
+        root.inode.init();
+        root
+    };
 }

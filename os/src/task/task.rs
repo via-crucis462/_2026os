@@ -186,6 +186,10 @@ impl TaskControlBlock {
     pub fn exec(&self, elf_data: &[u8], args: Vec<String>) {
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (memory_set, mut user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        info!(
+            "[kernel] task::exec: entry_point={:#x}, user_sp={:#x}",
+            entry_point, user_sp
+        );
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()

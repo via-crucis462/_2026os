@@ -35,7 +35,7 @@ extern crate alloc;
 mod console;
 pub mod config;
 pub mod drivers;
-pub mod easy_fs;
+pub mod ext4fs;
 pub mod fs;
 pub mod lang_items;
 pub mod logging;
@@ -66,8 +66,8 @@ fn clear_bss() {
 /// the rust entry-point of os
 pub fn rust_main() -> ! {
     clear_bss();
-    println!("[kernel] Hello, world!");
     logging::init();
+    info!("[kernel] Hello, world!");
     mm::init();
     mm::remap_test();
     trap::init();
