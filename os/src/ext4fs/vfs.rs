@@ -1,5 +1,6 @@
-use super::ext4inode::Ext4Inode;
+use super::ext4inode::{Ext4Inode,Ext4InodeDisk};
 use super::ext4_dir_entry::Ext4DirEntry;
+use super::block_cache::get_block_cache;
 use crate::fs::DirEntry;
 use alloc::boxed::Box;
 use alloc::string::ToString;
@@ -7,6 +8,7 @@ use alloc::vec::Vec;
 use lazy_static::*;
 use spin::Mutex;
 use alloc::sync::Arc;
+
 lazy_static! {
     pub static ref ENTRIES_TABLE: Mutex<Vec<DirEntry>> = Mutex::new(Vec::new());
 }
@@ -101,6 +103,37 @@ impl VfsInode for Ext4Inode {
             ..Default::default()
         }
     }
+    fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>> {
+        if !self.is_dir() {
+            return None;
+        }
+        // 1. 判断目录项
+        if self.find(name).is_some() {
+            return None;
+        }
+        // 2. 分配 Inode_id
+        let new_inode_id = self.fs.alloc_inode()?;
+        
+        // 3. 在磁盘上初始化该 Inode 结构
+        let (block_id, offset) = self.fs.get_inode_pos(new_inode_id);
+        let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
+        block_cache.lock().modify(offset, |disk_inode: &mut Ext4InodeDisk| {
+            // 设置基本信息
+            disk_inode.i_mode = mode as u16; 
+            disk_inode.i_size_lo = 0;
+            disk_inode.i_size_high = 0;
+            disk_inode.i_links_count = 1;
+            disk_inode.i_blocks_lo = 0;
+            disk_inode.i_flags = 0;
+            for i in 0..15 { disk_inode.i_block[i] = 0; }
+        });
 
+        // 4. 在父目录的数据块中写入目录项
+        if !self.add_dir_entry(name, new_inode_id) {
+            // 失败处理（简化：返回 None，实际上可能需要回滚分配）
+            return None;
+        }
 
+        Some(self.fs.get_inode(new_inode_id))
+    }
 }

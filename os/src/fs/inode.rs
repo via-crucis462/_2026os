@@ -7,6 +7,7 @@ use lazy_static::*;
 use crate::ext4fs::ext4::Ext4FS;
 use crate::ext4fs::block_dev::BlockDevice;
 use crate::ext4fs::ext4inode::Ext4Inode;
+use crate::fs::file_tree::*;
 use super::VfsInode;
 use spin::Mutex;
 use crate::mm::UserBuffer;
@@ -92,9 +93,9 @@ bitflags! {
         /// read and write
         const RDWR = 1 << 1;
         /// create new file
-        const CREATE = 1 << 9;
+        const CREATE = 1 << 6;
         /// truncate file size to 0
-        const TRUNC = 1 << 10;
+        const TRUNC = 1 << 9;
     }
 }
 
@@ -110,6 +111,9 @@ impl OpenFlags {
             (true, true)
         }
     }
+    pub fn should_create(&self) -> bool {
+        self.contains(Self::CREATE)
+    }
 }
 pub fn create_root_inode(device: Arc<dyn BlockDevice>) -> Arc<OSInode> {
     let ext4fs = Ext4FS::open(device.clone());
@@ -119,8 +123,25 @@ pub fn create_root_inode(device: Arc<dyn BlockDevice>) -> Arc<OSInode> {
 }
 pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     // 使用全局 Dentry 树递归查找路径，并自动填充缓存
-    let target_dentry = crate::fs::ROOT_DENTRY.find_tree(path);
-
+    let target_dentry = ROOT_DENTRY.find_tree(path);
+    if target_dentry.is_none() {
+        // 文件不存在，且没有创建标志，返回 None
+        if !flags.should_create() {
+            return None;
+        }
+        // 创建新文件的逻辑（简化处理，只创建空文件）
+        let parent_path = parent_path(path);
+        let file_name = file_name(path);
+        let parent_dentry = ROOT_DENTRY.find_tree(&parent_path)?;
+        let new_dentry = create_file_in_dentry(&parent_dentry, file_name);
+        let (readable, writable) = flags.read_write();
+        return Some(Arc::new(OSInode::new(
+            readable,
+            writable,
+            new_dentry.inode.clone(),
+        )));
+    }
+    let target_dentry = target_dentry.unwrap();
     let (readable, writable) = flags.read_write();
     Some(Arc::new(OSInode::new(
         readable,

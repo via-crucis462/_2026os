@@ -65,7 +65,7 @@ impl Dentry {
         new_child
     }
     /// 递归查找完整路径，例如 "bin/sh" 或 "/bin/sh"
-    pub fn find_tree(self: &Arc<Self>, path: &str) -> Arc<Dentry> {
+    pub fn find_tree(self: &Arc<Self>, path: &str) -> Option<Arc<Dentry>> {
         let segments: alloc::vec::Vec<&str> = path
             .split('/')
             .filter(|s| !s.is_empty())
@@ -74,17 +74,18 @@ impl Dentry {
         let mut current = self.clone();
         for seg in segments {
             // 这里我们复用之前的查找逻辑，为了能链式查找，我们先定义一个返回 Arc<Dentry> 的辅助方法
-            current = current.find_child(seg);
+            current = current.find_child(seg)?;
         }
-        current
+        Some(current)
     }
 
     /// 查找子节点（单级）：返回的是 Dentry 包装，以便继续向下查找
-    pub fn find_child(self: &Arc<Self>, name: &str) -> Arc<Dentry> {
+    pub fn find_child(self: &Arc<Self>, name: &str) -> Option<Arc<Dentry>> {
+        trace!("[kernel] Dentry::find_child: name={}", name);
         let mut children = self.children.lock();
         // 1. 尝试从当前节点的缓存中获取
         if let Some(child) = children.get(name) {
-            return child.clone();
+            return Some(child.clone());
         }
 
         // 2. 缓存未击中，调用底层磁盘接口查找
@@ -96,11 +97,12 @@ impl Dentry {
                 Arc::downgrade(self),
             );
             children.insert(String::from(name), new_child.clone());
-            return new_child;
+            return Some(new_child);
         }
 
         // 3. 磁盘也没找到，按照要求 panic
-        panic!("VFS: File '{}' not found in directory '{}'", name, self.name);
+        println!("VFS: File '{}' not found in directory '{}'", name, self.name);
+        None
     }
 }
 
@@ -112,4 +114,35 @@ lazy_static! {
             Weak::new(),
         )
     };
+}
+
+pub fn parent_path(path: &str) -> String {
+    let path = path.trim_end_matches('/');
+    if let Some(pos) = path.rfind('/') {
+        if pos == 0 {
+            String::from("/")
+        } else {
+            String::from(&path[..pos])
+        }
+    } else {
+        String::from(".")
+    }
+}
+
+pub fn file_name(path: &str) -> String {
+    let path = path.trim_end_matches('/');
+    if let Some(pos) = path.rfind('/') {
+        String::from(&path[pos + 1..])
+    } else {
+        String::from(path)
+    }
+}
+
+pub fn create_file_in_dentry(parent: &Arc<Dentry>, name: String) -> Arc<Dentry> {
+    // 默认创建普通文件权限 0o100666
+    let vfs_inode = parent.inode.create_file(&name, 0o100666)
+        .expect("VFS: Failed to create file in disk");
+    
+    // 将新创建的 Inode 插入 Dentry 缓存树
+    parent.insert(name, vfs_inode)
 }
