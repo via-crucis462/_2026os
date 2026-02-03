@@ -21,22 +21,53 @@ pub trait File: Send + Sync {
     fn read(&self, buf: UserBuffer) -> usize;
     /// write to the file from buf, return the number of bytes written
     fn write(&self, buf: UserBuffer) -> usize;
+    /// get the stat of the file
+    fn get_stat(&self) -> Stat;
 }
 
 /// The stat of a inode
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, Copy)]
+//文件状态结构体
 pub struct Stat {
     /// ID of device containing file
     pub dev: u64,
     /// inode number
     pub ino: u64,
     /// file type and mode
-    pub mode: StatMode,
+    pub mode: u32,
     /// number of hard links
     pub nlink: u32,
-    /// unused pad
-    pad: [u64; 7],
+    /// user ID of owner
+    pub uid: u32,
+    /// group ID of owner
+    pub gid: u32,
+    /// device ID (if special file)
+    pub rdev: u64,
+    /// padding
+    pub __pad: u64,
+    /// total size, in bytes
+    pub size: i64,
+    /// blocksize for filesystem I/O
+    pub blksize: i32,
+    /// padding
+    pub __pad2: i32,
+    /// number of 512B blocks allocated
+    pub blocks: i64,
+    /// time of last access
+    pub atime_sec: i64,
+    /// time of last access (nanoseconds)
+    pub atime_nsec: i64,
+    /// time of last modification
+    pub mtime_sec: i64,
+    /// time of last modification (nanoseconds)
+    pub mtime_nsec: i64,
+    /// time of last status change
+    pub ctime_sec: i64,
+    /// time of last status change (nanoseconds)
+    pub ctime_nsec: i64,
+    /// unused
+    pub __unused: [u32; 2],
 }
 pub trait VfsInode: Send + Sync {
     fn ls<'a>(&'a self) -> Box<dyn Iterator<Item = DirEntry> + 'a>;
@@ -44,6 +75,7 @@ pub trait VfsInode: Send + Sync {
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize;
     fn write_at(&self, offset: usize, buf: &[u8]) -> usize;
     fn get_size(&self) -> usize;
+    fn get_stat(&self) -> Stat;
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>>;
 }
 
