@@ -46,12 +46,12 @@ pub mod task;
 
 #[cfg(target_arch = "riscv64")]
 use core::arch::global_asm;
-#[cfg(target_arch = "loongarch64")]
+#[cfg(target_arch = "la64")]
 use core::arch::global_asm;
 
 #[cfg(target_arch = "riscv64")]
 global_asm!(include_str!("arch/riscv/entry.asm"));
-#[cfg(target_arch = "loongarch64")]
+#[cfg(target_arch = "la64")]
 global_asm!(include_str!("arch/loongarch/entry.asm"));
 
 /// clear BSS segment

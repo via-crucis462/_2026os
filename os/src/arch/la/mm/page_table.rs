@@ -1,6 +1,5 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
-
-// 注意：为了和la6吻合，修改为sv48
+//! 需要按照LA64标准完全重写
 use crate::mm::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use alloc::string::String;
 use alloc::vec;
@@ -96,7 +95,7 @@ impl PageTable {
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
-            if i == 3 {
+            if i == 2 {
                 result = Some(pte);
                 break;
             }
@@ -116,7 +115,7 @@ impl PageTable {
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
-            if i == 3 {
+            if i == 2 {
                 result = Some(pte);
                 break;
             }
@@ -156,7 +155,7 @@ impl PageTable {
     }
     /// get the token from the page table
     pub fn token(&self) -> usize {
-        9usize << 60 | self.root_ppn.0
+        8usize << 60 | self.root_ppn.0
     }
 }
 
