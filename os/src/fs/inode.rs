@@ -77,6 +77,10 @@ impl File for OSInode {
         }
         total_write
     }
+
+    fn get_stat(&self) -> super::Stat {
+        self.inode.get_stat()
+    }
 }
 bitflags! {
     ///  The flags argument to the open() system call is constructed by ORing together zero or more of the following values:
