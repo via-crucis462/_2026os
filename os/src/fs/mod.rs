@@ -7,7 +7,7 @@ mod dir_entry;
 mod file_tree;
 
 pub use dir_entry::DirEntry;
-pub use file_tree::ROOT_DENTRY;
+pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
 use alloc::boxed::Box;
 use crate::mm::UserBuffer;
 use alloc::sync::Arc;
@@ -77,6 +77,7 @@ pub trait VfsInode: Send + Sync {
     fn get_size(&self) -> usize;
     fn get_stat(&self) -> Stat;
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>>;
+    fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
 }
 
 bitflags! {
