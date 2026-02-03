@@ -2,10 +2,10 @@ use crate::mm::PageTableEntry;
 use crate::arch::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use core::fmt::{self, Debug, Formatter};
 
-const PA_WIDTH_SV39: usize = 56;
-const VA_WIDTH_SV39: usize = 39;
-const PPN_WIDTH_SV39: usize = PA_WIDTH_SV39 - PAGE_SIZE_BITS;
-const VPN_WIDTH_SV39: usize = VA_WIDTH_SV39 - PAGE_SIZE_BITS;
+const PA_WIDTH_SV48: usize = 56;
+const VA_WIDTH_SV48: usize = 48;
+const PPN_WIDTH_SV48: usize = PA_WIDTH_SV48 - PAGE_SIZE_BITS;
+const VPN_WIDTH_SV48: usize = VA_WIDTH_SV48 - PAGE_SIZE_BITS;
 
 /// Definitions
 #[repr(C)]
@@ -58,22 +58,22 @@ impl Debug for PhysPageNum {
 
 impl From<usize> for PhysAddr {
     fn from(v: usize) -> Self {
-        Self(v & ((1 << PA_WIDTH_SV39) - 1))
+        Self(v & ((1 << PA_WIDTH_SV48) - 1))
     }
 }
 impl From<usize> for PhysPageNum {
     fn from(v: usize) -> Self {
-        Self(v & ((1 << PPN_WIDTH_SV39) - 1))
+        Self(v & ((1 << PPN_WIDTH_SV48) - 1))
     }
 }
 impl From<usize> for VirtAddr {
     fn from(v: usize) -> Self {
-        Self(v & ((1 << VA_WIDTH_SV39) - 1))
+        Self(v & ((1 << VA_WIDTH_SV48) - 1))
     }
 }
 impl From<usize> for VirtPageNum {
     fn from(v: usize) -> Self {
-        Self(v & ((1 << VPN_WIDTH_SV39) - 1))
+        Self(v & ((1 << VPN_WIDTH_SV48) - 1))
     }
 }
 impl From<PhysAddr> for usize {
@@ -88,8 +88,8 @@ impl From<PhysPageNum> for usize {
 }
 impl From<VirtAddr> for usize {
     fn from(v: VirtAddr) -> Self {
-        if v.0 >= (1 << (VA_WIDTH_SV39 - 1)) {
-            v.0 | (!((1 << VA_WIDTH_SV39) - 1))
+        if v.0 >= (1 << (VA_WIDTH_SV48 - 1)) {
+            v.0 | (!((1 << VA_WIDTH_SV48) - 1))
         } else {
             v.0
         }
@@ -165,10 +165,10 @@ impl From<PhysPageNum> for PhysAddr {
 
 impl VirtPageNum {
     /// Get the indexes of the page table entry
-    pub fn indexes(&self) -> [usize; 3] {
+    pub fn indexes(&self) -> [usize; 4] {
         let mut vpn = self.0;
-        let mut idx = [0usize; 3];
-        for i in (0..3).rev() {
+        let mut idx = [0usize; 4];
+        for i in (0..4).rev() {
             idx[i] = vpn & 511;
             vpn >>= 9;
         }
