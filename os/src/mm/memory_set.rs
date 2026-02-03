@@ -1,5 +1,5 @@
 use super::{frame_alloc, FrameTracker};
-use super::{PTEFlags, PageTable, PageTableEntry};
+use super::{PageTable, PageTableEntry, PTEFlags};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
 use crate::arch::config::{MEMORY_END, MMIO, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use core::panic;
 use lazy_static::*;
+#[cfg(target_arch = "riscv64")]
 use riscv::register::satp;
 
 extern "C" {
@@ -293,6 +294,7 @@ impl MemorySet {
         memory_set
     }
     /// Change page table by writing satp CSR Register.
+    #[cfg(target_arch = "riscv64")]
     pub fn activate(&self) {
         let satp = self.page_table.token();
         unsafe {
@@ -300,6 +302,25 @@ impl MemorySet {
             asm!("sfence.vma");
         }
     }
+    /// 对于龙芯，修改PGDL/H寄器
+    #[cfg(target_arch = "loongarch64")]
+    pub fn activate(&self) {
+        let pgd_pa = PhysAddr::from(
+            self.page_table.token() << crate::arch::config::PAGE_SIZE_BITS,
+        );
+        unsafe {
+            asm!(
+                "
+                csrw pgdl, {0}
+                csrw pgdh, {1}
+                sfence.vma
+                ",
+                in(reg) (pgd_pa.0 & 0xffff_ffff) as usize,
+                in(reg) ((pgd_pa.0 >> 32) & 0xffff_ffff) as usize,
+            );
+        }
+    }
+    
     /// Translate a virtual page number to a page table entry
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.page_table.translate(vpn)

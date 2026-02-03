@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 /// An abstraction over a buffer passed from user space to kernel space
 pub struct UserBuffer {
     /// A list of buffers
