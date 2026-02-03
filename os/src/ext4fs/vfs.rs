@@ -82,5 +82,25 @@ impl VfsInode for Ext4Inode {
         self.size as usize
     }
 
+    fn get_stat(&self) -> crate::fs::Stat {
+        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        crate::fs::Stat {
+            dev: 0,
+            ino: self.inode_id as u64,
+            mode: disk_inode.i_mode as u32,
+            nlink: disk_inode.i_links_count as u32,
+            uid: disk_inode.i_uid as u32,
+            gid: disk_inode.i_gid as u32,
+            rdev: 0,
+            size: disk_inode.size() as i64,
+            blksize: 512,
+            blocks: disk_inode.i_blocks_lo as i64,
+            atime_sec: disk_inode.i_atime as i64,
+            mtime_sec: disk_inode.i_mtime as i64,
+            ctime_sec: disk_inode.i_ctime as i64,
+            ..Default::default()
+        }
+    }
+
 
 }
