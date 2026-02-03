@@ -1,26 +1,12 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
-// 正在尝试按照LA64标准完全重写，采用4级页表，4KB页大小，使用基本页表项（固定12字节偏移）
+// 粘自riscv的版本
+// 正在按照LA64标准重写，采用4级页表，4KB页大小，使用基本页表项（固定12字节偏移）（还未实现）
 
-use crate::mm::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use crate::mm::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum, PTEFlags};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use bitflags::*;
 
-bitflags! {
-    /// page table entry flags 
-    /// rcore自带标志，riscv sv48 标准
-    pub struct PTEFlagsRV: u8 {
-        const V = 1 << 0;
-        const R = 1 << 1;
-        const W = 1 << 2;
-        const X = 1 << 3;
-        const U = 1 << 4;
-        const G = 1 << 5;
-        const A = 1 << 6;
-        const D = 1 << 7;
-    }
-}
 
 
 bitflags!{
@@ -43,18 +29,18 @@ bitflags!{
 
 }
 
-fn from_riscv_flags(riscv_flags: PTEFlagsRV) -> PTEFlagsLA64 {
+fn from_riscv_flags(riscv_flags: PTEFlags) -> PTEFlagsLA64 {
     let mut la64_flags = PTEFlagsLA64::empty();
-    if (riscv_flags & PTEFlagsRV::V) != PTEFlagsRV::empty() {
+    if (riscv_flags & PTEFlags::V) != PTEFlags::empty() {
         la64_flags |= PTEFlagsLA64::V;
     }
-    if (riscv_flags & PTEFlagsRV::R) != PTEFlagsRV::empty() {
+    if (riscv_flags & PTEFlags::R) != PTEFlags::empty() {
         la64_flags |= PTEFlagsLA64::NR;
     }
-    if (riscv_flags & PTEFlagsRV::W) != PTEFlagsRV::empty() {
+    if (riscv_flags & PTEFlags::W) != PTEFlags::empty() {
         la64_flags |= PTEFlagsLA64::W;
     }
-    if (riscv_flags & PTEFlagsRV::X) != PTEFlagsRV::empty() {
+    if (riscv_flags & PTEFlags::X) != PTEFlags::empty() {
         la64_flags |= PTEFlagsLA64::NX;
     }
     la64_flags
@@ -72,7 +58,7 @@ pub struct PageTableEntry {
 // 按la64标准作部分修改
 impl PageTableEntry {
     /// Create a new page table entry
-    pub fn new(ppn: PhysPageNum, flags: PTEFlagsRV) -> Self {
+    pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
         let bits = ppn.0 << 12;
         let la64_flags = from_riscv_flags(flags);
         PageTableEntry { bits: bits | la64_flags.bits as usize }
@@ -95,7 +81,7 @@ impl PageTableEntry {
     }
     /// The page pointered by page table entry is readable?
     pub fn readable(&self) -> bool {
-        (self.flags() & PTEFlagsLA64::R) != PTEFlagsLA64::empty()
+        (self.flags() & PTEFlagsLA64::NR) == PTEFlagsLA64::empty()
     }
     /// The page pointered by page table entry is writable?
     pub fn writable(&self) -> bool {
@@ -103,7 +89,7 @@ impl PageTableEntry {
     }
     /// The page pointered by page table entry is executable?
     pub fn executable(&self) -> bool {
-        (self.flags() & PTEFlagsLA64::X) != PTEFlagsLA64::empty()
+        (self.flags() & PTEFlagsLA64::NX) == PTEFlagsLA64::empty()
     }
 }
 
@@ -124,7 +110,7 @@ impl PageTable {
         }
     }
     /// Temporarily used to get arguments from user space.
-    /// la64根页表地址存储在CSR.PGDL/H
+    /// la64根页表地址存储在CSR.PGDL/H，将其作为token传递进来
     pub fn from_token(token: usize) -> Self {
         Self {
             root_ppn: PhysPageNum::from(token & ((1usize << 44) - 1)),
@@ -144,7 +130,7 @@ impl PageTable {
             }
             if !pte.is_valid() {
                 let frame = frame_alloc().unwrap();
-                *pte = PageTableEntry::new(frame.ppn, PTEFlagsRV::V);
+                *pte = PageTableEntry::new(frame.ppn, PTEFlags::V);
                 self.frames.push(frame);
             }
             ppn = pte.ppn();
@@ -171,7 +157,7 @@ impl PageTable {
     }
     /// set the map between virtual page number and physical page number
     #[allow(unused)]
-    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlagsRV) {
+    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
