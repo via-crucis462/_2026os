@@ -1,5 +1,6 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
-//! 需要按照LA64标准完全重写
+// 正在尝试按照LA64标准完全重写，采用4级页表，4KB页大小，使用基本页表项（固定12字节偏移）
+
 use crate::mm::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use alloc::string::String;
 use alloc::vec;
@@ -7,8 +8,9 @@ use alloc::vec::Vec;
 use bitflags::*;
 
 bitflags! {
-    /// page table entry flags
-    pub struct PTEFlags: u8 {
+    /// page table entry flags 
+    /// rcore自带标志，riscv sv48 标准
+    pub struct PTEFlagsRV: u8 {
         const V = 1 << 0;
         const R = 1 << 1;
         const W = 1 << 2;
@@ -20,6 +22,45 @@ bitflags! {
     }
 }
 
+
+bitflags!{
+    /// page table entry flags
+    /// la64标准
+    pub struct PTEFlagsLA64: u64 {
+        const V = 1 << 0;
+        const D = 1 << 1;
+        const PLV0 = 1 << 2;
+        const PLV1 = 1 << 3;
+        const MAT0 =  1 << 4;
+        const MAT1 =  1 << 5;
+        const G =  1 << 6;
+        const P =  1 << 7;
+        const W =  1 << 8;
+        const NR = 1 << 61;
+        const NX = 1 << 62;
+        const RPLV = 1 << 63;
+    }
+
+}
+
+fn from_riscv_flags(riscv_flags: PTEFlagsRV) -> PTEFlagsLA64 {
+    let mut la64_flags = PTEFlagsLA64::empty();
+    if (riscv_flags & PTEFlagsRV::V) != PTEFlagsRV::empty() {
+        la64_flags |= PTEFlagsLA64::V;
+    }
+    if (riscv_flags & PTEFlagsRV::R) != PTEFlagsRV::empty() {
+        la64_flags |= PTEFlagsLA64::NR;
+    }
+    if (riscv_flags & PTEFlagsRV::W) != PTEFlagsRV::empty() {
+        la64_flags |= PTEFlagsLA64::W;
+    }
+    if (riscv_flags & PTEFlagsRV::X) != PTEFlagsRV::empty() {
+        la64_flags |= PTEFlagsLA64::NX;
+    }
+    la64_flags
+}
+
+
 #[derive(Copy, Clone)]
 #[repr(C)]
 /// page table entry structure
@@ -28,12 +69,13 @@ pub struct PageTableEntry {
     pub bits: usize,
 }
 
+// 按la64标准作部分修改
 impl PageTableEntry {
     /// Create a new page table entry
-    pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
-        PageTableEntry {
-            bits: ppn.0 << 10 | flags.bits as usize,
-        }
+    pub fn new(ppn: PhysPageNum, flags: PTEFlagsRV) -> Self {
+        let bits = ppn.0 << 12;
+        let la64_flags = from_riscv_flags(flags);
+        PageTableEntry { bits: bits | la64_flags.bits as usize }
     }
     /// Create an empty page table entry
     pub fn empty() -> Self {
@@ -41,27 +83,27 @@ impl PageTableEntry {
     }
     /// Get the physical page number from the page table entry
     pub fn ppn(&self) -> PhysPageNum {
-        (self.bits >> 10 & ((1usize << 44) - 1)).into()
+        (self.bits >> 12 & ((1usize << 44) - 1)).into()
     }
     /// Get the flags from the page table entry
-    pub fn flags(&self) -> PTEFlags {
-        PTEFlags::from_bits(self.bits as u8).unwrap()
+    pub fn flags(&self) -> PTEFlagsLA64 {
+        PTEFlagsLA64::from_bits(self.bits as u64).unwrap()
     }
     /// The page pointered by page table entry is valid?
     pub fn is_valid(&self) -> bool {
-        (self.flags() & PTEFlags::V) != PTEFlags::empty()
+        (self.flags() & PTEFlagsLA64::V) != PTEFlagsLA64::empty()
     }
     /// The page pointered by page table entry is readable?
     pub fn readable(&self) -> bool {
-        (self.flags() & PTEFlags::R) != PTEFlags::empty()
+        (self.flags() & PTEFlagsLA64::R) != PTEFlagsLA64::empty()
     }
     /// The page pointered by page table entry is writable?
     pub fn writable(&self) -> bool {
-        (self.flags() & PTEFlags::W) != PTEFlags::empty()
+        (self.flags() & PTEFlagsLA64::W) != PTEFlagsLA64::empty()
     }
     /// The page pointered by page table entry is executable?
     pub fn executable(&self) -> bool {
-        (self.flags() & PTEFlags::X) != PTEFlags::empty()
+        (self.flags() & PTEFlagsLA64::X) != PTEFlagsLA64::empty()
     }
 }
 
@@ -82,9 +124,10 @@ impl PageTable {
         }
     }
     /// Temporarily used to get arguments from user space.
-    pub fn from_token(satp: usize) -> Self {
+    /// la64根页表地址存储在CSR.PGDL/H
+    pub fn from_token(token: usize) -> Self {
         Self {
-            root_ppn: PhysPageNum::from(satp & ((1usize << 44) - 1)),
+            root_ppn: PhysPageNum::from(token & ((1usize << 44) - 1)),
             frames: Vec::new(),
         }
     }
@@ -101,7 +144,7 @@ impl PageTable {
             }
             if !pte.is_valid() {
                 let frame = frame_alloc().unwrap();
-                *pte = PageTableEntry::new(frame.ppn, PTEFlags::V);
+                *pte = PageTableEntry::new(frame.ppn, PTEFlagsRV::V);
                 self.frames.push(frame);
             }
             ppn = pte.ppn();
@@ -128,7 +171,7 @@ impl PageTable {
     }
     /// set the map between virtual page number and physical page number
     #[allow(unused)]
-    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
+    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlagsRV) {
         let pte = self.find_pte_create(vpn).unwrap();
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
@@ -217,62 +260,4 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .translate_va(VirtAddr::from(va))
         .unwrap()
         .get_mut()
-}
-
-/// An abstraction over a buffer passed from user space to kernel space
-pub struct UserBuffer {
-    /// A list of buffers
-    pub buffers: Vec<&'static mut [u8]>,
-}
-
-impl UserBuffer {
-    /// Constuct UserBuffer
-    pub fn new(buffers: Vec<&'static mut [u8]>) -> Self {
-        Self { buffers }
-    }
-    /// Get the length of the buffer
-    pub fn len(&self) -> usize {
-        let mut total: usize = 0;
-        for b in self.buffers.iter() {
-            total += b.len();
-        }
-        total
-    }
-}
-
-impl IntoIterator for UserBuffer {
-    type Item = *mut u8;
-    type IntoIter = UserBufferIterator;
-    fn into_iter(self) -> Self::IntoIter {
-        UserBufferIterator {
-            buffers: self.buffers,
-            current_buffer: 0,
-            current_idx: 0,
-        }
-    }
-}
-
-/// An iterator over a UserBuffer
-pub struct UserBufferIterator {
-    buffers: Vec<&'static mut [u8]>,
-    current_buffer: usize,
-    current_idx: usize,
-}
-
-impl Iterator for UserBufferIterator {
-    type Item = *mut u8;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.current_buffer >= self.buffers.len() {
-            None
-        } else {
-            let r = &mut self.buffers[self.current_buffer][self.current_idx] as *mut _;
-            if self.current_idx + 1 == self.buffers[self.current_buffer].len() {
-                self.current_idx = 0;
-                self.current_buffer += 1;
-            } else {
-                self.current_idx += 1;
-            }
-            Some(r)
-        }
-    }
 }
