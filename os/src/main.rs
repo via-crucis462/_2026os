@@ -6,7 +6,7 @@
 //! - [`trap`]: Handles all cases of switching from userspace to the kernel
 //! - [`task`]: Task management
 //! - [`syscall`]: System call handling and implementation
-//! - [`mm`]: Address map using SV39
+//! - [`mm`]: Address map using SV48 注意本来是SV39，现在改为SV48
 //! - [`sync`]: Wrap a static data structure inside it so that we are able to access it without any `unsafe`.
 //! - [`fs`]: Separate user from file system with some structures
 //!
@@ -33,24 +33,29 @@ extern crate alloc;
 
 #[macro_use]
 mod console;
-pub mod config;
+pub mod arch;
 pub mod drivers;
 pub mod ext4fs;
 pub mod fs;
 pub mod lang_items;
 pub mod logging;
 pub mod mm;
-pub mod sbi;
 pub mod sync;
 pub mod syscall;
 pub mod task;
-pub mod timer;
-pub mod trap;
 
+#[cfg(target_arch = "riscv64")]
+use core::arch::global_asm;
+#[cfg(target_arch = "la64")]
 use core::arch::global_asm;
 
-global_asm!(include_str!("entry.asm"));
+#[cfg(target_arch = "riscv64")]
+global_asm!(include_str!("arch/riscv/entry.asm"));
+#[cfg(target_arch = "la64")]
+global_asm!(include_str!("arch/loongarch/entry.asm"));
+
 /// clear BSS segment
+/// 两种架构应该是统一的
 fn clear_bss() {
     extern "C" {
         fn sbss();
@@ -62,6 +67,8 @@ fn clear_bss() {
     }
 }
 
+
+#[cfg(target_arch = "riscv64")]
 #[no_mangle]
 /// the rust entry-point of os
 pub fn rust_main() -> ! {
@@ -70,11 +77,18 @@ pub fn rust_main() -> ! {
     info!("[kernel] Hello, world!");
     mm::init();
     mm::remap_test();
-    trap::init();
-    trap::enable_timer_interrupt();
-    timer::set_next_trigger();
+    arch::trap::init();
+    arch::trap::enable_timer_interrupt();
+    arch::timer::set_next_trigger();
     fs::list_apps();
     task::add_initproc();
     task::run_tasks();
     panic!("Unreachable in rust_main!");
+}
+
+#[cfg(target_arch = "loongarch")]
+#[no_mangle]
+pub fn rust_main() -> isize {
+    println!("Hello, LoongArch!");
+    0
 }

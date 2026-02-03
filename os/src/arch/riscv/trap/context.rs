@@ -1,5 +1,5 @@
 //! Implementation of [`TrapContext`]
-
+#![cfg(target_arch = "riscv64")]
 use riscv::register::sstatus::{self, Sstatus, SPP};
 
 #[repr(C)]

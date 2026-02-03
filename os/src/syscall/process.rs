@@ -7,7 +7,7 @@ use crate::{
         add_task, current_task, current_user_token, exit_current_and_run_next, pid2task,
         suspend_current_and_run_next, SignalAction, SignalFlags, MAX_SIG
     },
-    timer::{get_time_ms,get_time_us},
+    arch::timer::{get_time_ms,get_time_us},
     task::fork::*,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
