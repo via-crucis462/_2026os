@@ -3,7 +3,7 @@ TARGET := riscv64gc-unknown-none-elf
 MODE := release
 KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
-FS ?= EFS
+FS ?= EXT4
 ARCH ?= riscv64
 # BOARD
 BOARD := qemu
