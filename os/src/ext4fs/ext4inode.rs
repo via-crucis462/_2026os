@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::string::String;
-use super::{ext4::Ext4FS};
+use super::{ext4::Ext4FS, ext4_dir_entry::Ext4DirEntry};
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ext4InodeDisk {
@@ -216,5 +216,54 @@ impl Ext4Inode {
         }
 
         actual_write
+    }
+
+    pub fn add_dir_entry(&self, name: &str, inode_id: u32) -> bool {
+        let mut offset = 0;
+        let file_size = self.size as usize;
+        let block_size = 4096; 
+        
+        while offset < file_size {
+            let mut buf = alloc::vec![0u8; 4096];
+            self.read_at(offset, &mut buf);
+            
+            let mut block_offset = 0;
+            while block_offset < block_size {
+                let dirent = unsafe { &mut *(buf[block_offset..].as_ptr() as *mut Ext4DirEntry) };
+                let rec_len = dirent.rec_len as usize;
+                
+                if rec_len == 0 { break; } 
+                
+                let real_len = dirent.real_len() as usize;
+                let needed_len = ((8 + name.len() + 3) & !3) as usize;
+                
+                // 检查当前项是否有足够的空余空间来分裂出一个新项
+                if rec_len >= real_len + needed_len {
+                    // 1. 缩减当前项的 rec_len
+                    let old_rec_len = dirent.rec_len;
+                    dirent.rec_len = real_len as u16;
+                    
+                    // 2. 在后面构造新项
+                    let new_offset = block_offset + real_len;
+                    let new_rec_len = old_rec_len - (real_len as u16);
+                    let new_dirent = Ext4DirEntry::new_disk(inode_id, new_rec_len, name, 1 /* FILE */);
+                    
+                    // 将新项拷贝进缓冲区
+                    let new_dirent_bytes = unsafe {
+                        core::slice::from_raw_parts(&new_dirent as *const _ as *const u8, 8 + new_dirent.name_len as usize)
+                    };
+                    buf[new_offset..new_offset + new_dirent_bytes.len()].copy_from_slice(new_dirent_bytes);
+                    
+                    // 3. 写回磁盘
+                    self.write_at(offset, &buf); 
+                    return true;
+                }
+                
+                block_offset += rec_len;
+                if block_offset >= block_size { break; }
+            }
+            offset += block_size;
+        }
+        false
     }
 }

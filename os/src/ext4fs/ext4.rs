@@ -64,10 +64,47 @@ impl Ext4FS {
         block_cache.read(offset, |disk_inode: &Ext4InodeDisk| {
             disk_inode.clone()
         })
-        //返回指定inode_id的磁盘inode结构
     }
     pub fn get_inode(self: &Arc<Self>, inode_id: u32) -> Arc<Ext4Inode> {
         let disk_inode = self.get_disk_inode(inode_id);
         Arc::new(Ext4Inode::new(inode_id, &disk_inode, self.clone(), None))
-    }//返回指定inode_id的内存inode结构
+    }
+
+    pub fn alloc_inode(&self) -> Option<u32> {
+        // 1. 遍历块组，找到有空闲 Inode 的组
+        for (group_id, group_mutex) in self.block_groups.iter().enumerate() {
+            let mut group = group_mutex.lock();
+            if group.free_inodes_count > 0 {
+                // 读取 Inode 位图块
+                let bitmap_block = group.inode_bitmap_id;
+                let block_cache = get_block_cache(bitmap_block as usize, self.block_dev.clone());
+                let mut bitmap_cache = block_cache.lock();
+
+                // 在位图中查找第一个空闲位 (0)
+                let res = bitmap_cache.modify(0, |bitmap: &mut [u8; 4096]| {
+                    for byte_idx in 0..4096 {
+                        if bitmap[byte_idx] != 0xFF {
+                            for bit_idx in 0..8 {
+                                if (bitmap[byte_idx] & (1 << bit_idx)) == 0 {
+                                    bitmap[byte_idx] |= 1 << bit_idx;
+                                    return Some((byte_idx, bit_idx));
+                                }
+                            }
+                        }
+                    }
+                    None
+                });
+
+                if let Some((byte_idx, bit_idx)) = res {
+                    // 更新组描述符（内存中）
+                    group.free_inodes_count -= 1;
+                    // 计算全局 Inode ID
+                    let inode_per_group = self.superblock.inodes_per_group;
+                    let inode_id = (group_id as u32) * inode_per_group + (byte_idx as u32 * 8) + bit_idx as u32 + 1;
+                    return Some(inode_id);
+                }
+            }
+        }
+        None
+    }
 }
