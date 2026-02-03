@@ -124,9 +124,22 @@ pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
 }
 
 /// YOUR JOB: Implement fstat.
-pub fn sys_fstat(_fd: usize, _st: *mut Stat) -> isize {
-    trace!("kernel:pid[{}] sys_fstat NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
+    let token = current_user_token();
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return -1;
+    }
+    if let Some(file) = &inner.fd_table[fd] {
+        let file = file.clone();
+        drop(inner);
+        let stat = file.get_stat();
+        *translated_refmut(token, st) = stat;
+        0
+    } else {
+        -1
+    }
 }
 
 /// YOUR JOB: Implement linkat.

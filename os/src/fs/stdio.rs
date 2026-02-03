@@ -44,6 +44,13 @@ impl File for Stdin {
     fn write(&self, _user_buf: UserBuffer) -> usize {
         panic!("Cannot write to stdin!");
     }
+
+    fn get_stat(&self) -> super::Stat {
+        super::Stat {
+            mode: 0o020000,
+            ..Default::default()
+        }
+    }
 }
 
 impl File for Stdout {
@@ -62,4 +69,9 @@ impl File for Stdout {
         }
         user_buf.len()
     }
-}
+    fn get_stat(&self) -> super::Stat {
+        super::Stat {
+            mode: 0o020000,
+            ..Default::default()
+        }
+    }}

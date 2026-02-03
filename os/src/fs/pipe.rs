@@ -188,4 +188,11 @@ impl File for Pipe {
             }
         }
     }
+
+    fn get_stat(&self) -> super::Stat {
+        super::Stat {
+            mode: 0o010000,
+            ..Default::default()
+        }
+    }
 }
