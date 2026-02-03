@@ -62,3 +62,5 @@ TODO：把现有的内核架构进一步拆分为抽象层和实现层，其中�
 ## 2026.2.3
 1. 完成了fstat的系统调用书写
 2. 修改了makefile，完全去除了rCore中对于easy_fs的支持，改为ext4
+3. 完善了open系统调用的书写，支持了未创建文件的创建，修改了Openflag，符合posix标准。
+4. 因为open符合了posix标准，所以close这个测例也过了。
