@@ -32,7 +32,7 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_FSTAT: usize = 80;
 /// exit syscall
 const SYSCALL_EXIT: usize = 93;
-//const SYSCALL_SLEEP:usize =101;
+const SYSCALL_SLEEP:usize =101;
 /// yield syscall
 const SYSCALL_YIELD: usize = 124;
 /// kill syscall
@@ -97,7 +97,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[1] as *const SignalAction,
             args[2] as *mut SignalAction,
         ),
-        //SYSCALL_SLEEP => sys_nanosleep(args[0] as *const TimeSpec, args[1] as *mut TimeSpec),
+        SYSCALL_SLEEP => sys_nanosleep(args[0] as *const TimeSpec, args[1] as *mut TimeSpec),
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as u32),
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_GETPID => sys_getpid(),
