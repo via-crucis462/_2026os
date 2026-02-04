@@ -294,6 +294,7 @@ impl TaskControlBlock {
         // modify kernel_sp in trap_cx
         // **** access child PCB exclusively
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
+        
         trap_cx.kernel_sp = kernel_stack_top;
         if let Some(sp) = sp {
             trap_cx.set_sp(sp);

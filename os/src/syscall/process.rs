@@ -20,6 +20,12 @@ pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
 }
+/*#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TimeSpec {
+    pub tv_sec: usize,
+    pub tv_nsec: usize,
+}*/
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Tms {
