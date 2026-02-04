@@ -1,14 +1,11 @@
-// 粘自riscv版本SV48的address.rs，修改中
-// TODO: 修改到LA64模式
-
-use crate::mm::PageTableEntry;
+use super::pte::PageTableEntry;
 use crate::arch::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use core::fmt::{self, Debug, Formatter};
 
-const PA_WIDTH_LA64: usize = 56;
-const VA_WIDTH_LA64: usize = 48;
-const PPN_WIDTH_LA64: usize = PA_WIDTH_LA64 - PAGE_SIZE_BITS;
-const VPN_WIDTH_LA64: usize = VA_WIDTH_LA64 - PAGE_SIZE_BITS;
+const PA_WIDTH_SV39: usize = 56;
+const VA_WIDTH_SV39: usize = 39;
+const PPN_WIDTH_SV39: usize = PA_WIDTH_SV39 - PAGE_SIZE_BITS;
+const VPN_WIDTH_SV39: usize = VA_WIDTH_SV39 - PAGE_SIZE_BITS;
 
 /// Definitions
 #[repr(C)]
@@ -61,22 +58,22 @@ impl Debug for PhysPageNum {
 
 impl From<usize> for PhysAddr {
     fn from(v: usize) -> Self {
-        Self(v & ((1 << PA_WIDTH_LA64) - 1))
+        Self(v & ((1 << PA_WIDTH_SV39) - 1))
     }
 }
 impl From<usize> for PhysPageNum {
     fn from(v: usize) -> Self {
-        Self(v & ((1 << PPN_WIDTH_LA64) - 1))
+        Self(v & ((1 << PPN_WIDTH_SV39) - 1))
     }
 }
 impl From<usize> for VirtAddr {
     fn from(v: usize) -> Self {
-        Self(v & ((1 << VA_WIDTH_LA64) - 1))
+        Self(v & ((1 << VA_WIDTH_SV39) - 1))
     }
 }
 impl From<usize> for VirtPageNum {
     fn from(v: usize) -> Self {
-        Self(v & ((1 << VPN_WIDTH_LA64) - 1))
+        Self(v & ((1 << VPN_WIDTH_SV39) - 1))
     }
 }
 impl From<PhysAddr> for usize {
@@ -89,10 +86,11 @@ impl From<PhysPageNum> for usize {
         v.0
     }
 }
+// 可能需要按架构区分，暂时统一为sv39的实现
 impl From<VirtAddr> for usize {
     fn from(v: VirtAddr) -> Self {
-        if v.0 >= (1 << (VA_WIDTH_LA64 - 1)) {
-            v.0 | (!((1 << VA_WIDTH_LA64) - 1))
+        if v.0 >= (1 << (VA_WIDTH_SV39 - 1)) {
+            v.0 | (!((1 << VA_WIDTH_SV39) - 1))
         } else {
             v.0
         }
@@ -104,11 +102,8 @@ impl From<VirtPageNum> for usize {
     }
 }
 /// virtual address impl
-/// 注意，龙芯的虚拟地址结构与SV48不同，需要重新实现所有转换函数
-/// 暂时未修改
 impl VirtAddr {
     /// Get the (floor) virtual page number
-    
     pub fn floor(&self) -> VirtPageNum {
         VirtPageNum(self.0 / PAGE_SIZE)
     }
@@ -171,11 +166,11 @@ impl From<PhysPageNum> for PhysAddr {
 
 impl VirtPageNum {
     /// Get the indexes of the page table entry
-    pub fn indexes(&self) -> [usize; 4] {
+    pub fn indexes(&self) -> [usize; 3] {
         let mut vpn = self.0;
-        let mut idx = [0usize; 4];
-        for i in (0..4).rev() {
-            idx[i] = vpn & 511;
+        let mut idx = [0usize; 3];
+        for i in (0..3).rev() {
+            idx[i] = vpn & 511;//取低9位
             vpn >>= 9;
         }
         idx

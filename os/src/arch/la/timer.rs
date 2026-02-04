@@ -1,4 +1,4 @@
-// la64需要重写timer
+// LA64需要重写timer
 
 use crate::arch::config::CLOCK_FREQ;
 use crate::arch::sbi::set_timer;

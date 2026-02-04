@@ -1,6 +1,6 @@
 //! Constants in the kernel
 
-// la64可能有所不同，暂时复制riscv的配置
+// LA64可能有所不同，暂时复制riscv的配置
 
 #[allow(unused)]
 
