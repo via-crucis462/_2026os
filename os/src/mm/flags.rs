@@ -2,7 +2,7 @@ use bitflags::*;
 
 bitflags! {
     /// page table entry flags 
-    /// rcore自带标志结构，riscv sv48 标准
+    /// rcore自带标志结构，riscv sv39 标准
     pub struct PTEFlags: u8 {
         const V = 1 << 0;
         const R = 1 << 1;

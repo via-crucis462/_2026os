@@ -6,7 +6,7 @@
 //! - [`trap`]: Handles all cases of switching from userspace to the kernel
 //! - [`task`]: Task management
 //! - [`syscall`]: System call handling and implementation
-//! - [`mm`]: Address map using SV48 注意本来是SV39，现在改为SV48
+//! - [`mm`]: Address map using SV39
 //! - [`sync`]: Wrap a static data structure inside it so that we are able to access it without any `unsafe`.
 //! - [`fs`]: Separate user from file system with some structures
 //!
@@ -46,12 +46,12 @@ pub mod task;
 
 #[cfg(target_arch = "riscv64")]
 use core::arch::global_asm;
-#[cfg(target_arch = "la64")]
+#[cfg(target_arch = "LA64")]
 use core::arch::global_asm;
 
 #[cfg(target_arch = "riscv64")]
 global_asm!(include_str!("arch/riscv/entry.asm"));
-#[cfg(target_arch = "la64")]
+#[cfg(target_arch = "LA64")]
 global_asm!(include_str!("arch/loongarch/entry.asm"));
 
 /// clear BSS segment

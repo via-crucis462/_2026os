@@ -1,64 +1,18 @@
-//! Implementation of [`PageTableEntry`] and [`PageTable`].
-
-// 注意：为了和la6吻合，修改为sv48
-use crate::mm::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum, PTEFlags, pte::*};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::mm::flags::PTEFlags;
-
-#[derive(Copy, Clone)]
-#[repr(C)]
-/// page table entry structure
-pub struct PageTableEntry {
-    /// bits of page table entry
-    pub bits: usize,
-}
-
-impl PageTableEntry {
-    /// Create a new page table entry
-    pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
-        PageTableEntry {
-            bits: ppn.0 << 10 | flags.bits() as usize,
-        }
-    }
-    /// Create an empty page table entry
-    pub fn empty() -> Self {
-        PageTableEntry { bits: 0 }
-    }
-    /// Get the physical page number from the page table entry
-    pub fn ppn(&self) -> PhysPageNum {
-        (self.bits >> 10 & ((1usize << 44) - 1)).into()
-    }
-    /// Get the flags from the page table entry
-    pub fn flags(&self) -> PTEFlags {
-        PTEFlags::from_bits(self.bits as u8).unwrap()
-    }
-    /// The page pointered by page table entry is valid?
-    pub fn is_valid(&self) -> bool {
-        (self.flags() & PTEFlags::V) != PTEFlags::empty()
-    }
-    /// The page pointered by page table entry is readable?
-    pub fn readable(&self) -> bool {
-        (self.flags() & PTEFlags::R) != PTEFlags::empty()
-    }
-    /// The page pointered by page table entry is writable?
-    pub fn writable(&self) -> bool {
-        (self.flags() & PTEFlags::W) != PTEFlags::empty()
-    }
-    /// The page pointered by page table entry is executable?
-    pub fn executable(&self) -> bool {
-        (self.flags() & PTEFlags::X) != PTEFlags::empty()
-    }
-}
 
 /// page table structure
 pub struct PageTable {
+    // LA64也要求PAGE_SIZE对齐   
     root_ppn: PhysPageNum,
+    // 这里用同样的结构体记录分配的页帧
     frames: Vec<FrameTracker>,
 }
 
 /// Assume that it won't oom when creating/mapping.
+/// 按照LA64标准重写方法
 impl PageTable {
     /// Create a new page table
     pub fn new() -> Self {
@@ -69,9 +23,11 @@ impl PageTable {
         }
     }
     /// Temporarily used to get arguments from user space.
-    pub fn from_token(satp: usize) -> Self {
+    /// LA64根页表地址存储在CSR.PGDL或H，
+    /// 这里存储的是2级页表的物理页号，因为弃用了3，4级页表
+    pub fn from_token(token: usize) -> Self {
         Self {
-            root_ppn: PhysPageNum::from(satp & ((1usize << 44) - 1)),
+            root_ppn: PhysPageNum::from(token & ((1usize << 44) - 1)),
             frames: Vec::new(),
         }
     }
@@ -82,7 +38,7 @@ impl PageTable {
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
-            if i == 3 {
+            if i == 2 {
                 result = Some(pte);
                 break;
             }
@@ -102,7 +58,7 @@ impl PageTable {
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
-            if i == 3 {
+            if i == 2 {
                 result = Some(pte);
                 break;
             }
@@ -141,8 +97,13 @@ impl PageTable {
         })
     }
     /// get the token from the page table
+    #[cfg(target_arch = "riscv64")]
     pub fn token(&self) -> usize {
-        9usize << 60 | self.root_ppn.0
+        8usize << 60 | self.root_ppn.0
+    }
+    #[cfg(target_arch = "loongarch64")]
+    pub fn token(&self) -> usize {
+        self.root_ppn.0 //la64的PGD寄存器直接存储物理页号
     }
 }
 
@@ -205,5 +166,3 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .unwrap()
         .get_mut()
 }
-
-
