@@ -166,3 +166,23 @@ pub fn sys_unlinkat(_name: *const u8) -> isize {
     trace!("kernel:pid[{}] sys_unlinkat NOT IMPLEMENTED", current_task().unwrap().pid.0);
     -1
 }
+
+pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
+    let token = current_user_token();
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return -1;
+    }
+    if let Some(file) = &inner.fd_table[fd] {
+        let file = file.clone();
+        drop(inner);
+        if !file.readable() {
+            return -1;
+        }
+        trace!("[kernel] sys_getdents: fd={}, count={}", fd, count);
+        file.getdents(translated_byte_buffer(token, dirp, count).remove(0)) as isize
+    } else {
+        -1
+    }
+}

@@ -82,6 +82,10 @@ impl File for OSInode {
     fn get_stat(&self) -> super::Stat {
         self.inode.get_stat()
     }
+
+    fn getdents(&self, buf: &mut [u8]) -> isize{
+        self.inode.getdents(buf)
+    }
 }
 bitflags! {
     ///  The flags argument to the open() system call is constructed by ORing together zero or more of the following values:
@@ -175,15 +179,26 @@ pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
 /// List all apps in the root directory
 pub fn list_apps() {
     info!("/**** APPS ****");
-    for app in ROOT_INODE.inode.ls() {
-        println!("{}", app.name);
+    let mut buf = [0u8; 4096];
+    let len = ROOT_INODE.inode.getdents(&mut buf);
+    if len > 0 {
+        let mut offset = 0;
+        while offset < len as usize {
+            let entry = unsafe { &*(buf[offset..].as_ptr() as *const super::DirEntry) };
+            if entry.d_reclen == 0 { break; }
+            
+            let name_len = entry.d_name.iter().position(|&c| c == 0).unwrap_or(256);
+            let name = core::str::from_utf8(&entry.d_name[..name_len]).unwrap_or("");
+            println!("{}", name);
+            
+            offset += entry.d_reclen as usize;
+        }
     }
     info!("**************/");
 }
 lazy_static! {
     pub static ref ROOT_INODE: Arc<OSInode> = {
         let root = create_root_inode(BLOCK_DEVICE.clone());
-        root.inode.init();
         root
     };
 }

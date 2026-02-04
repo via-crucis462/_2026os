@@ -8,7 +8,6 @@ mod file_tree;
 
 pub use dir_entry::DirEntry;
 pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
-use alloc::boxed::Box;
 use crate::mm::UserBuffer;
 use alloc::sync::Arc;
 /// trait File for all file types
@@ -23,6 +22,8 @@ pub trait File: Send + Sync {
     fn write(&self, buf: UserBuffer) -> usize;
     /// get the stat of the file
     fn get_stat(&self) -> Stat;
+    /// 获取目录下的所有目录项
+    fn getdents(&self, _buf: &mut [u8]) -> isize;
 }
 
 /// The stat of a inode
@@ -70,8 +71,6 @@ pub struct Stat {
     pub __unused: [u32; 2],
 }
 pub trait VfsInode: Send + Sync {
-    fn ls<'a>(&'a self) -> Box<dyn Iterator<Item = DirEntry> + 'a>;
-    fn init(&self);
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize;
     fn write_at(&self, offset: usize, buf: &[u8]) -> usize;
     fn get_size(&self) -> usize;
@@ -79,6 +78,7 @@ pub trait VfsInode: Send + Sync {
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>>;
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
     fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
+    fn getdents(&self, buf: &mut [u8]) -> isize;
 }
 
 bitflags! {
