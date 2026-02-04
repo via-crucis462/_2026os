@@ -78,6 +78,7 @@ pub trait VfsInode: Send + Sync {
     fn get_stat(&self) -> Stat;
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>>;
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
+    fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
 }
 
 bitflags! {
@@ -93,6 +94,6 @@ bitflags! {
     }
 }
 
-pub use inode::{list_apps, OpenFlags, open_file, ROOT_INODE};
+pub use inode::{list_apps, OpenFlags, open_file, ROOT_INODE, make_dir, OSInode};
 pub use pipe::{make_pipe, Pipe};
 pub use stdio::{Stdin, Stdout};

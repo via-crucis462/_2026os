@@ -27,7 +27,7 @@ impl Ext4DirEntry {
             inode,
             rec_len,
             name_len: len as u8,
-            file_type,
+            file_type, // 已经改为使用调用者传入的类型 (1=文件, 2=目录)
             name: name_bytes,
         }
     }

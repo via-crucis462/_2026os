@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::string::String;
-use super::{ext4::Ext4FS, ext4_dir_entry::Ext4DirEntry};
+use super::{ext4::Ext4FS, ext4_dir_entry::Ext4DirEntry, block_cache::get_block_cache};
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ext4InodeDisk {
@@ -147,28 +147,27 @@ impl Ext4Inode {
     }
     /// 从文件的 offset 字节处开始，读取数据到 buf 中，返回实际读取长度
     pub fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        let block_size = self.fs.superblock.block_size as usize;
+        let block_size = 4096;
         let mut actual_read = 0;
         let mut curr_offset = offset;
 
-        // 不能超过文件总大小
-        let end = core::cmp::min(offset + buf.len(), self.size as usize);
+        // 修正：i_size_lo 实际上存储的是字节数，不再乘以 4096
+        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        let disk_size_bytes = disk_inode.size() as usize;
+        
+        let end = core::cmp::min(offset + buf.len(), disk_size_bytes);
         if curr_offset >= end { return 0; }
 
         while curr_offset < end {
-            // 1. 计算当前逻辑块号 (文件中的第几块)
             let inner_block_id = (curr_offset / block_size) as u32;
             let block_pos = curr_offset % block_size;
             
-            // 2. 找到该逻辑块对应的全局物理块号
             let physical_block_id = self.find_physical_block(inner_block_id);
-            if physical_block_id == 0 { break; } // 空洞文件或超出范围
+            if physical_block_id == 0 { break; } 
 
-            // 3. 读取块数据
             let mut temp_buf = alloc::vec![0u8; 4096];
             self.fs.block_dev.read_block(physical_block_id as usize, &mut temp_buf);
 
-            // 4. 拷贝到输出 buf
             let read_len = core::cmp::min(block_size - block_pos, end - curr_offset);
             buf[actual_read..actual_read + read_len].copy_from_slice(&temp_buf[block_pos..block_pos + read_len]);
             
@@ -179,30 +178,25 @@ impl Ext4Inode {
         actual_read
     }
 
-    /// 从文件的 offset 字节处开始，将数据写入 buf 中，返回实际写入长度
     pub fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
-        let block_size = self.fs.superblock.block_size as usize;
+        let block_size = 4096;
         let mut actual_write = 0;
         let mut curr_offset = offset;
 
-        // 目前仅支持对已有数据块的覆盖写入，不支持自动增长文件大小
-        let end = core::cmp::min(offset + buf.len(), self.size as usize);
-        if curr_offset >= end {
-            return 0;
-        }
-
+        let old_size_bytes = self.fs.get_disk_inode(self.inode_id).size() as usize;
+        let end = offset + buf.len();
+        
         while curr_offset < end {
-            // 1. 计算逻辑块号
             let inner_block_id = (curr_offset / block_size) as u32;
             let block_pos = curr_offset % block_size;
 
-            // 2. 查找物理块号
             let physical_block_id = self.find_physical_block(inner_block_id);
             if physical_block_id == 0 {
+                // 如果块不存在，尝试分配 (暂时不支持)
+                trace!("VFS: write_at - block allocation not implemented for inode {}", self.inode_id);
                 break;
             }
 
-            // 3. 读-改-写 (暂未实现更高效的缓存部分写入)
             let mut temp_buf = alloc::vec![0u8; 4096];
             self.fs.block_dev.read_block(physical_block_id as usize, &mut temp_buf);
 
@@ -215,15 +209,28 @@ impl Ext4Inode {
             curr_offset += write_len;
         }
 
+        // 更新磁盘 Inode 的 size (以字节为单位)
+        let new_size_bytes = offset + actual_write;
+        
+        if new_size_bytes > old_size_bytes {
+            let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
+            let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
+            block_cache.lock().modify(inode_offset, |disk_inode: &mut Ext4InodeDisk| {
+                disk_inode.i_size_lo = new_size_bytes as u32;
+                disk_inode.i_size_high = (new_size_bytes >> 32) as u32;
+            });
+        }
+
         actual_write
     }
 
-    pub fn add_dir_entry(&self, name: &str, inode_id: u32) -> bool {
+    pub fn add_dir_entry(&self, name: &str, inode_id: u32, file_type: u8) -> bool {
         let mut offset = 0;
-        let file_size = self.size as usize;
-        let block_size = 4096; 
+        let block_size = 4096;
+        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        let file_size_bytes = disk_inode.size() as usize;
         
-        while offset < file_size {
+        while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; 4096];
             self.read_at(offset, &mut buf);
             
@@ -237,24 +244,19 @@ impl Ext4Inode {
                 let real_len = dirent.real_len() as usize;
                 let needed_len = ((8 + name.len() + 3) & !3) as usize;
                 
-                // 检查当前项是否有足够的空余空间来分裂出一个新项
                 if rec_len >= real_len + needed_len {
-                    // 1. 缩减当前项的 rec_len
                     let old_rec_len = dirent.rec_len;
                     dirent.rec_len = real_len as u16;
                     
-                    // 2. 在后面构造新项
                     let new_offset = block_offset + real_len;
                     let new_rec_len = old_rec_len - (real_len as u16);
-                    let new_dirent = Ext4DirEntry::new_disk(inode_id, new_rec_len, name, 1 /* FILE */);
+                    let new_dirent = Ext4DirEntry::new_disk(inode_id, new_rec_len, name, file_type);
                     
-                    // 将新项拷贝进缓冲区
                     let new_dirent_bytes = unsafe {
                         core::slice::from_raw_parts(&new_dirent as *const _ as *const u8, 8 + new_dirent.name_len as usize)
                     };
                     buf[new_offset..new_offset + new_dirent_bytes.len()].copy_from_slice(new_dirent_bytes);
                     
-                    // 3. 写回磁盘
                     self.write_at(offset, &buf); 
                     return true;
                 }

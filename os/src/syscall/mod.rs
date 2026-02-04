@@ -64,7 +64,8 @@ const SYSCALL_MMAP: usize = 222;
 const SYSCALL_WAIT4: usize = 260;
 /// spawn syscall
 const SYSCALL_SPAWN: usize = 400;
-
+/// mkdir syscall
+const SYSCALL_MKDIR: usize = 34;
 mod fs;
 mod process;
 
@@ -77,6 +78,7 @@ use crate::{fs::Stat, task::SignalAction};
 /// handle syscall exception with `syscall_id` and other arguments
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
+    debug!("[kernel] syscall: id={}, args={:?}", syscall_id, args);
     match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
@@ -113,6 +115,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SPAWN => sys_spawn(args[0] as *const u8),
         SYSCALL_SET_PRIORITY => sys_set_priority(args[0] as isize),
         SYSCALL_TIMES => sys_times(args[0] as *mut usize),
+        SYSCALL_MKDIR => sys_mkdir(args[1] as *const u8, args[2] as u32),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
