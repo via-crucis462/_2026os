@@ -16,22 +16,18 @@ pub mod flags;
 pub mod mmap;
 pub mod user_buffer;
 pub mod address;
+pub mod page_table;
 
 
 use address::VPNRange;
+pub use page_table::*;
 pub use flags::PTEFlags;
 pub use user_buffer::UserBuffer;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 pub use frame_allocator::{frame_alloc, frame_dealloc, FrameTracker};
 pub use memory_set::remap_test;
 pub use memory_set::{kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
-
-
-
-pub use crate::arch::mm::page_table::{
-    translated_byte_buffer, translated_ref, translated_refmut, translated_str, PageTable,
-    PageTableEntry
-};
+pub use crate::arch::mm::pte;
 
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {

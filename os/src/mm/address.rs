@@ -1,4 +1,4 @@
-use crate::mm::PageTableEntry;
+use super::pte::PageTableEntry;
 use crate::arch::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use core::fmt::{self, Debug, Formatter};
 
@@ -86,6 +86,7 @@ impl From<PhysPageNum> for usize {
         v.0
     }
 }
+// 可能需要按架构区分，暂时统一为sv39的实现
 impl From<VirtAddr> for usize {
     fn from(v: VirtAddr) -> Self {
         if v.0 >= (1 << (VA_WIDTH_SV39 - 1)) {
@@ -169,7 +170,7 @@ impl VirtPageNum {
         let mut vpn = self.0;
         let mut idx = [0usize; 3];
         for i in (0..3).rev() {
-            idx[i] = vpn & 511;
+            idx[i] = vpn & 511;//取低9位
             vpn >>= 9;
         }
         idx
