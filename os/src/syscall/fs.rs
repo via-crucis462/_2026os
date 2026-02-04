@@ -1,5 +1,5 @@
 //! File and filesystem-related syscalls
-use crate::fs::{make_pipe, OpenFlags, Stat, open_file};
+use crate::fs::{make_pipe, OpenFlags, Stat, open_file, make_dir};
 use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
 use crate::task::{current_task, current_user_token};
 use alloc::sync::Arc;
@@ -53,6 +53,10 @@ pub fn sys_open(path: *const u8, flags: u32) -> isize {
     let path = translated_str(token, path);
     debug!("[kernel] sys_open: path={}", path);
     if let Some(inode) = open_file(path.as_str(), OpenFlags::from_bits(flags).unwrap()) {
+        if OpenFlags::from_bits(flags).unwrap().should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
+            trace!("VFS: sys_open failed - '{}' is not a directory", path);
+            return -1;
+        }
         let mut inner = task.inner_exclusive_access();
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(inode);
@@ -141,8 +145,17 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
         -1
     }
 }
-
-/// YOUR JOB: Implement linkat.
+pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    debug!("[kernel] sys_mkdir: path={}", path);
+    
+    if let Some(_) = make_dir(path.as_str(), _mode) {
+        0
+    } else {
+        -1
+    }
+}
 pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
     trace!("kernel:pid[{}] sys_linkat NOT IMPLEMENTED", current_task().unwrap().pid.0);
     -1
