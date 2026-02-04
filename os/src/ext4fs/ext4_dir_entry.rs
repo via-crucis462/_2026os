@@ -12,6 +12,26 @@ impl Ext4DirEntry {
     pub fn name_len(&self) -> u8 { self.name_len }
     pub fn rec_len(&self) -> u16 { self.rec_len }
 
+    /// 计算目录项实际需要的最小长度（头部8字节 + 文件名长度，4字节对齐）
+    pub fn real_len(&self) -> u16 {
+        let len = 8 + self.name_len as u16;
+        (len + 3) & !3
+    }
+
+    /// 构造一个新的目录项
+    pub fn new_disk(inode: u32, rec_len: u16, name: &str, file_type: u8) -> Self {
+        let mut name_bytes = [0u8; 255];
+        let len = name.len().min(255);
+        name_bytes[..len].copy_from_slice(&name.as_bytes()[..len]);
+        Self {
+            inode,
+            rec_len,
+            name_len: len as u8,
+            file_type, // 已经改为使用调用者传入的类型 (1=文件, 2=目录)
+            name: name_bytes,
+        }
+    }
+
     /// 获取当前目录项中的文件名字符串
     pub fn name(&self) -> &str {
         let len = self.name_len as usize;

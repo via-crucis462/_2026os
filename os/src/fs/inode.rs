@@ -7,6 +7,7 @@ use lazy_static::*;
 use crate::ext4fs::ext4::Ext4FS;
 use crate::ext4fs::block_dev::BlockDevice;
 use crate::ext4fs::ext4inode::Ext4Inode;
+use crate::fs::file_tree::*;
 use super::VfsInode;
 use spin::Mutex;
 use crate::mm::UserBuffer;
@@ -81,6 +82,10 @@ impl File for OSInode {
     fn get_stat(&self) -> super::Stat {
         self.inode.get_stat()
     }
+
+    fn getdents(&self, buf: &mut [u8]) -> isize{
+        self.inode.getdents(buf)
+    }
 }
 bitflags! {
     ///  The flags argument to the open() system call is constructed by ORing together zero or more of the following values:
@@ -92,12 +97,13 @@ bitflags! {
         /// read and write
         const RDWR = 1 << 1;
         /// create new file
-        const CREATE = 1 << 9;
+        const CREATE = 1 << 6;
         /// truncate file size to 0
-        const TRUNC = 1 << 10;
+        const TRUNC = 1 << 9;
+        /// 用于mkdir中，open二次确认是否新建的文件是目录类型
+        const DIRECTORY = 1 << 16;
     }
 }
-
 impl OpenFlags {
     /// Do not check validity for simplicity
     /// Return (readable, writable)
@@ -110,6 +116,12 @@ impl OpenFlags {
             (true, true)
         }
     }
+    pub fn should_create(&self) -> bool {
+        self.contains(Self::CREATE)
+    }
+    pub fn should_be_directory(&self) -> bool {
+        self.contains(Self::DIRECTORY)
+    }
 }
 pub fn create_root_inode(device: Arc<dyn BlockDevice>) -> Arc<OSInode> {
     let ext4fs = Ext4FS::open(device.clone());
@@ -119,8 +131,30 @@ pub fn create_root_inode(device: Arc<dyn BlockDevice>) -> Arc<OSInode> {
 }
 pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     // 使用全局 Dentry 树递归查找路径，并自动填充缓存
-    let target_dentry = crate::fs::ROOT_DENTRY.find_tree(path);
-
+    // 1. 查找文件是否已存在
+    let target_dentry = ROOT_DENTRY.find_tree(path);
+    // 2.1 若不存在
+    // 2.1.1 若文件不需要创建，返回 None
+    if target_dentry.is_none() {
+        // 文件不存在，且没有创建标志，返回 None
+        if !flags.should_create() {
+            return None;
+        }
+        // 创建新文件的逻辑（简化处理，只创建空文件）
+    // 2.1.2 创建新文件
+        let parent_path = parent_path(path);
+        let parent_dentry = ROOT_DENTRY.find_tree(&parent_path)?;
+        let file_name = file_name(path);
+        let new_dentry = create_file_in_dentry(&parent_dentry, file_name);
+        let (readable, writable) = flags.read_write();
+        return Some(Arc::new(OSInode::new(
+            readable,
+            writable,
+            new_dentry.inode.clone(),
+        )));
+    }
+    // 2.2 若存在，直接返回对应的 OSInode
+    let target_dentry = target_dentry.unwrap();
     let (readable, writable) = flags.read_write();
     Some(Arc::new(OSInode::new(
         readable,
@@ -128,18 +162,43 @@ pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
         target_dentry.inode.clone(),
     )))
 }
+
+pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
+    // 1. 检查目录是否已存在
+    if ROOT_DENTRY.find_tree(path).is_some() {
+        println!("VFS: make_dir - target '{}' already exists", path);
+        return None; 
+    }
+    let parent_path = parent_path(path);
+    let parent_dentry = ROOT_DENTRY.find_tree(&parent_path)?;
+    let dir_name = file_name(path);
+    println!("VFS: make_dir - creating directory '{}' in parent '{}'", dir_name, parent_path);
+    let new_dentry = create_dir_in_dentry(&parent_dentry, dir_name , _mode);
+    Some(new_dentry.inode.get_stat().ino as u32)
+}
 /// List all apps in the root directory
 pub fn list_apps() {
     info!("/**** APPS ****");
-    for app in ROOT_INODE.inode.ls() {
-        println!("{}", app.name);
+    let mut buf = [0u8; 4096];
+    let len = ROOT_INODE.inode.getdents(&mut buf);
+    if len > 0 {
+        let mut offset = 0;
+        while offset < len as usize {
+            let entry = unsafe { &*(buf[offset..].as_ptr() as *const super::DirEntry) };
+            if entry.d_reclen == 0 { break; }
+            
+            let name_len = entry.d_name.iter().position(|&c| c == 0).unwrap_or(256);
+            let name = core::str::from_utf8(&entry.d_name[..name_len]).unwrap_or("");
+            println!("{}", name);
+            
+            offset += entry.d_reclen as usize;
+        }
     }
     info!("**************/");
 }
 lazy_static! {
     pub static ref ROOT_INODE: Arc<OSInode> = {
         let root = create_root_inode(BLOCK_DEVICE.clone());
-        root.inode.init();
         root
     };
 }
