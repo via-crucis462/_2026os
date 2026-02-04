@@ -1,6 +1,4 @@
 //需要按照loongarch64架构修改
-#![cfg(target_arch = "la64")]
-use riscv::register::sstatus::{self, Sstatus, SPP};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
