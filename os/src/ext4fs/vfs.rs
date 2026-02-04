@@ -20,9 +20,9 @@ impl VfsInode for Ext4Inode {
         }
         let mut entries = alloc::vec::Vec::new();
         let mut offset = 0;
-        let file_size = self.size as usize;
+        let file_size_bytes = self.size as usize;
 
-        while offset < file_size {
+        while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; 4096];
             let read_len = self.read_at(offset, &mut buf);
             if read_len == 0 { break; }
@@ -128,11 +128,68 @@ impl VfsInode for Ext4Inode {
             for i in 0..15 { disk_inode.i_block[i] = 0; }
         });
 
-        // 4. 在父目录的数据块中写入目录项
-        if !self.add_dir_entry(name, new_inode_id) {
+        // 4. 在父目录的数据块中写入目录项 (文件类型 1)
+        if !self.add_dir_entry(name, new_inode_id, 1) {
             // 失败处理（简化：返回 None，实际上可能需要回滚分配）
             return None;
         }
+
+        // 5. 更新父目录（当前 Inode）的元数据：确保 size 至少占用了1个块
+        let (p_block_id, p_offset) = self.fs.get_inode_pos(self.inode_id);
+        let p_block_cache = get_block_cache(p_block_id as usize, self.fs.block_dev.clone());
+        p_block_cache.lock().modify(p_offset, |p_disk_inode: &mut Ext4InodeDisk| {
+            if p_disk_inode.i_size_lo < 4096 {
+                p_disk_inode.i_size_lo = 4096;
+            }
+        });
+
+        Some(self.fs.get_inode(new_inode_id))
+    }
+
+    fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>> {
+        println!("VFS: Creating directory '{}' in inode {}", name, self.inode_id);
+        if !self.is_dir() {
+            println!("VFS: create_dir failed - inode {} is not a directory", self.inode_id);
+            return None;
+        }
+        // 1. 判断目录项
+        if self.find(name).is_some() {
+            println!("VFS: Directory '{}' already exists in inode {}", name, self.inode_id);
+            return None;
+        }
+        // 2. 分配 Inode_id
+        let new_inode_id = self.fs.alloc_inode()?;
+        println!("VFS: Creating directory '{}' with inode id {}", name, new_inode_id);
+        // 3. 在磁盘上初始化该 Inode 结构
+        let (block_id, offset) = self.fs.get_inode_pos(new_inode_id);
+        let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
+        block_cache.lock().modify(offset, |disk_inode: &mut Ext4InodeDisk| {
+            // 设置基本信息
+            disk_inode.i_mode = mode as u16; 
+            disk_inode.i_size_lo = 0;
+            disk_inode.i_size_high = 0;
+            disk_inode.i_links_count = 2; // 目录初始链接数为2 (self + .)
+            disk_inode.i_blocks_lo = 0;
+            disk_inode.i_flags = 0;
+            for i in 0..15 { disk_inode.i_block[i] = 0; }
+        });
+
+        // 4. 在父目录的数据块中写入目录项 (文件类型 2)
+        if !self.add_dir_entry(name, new_inode_id, 2) {
+            // 失败处理（简化：返回 None，实际上可能需要回滚分配）
+            return None;
+        }
+
+        // 5. 更新父目录（当前 Inode）的元数据：链接数 +1，且确保 size 至少占用了1个块
+        let (p_block_id, p_offset) = self.fs.get_inode_pos(self.inode_id);
+        let p_block_cache = get_block_cache(p_block_id as usize, self.fs.block_dev.clone());
+        p_block_cache.lock().modify(p_offset, |p_disk_inode: &mut Ext4InodeDisk| {
+            p_disk_inode.i_links_count += 1;
+            // 确保目录大小至少为1个块 (size 这里的单位保持为字节，即 4096)
+            if p_disk_inode.i_size_lo < 4096 {
+                p_disk_inode.i_size_lo = 4096;
+            }
+        });
 
         Some(self.fs.get_inode(new_inode_id))
     }

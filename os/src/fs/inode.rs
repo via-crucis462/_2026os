@@ -96,9 +96,10 @@ bitflags! {
         const CREATE = 1 << 6;
         /// truncate file size to 0
         const TRUNC = 1 << 9;
+        /// 用于mkdir中，open二次确认是否新建的文件是目录类型
+        const DIRECTORY = 1 << 16;
     }
 }
-
 impl OpenFlags {
     /// Do not check validity for simplicity
     /// Return (readable, writable)
@@ -114,6 +115,9 @@ impl OpenFlags {
     pub fn should_create(&self) -> bool {
         self.contains(Self::CREATE)
     }
+    pub fn should_be_directory(&self) -> bool {
+        self.contains(Self::DIRECTORY)
+    }
 }
 pub fn create_root_inode(device: Arc<dyn BlockDevice>) -> Arc<OSInode> {
     let ext4fs = Ext4FS::open(device.clone());
@@ -123,16 +127,20 @@ pub fn create_root_inode(device: Arc<dyn BlockDevice>) -> Arc<OSInode> {
 }
 pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     // 使用全局 Dentry 树递归查找路径，并自动填充缓存
+    // 1. 查找文件是否已存在
     let target_dentry = ROOT_DENTRY.find_tree(path);
+    // 2.1 若不存在
+    // 2.1.1 若文件不需要创建，返回 None
     if target_dentry.is_none() {
         // 文件不存在，且没有创建标志，返回 None
         if !flags.should_create() {
             return None;
         }
         // 创建新文件的逻辑（简化处理，只创建空文件）
+    // 2.1.2 创建新文件
         let parent_path = parent_path(path);
-        let file_name = file_name(path);
         let parent_dentry = ROOT_DENTRY.find_tree(&parent_path)?;
+        let file_name = file_name(path);
         let new_dentry = create_file_in_dentry(&parent_dentry, file_name);
         let (readable, writable) = flags.read_write();
         return Some(Arc::new(OSInode::new(
@@ -141,6 +149,7 @@ pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
             new_dentry.inode.clone(),
         )));
     }
+    // 2.2 若存在，直接返回对应的 OSInode
     let target_dentry = target_dentry.unwrap();
     let (readable, writable) = flags.read_write();
     Some(Arc::new(OSInode::new(
@@ -148,6 +157,20 @@ pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
         writable,
         target_dentry.inode.clone(),
     )))
+}
+
+pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
+    // 1. 检查目录是否已存在
+    if ROOT_DENTRY.find_tree(path).is_some() {
+        println!("VFS: make_dir - target '{}' already exists", path);
+        return None; 
+    }
+    let parent_path = parent_path(path);
+    let parent_dentry = ROOT_DENTRY.find_tree(&parent_path)?;
+    let dir_name = file_name(path);
+    println!("VFS: make_dir - creating directory '{}' in parent '{}'", dir_name, parent_path);
+    let new_dentry = create_dir_in_dentry(&parent_dentry, dir_name , _mode);
+    Some(new_dentry.inode.get_stat().ino as u32)
 }
 /// List all apps in the root directory
 pub fn list_apps() {
