@@ -1,17 +1,15 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 // 粘自riscv的版本
-// 正在按照LA64标准重写，采用4级页表，4KB页大小，使用基本页表项（固定12字节偏移）（还未实现）
+// 正在按照LA64标准重写，采用4级页表，4KB页大小，使用基本页页表项（固定12字节偏移）（还未实现）
 
 use crate::mm::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum, PTEFlags};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-
-
 bitflags!{
     /// page table entry flags
-    /// la64标准
+    /// LA64标准
     pub struct PTEFlagsLA64: u64 {
         const V = 1 << 0;
         const D = 1 << 1;
@@ -30,38 +28,41 @@ bitflags!{
 }
 
 fn from_riscv_flags(riscv_flags: PTEFlags) -> PTEFlagsLA64 {
-    let mut la64_flags = PTEFlagsLA64::empty();
+    let mut LA64_flags = PTEFlagsLA64::empty();
     if (riscv_flags & PTEFlags::V) != PTEFlags::empty() {
-        la64_flags |= PTEFlagsLA64::V;
+        LA64_flags |= PTEFlagsLA64::V;
     }
     if (riscv_flags & PTEFlags::R) != PTEFlags::empty() {
-        la64_flags |= PTEFlagsLA64::NR;
+        LA64_flags |= PTEFlagsLA64::NR;
     }
     if (riscv_flags & PTEFlags::W) != PTEFlags::empty() {
-        la64_flags |= PTEFlagsLA64::W;
+        LA64_flags |= PTEFlagsLA64::W;
     }
     if (riscv_flags & PTEFlags::X) != PTEFlags::empty() {
-        la64_flags |= PTEFlagsLA64::NX;
+        LA64_flags |= PTEFlagsLA64::NX;
     }
-    la64_flags
+    if (riscv_flags & PTEFlags::U) != PTEFlags::empty() {
+        LA64_flags |= PTEFlagsLA64::RPLV;
+    }
+    LA64_flags
 }
 
 
 #[derive(Copy, Clone)]
 #[repr(C)]
-/// page table entry structure
+/// 对于LA64，目录项和页表项格式相同，无需区分
 pub struct PageTableEntry {
     /// bits of page table entry
     pub bits: usize,
 }
 
-// 按la64标准作部分修改
+// 按LA64标准作部分修改
 impl PageTableEntry {
     /// Create a new page table entry
     pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
         let bits = ppn.0 << 12;
-        let la64_flags = from_riscv_flags(flags);
-        PageTableEntry { bits: bits | la64_flags.bits as usize }
+        let LA64_flags = from_riscv_flags(flags);
+        PageTableEntry { bits: bits | LA64_flags.bits as usize }
     }
     /// Create an empty page table entry
     pub fn empty() -> Self {
@@ -110,7 +111,7 @@ impl PageTable {
         }
     }
     /// Temporarily used to get arguments from user space.
-    /// la64根页表地址存储在CSR.PGDL/H，将其作为token传递进来
+    /// LA64根页表地址存储在CSR.PGDL/H，将其作为token传递进来
     pub fn from_token(token: usize) -> Self {
         Self {
             root_ppn: PhysPageNum::from(token & ((1usize << 44) - 1)),
@@ -124,7 +125,7 @@ impl PageTable {
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
-            if i == 2 {
+            if i == 3 {
                 result = Some(pte);
                 break;
             }
@@ -246,4 +247,9 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .translate_va(VirtAddr::from(va))
         .unwrap()
         .get_mut()
+}
+
+/// TLB重填
+pub fn tlb_refill(va: VirtAddr) {
+    
 }
