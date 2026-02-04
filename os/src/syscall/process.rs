@@ -20,12 +20,12 @@ pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
 }
-/*#[repr(C)]
+#[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct TimeSpec {
     pub tv_sec: usize,
     pub tv_nsec: usize,
-}*/
+}
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Tms {
@@ -211,7 +211,17 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     // 5. 成功返回 0 (注意之前你返回的是 -1)
     0
 }
-
+pub fn sys_nanosleep(req: *const TimeSpec, _rem: *mut TimeSpec) -> isize {
+    // 1. 获取当前时间 (毫秒)
+    let start = get_time_ms();
+    let token = current_user_token();
+    let len = *translated_ref(token, req); 
+    let duration_ms = len.tv_sec * 1000 + len.tv_nsec / 1_000_000;
+    while get_time_ms() < start + duration_ms {
+        suspend_current_and_run_next();
+    }
+    0
+}
 /// YOUR JOB: Implement mmap.
 pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, _fd: i32, _off: usize) -> isize {
     trace!("kernel:pid[{}] sys_mmap NOT COMPLITED", current_task().unwrap().pid.0);
