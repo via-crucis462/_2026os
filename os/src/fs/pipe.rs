@@ -195,4 +195,9 @@ impl File for Pipe {
             ..Default::default()
         }
     }
+
+    fn getdents(&self, _buf: &mut [u8]) -> isize {
+        trace!("Pipe: getdents called on a pipe, returning -1");
+        -1
+    }
 }

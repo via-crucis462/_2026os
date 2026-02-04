@@ -155,7 +155,7 @@ impl Ext4Inode {
         let disk_inode = self.fs.get_disk_inode(self.inode_id);
         let disk_size_bytes = disk_inode.size() as usize;
         
-        let end = core::cmp::min(offset + buf.len(), disk_size_bytes);
+        let end = core::cmp::min(offset + buf.len(), disk_size_bytes);//buf不够长就返回buf,不然就返回size
         if curr_offset >= end { return 0; }
 
         while curr_offset < end {

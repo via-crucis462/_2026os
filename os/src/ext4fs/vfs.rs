@@ -1,24 +1,15 @@
 use super::ext4inode::{Ext4Inode,Ext4InodeDisk};
 use super::ext4_dir_entry::Ext4DirEntry;
 use super::block_cache::get_block_cache;
-use crate::fs::DirEntry;
-use alloc::boxed::Box;
-use alloc::string::ToString;
-use alloc::vec::Vec;
-use lazy_static::*;
-use spin::Mutex;
 use alloc::sync::Arc;
-
-lazy_static! {
-    pub static ref ENTRIES_TABLE: Mutex<Vec<DirEntry>> = Mutex::new(Vec::new());
-}
+use alloc::vec;
+use alloc::string::String;
 use crate::fs::VfsInode;
 impl VfsInode for Ext4Inode {
-    fn ls<'a>(&'a self) -> Box<dyn Iterator<Item = DirEntry> + 'a> {
+     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
         if !self.is_dir() {
-            return Box::new(core::iter::empty());
+            return None;
         }
-        let mut entries = alloc::vec::Vec::new();
         let mut offset = 0;
         let file_size_bytes = self.size as usize;
 
@@ -31,7 +22,16 @@ impl VfsInode for Ext4Inode {
             while block_offset < read_len {
                 if let Some(dirent) = Ext4DirEntry::from_bytes(&buf[block_offset..]) {
                     if dirent.inode() != 0 && dirent.name_len() > 0 {
-                        entries.push(DirEntry::new(dirent.name().to_string(), dirent.inode()));
+                        if dirent.name() == name {
+                            // 找到了名称匹配的项，去磁盘读它的 Inode
+                            let disk_inode = self.fs.get_disk_inode(dirent.inode());
+                            return Some(Arc::new(Ext4Inode::new(
+                                dirent.inode(),
+                                &disk_inode,
+                                self.fs.clone(),
+                                Some(self.inode_id),
+                            )));
+                        }
                     }
                     let rec_len = dirent.rec_len() as usize;
                     if rec_len == 0 { break; }
@@ -41,33 +41,6 @@ impl VfsInode for Ext4Inode {
                 }
             }
             offset += read_len;
-        }
-        Box::new(entries.into_iter())
-    }
-
-    fn init(&self) {
-        let mut table = ENTRIES_TABLE.lock();
-        for entry in self.ls() {
-            table.push(entry);
-        }
-    }
-
-    fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
-        if !self.is_dir() {
-            return None;
-        }
-        // 遍历目录项迭代器
-        for entry in self.ls() {
-            if entry.name == name {
-                // 找到了名称匹配的项，去磁盘读它的 Inode
-                let disk_inode = self.fs.get_disk_inode(entry.inode_id);
-                return Some(Arc::new(Ext4Inode::new(
-                    entry.inode_id,
-                    &disk_inode,
-                    self.fs.clone(),
-                    Some(self.inode_id),
-                )));
-            }
         }
         None
     }
@@ -192,5 +165,64 @@ impl VfsInode for Ext4Inode {
         });
 
         Some(self.fs.get_inode(new_inode_id))
+    }
+
+    fn getdents(&self, buf: &mut [u8]) -> isize {
+        if !self.is_dir() {
+            return -1;
+        }
+        let mut offset = 0;
+        let mut buf_offset = 0;
+        let file_size_bytes = self.size as usize;
+        let buf_len = buf.len();
+        let mut last_name = String::new();
+
+        while offset < file_size_bytes && buf_offset < buf_len {
+            let mut temp_buf = vec![0u8; 4096];
+            let read_len = self.read_at(offset, &mut temp_buf);
+            if read_len == 0 { break; }
+
+            let mut block_offset = 0;
+            while block_offset < read_len && buf_offset < buf_len {
+                if let Some(ext4_dirent) = Ext4DirEntry::from_bytes(&temp_buf[block_offset..]) {
+                    if ext4_dirent.inode() != 0 && ext4_dirent.name_len() > 0 {
+                        let name = ext4_dirent.name();
+                        last_name = String::from(name);
+                        
+                        // 构造符合 ABI 的 DirEntry (linux_dirent64)
+                        let abi_entry = crate::fs::DirEntry::new(
+                            String::from(name),
+                            ext4_dirent.inode(),
+                            ext4_dirent.file_type,
+                        );
+                        
+                        let rec_len = abi_entry.d_reclen as usize;
+                        if buf_offset + rec_len > buf_len {
+                            println!("VFS: getdents buffer full, stopping read");
+                            break; 
+                        }
+
+                        // 将 abi_entry 复制到用户缓冲区
+                        let entry_ptr = &abi_entry as *const _ as *const u8;
+                        let entry_slice = unsafe { core::slice::from_raw_parts(entry_ptr, rec_len) };
+                        buf[buf_offset..buf_offset + rec_len].copy_from_slice(entry_slice);
+                        
+                        buf_offset += rec_len;
+                    }
+                    let disk_rec_len = ext4_dirent.rec_len() as usize;
+                    if disk_rec_len == 0 { break; }
+                    block_offset += disk_rec_len;
+                } else {
+                    break;
+                }
+            }
+            offset += read_len;
+        }
+
+        if !last_name.is_empty() {
+             println!("VFS: getdents last entry name: {}", last_name);
+        }
+
+        buf_offset as isize
     }
 }

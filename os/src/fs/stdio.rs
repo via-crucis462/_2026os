@@ -51,6 +51,11 @@ impl File for Stdin {
             ..Default::default()
         }
     }
+
+    fn getdents(&self, _buf: &mut [u8]) -> isize {
+        trace!("Stdin: getdents called on stdin, returning -1");
+        -1
+    }
 }
 
 impl File for Stdout {
@@ -74,4 +79,9 @@ impl File for Stdout {
             mode: 0o020000,
             ..Default::default()
         }
-    }}
+    }
+    fn getdents(&self, _buf: &mut [u8]) -> isize {
+        trace!("Stdout: getdents called on stdout, returning -1");
+        -1
+    }
+}
