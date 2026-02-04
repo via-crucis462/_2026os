@@ -5,6 +5,8 @@ KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
 FS ?= EXT4
 ARCH ?= riscv64
+# Log level: ERROR, WARN, INFO, DEBUG, TRACE, OFF
+LOG ?= OFF
 # BOARD
 BOARD := qemu
 SBI ?= rustsbi
