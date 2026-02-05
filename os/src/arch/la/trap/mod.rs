@@ -1,51 +1,45 @@
 // 需要按照la64重写, 此文件暂时保留rv64的实现供参考用，但几乎完全无法复用
 
 mod context;
-
+/* 
 use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
+
 use crate::syscall::syscall;
 use crate::task::{
     check_signals_error_of_current, current_add_signal, current_trap_cx, current_user_token,
     exit_current_and_run_next, handle_signals, suspend_current_and_run_next, SignalFlags,
 };
 use crate::arch::timer::set_next_trigger;
+
 use core::arch::{asm, global_asm};
-#[cfg(target_arch = "riscv64")]
-use riscv::register::{
-    mtvec::TrapMode,
-    scause::{self, Exception, Interrupt, Trap},
-    sie, stval, stvec,
-};
 
 global_asm!(include_str!("trap.S"));
-
+*/
 /// Initialize trap handling
 pub fn init() {
     set_kernel_trap_entry();
 }
 
 fn set_kernel_trap_entry() {
-    unsafe {
-        stvec::write(trap_from_kernel as usize, TrapMode::Direct);
-    }
+    // TODO
 }
 
 fn set_user_trap_entry() {
-    unsafe {
-        stvec::write(TRAMPOLINE as usize, TrapMode::Direct);
-    }
+    // TODO
 }
 
 /// enable timer interrupt in supervisor mode
 pub fn enable_timer_interrupt() {
-    unsafe {
-        sie::set_stimer();
-    }
+    // TODO
 }
 
 /// trap handler
 #[no_mangle]
 pub fn trap_handler() -> ! {
+    loop {
+        
+    }
+    /* 
     set_kernel_trap_entry();
     let scause = scause::read();
     let stval = stval::read();
@@ -85,14 +79,16 @@ pub fn trap_handler() -> ! {
         exit_current_and_run_next(errno);
     }
     trap_return();
+    */
 }
 
 #[no_mangle]
 /// return to user space
 pub fn trap_return() -> ! {
+    /*
     set_user_trap_entry();
-    let trap_cx_ptr = TRAP_CONTEXT_BASE;
-    let user_satp = current_user_token();
+    let _trap_cx_ptr = TRAP_CONTEXT_BASE;
+    // let _user_satp = current_user_token();
     // println!("[kernel] trap_return: to user mode");
     extern "C" {
         fn __alltraps();
@@ -105,10 +101,14 @@ pub fn trap_return() -> ! {
             "fence.i",
             "jr {restore_va}",
             restore_va = in(reg) restore_va,
-            in("a0") trap_cx_ptr,
-            in("a1") user_satp,
+            //in("a0") trap_cx_ptr,
+            //in("a1") user_satp,
             options(noreturn)
         );
+    }
+    */
+    loop {
+        
     }
 }
 
@@ -117,9 +117,14 @@ pub fn trap_return() -> ! {
 /// Unimplement: traps/interrupts/exceptions from kernel mode
 /// Todo: Chapter 9: I/O device
 pub fn trap_from_kernel() -> ! {
+    loop {
+        
+    }
+    /* 
     use riscv::register::sepc;
     trace!("stval = {:#x}, sepc = {:#x}", stval::read(), sepc::read());
     panic!("a trap {:?} from kernel!", scause::read().cause());
+    */
 }
 
 pub use context::TrapContext;
