@@ -44,15 +44,12 @@ pub mod sync;
 pub mod syscall;
 pub mod task;
 
-#[cfg(target_arch = "riscv64")]
-use core::arch::global_asm;
-#[cfg(target_arch = "LA64")]
 use core::arch::global_asm;
 
 #[cfg(target_arch = "riscv64")]
 global_asm!(include_str!("arch/riscv/entry.asm"));
-#[cfg(target_arch = "LA64")]
-global_asm!(include_str!("arch/loongarch/entry.asm"));
+#[cfg(target_arch = "loongarch64")]
+global_asm!(include_str!("arch/la/entry.asm"));
 
 /// clear BSS segment
 /// 两种架构应该是统一的
@@ -86,9 +83,12 @@ pub fn rust_main() -> ! {
     panic!("Unreachable in rust_main!");
 }
 
-#[cfg(target_arch = "loongarch")]
+// la的main需重写
+#[cfg(target_arch = "loongarch64")]
 #[no_mangle]
 pub fn rust_main() -> isize {
     println!("Hello, LoongArch!");
+    clear_bss();
+    //TODO
     0
 }

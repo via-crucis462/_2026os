@@ -13,17 +13,21 @@ const MICRO_PER_SEC: usize = 1_000_000;
 
 /// Get the current time in ticks
 pub fn get_time() -> usize {
-    time::read()
+    //TODO
+    0
 }
 
 /// get current time in milliseconds
 pub fn get_time_ms() -> usize {
-    time::read() * MSEC_PER_SEC / CLOCK_FREQ
+    //TODO
+    let time = 0;
+    time * MSEC_PER_SEC / CLOCK_FREQ
 }
 
 /// get current time in microseconds
 pub fn get_time_us() -> usize {
-    time::read() * MICRO_PER_SEC / CLOCK_FREQ
+    let time = 0;
+    time * MICRO_PER_SEC / CLOCK_FREQ
 }
 
 /// Set the next timer interrupt

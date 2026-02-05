@@ -22,24 +22,30 @@ bitflags!{
 }
 
 fn from_riscv_flags(riscv_flags: PTEFlags) -> PTEFlagsLA64 {
-    let mut LA64_flags = PTEFlagsLA64::empty();
+    let mut la64_flags = PTEFlagsLA64::empty();
     if (riscv_flags & PTEFlags::V) != PTEFlags::empty() {
-        LA64_flags |= PTEFlagsLA64::V;
+        la64_flags |= PTEFlagsLA64::V;
+    }
+    if (riscv_flags & PTEFlags::D) != PTEFlags::empty() {
+        la64_flags |= PTEFlagsLA64::D;
+    }
+    if (riscv_flags & PTEFlags::G) != PTEFlags::empty() {
+        la64_flags |= PTEFlagsLA64::G;
     }
     if (riscv_flags & PTEFlags::R) == PTEFlags::empty() {
-        LA64_flags |= PTEFlagsLA64::NR;
+        la64_flags |= PTEFlagsLA64::NR;
     }
     if (riscv_flags & PTEFlags::W) != PTEFlags::empty() {
-        LA64_flags |= PTEFlagsLA64::W;
+        la64_flags |= PTEFlagsLA64::W;
     }
     if (riscv_flags & PTEFlags::X) == PTEFlags::empty() {
-        LA64_flags |= PTEFlagsLA64::NX;
+        la64_flags |= PTEFlagsLA64::NX;
     }
     if (riscv_flags & PTEFlags::U) != PTEFlags::empty() {
-        LA64_flags |= PTEFlagsLA64::PLV0;
-        LA64_flags |= PTEFlagsLA64::PLV1;
+        la64_flags |= PTEFlagsLA64::PLV0;
+        la64_flags |= PTEFlagsLA64::PLV1;
     }
-    LA64_flags
+    la64_flags
 }
 
 
@@ -56,8 +62,8 @@ impl PageTableEntry {
     /// Create a new page table entry
     pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
         let bits = ppn.0 << 12;
-        let LA64_flags = from_riscv_flags(flags);
-        PageTableEntry { bits: bits | LA64_flags.bits as usize }
+        let la64_flags = from_riscv_flags(flags);
+        PageTableEntry { bits: bits | la64_flags.bits as usize }
     }
     /// Create an empty page table entry
     pub fn empty() -> Self {
