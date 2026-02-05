@@ -12,7 +12,7 @@ BOARD := qemu
 SBI ?= rustsbi
 BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
 
-LA_KERNEL_ELF := target/loongarch64-unknown-none-softfloat/$(MODE)/os
+LA_KERNEL_ELF := target/loongarch64-unknown-none/$(MODE)/os
 LA_KERNEL_BIN := $(LA_KERNEL_ELF).bin
 
 # Building mode argument
@@ -76,7 +76,7 @@ gdbclient:
 
 env-la:
 ifeq ($(OFFLINE),)
-	(rustup target list | grep "loongarch64-unknown-none-softfloat (installed)") || rustup target add loongarch64-unknown-none-softfloat
+	(rustup target list | grep "loongarch64-unknown-none (installed)") || rustup target add loongarch64-unknown-none
 	rustup component add rust-src
 	rustup component add llvm-tools-preview
 endif
@@ -86,7 +86,7 @@ $(LA_KERNEL_BIN): kernel-la
 
 kernel-la:
 	@echo Building for loongarch64...
-	@LOG=$(LOG) cargo build --target loongarch64-unknown-none-softfloat $(MODE_ARG)
+	@LOG=$(LOG) cargo build --target loongarch64-unknown-none $(MODE_ARG)
 
 build-la: env-la $(LA_KERNEL_BIN)
 

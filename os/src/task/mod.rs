@@ -213,7 +213,7 @@ fn check_pending_signals() {
             if handling_sig == -1 {
                 masked = false;
             } else {
-                let handling_sig = handling_sig as usize;
+                let handling_sig = handling_sig as *const () as usize;
                 if !task_inner.signal_actions.table[handling_sig]
                     .mask
                     .contains(signal)

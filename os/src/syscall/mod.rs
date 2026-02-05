@@ -113,7 +113,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as i32, args[4] as i32, args[5]
         ),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
-        SYSCALL_BRK => sys_brk(args[0] as usize),
+        SYSCALL_BRK => sys_brk(args[0] as *const () as usize),
         SYSCALL_SPAWN => sys_spawn(args[0] as *const u8),
         SYSCALL_SET_PRIORITY => sys_set_priority(args[0] as isize),
         SYSCALL_TIMES => sys_times(args[0] as *mut usize),

@@ -55,7 +55,7 @@ pub fn trap_handler() -> ! {
             );
             // cx is changed during sys_exec, so we have to call it again
             cx = current_trap_cx();
-            cx.x[10] = result as usize;
+            cx.x[10] = result as *const () as usize;
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_trigger();
@@ -94,7 +94,7 @@ pub fn trap_return() -> ! {
         fn __alltraps();
         fn __restore();
     }
-    let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
+    let restore_va = __restore as *const () as usize - __alltraps as *const () as usize + TRAMPOLINE;
     // trace!("[kernel] trap_return: ..before return");
     unsafe {
         asm!(

@@ -1,5 +1,5 @@
 OUTPUT_ARCH( "loongarch" )
-ENTRY(_start)
+ENTRY(main)
 
 SECTIONS
 {
@@ -41,7 +41,7 @@ SECTIONS
     *(.bss .bss.*)
   }
   . = ALIGN(0x1000);
-    bss_end = .;
+    ebss = .;
 
     ekernel = .;
   PROVIDE(end = .);
