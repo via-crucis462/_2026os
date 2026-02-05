@@ -63,7 +63,7 @@ impl PageTableEntry {
     pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
         let bits = ppn.0 << 12;
         let la64_flags = from_riscv_flags(flags);
-        PageTableEntry { bits: bits | la64_flags.bits as usize }
+        PageTableEntry { bits: bits | la64_flags.bits as *const () as usize }
     }
     /// Create an empty page table entry
     pub fn empty() -> Self {

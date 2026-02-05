@@ -170,7 +170,7 @@ impl TaskControlBlock {
             user_sp,
             KERNEL_SPACE.exclusive_access().token(),
             kernel_stack_top,
-            trap_handler as usize,
+            trap_handler as *const () as usize,
         );
         task_control_block
     }
@@ -230,7 +230,7 @@ impl TaskControlBlock {
             user_sp,
             KERNEL_SPACE.exclusive_access().token(),
             self.kernel_stack.get_top(),
-            trap_handler as usize,
+            trap_handler as *const () as usize,
         );
         trap_cx.x[10] = args.len();
         trap_cx.x[11] = argv_base;
@@ -343,15 +343,15 @@ impl TaskControlBlock {
         let result = if size < 0 {
             inner
                 .memory_set
-                .shrink_to(VirtAddr(heap_bottom), VirtAddr(new_brk as usize))
+                .shrink_to(VirtAddr(heap_bottom), VirtAddr(new_brk as *const () as usize))
         } else {
             inner
                 .memory_set
-                .append_to(VirtAddr(heap_bottom), VirtAddr(new_brk as usize))
+                .append_to(VirtAddr(heap_bottom), VirtAddr(new_brk as *const () as usize))
         };
         println!("brk: change from {:#x} to {:#x}", _old_break, new_brk);
         if result {
-            inner.program_brk = new_brk as usize;
+            inner.program_brk = new_brk as *const () as usize;
             
             Ok(addr)
         } else {

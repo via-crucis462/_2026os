@@ -65,7 +65,7 @@ pub fn console_putchar(c: usize) {
 
 #[allow(dead_code)]
 pub fn console_getchar() -> usize {
-    UART_SBI.exclusive_access().get().unwrap_or(0) as usize
+    UART_SBI.exclusive_access().get().unwrap_or(0) as *const () as usize
 }
 
 #[allow(dead_code)]

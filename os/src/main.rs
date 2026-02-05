@@ -21,7 +21,6 @@
 #![deny(warnings)]
 #![no_std]
 #![no_main]
-#![feature(panic_info_message)]
 #![feature(alloc_error_handler)]
 
 #[macro_use]
@@ -59,7 +58,7 @@ fn clear_bss() {
         fn ebss();
     }
     unsafe {
-        core::slice::from_raw_parts_mut(sbss as usize as *mut u8, ebss as usize - sbss as usize)
+        core::slice::from_raw_parts_mut(sbss as *const () as usize as *mut u8, ebss as *const () as usize - sbss as *const () as usize)
             .fill(0);
     }
 }
@@ -86,7 +85,7 @@ pub fn rust_main() -> ! {
 // la的main需重写
 #[cfg(target_arch = "loongarch64")]
 #[no_mangle]
-pub fn rust_main() -> isize {
+extern "C" fn main() -> isize {
     println!("Hello, LoongArch!");
     clear_bss();
     //TODO
