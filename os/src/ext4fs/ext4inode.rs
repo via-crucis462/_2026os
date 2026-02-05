@@ -1,6 +1,8 @@
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::string::String;
+use crate::ext4fs::BLOCK_SZ;
+
 use super::{ext4::Ext4FS, ext4_dir_entry::Ext4DirEntry, block_cache::get_block_cache};
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
@@ -76,37 +78,87 @@ impl Ext4Inode {
     }
 
     /// 根据逻辑块号寻找对应的物理块号 (支持 Extents 和直接块)
+    /// 根据逻辑块号寻找对应的物理块号 (支持 Extents 和直接块)
     pub fn find_physical_block(&self, logical_block_id: u32) -> u32 {
-        if self.flags & 0x80000 != 0 {
+        // 实时获取磁盘 Inode，避免 self.i_block 与磁盘不同步
+        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        let flags = disk_inode.i_flags;
+        let i_block = disk_inode.i_block;
+
+        if flags & 0x80000 != 0 {
             // Extents 模式 (EXT4_EXTENTS_FL = 0x80000)
-            let magic = (self.i_block[0] & 0xFFFF) as u16;
-            if magic != 0xF30A { 
-                return 0; 
-            }
-            let entries = ((self.i_block[0] >> 16) & 0xFFFF) as u16;
-            let depth = ((self.i_block[1] >> 16) & 0xFFFF) as u16;
             
-            // 目前仅处理叶子节点 (depth == 0)
-            if depth == 0 {
-                for i in 0..entries as usize {
-                    let base = 3 + i * 3;
-                    if base + 2 >= 15 { break; }
-                    let ee_block = self.i_block[base];
-                    let ee_len = (self.i_block[base + 1] & 0xFFFF) as u16;
-                    let ee_start_lo = self.i_block[base + 2];
+            // 将 i_block 转为字节数组以便统一处理逻辑
+            let mut header_buf = [0u8; 60];
+            for i in 0..15 {
+                let bytes = i_block[i].to_le_bytes();
+                header_buf[i * 4..(i + 1) * 4].copy_from_slice(&bytes);
+            }
+
+            // 使用堆分配 buffer 避免 kernel stack 溢出 (8KB 栈下 4KB 数组非常危险)
+            let mut current_block_data = alloc::boxed::Box::new([0u8; 4096]);
+            let mut data_ptr: &[u8] = &header_buf;
+
+            loop {
+                // Extent Header (12 bytes)
+                if data_ptr.len() < 12 { return 0; }
+                let eh_magic = u16::from_le_bytes(data_ptr[0..2].try_into().unwrap());
+                if eh_magic != 0xF30A { return 0; }
+                let eh_entries = u16::from_le_bytes(data_ptr[2..4].try_into().unwrap());
+                let eh_depth = u16::from_le_bytes(data_ptr[6..8].try_into().unwrap());
+
+                if eh_depth == 0 {
+                    // 叶子节点 (Leaf Node)
+                    // 在 Inode 中最多只有 4 个 entry
+                    let max_entries = if data_ptr.len() == 60 { 4 } else { 340 };
+                    let actual_entries = eh_entries as usize;
                     
-                    // ee_len 如果大于 32768 表示未填充，实际长度需要减去 32768
-                    let actual_len = if ee_len > 32768 { ee_len - 32768 } else { ee_len } as u32;
-                    if logical_block_id >= ee_block && logical_block_id < ee_block + actual_len {
-                        return ee_start_lo + (logical_block_id - ee_block);
+                    for i in 0..actual_entries.min(max_entries) {
+                        let off = 12 + i * 12;
+                        if off + 12 > data_ptr.len() { break; }
+                        let ee_block = u32::from_le_bytes(data_ptr[off..off + 4].try_into().unwrap());
+                        let ee_len = u16::from_le_bytes(data_ptr[off + 4..off + 6].try_into().unwrap());
+                        let ee_start_hi = u16::from_le_bytes(data_ptr[off + 6..off + 8].try_into().unwrap());
+                        let ee_start_lo = u32::from_le_bytes(data_ptr[off + 8..off + 12].try_into().unwrap());
+
+                        // ee_len 如果大于 32768 表示未初始化，实际长度需要减去 32768
+                        let actual_len = if ee_len > 32768 { ee_len - 32768 } else { ee_len } as u32;
+                        if logical_block_id >= ee_block && logical_block_id < ee_block + actual_len {
+                            let start_phys = ((ee_start_hi as u64) << 32) | (ee_start_lo as u64);
+                            return (start_phys + (logical_block_id - ee_block) as u64) as u32;
+                        }
                     }
+                    return 0; // 未在 Extents 中找到该逻辑块
+                } else {
+                    // 索引节点 (Index Node)
+                    let max_entries = if data_ptr.len() == 60 { 4 } else { 340 };
+                    let mut found_index = 0;
+                    let actual_entries = eh_entries as usize;
+
+                    for i in 0..actual_entries.min(max_entries) {
+                        let off = 12 + i * 12;
+                        let ei_block = u32::from_le_bytes(data_ptr[off..off + 4].try_into().unwrap());
+                        if logical_block_id >= ei_block {
+                            found_index = i;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let off = 12 + found_index * 12;
+                    let ei_leaf_lo = u32::from_le_bytes(data_ptr[off + 4..off + 8].try_into().unwrap());
+                    let ei_leaf_hi = u16::from_le_bytes(data_ptr[off + 8..off + 10].try_into().unwrap());
+                    let next_block = ((ei_leaf_hi as u64) << 32) | (ei_leaf_lo as u64);
+
+                    // 加载下一层级的数据块并继续搜索
+                    self.fs.block_dev.read_block(next_block as usize, current_block_data.as_mut_slice());
+                    data_ptr = current_block_data.as_slice();
                 }
             }
-            0
         } else {
             // 传统的直接块模式
             if (logical_block_id as usize) < 12 {
-                self.i_block[logical_block_id as usize]
+                i_block[logical_block_id as usize]
             } else {
                 0 // 目前尚不支持一级/二级/三级间接块
             }
@@ -147,15 +199,15 @@ impl Ext4Inode {
     }
     /// 从文件的 offset 字节处开始，读取数据到 buf 中，返回实际读取长度
     pub fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        let block_size = 4096;
+        let block_size = BLOCK_SZ as usize;
         let mut actual_read = 0;
         let mut curr_offset = offset;
 
-        // 修正：i_size_lo 实际上存储的是字节数，不再乘以 4096
+        // 实时获取磁盘 Inode 信息以获取准备的大小
         let disk_inode = self.fs.get_disk_inode(self.inode_id);
         let disk_size_bytes = disk_inode.size() as usize;
         
-        let end = core::cmp::min(offset + buf.len(), disk_size_bytes);//buf不够长就返回buf,不然就返回size
+        let end = core::cmp::min(offset + buf.len(), disk_size_bytes);
         if curr_offset >= end { return 0; }
 
         while curr_offset < end {
@@ -163,13 +215,17 @@ impl Ext4Inode {
             let block_pos = curr_offset % block_size;
             
             let physical_block_id = self.find_physical_block(inner_block_id);
-            if physical_block_id == 0 { break; } 
-
-            let mut temp_buf = alloc::vec![0u8; 4096];
-            self.fs.block_dev.read_block(physical_block_id as usize, &mut temp_buf);
-
             let read_len = core::cmp::min(block_size - block_pos, end - curr_offset);
-            buf[actual_read..actual_read + read_len].copy_from_slice(&temp_buf[block_pos..block_pos + read_len]);
+
+            if physical_block_id == 0 {
+                // 如果是空洞 (Hole)，填充 0 而不是停止读取
+                // 这样能确保返回给上层的 buffer 长度符合预期，不会因截断导致 ELF 解析失败
+                buf[actual_read..actual_read + read_len].fill(0);
+            } else {
+                let mut temp_buf = alloc::vec![0u8; 4096];
+                self.fs.block_dev.read_block(physical_block_id as usize, &mut temp_buf);
+                buf[actual_read..actual_read + read_len].copy_from_slice(&temp_buf[block_pos..block_pos + read_len]);
+            }
             
             actual_read += read_len;
             curr_offset += read_len;
@@ -179,7 +235,7 @@ impl Ext4Inode {
     }
 
     pub fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
-        let block_size = 4096;
+        let block_size = BLOCK_SZ as usize;
         let mut actual_write = 0;
         let mut curr_offset = offset;
 
@@ -226,12 +282,12 @@ impl Ext4Inode {
 
     pub fn add_dir_entry(&self, name: &str, inode_id: u32, file_type: u8) -> bool {
         let mut offset = 0;
-        let block_size = 4096;
+        let block_size = BLOCK_SZ as usize;
         let disk_inode = self.fs.get_disk_inode(self.inode_id);
         let file_size_bytes = disk_inode.size() as usize;
         
         while offset < file_size_bytes {
-            let mut buf = alloc::vec![0u8; 4096];
+            let mut buf = alloc::vec![0u8; BLOCK_SZ as usize];
             self.read_at(offset, &mut buf);
             
             let mut block_offset = 0;
