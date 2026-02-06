@@ -8,6 +8,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
+
     if fd >= inner.fd_table.len() {
         return -1;
     }

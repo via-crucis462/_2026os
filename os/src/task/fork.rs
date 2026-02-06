@@ -19,9 +19,9 @@ pub fn do_clone(func: usize, stack: usize, _flags: usize) -> isize {
     // for child process, clone returns 0(参考rcore的实现)
     trap_cx.x[10] = 0;
     // 设置子进程的起始函数，如果指定
-    if func != 0 {
-        trap_cx.sepc = func;
-    }
+    //if func != 0 {
+    //    trap_cx.sepc = func;
+    //}
     // add new task to scheduler
     add_task(new_task);
     new_pid as isize
