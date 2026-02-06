@@ -17,6 +17,7 @@ pub struct OSInode {
     writable: bool,
     inner: Mutex<OSInodeInner>,
     pub inode: Arc<dyn VfsInode>,   //实现了VfsInode trait的具体文件系统的inode
+    pub dentry: Arc<Dentry>, 
 }
 
 pub struct OSInodeInner {
@@ -24,12 +25,13 @@ pub struct OSInodeInner {
 }
 
 impl OSInode {
-    pub fn new(readable: bool, writable: bool, inode: Arc<dyn VfsInode>) -> Self {
+    pub fn new(readable: bool, writable: bool, inode: Arc<dyn VfsInode>, dentry: Arc<Dentry>) -> Self {
         Self {
             readable,
             writable,
             inner: Mutex::new(OSInodeInner { offset: 0 }),
             inode,
+            dentry,
         }
     }
     pub fn read_all(&self) -> alloc::vec::Vec<u8> {
@@ -47,6 +49,9 @@ impl OSInode {
             buffer.truncate(read_len);
         }
         buffer
+    }
+    pub fn get_dentry(&self) -> Arc<Dentry> {
+        self.dentry.clone()
     }
 }
 
@@ -127,7 +132,7 @@ pub fn create_root_inode(device: Arc<dyn BlockDevice>) -> Arc<OSInode> {
     let ext4fs = Ext4FS::open(device.clone());
     let root_disk_inode = ext4fs.get_disk_inode(2); // ext4根目录通常是2号
     let vfs_inode = Arc::new(Ext4Inode::new(2, &root_disk_inode, Arc::new(ext4fs), None));
-    Arc::new(OSInode::new(true, false, vfs_inode))
+    Arc::new(OSInode::new(true, false, vfs_inode, ROOT_DENTRY.clone()))
 }
 pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     // 使用全局 Dentry 树递归查找路径，并自动填充缓存
@@ -151,6 +156,7 @@ pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
             readable,
             writable,
             new_dentry.inode.clone(),
+            new_dentry,
         )));
     }
     // 2.2 若存在，直接返回对应的 OSInode
@@ -160,6 +166,7 @@ pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
         readable,
         writable,
         target_dentry.inode.clone(),
+        target_dentry,
     )))
 }
 
