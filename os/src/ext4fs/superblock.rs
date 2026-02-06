@@ -11,6 +11,7 @@ pub struct Ext4SuperBlock {
     pub blocks_per_group: u32,
     pub inodes_per_group: u32,
     pub first_data_block: u32,
+    pub incompat_features: u32,
 }
 
 impl Ext4SuperBlock {
@@ -29,6 +30,7 @@ impl Ext4SuperBlock {
             blocks_per_group: ext4_superblock_disk.s_blocks_per_group,
             inodes_per_group: ext4_superblock_disk.s_inodes_per_group,
             first_data_block: ext4_superblock_disk.s_first_data_block,
+            incompat_features: ext4_superblock_disk.s_feature_incompat,
         }
     }
     pub fn group_num(&self) -> u32 {

@@ -9,7 +9,6 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::asm;
-use core::panic;
 use lazy_static::*;
 #[cfg(target_arch = "riscv64")]
 use riscv::register::satp;
@@ -364,11 +363,6 @@ impl MemorySet {
     /// 检查目标地址段是否与已有的映射冲突(存在交集)
     fn has_conflict(&self, start: usize, len: usize) -> bool {
         for area in self.areas.iter() {
-            // 暂时不考虑文件映射
-            if area.map_type == MapType::File {
-                continue;
-            }
-            // 以下均为页号
             let area_start = area.vpn_range.get_start();
             let area_end = area.vpn_range.get_end();
             let target_start = VirtAddr::from(start).floor();
@@ -386,8 +380,17 @@ impl MemorySet {
         length: usize,
         prot: mmap::MMapProt
     ) -> Result<usize, i32> {
+        let mut start_va = addr;
+        if start_va == 0 {
+            if let Some(new_addr) = self.find_free_area(length) {
+                start_va = new_addr;
+            } else {
+                return Err(-1);
+            }
+        }
+
         // 检查冲突
-        if self.has_conflict(addr, length) {
+        if self.has_conflict(start_va, length) {
             return Err(-1);
         }
 
@@ -408,12 +411,38 @@ impl MemorySet {
 
         // 映射区域
         self.insert_file_area(
-            VirtAddr::from(addr),
-            VirtAddr::from(addr + length),
+            VirtAddr::from(start_va),
+            VirtAddr::from(start_va + length),
             permission,
         );
 
-        Ok(addr)
+        Ok(start_va)
+    }
+
+    pub fn find_free_area(&self, length: usize) -> Option<usize> {
+        // 从 0x4000_0000 开始往上找，避开程序段和堆，并保留足够的安全距离
+        let mut current_addr = 0x4000_0000;
+        let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1); // 对齐到页
+        
+        let mut sorted_areas: Vec<_> = self.areas.iter().collect();
+        sorted_areas.sort_by_key(|a| a.vpn_range.get_start());
+        
+        for area in sorted_areas {
+            let area_start: usize = area.vpn_range.get_start().into();
+            if current_addr + length <= area_start {
+                return Some(current_addr);
+            }
+            let area_end: usize = area.vpn_range.get_end().into();
+            if area_end > current_addr {
+                current_addr = area_end;
+            }
+        }
+        
+        if current_addr + length < TRAP_CONTEXT_BASE {
+            Some(current_addr)
+        } else {
+            None
+        }
     }
     /// munmap的实现
     /// 注意：不允许取消映射brk之前的区域
@@ -562,9 +591,11 @@ impl MapArea {
                 ppn = frame.ppn;
                 self.data_frames.insert(vpn, frame);
             }
-            // 文件映射没实现
+            // 文件映射：目前简单处理为 Framed，以便 sys_mmap 可以直接读写
             MapType::File => {
-                panic!("Mmap File Error!");
+                let frame = frame_alloc().unwrap();
+                ppn = frame.ppn;
+                self.data_frames.insert(vpn, frame);
             }
         }
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();

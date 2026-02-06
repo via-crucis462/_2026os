@@ -107,4 +107,38 @@ impl Ext4FS {
         }
         None
     }
+
+    pub fn alloc_block(&self) -> Option<u32> {
+        for (group_id, group_mutex) in self.block_groups.iter().enumerate() {
+            let mut group = group_mutex.lock();
+            if group.free_blocks_count > 0 {
+                let bitmap_block = group.block_bitmap_id;
+                let block_cache = get_block_cache(bitmap_block as *const () as usize, self.block_dev.clone());
+                let mut bitmap_cache = block_cache.lock();
+
+                let res = bitmap_cache.modify(0, |bitmap: &mut [u8; 4096]| {
+                    for byte_idx in 0..4096 {
+                        if bitmap[byte_idx] != 0xFF {
+                            for bit_idx in 0..8 {
+                                if (bitmap[byte_idx] & (1 << bit_idx)) == 0 {
+                                    bitmap[byte_idx] |= 1 << bit_idx;
+                                    return Some((byte_idx, bit_idx));
+                                }
+                            }
+                        }
+                    }
+                    None
+                });
+
+                if let Some((byte_idx, bit_idx)) = res {
+                    group.free_blocks_count -= 1;
+                    let blocks_per_group = self.superblock.blocks_per_group;
+                    let first_data_block = self.superblock.first_data_block;
+                    let block_id = (group_id as u32) * blocks_per_group + (byte_idx as u32 * 8) + bit_idx as u32 + first_data_block;
+                    return Some(block_id);
+                }
+            }
+        }
+        None
+    }
 }
