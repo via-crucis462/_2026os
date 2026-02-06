@@ -1,4 +1,4 @@
-use super::ext4inode::{Ext4Inode,Ext4InodeDisk};
+use super::ext4inode::{Ext4Inode,Ext4InodeDisk, EXT4_EXTENTS_FL};
 use super::ext4_dir_entry::Ext4DirEntry;
 use super::block_cache::get_block_cache;
 use alloc::sync::Arc;
@@ -97,8 +97,17 @@ impl VfsInode for Ext4Inode {
             disk_inode.i_size_high = 0;
             disk_inode.i_links_count = 1;
             disk_inode.i_blocks_lo = 0;
-            disk_inode.i_flags = 0;
-            for i in 0..15 { disk_inode.i_block[i] = 0; }
+            // 判断是否开启 extents
+            if (self.fs.superblock.incompat_features & 0x40) != 0 {
+                disk_inode.i_flags = EXT4_EXTENTS_FL;
+                for i in 0..15 { disk_inode.i_block[i] = 0; }
+                // 初始化空的 extent header: magic=0xF30A, entries=0, max=4, depth=0
+                disk_inode.i_block[0] = 0xF30A; // magic: low 16 bits, entries: high 16 bits (0)
+                disk_inode.i_block[1] = 0x0004; // max: low 16 bits (4), depth: high 16 bits (0)
+            } else {
+                disk_inode.i_flags = 0;
+                for i in 0..15 { disk_inode.i_block[i] = 0; }
+            }
         });
 
         // 4. 在父目录的数据块中写入目录项 (文件类型 1)

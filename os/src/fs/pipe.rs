@@ -189,6 +189,14 @@ impl File for Pipe {
         }
     }
 
+    fn read_at(&self, _offset: usize, buf: UserBuffer) -> usize {
+        self.read(buf)
+    }
+
+    fn write_at(&self, _offset: usize, buf: UserBuffer) -> usize {
+        self.write(buf)
+    }
+
     fn get_stat(&self) -> super::Stat {
         super::Stat {
             mode: 0o010000,

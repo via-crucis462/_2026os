@@ -2,7 +2,7 @@
 
 use crate::{
     fs::{*}, 
-    mm::{mmap, translated_ref, translated_refmut, translated_str}, 
+    mm::{mmap, translated_ref, translated_refmut, translated_str, translated_byte_buffer, UserBuffer}, 
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next, pid2task,
         suspend_current_and_run_next, SignalAction, SignalFlags, MAX_SIG
@@ -105,7 +105,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         }
     }
     trace!("[kernel] sys_exec: before open_file");
-    if let Some(app_inode) = open_file(cwd, path.as_str(), OpenFlags::RDONLY) {
+    if let Some(app_inode) = open_file(cwd,path.as_str(), OpenFlags::RDONLY) {
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
@@ -226,32 +226,38 @@ pub fn sys_nanosleep(req: *const TimeSpec, _rem: *mut TimeSpec) -> isize {
     0
 }
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, _fd: i32, _off: usize) -> isize {
-    trace!("kernel:pid[{}] sys_mmap NOT COMPLITED", current_task().unwrap().pid.0);
+pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: usize) -> isize {
     let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
     let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
-    if let Ok(ret) = mmap::do_mmap(
-        start, 
-        len,
-        mmap_prot
-    ) {
-        match mmap_flags {
-            mmap::MMapFlags::MAP_ANONYMOUS => {},
-            mmap::MMapFlags::MAP_PRIVATE => {
-                // 按目前理解，拷贝文件内容到映射区即可？
-                //sys_read(fd as *const () as usize, ret as *mut u8, len);
-            },
-            mmap::MMapFlags::MAP_SHARED => {
-                //尚未实现
-                //此此处似乎需要实现文件的同步回写
-            },
-            _ =>  {return -1;},
-        };
-        ret as isize
+    
+    // 1. 分配并映射虚存及其对应的物理页
+    let ret = match mmap::do_mmap(start, len, mmap_prot) {
+        Ok(addr) => addr,
+        Err(_) => return -1,
+    };
+
+    // 2. 如果是文件映射（非匿名映射）且 FD 合法，读取内容
+    if !mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) && fd >= 0 {
+        let task = current_task().unwrap();
+        let token = current_user_token();
+        let inner = task.inner_exclusive_access();
+        
+        if (fd as usize) < inner.fd_table.len() {
+            if let Some(file) = &inner.fd_table[fd as usize] {
+                if file.readable() {
+                    let file = file.clone();
+                    drop(inner); // 必须释放锁，因为 file.read 涉及磁盘 IO 可能阻塞
+                    
+                    // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
+                    let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
+                    
+                    // 使用 read_at 确保不受 FD 当前 offset 影响，并使用系统调用传入的 _off
+                    file.read_at(_off, user_buf);
+                }
+            }
+        }
     }
-    else {
-        -1
-    }
+    ret as isize
 }
 
 /// YOUR JOB: Implement munmap.

@@ -5,7 +5,6 @@ use alloc::sync::Arc;
 use bitflags::*;
 use lazy_static::*;
 use crate::ext4fs::ext4::Ext4FS;
-use crate::ext4fs::block_dev::BlockDevice;
 use crate::ext4fs::ext4inode::Ext4Inode;
 use crate::fs::file_tree::*;
 use super::VfsInode;
@@ -59,26 +58,41 @@ impl File for OSInode {
     fn readable(&self) -> bool { self.readable }
     fn writable(&self) -> bool { self.writable }
 
-    fn read(&self, mut buf: UserBuffer) -> usize {
+    fn read(&self, buf: UserBuffer) -> usize {
         let mut inner = self.inner.lock();
+        let offset = inner.offset;
+        let read_len = self.read_at(offset, buf);
+        inner.offset += read_len;
+        read_len
+    }
+
+    fn write(&self, buf: UserBuffer) -> usize {
+        let mut inner = self.inner.lock();
+        let offset = inner.offset;
+        let write_len = self.write_at(offset, buf);
+        inner.offset += write_len;
+        write_len
+    }
+
+    fn read_at(&self, offset: usize, mut buf: UserBuffer) -> usize {
         let mut total_read = 0;
-        // 针对 UserBuffer 的每一段进行读取（处理跨页）
+        let mut current_offset = offset;
         for slice in buf.buffers.iter_mut() {
-            let read_len = self.inode.read_at(inner.offset, *slice);
+            let read_len = self.inode.read_at(current_offset, *slice);
             if read_len == 0 { break; }
-            inner.offset += read_len;
+            current_offset += read_len;
             total_read += read_len;
         }
         total_read
     }
 
-    fn write(&self, buf: UserBuffer) -> usize {
-        let mut inner = self.inner.lock();
+    fn write_at(&self, offset: usize, buf: UserBuffer) -> usize {
         let mut total_write = 0;
+        let mut current_offset = offset;
         for slice in buf.buffers.iter() {
-            let write_len = self.inode.write_at(inner.offset, *slice);
+            let write_len = self.inode.write_at(current_offset, *slice);
             if write_len == 0 { break; }
-            inner.offset += write_len;
+            current_offset += write_len;
             total_write += write_len;
         }
         total_write
@@ -127,12 +141,6 @@ impl OpenFlags {
     pub fn should_be_directory(&self) -> bool {
         self.contains(Self::DIRECTORY)
     }
-}
-pub fn create_root_inode(device: Arc<dyn BlockDevice>) -> Arc<OSInode> {
-    let ext4fs = Ext4FS::open(device.clone());
-    let root_disk_inode = ext4fs.get_disk_inode(2); // ext4根目录通常是2号
-    let vfs_inode = Arc::new(Ext4Inode::new(2, &root_disk_inode, Arc::new(ext4fs), None));
-    Arc::new(OSInode::new(true, false, vfs_inode, ROOT_DENTRY.clone()))
 }
 pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     let start_node = if path.starts_with('/') {
@@ -210,8 +218,13 @@ pub fn list_apps() {
     info!("**************/");
 }
 lazy_static! {
+    pub static ref ROOT_VFS_INODE: Arc<dyn VfsInode> = {
+        let ext4fs = Ext4FS::open(BLOCK_DEVICE.clone());
+        let root_disk_inode = ext4fs.get_disk_inode(2);
+        Arc::new(Ext4Inode::new(2, &root_disk_inode, Arc::new(ext4fs), None))
+    };
+
     pub static ref ROOT_INODE: Arc<OSInode> = {
-        let root = create_root_inode(BLOCK_DEVICE.clone());
-        root
+        Arc::new(OSInode::new(true, false, ROOT_VFS_INODE.clone(), ROOT_DENTRY.clone()))
     };
 }
