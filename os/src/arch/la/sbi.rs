@@ -74,7 +74,8 @@ pub fn set_timer(_timer: usize) {
 }
 
 #[allow(dead_code)]
+#[allow(unreachable_code)]
 pub fn shutdown() -> ! {
-    panic!("Forced shutdown!");
-    // 不应运行到这里
+    // 暂未实现，死循环代替
+    loop {}
 }

@@ -10,7 +10,14 @@ LOG ?= OFF
 # BOARD
 BOARD := qemu
 SBI ?= rustsbi
+
+# 添加了新sbi启动选项, 以支持qemu8
+bl ?= dft
 BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
+
+ifeq ($(bl), new)
+	BOOTLOADER := ../bl-new-qemu/$(SBI)-$(BOARD).bin
+endif
 
 LA_KERNEL_ELF := target/loongarch64-unknown-none/$(MODE)/os
 LA_KERNEL_BIN := $(LA_KERNEL_ELF).bin
@@ -88,15 +95,14 @@ kernel-la:
 	@echo Building for loongarch64...
 	@LOG=$(LOG) cargo build --target loongarch64-unknown-none $(MODE_ARG)
 
-build-la: env-la $(LA_KERNEL_BIN)
+build-la: env-la kernel-la
 
 run-la: build-la run-inner-la
 
 run-inner-la:
-
 	@qemu-system-loongarch64 \
 		-machine virt \
 		-nographic \
-		-device loader,file=$(LA_KERNEL_BIN),addr=$(0x00100000) \
+		-kernel $(LA_KERNEL_ELF) \
 		-drive file=$(FS_IMG),if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+		-device virtio-blk-pci,drive=x0
