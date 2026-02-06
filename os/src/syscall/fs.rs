@@ -50,10 +50,11 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
 
 pub fn sys_open(path: *const u8, flags: u32) -> isize {
     let task = current_task().unwrap();
+    let cwd = task.inner_exclusive_access().cwd.clone();
     let token = current_user_token();
     let path = translated_str(token, path);
     debug!("[kernel] sys_open: path={}", path);
-    if let Some(inode) = open_file(path.as_str(), OpenFlags::from_bits(flags).unwrap()) {
+    if let Some(inode) = open_file(cwd, path.as_str(), OpenFlags::from_bits(flags).unwrap()) {
         if OpenFlags::from_bits(flags).unwrap().should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
             trace!("VFS: sys_open failed - '{}' is not a directory", path);
             return -1;
@@ -220,6 +221,7 @@ pub fn sys_chdir(path: *const u8) -> isize {
     debug!("[kernel] sys_chdir: path={}", path_str);
     
     let task = current_task().unwrap();
+    let cwd = task.inner_exclusive_access().cwd.clone();
     let current_path = {
         let inner = task.inner_exclusive_access();
         inner.cwd.get_full_path()
@@ -237,7 +239,7 @@ pub fn sys_chdir(path: *const u8) -> isize {
         p
     };
 
-    if let Some(inode) = open_file(full_path.as_str(), OpenFlags::DIRECTORY) {
+    if let Some(inode) = open_file(cwd, full_path.as_str(), OpenFlags::DIRECTORY) {
         let mut inner = task.inner_exclusive_access();
         inner.cwd = inode.get_dentry();
         0

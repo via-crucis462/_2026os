@@ -134,10 +134,16 @@ pub fn create_root_inode(device: Arc<dyn BlockDevice>) -> Arc<OSInode> {
     let vfs_inode = Arc::new(Ext4Inode::new(2, &root_disk_inode, Arc::new(ext4fs), None));
     Arc::new(OSInode::new(true, false, vfs_inode, ROOT_DENTRY.clone()))
 }
-pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
+pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
+    let start_node = if path.starts_with('/') {
+        ROOT_DENTRY.clone() // 绝对路径，从根开始
+    } else {
+        base // 相对路径，从 base 开始
+    };
+    
     // 使用全局 Dentry 树递归查找路径，并自动填充缓存
     // 1. 查找文件是否已存在
-    let target_dentry = ROOT_DENTRY.find_tree(path);
+    let target_dentry = start_node.find_tree(path);
     // 2.1 若不存在
     // 2.1.1 若文件不需要创建，返回 None
     if target_dentry.is_none() {
@@ -148,7 +154,7 @@ pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
         // 创建新文件的逻辑（简化处理，只创建空文件）
     // 2.1.2 创建新文件
         let parent_path = parent_path(path);
-        let parent_dentry = ROOT_DENTRY.find_tree(&parent_path)?;
+        let parent_dentry = start_node.find_tree(&parent_path)?;
         let file_name = file_name(path);
         let new_dentry = create_file_in_dentry(&parent_dentry, file_name);
         let (readable, writable) = flags.read_write();

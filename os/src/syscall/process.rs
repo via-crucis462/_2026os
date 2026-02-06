@@ -86,6 +86,9 @@ pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
 
 pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let token = current_user_token();
+    let task = current_task().unwrap();
+    let cwd = task.inner_exclusive_access().cwd.clone();
+    drop(task);
     let path = translated_str(token, path);
     info!("[kernel] sys_exec: path={}, args_ptr={:#x}", path, args as *const () as usize);
     let mut args_vec: Vec<String> = Vec::new();
@@ -102,7 +105,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         }
     }
     trace!("[kernel] sys_exec: before open_file");
-    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+    if let Some(app_inode) = open_file(cwd, path.as_str(), OpenFlags::RDONLY) {
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
