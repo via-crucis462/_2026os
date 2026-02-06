@@ -6,7 +6,7 @@
 //! - [`trap`]: Handles all cases of switching from userspace to the kernel
 //! - [`task`]: Task management
 //! - [`syscall`]: System call handling and implementation
-//! - [`mm`]: Address map using SV48 注意本来是SV39，现在改为SV48
+//! - [`mm`]: Address map using SV39
 //! - [`sync`]: Wrap a static data structure inside it so that we are able to access it without any `unsafe`.
 //! - [`fs`]: Separate user from file system with some structures
 //!
@@ -21,7 +21,6 @@
 #![deny(warnings)]
 #![no_std]
 #![no_main]
-#![feature(panic_info_message)]
 #![feature(alloc_error_handler)]
 
 #[macro_use]
@@ -44,15 +43,12 @@ pub mod sync;
 pub mod syscall;
 pub mod task;
 
-#[cfg(target_arch = "riscv64")]
-use core::arch::global_asm;
-#[cfg(target_arch = "la64")]
 use core::arch::global_asm;
 
 #[cfg(target_arch = "riscv64")]
 global_asm!(include_str!("arch/riscv/entry.asm"));
-#[cfg(target_arch = "la64")]
-global_asm!(include_str!("arch/loongarch/entry.asm"));
+#[cfg(target_arch = "loongarch64")]
+global_asm!(include_str!("arch/la/entry.asm"));
 
 /// clear BSS segment
 /// 两种架构应该是统一的
@@ -62,7 +58,7 @@ fn clear_bss() {
         fn ebss();
     }
     unsafe {
-        core::slice::from_raw_parts_mut(sbss as usize as *mut u8, ebss as usize - sbss as usize)
+        core::slice::from_raw_parts_mut(sbss as *const () as usize as *mut u8, ebss as *const () as usize - sbss as *const () as usize)
             .fill(0);
     }
 }
@@ -86,9 +82,12 @@ pub fn rust_main() -> ! {
     panic!("Unreachable in rust_main!");
 }
 
-#[cfg(target_arch = "loongarch")]
+// la的main需重写
+#[cfg(target_arch = "loongarch64")]
 #[no_mangle]
-pub fn rust_main() -> isize {
+extern "C" fn main() -> isize {
     println!("Hello, LoongArch!");
+    clear_bss();
+    //TODO
     0
 }

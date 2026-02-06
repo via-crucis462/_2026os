@@ -27,14 +27,14 @@ impl Ext4DirEntry {
             inode,
             rec_len,
             name_len: len as u8,
-            file_type,
+            file_type, // 已经改为使用调用者传入的类型 (1=文件, 2=目录)
             name: name_bytes,
         }
     }
 
     /// 获取当前目录项中的文件名字符串
     pub fn name(&self) -> &str {
-        let len = self.name_len as usize;
+        let len = self.name_len as *const () as usize;
         core::str::from_utf8(&self.name[0..len]).unwrap_or("")
     }
 

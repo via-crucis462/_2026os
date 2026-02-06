@@ -1,5 +1,5 @@
 use super::{frame_alloc, FrameTracker};
-use super::{PageTable, PageTableEntry, PTEFlags};
+use super::{PageTable, pte::*, PTEFlags};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
 use crate::arch::config::{MEMORY_END, MMIO, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
@@ -109,7 +109,7 @@ impl MemorySet {
     fn map_trampoline(&mut self) {
         self.page_table.map(
             VirtAddr::from(TRAMPOLINE).into(),
-            PhysAddr::from(strampoline as usize).into(),
+            PhysAddr::from(strampoline as *const () as usize).into(),
             PTEFlags::R | PTEFlags::X,
         );
     }
@@ -119,18 +119,18 @@ impl MemorySet {
         // map trampoline
         memory_set.map_trampoline();
         // map kernel sections
-        info!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
-        info!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
-        info!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
+        info!(".text [{:#x}, {:#x})", stext as *const () as usize, etext as *const () as usize);
+        info!(".rodata [{:#x}, {:#x})", srodata as *const () as usize, erodata as *const () as usize);
+        info!(".data [{:#x}, {:#x})", sdata as *const () as usize, edata as *const () as usize);
         info!(
             ".bss [{:#x}, {:#x})",
-            sbss_with_stack as usize, ebss as usize
+            sbss_with_stack as *const () as usize, ebss as *const () as usize
         );
         info!("mapping .text section");
         memory_set.push(
             MapArea::new(
-                (stext as usize).into(),
-                (etext as usize).into(),
+                (stext as *const () as usize).into(),
+                (etext as *const () as usize).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::X,
             ),
@@ -139,8 +139,8 @@ impl MemorySet {
         info!("mapping .rodata section");
         memory_set.push(
             MapArea::new(
-                (srodata as usize).into(),
-                (erodata as usize).into(),
+                (srodata as *const () as usize).into(),
+                (erodata as *const () as usize).into(),
                 MapType::Identical,
                 MapPermission::R,
             ),
@@ -149,8 +149,8 @@ impl MemorySet {
         info!("mapping .data section");
         memory_set.push(
             MapArea::new(
-                (sdata as usize).into(),
-                (edata as usize).into(),
+                (sdata as *const () as usize).into(),
+                (edata as *const () as usize).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::W,
             ),
@@ -159,8 +159,8 @@ impl MemorySet {
         info!("mapping .bss section");
         memory_set.push(
             MapArea::new(
-                (sbss_with_stack as usize).into(),
-                (ebss as usize).into(),
+                (sbss_with_stack as *const () as usize).into(),
+                (ebss as *const () as usize).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::W,
             ),
@@ -169,7 +169,7 @@ impl MemorySet {
         info!("mapping physical memory");
         memory_set.push(
             MapArea::new(
-                (ekernel as usize).into(),
+                (ekernel as *const () as usize).into(),
                 (MEMORY_END - 4096).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::W,
@@ -206,8 +206,8 @@ impl MemorySet {
         for i in 0..ph_count {
             let ph = elf.program_header(i).unwrap();
             if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
-                let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
-                let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize).into();
+                let start_va: VirtAddr = (ph.virtual_addr() as *const () as usize).into();
+                let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as *const () as usize).into();
                 let mut map_perm = MapPermission::U;
                 let ph_flags = ph.flags();
                 if ph_flags.is_read() {
@@ -223,7 +223,7 @@ impl MemorySet {
                 max_end_vpn = map_area.vpn_range.get_end();
                 memory_set.push(
                     map_area,
-                    Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
+                    Some(&elf.input[ph.offset() as *const () as usize..(ph.offset() + ph.file_size()) as *const () as usize]),
                 );
             }
         }
@@ -268,7 +268,7 @@ impl MemorySet {
         (
             memory_set,
             user_stack_top,
-            elf.header.pt2.entry_point() as usize,
+            elf.header.pt2.entry_point() as *const () as usize,
         )
     }
     /// Create a new address space by copy code&data from a exited process's address space.
@@ -315,8 +315,8 @@ impl MemorySet {
                 csrw pgdh, {1}
                 sfence.vma
                 ",
-                in(reg) (pgd_pa.0 & 0xffff_ffff) as usize,
-                in(reg) ((pgd_pa.0 >> 32) & 0xffff_ffff) as usize,
+                in(reg) (pgd_pa.0 & 0xffff_ffff) as *const () as usize,
+                in(reg) ((pgd_pa.0 >> 32) & 0xffff_ffff) as *const () as usize,
             );
         }
     }
@@ -671,9 +671,9 @@ bitflags! {
 #[allow(unused)]
 pub fn remap_test() {
     let mut kernel_space = KERNEL_SPACE.exclusive_access();
-    let mid_text: VirtAddr = ((stext as usize + etext as usize) / 2).into();
-    let mid_rodata: VirtAddr = ((srodata as usize + erodata as usize) / 2).into();
-    let mid_data: VirtAddr = ((sdata as usize + edata as usize) / 2).into();
+    let mid_text: VirtAddr = ((stext as *const () as usize + etext as *const () as usize) / 2).into();
+    let mid_rodata: VirtAddr = ((srodata as *const () as usize + erodata as *const () as usize) / 2).into();
+    let mid_data: VirtAddr = ((sdata as *const () as usize + edata as *const () as usize) / 2).into();
     assert!(!kernel_space
         .page_table
         .translate(mid_text.floor())

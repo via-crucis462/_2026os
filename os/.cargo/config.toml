@@ -6,7 +6,7 @@ rustflags = [
     "-Clink-arg=-Tsrc/arch/riscv/linker.ld", "-Cforce-frame-pointers=yes"
 ]
 
-[target.loongarch64-unknown-none-softfloat]
+[target.loongarch64-unknown-none]
 rustflags = [
     "-Clink-arg=-Tsrc/arch/la/linker.ld", "-Cforce-frame-pointers=yes"
 ]

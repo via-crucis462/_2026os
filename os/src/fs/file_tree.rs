@@ -66,6 +66,9 @@ impl Dentry {
     }
     /// 递归查找完整路径，例如 "bin/sh" 或 "/bin/sh"
     pub fn find_tree(self: &Arc<Self>, path: &str) -> Option<Arc<Dentry>> {
+        if path == "." || path == "" {
+            return Some(self.clone());
+        }
         let segments: alloc::vec::Vec<&str> = path
             .split('/')
             .filter(|s| !s.is_empty())
@@ -73,7 +76,15 @@ impl Dentry {
         
         let mut current = self.clone();
         for seg in segments {
-            // 这里我们复用之前的查找逻辑，为了能链式查找，我们先定义一个返回 Arc<Dentry> 的辅助方法
+            if seg == "." {
+                continue;
+            } else if seg == ".." {
+                if let Some(parent) = current.parent.upgrade() {
+                    current = parent;
+                }
+                // 如果没有 parent，说明是根目录，则保持不变
+                continue;
+            }
             current = current.find_child(seg)?;
         }
         Some(current)
@@ -142,6 +153,16 @@ pub fn create_file_in_dentry(parent: &Arc<Dentry>, name: String) -> Arc<Dentry> 
     // 默认创建普通文件权限 0o100666
     let vfs_inode = parent.inode.create_file(&name, 0o100666)
         .expect("VFS: Failed to create file in disk");
+    
+    // 将新创建的 Inode 插入 Dentry 缓存树
+    parent.insert(name, vfs_inode)
+}
+
+pub fn create_dir_in_dentry(parent: &Arc<Dentry>, name: String, _mode: u32) -> Arc<Dentry> {
+    // 解码权限：取 _mode 的低 9 位（权限位）并加上目录类型标志 0o040000 (S_IFDIR)
+    let mode = (_mode & 0o777) | 0o040000;
+    let vfs_inode = parent.inode.create_dir(&name, mode)
+        .expect("VFS: Failed to create directory in disk");
     
     // 将新创建的 Inode 插入 Dentry 缓存树
     parent.insert(name, vfs_inode)
