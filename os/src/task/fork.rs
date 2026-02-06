@@ -7,7 +7,7 @@ use crate::task::*;
 ///flags暂时未使用
 pub fn do_clone(func: usize, stack: usize, _flags: usize) -> isize {
     // 调试信息
-    println!("[K] do_clone: func={:#x}, stack={:#x}, flags={:#x}", func, stack, _flags);
+    trace!("[K] do_clone: func={:#x}, stack={:#x}, flags={:#x}", func, stack, _flags);
     let current_task = current_task().unwrap();
     let new_task = current_task.fork(
         if stack != 0 { Some(stack) } 
