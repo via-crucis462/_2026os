@@ -7,7 +7,7 @@ pub struct TrapContext {
     /// General-Purpose Register x0-31
     pub x: [usize; 32],
     /// Supervisor Status Register
-    pub sstatus: Sstatus,
+    // pub sstatus: Sstatus,
     /// Supervisor Exception Program Counter
     pub sepc: usize,
     /// Token of kernel address space
@@ -25,12 +25,13 @@ impl TrapContext {
     }
     /// init the trap context of an application
     pub fn app_init_context(
-        entry: usize,
-        sp: usize,
-        kernel_satp: usize,
-        kernel_sp: usize,
-        trap_handler: usize,
+        _entry: usize,
+        _sp: usize,
+        _kernel_satp: usize,
+        _kernel_sp: usize,
+        _trap_handler: usize,
     ) -> Self {
+        /* 
         let mut sstatus = sstatus::read();
         // set CPU privilege to User after trapping back
         sstatus.set_spp(SPP::User);
@@ -44,5 +45,14 @@ impl TrapContext {
         };
         cx.set_sp(sp); // app's user stack pointer
         cx // return initial Trap Context of app
+        */
+        Self {
+            x: [0; 32],
+            sepc: 0,
+            kernel_satp: 0,
+            kernel_sp: 0,
+            trap_handler: 0,
+        }    
     }
+     
 }

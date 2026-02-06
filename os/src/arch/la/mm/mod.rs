@@ -1,11 +1,11 @@
 //! la64的内存管理模块
 //! 处理龙芯与riscv内存管理的差异部分
 //! 尚不完善
+pub mod pte;
 
-pub mod address;
-pub mod page_table;
-
-use crate::arch::config::{PAGE_SIZE, PAGE_SIZE_BITS};
+use crate::mm::address::VirtAddr;
+use crate::arch::config::*;
+use core::arch::asm;
 
 const PA_WIDTH_SV39: usize = 56;
 const VA_WIDTH_SV39: usize = 39;
@@ -50,7 +50,7 @@ pub fn la64_init_mem(token: usize) {
 }
 
 /// TLB重填，未完成
-pub fn do_tlb_refill(va: VirtAddr) {
+pub fn do_tlb_refill(_va: VirtAddr) {
     // TODO
 }
 

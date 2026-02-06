@@ -111,7 +111,7 @@ impl Ext4Inode {
                     // 叶子节点 (Leaf Node)
                     // 在 Inode 中最多只有 4 个 entry
                     let max_entries = if data_ptr.len() == 60 { 4 } else { 340 };
-                    let actual_entries = eh_entries as usize;
+                    let actual_entries = eh_entries as *const () as usize;
                     
                     for i in 0..actual_entries.min(max_entries) {
                         let off = 12 + i * 12;
@@ -133,7 +133,7 @@ impl Ext4Inode {
                     // 索引节点 (Index Node)
                     let max_entries = if data_ptr.len() == 60 { 4 } else { 340 };
                     let mut found_index = 0;
-                    let actual_entries = eh_entries as usize;
+                    let actual_entries = eh_entries as *const () as usize;
 
                     for i in 0..actual_entries.min(max_entries) {
                         let off = 12 + i * 12;
@@ -151,14 +151,14 @@ impl Ext4Inode {
                     let next_block = ((ei_leaf_hi as u64) << 32) | (ei_leaf_lo as u64);
 
                     // 加载下一层级的数据块并继续搜索
-                    self.fs.block_dev.read_block(next_block as usize, current_block_data.as_mut_slice());
+                    self.fs.block_dev.read_block(next_block as *const () as usize, current_block_data.as_mut_slice());
                     data_ptr = current_block_data.as_slice();
                 }
             }
         } else {
             // 传统的直接块模式
-            if (logical_block_id as usize) < 12 {
-                i_block[logical_block_id as usize]
+            if (logical_block_id as *const () as usize) < 12 {
+                i_block[logical_block_id as *const () as usize]
             } else {
                 0 // 目前尚不支持一级/二级/三级间接块
             }
@@ -170,7 +170,7 @@ impl Ext4Inode {
             return;
         }
         let mut offset = 0;
-        let file_size = self.size as usize;
+        let file_size = self.size as *const () as usize;
 
         while offset < file_size {
             // 1. 先读 8 个字节拿到头部 (inode, rec_len, name_len, file_type)
@@ -178,8 +178,8 @@ impl Ext4Inode {
             self.read_at(offset, &mut header_buf);
             
             let inode_id = u32::from_le_bytes(header_buf[0..4].try_into().unwrap());
-            let rec_len = u16::from_le_bytes(header_buf[4..6].try_into().unwrap()) as usize;
-            let name_len = header_buf[6] as usize;
+            let rec_len = u16::from_le_bytes(header_buf[4..6].try_into().unwrap()) as *const () as usize;
+            let name_len = header_buf[6] as *const () as usize;
 
             if rec_len == 0 { break; } // 防止死循环
 
@@ -199,13 +199,13 @@ impl Ext4Inode {
     }
     /// 从文件的 offset 字节处开始，读取数据到 buf 中，返回实际读取长度
     pub fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        let block_size = BLOCK_SZ as usize;
+        let block_size = BLOCK_SZ as *const () as usize;
         let mut actual_read = 0;
         let mut curr_offset = offset;
 
         // 实时获取磁盘 Inode 信息以获取准备的大小
         let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        let disk_size_bytes = disk_inode.size() as usize;
+        let disk_size_bytes = disk_inode.size() as *const () as usize;
         
         let end = core::cmp::min(offset + buf.len(), disk_size_bytes);
         if curr_offset >= end { return 0; }
@@ -223,7 +223,7 @@ impl Ext4Inode {
                 buf[actual_read..actual_read + read_len].fill(0);
             } else {
                 let mut temp_buf = alloc::vec![0u8; 4096];
-                self.fs.block_dev.read_block(physical_block_id as usize, &mut temp_buf);
+                self.fs.block_dev.read_block(physical_block_id as *const () as usize, &mut temp_buf);
                 buf[actual_read..actual_read + read_len].copy_from_slice(&temp_buf[block_pos..block_pos + read_len]);
             }
             
@@ -235,11 +235,11 @@ impl Ext4Inode {
     }
 
     pub fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
-        let block_size = BLOCK_SZ as usize;
+        let block_size = BLOCK_SZ as *const () as usize;
         let mut actual_write = 0;
         let mut curr_offset = offset;
 
-        let old_size_bytes = self.fs.get_disk_inode(self.inode_id).size() as usize;
+        let old_size_bytes = self.fs.get_disk_inode(self.inode_id).size() as *const () as usize;
         let end = offset + buf.len();
         
         while curr_offset < end {
@@ -254,12 +254,12 @@ impl Ext4Inode {
             }
 
             let mut temp_buf = alloc::vec![0u8; 4096];
-            self.fs.block_dev.read_block(physical_block_id as usize, &mut temp_buf);
+            self.fs.block_dev.read_block(physical_block_id as *const () as usize, &mut temp_buf);
 
             let write_len = core::cmp::min(block_size - block_pos, end - curr_offset);
             temp_buf[block_pos..block_pos + write_len].copy_from_slice(&buf[actual_write..actual_write + write_len]);
 
-            self.fs.block_dev.write_block(physical_block_id as usize, &temp_buf);
+            self.fs.block_dev.write_block(physical_block_id as *const () as usize, &temp_buf);
 
             actual_write += write_len;
             curr_offset += write_len;
@@ -270,7 +270,7 @@ impl Ext4Inode {
         
         if new_size_bytes > old_size_bytes {
             let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
-            let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
+            let block_cache = get_block_cache(block_id as *const () as usize, self.fs.block_dev.clone());
             block_cache.lock().modify(inode_offset, |disk_inode: &mut Ext4InodeDisk| {
                 disk_inode.i_size_lo = new_size_bytes as u32;
                 disk_inode.i_size_high = (new_size_bytes >> 32) as u32;
@@ -282,23 +282,23 @@ impl Ext4Inode {
 
     pub fn add_dir_entry(&self, name: &str, inode_id: u32, file_type: u8) -> bool {
         let mut offset = 0;
-        let block_size = BLOCK_SZ as usize;
+        let block_size = BLOCK_SZ as *const () as usize;
         let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        let file_size_bytes = disk_inode.size() as usize;
+        let file_size_bytes = disk_inode.size() as *const () as usize;
         
         while offset < file_size_bytes {
-            let mut buf = alloc::vec![0u8; BLOCK_SZ as usize];
+            let mut buf = alloc::vec![0u8; BLOCK_SZ as *const () as usize];
             self.read_at(offset, &mut buf);
             
             let mut block_offset = 0;
             while block_offset < block_size {
                 let dirent = unsafe { &mut *(buf[block_offset..].as_ptr() as *mut Ext4DirEntry) };
-                let rec_len = dirent.rec_len as usize;
+                let rec_len = dirent.rec_len as *const () as usize;
                 
                 if rec_len == 0 { break; } 
                 
-                let real_len = dirent.real_len() as usize;
-                let needed_len = ((8 + name.len() + 3) & !3) as usize;
+                let real_len = dirent.real_len() as *const () as usize;
+                let needed_len = ((8 + name.len() + 3) & !3) as *const () as usize;
                 
                 if rec_len >= real_len + needed_len {
                     let old_rec_len = dirent.rec_len;
@@ -309,7 +309,7 @@ impl Ext4Inode {
                     let new_dirent = Ext4DirEntry::new_disk(inode_id, new_rec_len, name, file_type);
                     
                     let new_dirent_bytes = unsafe {
-                        core::slice::from_raw_parts(&new_dirent as *const _ as *const u8, 8 + new_dirent.name_len as usize)
+                        core::slice::from_raw_parts(&new_dirent as *const _ as *const u8, 8 + new_dirent.name_len as *const () as usize)
                     };
                     buf[new_offset..new_offset + new_dirent_bytes.len()].copy_from_slice(new_dirent_bytes);
                     
