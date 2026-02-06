@@ -85,9 +85,9 @@ pub fn rust_main() -> ! {
 // la的main需重写
 #[cfg(target_arch = "loongarch64")]
 #[no_mangle]
-extern "C" fn main() -> isize {
-    println!("Hello, LoongArch!");
+pub fn rust_main() -> ! {
     clear_bss();
-    //TODO
-    0
+    logging::init();
+    println!("Hello, LoongArch!"); 
+    panic!("haha");
 }
