@@ -8,6 +8,7 @@ mod file_tree;
 
 pub use dir_entry::DirEntry;
 pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
+pub use file_tree::{Dentry};
 use crate::mm::UserBuffer;
 use alloc::sync::Arc;
 /// trait File for all file types

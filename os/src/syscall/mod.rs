@@ -70,6 +70,8 @@ const SYSCALL_MKDIR: usize = 34;
 const SYSCALL_GETDENTS: usize = 61;
 /// getcwd syscall
 const SYSCALL_GETCWD: usize = 17;
+/// chdir syscall
+const SYSCALL_CHDIR: usize = 49;
 mod fs;
 mod process;
 
@@ -122,6 +124,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MKDIR => sys_mkdir(args[1] as *const u8, args[2] as u32),
         SYSCALL_GETDENTS => sys_getdents(args[0], args[1] as *mut u8, args[2]),
         SYSCALL_GETCWD => sys_getcwd(args[0] as *mut u8, args[1]),
+        SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
