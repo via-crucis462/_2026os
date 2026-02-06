@@ -57,6 +57,8 @@ pub struct Ext4Inode {
     pub parent: Option<u32>,
 }
 
+pub const EXT4_EXTENTS_FL: u32 = 0x80000;
+
 impl Ext4Inode {
     pub fn new(inode_id: u32, disk_inode: &Ext4InodeDisk, fs: Arc<Ext4FS>, parent: Option<u32>) -> Self {
         Self {
@@ -165,6 +167,45 @@ impl Ext4Inode {
         }
     }
 
+    pub fn add_extent_entry(&self, logical_block_id: u32, physical_block_id: u32) -> Option<u32> {
+        let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
+        let block_cache = get_block_cache(block_id as *const () as usize, self.fs.block_dev.clone());
+        let mut cache = block_cache.lock();
+        
+        cache.modify(inode_offset, |disk_inode: &mut Ext4InodeDisk| {
+            let eh_magic = (disk_inode.i_block[0] & 0xFFFF) as u16;
+            let mut eh_entries = (disk_inode.i_block[0] >> 16) as u16;
+            let eh_max = (disk_inode.i_block[1] & 0xFFFF) as u16;
+            let eh_depth = (disk_inode.i_block[1] >> 16) as u16;
+
+            if eh_magic != 0xF30A {
+                trace!("VFS: add_extent_entry - invalid magic 0x{:X}", eh_magic);
+                return None;
+            }
+            if eh_depth != 0 {
+                trace!("VFS: add_extent_entry - only depth 0 supported");
+                return None;
+            }
+
+            if eh_entries < eh_max {
+                let entry_idx = 3 + (eh_entries as usize) * 3;
+                if entry_idx + 3 > 15 { return None; }
+
+                disk_inode.i_block[entry_idx] = logical_block_id;
+                disk_inode.i_block[entry_idx + 1] = 1; // len = 1 block
+                disk_inode.i_block[entry_idx + 2] = physical_block_id; // hi=0, lo=phys
+                
+                eh_entries += 1;
+                disk_inode.i_block[0] = (disk_inode.i_block[0] & 0xFFFF) | ((eh_entries as u32) << 16);
+                disk_inode.i_blocks_lo += 8; // 4096 / 512
+                Some(physical_block_id)
+            } else {
+                trace!("VFS: add_extent_entry - no space for more entries in inode extra space");
+                None
+            }
+        })
+    }
+
     pub fn read_dirents(&self) {
         if !self.is_dir() {
             return;
@@ -246,11 +287,38 @@ impl Ext4Inode {
             let inner_block_id = (curr_offset / block_size) as u32;
             let block_pos = curr_offset % block_size;
 
-            let physical_block_id = self.find_physical_block(inner_block_id);
+            let mut physical_block_id = self.find_physical_block(inner_block_id);
             if physical_block_id == 0 {
-                // 如果块不存在，尝试分配 (暂时不支持)
-                trace!("VFS: write_at - block allocation not implemented for inode {}", self.inode_id);
-                break;
+                // 如果块不存在，尝试分配
+                if let Some(new_block_id) = self.fs.alloc_block() {
+                    let disk_inode = self.fs.get_disk_inode(self.inode_id);
+                    if disk_inode.i_flags & EXT4_EXTENTS_FL == 0 {
+                        // 传统的直接块模式
+                        if inner_block_id < 12 {
+                            let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
+                            let block_cache = get_block_cache(block_id as *const () as usize, self.fs.block_dev.clone());
+                            block_cache.lock().modify(inode_offset, |disk_inode: &mut Ext4InodeDisk| {
+                                disk_inode.i_block[inner_block_id as usize] = new_block_id;
+                                disk_inode.i_blocks_lo += (block_size / 512) as u32;
+                            });
+                            physical_block_id = new_block_id;
+                        } else {
+                            trace!("VFS: write_at - indirect blocks not supported");
+                            break;
+                        }
+                    } else {
+                        // Extent 模式下的块分配
+                        if let Some(phys) = self.add_extent_entry(inner_block_id, new_block_id) {
+                            physical_block_id = phys;
+                        } else {
+                            trace!("VFS: write_at - extent allocation failed or not supported for depth > 0");
+                            break;
+                        }
+                    }
+                } else {
+                    trace!("VFS: write_at - no free blocks");
+                    break;
+                }
             }
 
             let mut temp_buf = alloc::vec![0u8; 4096];
