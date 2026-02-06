@@ -186,3 +186,29 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
         -1
     }
 }
+
+pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
+    let token = current_user_token();
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    let path = inner.current_dir.clone();
+    drop(inner);
+
+    let path_bytes = path.as_bytes();
+    if path_bytes.len() + 1 > size {
+        return -1;
+    }
+    let mut user_buf = UserBuffer::new(translated_byte_buffer(token, buf, size));
+    let mut current_offset = 0;
+    let mut path_vec = path_bytes.to_vec();
+    path_vec.push(0);
+    for buffer in user_buf.buffers.iter_mut() {
+        let copy_len = buffer.len().min(path_vec.len() - current_offset);
+        buffer[..copy_len].copy_from_slice(&path_vec[current_offset..current_offset + copy_len]);
+        current_offset += copy_len;
+        if current_offset == path_vec.len() {
+            break;
+        }
+    }
+    path_bytes.len() as isize
+}

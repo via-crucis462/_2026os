@@ -89,6 +89,8 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,// 注意需要在exec中维护，rcore忽略了这点，运行测例时brk失效，已修复
+
+    pub current_dir: String,
 }
 
 impl TaskControlBlockInner {
@@ -160,6 +162,7 @@ impl TaskControlBlock {
                     trap_ctx_backup: None,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    current_dir: String::from("/"),
                 })
             },
         };
@@ -286,6 +289,7 @@ impl TaskControlBlock {
                     trap_ctx_backup: None,
                     heap_bottom: sp.unwrap_or(parent_inner.heap_bottom),
                     program_brk: parent_inner.program_brk,
+                    current_dir: parent_inner.current_dir.clone(),
                 })
             },
         });
