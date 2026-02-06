@@ -18,9 +18,13 @@ pub trait File: Send + Sync {
     /// the file writable?
     fn writable(&self) -> bool;
     /// read from the file to buf, return the number of bytes read
-    fn read(&self, buf: UserBuffer) -> usize;
+    fn read(&self, _buf: UserBuffer) -> usize { 0 }
     /// write to the file from buf, return the number of bytes written
-    fn write(&self, buf: UserBuffer) -> usize;
+    fn write(&self, _buf: UserBuffer) -> usize { 0 }
+    /// read from the file to buf at a given offset, return the number of bytes read
+    fn read_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
+    /// write to the file from buf at a given offset, return the number of bytes written
+    fn write_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
     /// get the stat of the file
     fn get_stat(&self) -> Stat;
     /// 获取目录下的所有目录项
@@ -95,6 +99,6 @@ bitflags! {
     }
 }
 
-pub use inode::{list_apps, OpenFlags, open_file, ROOT_INODE, make_dir, OSInode};
+pub use inode::{list_apps, OpenFlags, open_file, ROOT_INODE, ROOT_VFS_INODE, make_dir, OSInode};
 pub use pipe::{make_pipe, Pipe};
 pub use stdio::{Stdin, Stdout};
