@@ -87,7 +87,7 @@ pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
 pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let token = current_user_token();
     let path = translated_str(token, path);
-    info!("[kernel] sys_exec: path={}, args_ptr={:#x}", path, args as usize);
+    info!("[kernel] sys_exec: path={}, args_ptr={:#x}", path, args as *const () as usize);
     let mut args_vec: Vec<String> = Vec::new();
     loop {
         let arg_str_ptr = *translated_ref(token, args);
@@ -128,13 +128,13 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, _options: usize) -> isize 
         let mut inner = task.inner_exclusive_access();
         
         // 1. 检查是否存在符合要求的子进程
-        if !inner.children.iter().any(|p| pid == -1 || pid as usize == p.getpid()) {
+        if !inner.children.iter().any(|p| pid == -1 || pid as *const () as usize == p.getpid()) {
             return -1; // 一个孩子都没有，直接返回错误
         }
     
         // 2. 尝试找一个“已经死掉”的僵尸孩子
         let pair = inner.children.iter().enumerate().find(|(_, p)| {
-            p.inner_exclusive_access().is_zombie() && (pid == -1 || pid as usize == p.getpid())
+            p.inner_exclusive_access().is_zombie() && (pid == -1 || pid as *const () as usize == p.getpid())
         });
     
         if let Some((idx, _)) = pair {
@@ -199,7 +199,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     // 4. 写入用户传进来的结构体
     // C标准中，如果指针是 NULL (0)，则表示不需要获取该值，直接忽略即可
     // 但为了过测例，ts 一般都是有效的
-    if ts as usize != 0 {
+    if ts as *const () as usize != 0 {
         // 将用户态的虚拟地址 ts 转换为内核能访问的引用
         let time_val = translated_refmut(token, ts);
         
@@ -236,7 +236,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, _fd: i32, _off:
             mmap::MMapFlags::MAP_ANONYMOUS => {},
             mmap::MMapFlags::MAP_PRIVATE => {
                 // 按目前理解，拷贝文件内容到映射区即可？
-                //sys_read(fd as usize, ret as *mut u8, len);
+                //sys_read(fd as *const () as usize, ret as *mut u8, len);
             },
             mmap::MMapFlags::MAP_SHARED => {
                 //尚未实现
@@ -338,16 +338,16 @@ pub fn sys_sigaction(
     let token = current_user_token();
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
-    if signum as usize > MAX_SIG {
+    if signum as *const () as usize > MAX_SIG {
         return -1;
     }
     if let Some(flag) = SignalFlags::from_bits(1 << signum) {
-        if check_sigaction_error(flag, action as usize, old_action as usize) {
+        if check_sigaction_error(flag, action as *const () as usize, old_action as *const () as usize) {
             return -1;
         }
-        let prev_action = inner.signal_actions.table[signum as usize];
+        let prev_action = inner.signal_actions.table[signum as *const () as usize];
         *translated_refmut(token, old_action) = prev_action;
-        inner.signal_actions.table[signum as usize] = *translated_ref(token, action);
+        inner.signal_actions.table[signum as *const () as usize] = *translated_ref(token, action);
         0
     } else {
         -1

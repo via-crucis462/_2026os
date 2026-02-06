@@ -5,10 +5,15 @@ KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
 FS ?= EXT4
 ARCH ?= riscv64
+# Log level: ERROR, WARN, INFO, DEBUG, TRACE, OFF
+LOG ?= OFF
 # BOARD
 BOARD := qemu
 SBI ?= rustsbi
 BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
+
+LA_KERNEL_ELF := target/loongarch64-unknown-none/$(MODE)/os
+LA_KERNEL_BIN := $(LA_KERNEL_ELF).bin
 
 # Building mode argument
 ifeq ($(MODE), release)
@@ -66,3 +71,32 @@ gdbclient:
 	@riscv64-unknown-elf-gdb -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'
 
 .PHONY: build env kernel clean run-inner gdbserver gdbclient
+
+# 此处开始为LA64相关
+
+env-la:
+ifeq ($(OFFLINE),)
+	(rustup target list | grep "loongarch64-unknown-none (installed)") || rustup target add loongarch64-unknown-none
+	rustup component add rust-src
+	rustup component add llvm-tools-preview
+endif
+
+$(LA_KERNEL_BIN): kernel-la
+	@rust-objcopy --binary-architecture=loongarch64 $(LA_KERNEL_ELF) --strip-all -O binary $@
+
+kernel-la:
+	@echo Building for loongarch64...
+	@LOG=$(LOG) cargo build --target loongarch64-unknown-none $(MODE_ARG)
+
+build-la: env-la $(LA_KERNEL_BIN)
+
+run-la: build-la run-inner-la
+
+run-inner-la:
+
+	@qemu-system-loongarch64 \
+		-machine virt \
+		-nographic \
+		-device loader,file=$(LA_KERNEL_BIN),addr=$(0x00100000) \
+		-drive file=$(FS_IMG),if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
