@@ -2,12 +2,10 @@
 
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
 use crate::{
-    arch::config::TRAP_CONTEXT_BASE,
-    fs::{File, Stdin, Stdout},
-    mm::{translated_refmut, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE},
+    arch::{config::TRAP_CONTEXT_BASE, trap::{TrapContext, trap_handler}},
+    fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout},
+    mm::{KERNEL_SPACE, MemorySet, PhysPageNum, VirtAddr, mmap, translated_refmut},
     sync::UPSafeCell,
-    arch::trap::{trap_handler, TrapContext},
-    mm::mmap,
 };
 use alloc::{
     string::String,
@@ -90,7 +88,7 @@ pub struct TaskControlBlockInner {
     /// Program break
     pub program_brk: usize,// 注意需要在exec中维护，rcore忽略了这点，运行测例时brk失效，已修复
 
-    pub current_dir: String,
+    pub cwd: Arc<Dentry>, // 当前工作目录
 }
 
 impl TaskControlBlockInner {
@@ -162,7 +160,7 @@ impl TaskControlBlock {
                     trap_ctx_backup: None,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
-                    current_dir: String::from("/"),
+                    cwd: ROOT_DENTRY.clone(),
                 })
             },
         };
@@ -289,7 +287,7 @@ impl TaskControlBlock {
                     trap_ctx_backup: None,
                     heap_bottom: sp.unwrap_or(parent_inner.heap_bottom),
                     program_brk: parent_inner.program_brk,
-                    current_dir: parent_inner.current_dir.clone(),
+                    cwd: parent_inner.cwd.clone(),
                 })
             },
         });

@@ -191,7 +191,7 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
-    let path = inner.current_dir.clone();
+    let path = inner.cwd.get_full_path();
     drop(inner);
 
     let path_bytes = path.as_bytes();
@@ -211,4 +211,36 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
         }
     }
     path_bytes.len() as isize
+}
+
+pub fn sys_chdir(path: *const u8) -> isize {
+    let token = current_user_token();
+    let path_str = translated_str(token, path);
+    debug!("[kernel] sys_chdir: path={}", path_str);
+    
+    let task = current_task().unwrap();
+    let current_path = {
+        let inner = task.inner_exclusive_access();
+        inner.cwd.get_full_path()
+    };
+
+    let full_path = if path_str.starts_with('/') {
+        path_str // 绝对路径
+    } else {
+        // 相对路径，拼接 CWD
+        let mut p = current_path;
+        if !p.ends_with('/') {
+            p.push('/');
+        }
+        p.push_str(&path_str);
+        p
+    };
+
+    if let Some(inode) = open_file(full_path.as_str(), OpenFlags::DIRECTORY) {
+        let mut inner = task.inner_exclusive_access();
+        inner.cwd = inode.get_dentry();
+        0
+    } else {
+        -1
+    }
 }

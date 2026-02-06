@@ -3,7 +3,7 @@ use alloc::string::String;
 use alloc::collections::BTreeMap;
 use spin::Mutex;
 use lazy_static::*;
-use super::{VfsInode,ROOT_INODE};
+use super::{VfsInode};
 
 pub struct Dentry {
     pub name: String,
@@ -115,13 +115,46 @@ impl Dentry {
         println!("VFS: File '{}' not found in directory '{}'", name, self.name);
         None
     }
+
+    pub fn get_full_path(self: &Arc<Self>) -> String {
+        let mut parts = alloc::vec::Vec::new();
+        let mut current = self.clone();
+
+        // 向上回溯直到根目录（根目录的 parent.upgrade() 会返回 None）
+        while let Some(parent) = current.parent.upgrade() {
+            parts.push(current.name.clone());
+            current = parent;
+        }
+
+        // 如果 parts 为空，说明当前就是根目录 "/"
+        if parts.is_empty() {
+            return String::from("/");
+        }
+
+        // 将收集到的名字反转并拼接
+        let mut full_path = String::new();
+        for name in parts.iter().rev() {
+            full_path.push('/');
+            full_path.push_str(name);
+        }
+        full_path
+    }
 }
 
 lazy_static! {
     pub static ref ROOT_DENTRY: Arc<Dentry> = {
+        let ext4fs = crate::ext4fs::ext4::Ext4FS::open(crate::drivers::BLOCK_DEVICE.clone());
+        let root_disk_inode = ext4fs.get_disk_inode(2); 
+        let vfs_inode = Arc::new(crate::ext4fs::ext4inode::Ext4Inode::new(
+            2, 
+            &root_disk_inode, 
+            Arc::new(ext4fs), 
+            None
+        ));
+
         Dentry::new(
             String::from("/"),
-            ROOT_INODE.inode.clone(),
+            vfs_inode,
             Weak::new(),
         )
     };
