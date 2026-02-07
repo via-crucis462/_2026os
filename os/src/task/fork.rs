@@ -17,7 +17,7 @@ pub fn do_clone(func: usize, stack: usize, _flags: usize) -> isize {
     let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
     // we do not have to move to next instruction since we have done it before
     // for child process, clone returns 0(参考rcore的实现)
-    trap_cx.x[10] = 0;
+    trap_cx.set_a0(0);
     // 设置子进程的起始函数，如果指定
     //if func != 0 {
     //    trap_cx.sepc = func;

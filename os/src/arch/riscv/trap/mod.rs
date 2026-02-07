@@ -21,12 +21,8 @@ use crate::task::{
 };
 use crate::arch::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
-#[cfg(target_arch = "riscv64")]
-use riscv::register::{
-    mtvec::TrapMode,
-    scause::{self, Exception, Interrupt, Trap},
-    sie, stval, stvec,
-};
+use crate::arch::la::mm::tlb_refill_handler;
+
 
 global_asm!(include_str!("trap.S"));
 
