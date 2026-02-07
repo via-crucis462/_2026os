@@ -1,5 +1,4 @@
 //! Implementation of [`TrapContext`]
-#![cfg(target_arch = "riscv64")]
 use riscv::register::sstatus::{self, Sstatus, SPP};
 
 #[repr(C)]
@@ -7,7 +6,7 @@ use riscv::register::sstatus::{self, Sstatus, SPP};
 /// trap context structure containing sstatus, sepc and registers
 pub struct TrapContext {
     /// General-Purpose Register x0-31
-    x: [usize; 32],
+    pub x: [usize; 32],
     /// Supervisor Status Register
     sstatus: Sstatus,
     /// Supervisor Exception Program Counter
@@ -44,6 +43,10 @@ impl TrapContext {
     /// 设置trap返回地址
     pub fn set_rt(&mut self, sepc: usize) {
         self.sepc = sepc;
+    }
+    /// 获取trap返回地址
+    pub fn get_rt(&self) -> usize {
+        self.sepc
     }
     /// init the trap context of an application
     pub fn app_init_context(
