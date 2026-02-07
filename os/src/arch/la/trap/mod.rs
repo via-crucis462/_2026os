@@ -1,4 +1,5 @@
-// 需要按照la64重写, 此文件暂时保留rv64的实现供参考用，但几乎完全无法复用
+// 为la64重写
+// 参考https://godones.github.io/rCoreloongArch/app.html
 
 mod context;
 /* 
@@ -34,6 +35,7 @@ pub fn enable_timer_interrupt() {
 }
 
 /// trap handler
+/// 初始化EENTRY要指向这里
 #[no_mangle]
 pub fn trap_handler() -> ! {
     loop {
