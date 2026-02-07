@@ -67,7 +67,7 @@ pub fn _sys_fork() -> isize {
     let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
     // we do not have to move to next instruction since we have done it before
     // for child process, fork returns 0
-    trap_cx.x[10] = 0;
+    trap_cx.set_a0(0);
     // add new task to scheduler
     add_task(new_task);
     new_pid as isize
@@ -320,7 +320,7 @@ pub fn sys_sigreturn() -> isize {
         // Here we return the value of a0 in the trap_ctx,
         // otherwise it will be overwritten after we trap
         // back to the original execution of the application.
-        trap_ctx.x[10] as isize
+        trap_ctx.get_a0() as isize
     } else {
         -1
     }

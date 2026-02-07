@@ -1,48 +1,54 @@
-OUTPUT_ARCH( "loongarch" )
-ENTRY(main)
+# 本文件相比riscv版本仅OUTPUT_ARCH和BASE_ADDRESS不同,其他部分完全一样
+OUTPUT_ARCH(loongarch)
+ENTRY(_start)
+BASE_ADDRESS = 0x0200000;
 
 SECTIONS
 {
-  . = 0x00100000;
-   text_start = .;
-  .text : {
-    *(.text .text.*)
-    PROVIDE(etext = .);
-    . = ALIGN(0x1000);
-  }
-    text_end = .;
-  . = ALIGN(0x1000);
-  rodata_start = .;
-  .rodata : {
-    . = ALIGN(16);
-    *(.srodata .srodata.*)
-    . = ALIGN(16);
-    *(.rodata .rodata.*)
-  }
-  . = ALIGN(0x1000);
-    rodata_end = .;
-    data_start = .;
-  .data : {
-. = ALIGN(16);
-    *(.sdata .sdata.*)
-. = ALIGN(16);
-    *(.data .data.*)
-  }
+    . = BASE_ADDRESS;
+    skernel = .;
 
-  . = ALIGN(0x1000);
-    data_end = .;
-    bss_start = .;
+    stext = .;
+    .text : {
+        *(.text.entry)
+        . = ALIGN(4K);
+        strampoline = .;
+        *(.text.trampoline);
+        . = ALIGN(4K);
+        *(.text .text.*)
+    }
 
-  .bss : {
-    sbss = .;
-. = ALIGN(16);
-    *(.sbss .sbss.*)
-. = ALIGN(16);
-    *(.bss .bss.*)
-  }
-  . = ALIGN(0x1000);
+    . = ALIGN(4K);
+    etext = .;
+    srodata = .;
+    .rodata : {
+        *(.rodata .rodata.*)
+        *(.srodata .srodata.*)
+    }
+
+    . = ALIGN(4K);
+    erodata = .;
+    sdata = .;
+    .data : {
+        *(.data .data.*)
+        *(.sdata .sdata.*)
+    }
+
+    . = ALIGN(4K);
+    edata = .;
+    sbss_with_stack = .;
+    .bss : {
+        *(.bss.stack)
+        sbss = .;
+        *(.bss .bss.*)
+        *(.sbss .sbss.*)
+    }
+
+    . = ALIGN(4K);
     ebss = .;
-
     ekernel = .;
-  PROVIDE(end = .);
+
+    /DISCARD/ : {
+        *(.eh_frame)
+    }
 }

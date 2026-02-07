@@ -94,3 +94,13 @@ TODO：把现有的内核架构进一步拆分为抽象层和实现层，其中�
 3. 实现了mmap和munmap，在memory_set中添加了一个函数名为find_free_area，调用时当传入的虚拟地址有冲突时，调用这个函数似乎可以自动分配内存
 4. 给SuperBlock中添加了字段，用于记录其是否开启了extents扩展。
 5. 增加了alloc_blockid方法给EXT4Inode，用于动态分配文件的块大小内容。
+### fmx
+1. 添加目录bl-new-qemu/，其中包含了最新版的rustsbi以提供对qemu8（如果在ubuntu24.04下用apt直接安装，即为这个版本）的支持。之所以希望使用qemu8，是因为希望在涉及la的场景中保持环境较新，且apt安装的qemu8.2.2包含了la版本，无需额外设置。makefile中也做了对应修改，现在，如果你尝试使用qemu8启动riscv版本，请使用make run bl=new。请注意：sbi.rs中的系统调用号需要做相应调整（其实就是改两个数字的事，这里已经提前写好并注释）。考虑到之前的riscv主要使用qemu7，所以这里没有应用修改，使用qemu7并正常使用make run即可。
+2. 发现将riscv版本的linker.ld和entry.asm直接复制到la，按la语法重写entry.asm，再修改基地址，就能直接正常启动。按此思路完成了la的最小化裸机启动配置。
+3. 验证了先前实现的la uart输入输出，成功在龙芯版qemu上打印出helloworld。
+
+## 2026.2.7
+### fmx
+1. 修改la的trap.S，实现了app初始化，完善TC结构体的设计与处理，完善trap模块到理论可用（未测试），封装了对sp和a0a1寄存器的读写为统一接口。
+2. trap应该能实现内存空间的切换了，学习了有关滑动窗口的知识，准备使用映射窗口将内核空间调整至usize:MAX / 2 + 1起的“平移”映射。
+3. todo：跳板暂未完善。

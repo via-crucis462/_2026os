@@ -2,7 +2,9 @@ use super::{frame_alloc, FrameTracker};
 use super::{PageTable, pte::*, PTEFlags};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
-use crate::arch::config::{MEMORY_END, MMIO, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
+use crate::arch::config::{MEMORY_END,  PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
+#[cfg(target_arch = "riscv64")]
+use crate::arch::config::MMIO;
 use crate::mm::mmap;
 use crate::sync::UPSafeCell;
 use alloc::collections::BTreeMap;
@@ -175,6 +177,8 @@ impl MemorySet {
             ),
             None,
         );
+        #[cfg(target_arch = "riscv64")]
+        {
         info!("mapping memory-mapped registers");
         for pair in MMIO {
             memory_set.push(
@@ -186,6 +190,7 @@ impl MemorySet {
                 ),
                 None,
             );
+        }
         }
         memory_set
     }

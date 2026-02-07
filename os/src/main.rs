@@ -45,6 +45,7 @@ pub mod task;
 
 use core::arch::global_asm;
 
+
 #[cfg(target_arch = "riscv64")]
 global_asm!(include_str!("arch/riscv/entry.asm"));
 #[cfg(target_arch = "loongarch64")]
@@ -85,9 +86,9 @@ pub fn rust_main() -> ! {
 // la的main需重写
 #[cfg(target_arch = "loongarch64")]
 #[no_mangle]
-extern "C" fn main() -> isize {
-    println!("Hello, LoongArch!");
+pub fn rust_main() -> ! {
     clear_bss();
-    //TODO
-    0
+    logging::init();
+    println!("Hello, LoongArch!"); 
+    panic!("haha");
 }

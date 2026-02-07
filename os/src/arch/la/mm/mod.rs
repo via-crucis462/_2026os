@@ -55,6 +55,7 @@ pub fn do_tlb_refill(_va: VirtAddr) {
 }
 
 // TLB重填异常处理
+#[no_mangle]
 pub fn tlb_refill_handler() {
     // TODO
 }
