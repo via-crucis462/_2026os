@@ -1,7 +1,8 @@
-// 需要按照la64重写, 此文件暂时保留rv64的实现供参考用，但几乎完全无法复用
-
+// 正在为la64重写
+// 参考https://godones.github.io/rCoreloongArch/app.html
+#![allow(unused)]
 mod context;
-/* 
+
 use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 
 use crate::syscall::syscall;
@@ -10,11 +11,12 @@ use crate::task::{
     exit_current_and_run_next, handle_signals, suspend_current_and_run_next, SignalFlags,
 };
 use crate::arch::timer::set_next_trigger;
+use crate::arch::mm::tlb_refill_handler;
 
 use core::arch::{asm, global_asm};
 
 global_asm!(include_str!("trap.S"));
-*/
+
 /// Initialize trap handling
 pub fn init() {
     set_kernel_trap_entry();
@@ -22,6 +24,12 @@ pub fn init() {
 
 fn set_kernel_trap_entry() {
     // TODO
+    unsafe {
+        asm!(
+            "csrw 0x305, {trap_handler}",
+            trap_handler = in(reg) trap_handler as *const() as usize,
+        );
+    }
 }
 
 fn set_user_trap_entry() {
@@ -34,6 +42,7 @@ pub fn enable_timer_interrupt() {
 }
 
 /// trap handler
+/// 初始化EENTRY要指向这里
 #[no_mangle]
 pub fn trap_handler() -> ! {
     loop {

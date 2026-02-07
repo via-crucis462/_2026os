@@ -233,8 +233,8 @@ impl TaskControlBlock {
             self.kernel_stack.get_top(),
             trap_handler as *const () as usize,
         );
-        trap_cx.x[10] = args.len();
-        trap_cx.x[11] = argv_base;
+        trap_cx.set_a0(args.len());
+        trap_cx.set_a1(argv_base);
         *inner.get_trap_cx() = trap_cx;
         // **** release current PCB
     }
