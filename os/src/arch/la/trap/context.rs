@@ -1,17 +1,19 @@
-//需要按照loongarch64架构修改
+//! 按照loongarch64架构修改
+
+use core::arch::asm;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-/// trap context structure containing sstatus, sepc and registers
+/// 模仿riscv设计
 pub struct TrapContext {
     /// General-Purpose Register x0-31
     pub x: [usize; 32],
-    /// Supervisor Status Register
-    // pub sstatus: Sstatus,
-    /// Supervisor Exception Program Counter
+    // prmd, trap前状态寄存器
+    pub sstatus: usize,
+    /// era, 返回地址
     pub sepc: usize,
     /// Token of kernel address space
-    pub kernel_satp: usize,
+    pub kernel_token: usize,
     /// Kernel stack pointer of the current application
     pub kernel_sp: usize,
     /// Virtual address of trap handler entry point in kernel
@@ -19,40 +21,33 @@ pub struct TrapContext {
 }
 
 impl TrapContext {
-    /// put the sp(stack pointer) into x\[2\] field of TrapContext
+    /// put the sp(stack pointer) into r[2] field of TrapContext
     pub fn set_sp(&mut self, sp: usize) {
         self.x[2] = sp;
     }
     /// init the trap context of an application
     pub fn app_init_context(
-        _entry: usize,
-        _sp: usize,
-        _kernel_satp: usize,
-        _kernel_sp: usize,
-        _trap_handler: usize,
+        entry: usize,
+        sp: usize,
+        kernel_token: usize,
+        kernel_sp: usize,
+        trap_handler: usize,
     ) -> Self {
-        /* 
-        let mut sstatus = sstatus::read();
+        let mut _c = 0;
         // set CPU privilege to User after trapping back
-        sstatus.set_spp(SPP::User);
+        unsafe {
+            asm!("# TODO");
+        }
         let mut cx = Self {
             x: [0; 32],
-            sstatus,
+            sstatus: 0,
             sepc: entry,  // entry point of app
-            kernel_satp,  // addr of page table
+            kernel_token,  // addr of page table
             kernel_sp,    // kernel stack
             trap_handler, // addr of trap_handler function
         };
         cx.set_sp(sp); // app's user stack pointer
         cx // return initial Trap Context of app
-        */
-        Self {
-            x: [0; 32],
-            sepc: 0,
-            kernel_satp: 0,
-            kernel_sp: 0,
-            trap_handler: 0,
-        }    
     }
      
 }
