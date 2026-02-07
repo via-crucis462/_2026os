@@ -1,7 +1,7 @@
 # 本文件相比riscv版本仅OUTPUT_ARCH和BASE_ADDRESS不同,其他部分完全一样
 OUTPUT_ARCH(loongarch)
 ENTRY(_start)
-BASE_ADDRESS = 0x00200000;
+BASE_ADDRESS = 0x0200000;
 
 SECTIONS
 {

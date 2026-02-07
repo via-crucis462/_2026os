@@ -45,6 +45,7 @@ pub mod task;
 
 use core::arch::global_asm;
 
+
 #[cfg(target_arch = "riscv64")]
 global_asm!(include_str!("arch/riscv/entry.asm"));
 #[cfg(target_arch = "loongarch64")]

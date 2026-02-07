@@ -7,11 +7,11 @@ use riscv::register::sstatus::{self, Sstatus, SPP};
 /// trap context structure containing sstatus, sepc and registers
 pub struct TrapContext {
     /// General-Purpose Register x0-31
-    pub x: [usize; 32],
+    x: [usize; 32],
     /// Supervisor Status Register
-    pub sstatus: Sstatus,
+    sstatus: Sstatus,
     /// Supervisor Exception Program Counter
-    pub sepc: usize,
+    sepc: usize,
     /// Token of kernel address space
     pub kernel_satp: usize,
     /// Kernel stack pointer of the current application
@@ -20,10 +20,30 @@ pub struct TrapContext {
     pub trap_handler: usize,
 }
 
+
+// 封装了对两平台名称不同寄存器的访问为同名接口
 impl TrapContext {
     /// put the sp(stack pointer) into x\[2\] field of TrapContext
     pub fn set_sp(&mut self, sp: usize) {
         self.x[2] = sp;
+    }
+    /// 设置返回值，a0对应x10
+    pub fn set_a0(&mut self, a0: usize) {
+        self.x[10] = a0;
+    }
+    pub fn set_a1(&mut self, a1: usize) {
+        self.x[11] = a1;
+    }
+    /// 获取返回值
+    pub fn get_a0(&self) -> usize {
+        self.x[10]
+    }
+    pub fn get_a1(&self) -> usize {
+        self.x[11]
+    }
+    /// 设置trap返回地址
+    pub fn set_rt(&mut self, sepc: usize) {
+        self.sepc = sepc;
     }
     /// init the trap context of an application
     pub fn app_init_context(

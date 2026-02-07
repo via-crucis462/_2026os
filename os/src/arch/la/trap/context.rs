@@ -1,17 +1,20 @@
 //! 按照loongarch64架构修改
 
-use core::arch::asm;
+use core::{arch::asm, default};
+
+use xmas_elf::program::ProgramHeader;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-/// 模仿riscv设计
+/// 复用riscv的设计，小幅度修改
 pub struct TrapContext {
     /// General-Purpose Register x0-31
-    pub x: [usize; 32],
-    // prmd, trap前状态寄存器
-    pub sstatus: usize,
-    /// era, 返回地址
-    pub sepc: usize,
+    r: [usize; 32],
+    /// prmd, trap前状态寄存器, 和riscv不同，
+    /// 保存的是上次trap前而非当前的状态
+    prmd: usize,
+    /// era, trap返回后下一步执行的地址
+    era: usize,
     /// Token of kernel address space
     pub kernel_token: usize,
     /// Kernel stack pointer of the current application
@@ -20,10 +23,29 @@ pub struct TrapContext {
     pub trap_handler: usize,
 }
 
+// 封装了对两平台名称不同寄存器的访问为同名接口
 impl TrapContext {
-    /// put the sp(stack pointer) into r[2] field of TrapContext
+    /// 将sp存入r3
     pub fn set_sp(&mut self, sp: usize) {
-        self.x[2] = sp;
+        self.r[3] = sp;
+    }
+    /// 设置返回值，a0对应r4
+    pub fn set_a0(&mut self, a0: usize) {
+        self.r[4] = a0;
+    }
+    pub fn set_a1(&mut self, a1: usize) {
+        self.r[5] = a1;
+    }
+    /// 获取返回值
+    pub fn get_a0(&self) -> usize {
+        self.r[4]
+    }
+    pub fn get_a1(&self) -> usize {
+        self.r[5]
+    }
+    /// 设置trap返回地址
+    pub fn set_rt(&mut self, era: usize) {
+        self.era = era;
     }
     /// init the trap context of an application
     pub fn app_init_context(
@@ -33,15 +55,20 @@ impl TrapContext {
         kernel_sp: usize,
         trap_handler: usize,
     ) -> Self {
-        let mut _c = 0;
-        // set CPU privilege to User after trapping back
+        // app启动需设置特权级为用户态，也就是plv=3
+        // 另，开启中断使能，开启分页
+        let mut default_status: usize  = 0b0001_0111; 
+        // la通过修改prmd寄存器而非cx实现
         unsafe {
-            asm!("# TODO");
+            asm!(
+                "csrwr {default_status}, 0x1", // 设置默认状态到prmd寄存器
+                default_status = in(reg) default_status,
+            )
         }
         let mut cx = Self {
-            x: [0; 32],
-            sstatus: 0,
-            sepc: entry,  // entry point of app
+            r: [0; 32],
+            prmd: 0,
+            era: entry,  // entry point of app
             kernel_token,  // addr of page table
             kernel_sp,    // kernel stack
             trap_handler, // addr of trap_handler function
