@@ -1,15 +1,18 @@
 //! LA64通常没有SBI，需要用uart模拟一些简单的SBI调用
+
+#![allow(unused)]
 use lazy_static::lazy_static;
 
 use crate::sync::UPSafeCell;
-
+use super::config::*;
+use core::arch::asm;
 // 使用uart模拟sbi
 struct UartSbi {
     base_addr: usize,
 }
 
 // qemu la64 uart基址
-const UART_BASE: usize = 0x1fe001e0;
+const UART_BASE: usize = UNCHACHED_KERNEL_BASE | 0x1fe001e0;
 
 lazy_static! {
     static ref UART_SBI: UPSafeCell<UartSbi> = 
@@ -69,8 +72,23 @@ pub fn console_getchar() -> usize {
 }
 
 #[allow(dead_code)]
-pub fn set_timer(_timer: usize) {
-    // TODO
+//、 ai写的设置定时器函数，暂未检查
+pub fn set_timer(timer: usize) {
+    // LoongArch 使用 CSR TCFG (0x41) 配置定时器
+    // TCFG 格式: [InitVal (bits 63:2)] | [Periodic (bit 1)] | [En (bit 0)]
+    // 定时器是倒计数的。我们需要计算 delta 并设置为单次触发模式。
+    
+    let current_time: usize;
+    unsafe { asm!("rdtime.d {}, $zero", out(reg) current_time); }
+    
+    let delta = if timer > current_time { timer - current_time } else { 2000 };
+    
+    // 设置初始值并使能 (Enable=1, Periodic=0 for One-shot)
+    let tcfg = (delta << 2) | 1;
+    
+    unsafe {
+        asm!("csrwr {}, 0x41", in(reg) tcfg);
+    }
 }
 
 #[allow(dead_code)]

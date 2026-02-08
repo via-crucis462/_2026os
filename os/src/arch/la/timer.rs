@@ -11,10 +11,15 @@ const MSEC_PER_SEC: usize = 1000;
 /// The number of microseconds per second
 const MICRO_PER_SEC: usize = 1_000_000;
 
+use core::arch::asm;
+
 /// Get the current time in ticks
 pub fn get_time() -> usize {
-    //TODO
-    0
+    let time: usize;
+    unsafe {
+        asm!("rdtime.d {}, $zero", out(reg) time);
+    }
+    time
 }
 
 /// get current time in milliseconds

@@ -44,6 +44,9 @@ pub mod syscall;
 pub mod task;
 
 use core::arch::global_asm;
+#[cfg(target_arch = "loongarch64")]
+#[allow(unused)]
+use crate::arch::la;
 
 
 #[cfg(target_arch = "riscv64")]
@@ -87,8 +90,17 @@ pub fn rust_main() -> ! {
 #[cfg(target_arch = "loongarch64")]
 #[no_mangle]
 pub fn rust_main() -> ! {
+    la::mm::la_kernel_init_mem();// 设置映射窗口，其实不写也可以，qemu会自动处理，但这里写上防止移植出现bug
     clear_bss();
     logging::init();
-    println!("Hello, LoongArch!"); 
-    panic!("haha");
+    info!("[kernel] Hello, world!");
+    mm::init();
+    mm::remap_test();
+    arch::trap::init();
+    arch::trap::enable_timer_interrupt();
+    arch::timer::set_next_trigger();
+    fs::list_apps();
+    task::add_initproc();
+    task::run_tasks();
+    panic!("Unreachable in rust_main!");
 }
