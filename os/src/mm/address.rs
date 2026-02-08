@@ -3,7 +3,7 @@ use crate::arch::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use core::fmt::{self, Debug, Formatter};
 
 const PA_WIDTH_SV39: usize = 56;
-const VA_WIDTH_SV39: usize = 39;
+const VA_WIDTH_SV39: usize = 39;//27+12
 const PPN_WIDTH_SV39: usize = PA_WIDTH_SV39 - PAGE_SIZE_BITS;
 const VPN_WIDTH_SV39: usize = VA_WIDTH_SV39 - PAGE_SIZE_BITS;
 
@@ -166,10 +166,11 @@ impl From<PhysPageNum> for PhysAddr {
 
 impl VirtPageNum {
     /// Get the indexes of the page table entry
+    /// la64的页表索引顺序与SV39相同
     pub fn indexes(&self) -> [usize; 3] {
         let mut vpn = self.0;
         let mut idx = [0usize; 3];
-        for i in (0..3).rev() {
+        for i in (0..3).rev()/*翻转*/ {
             idx[i] = vpn & 511;//取低9位
             vpn >>= 9;
         }
