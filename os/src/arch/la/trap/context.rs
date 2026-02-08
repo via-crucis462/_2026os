@@ -9,7 +9,7 @@ use xmas_elf::program::ProgramHeader;
 /// 复用riscv的设计，小幅度修改
 pub struct TrapContext {
     /// General-Purpose Register x0-31
-    r: [usize; 32],
+    pub r: [usize; 32],
     /// prmd, trap前状态寄存器, 和riscv不同，
     /// 保存的是上次trap前而非当前的状态
     prmd: usize,
@@ -46,6 +46,10 @@ impl TrapContext {
     /// 设置trap返回地址
     pub fn set_rt(&mut self, era: usize) {
         self.era = era;
+    }
+    /// 获取trap返回地址
+    pub fn get_rt(&self) -> usize {
+        self.era
     }
     /// init the trap context of an application
     pub fn app_init_context(
