@@ -19,9 +19,10 @@ pub const PAGE_SIZE: usize = 0x1000;
 /// page size bits: 12
 pub const PAGE_SIZE_BITS: usize = 0xc;
 /// the virtual addr of trampoline
-/// 对用户程序，转成va时会自动置零高半部分，所以无需额外更改
-pub const TRAMPOLINE: usize = usize::MAX - PAGE_SIZE + 1;
-/// the virtual addr of trap context
+/// 对用户程序，转成va时会自动置零高半部分，、
+/// 但这里/2使其本身就位于低半地址空间，更方便
+pub const TRAMPOLINE: usize = usize::MAX / 2 - PAGE_SIZE + 1;
+/// the virtual addr of trap context 
 pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
 /// clock frequency
 pub const CLOCK_FREQ: usize = 12500000;

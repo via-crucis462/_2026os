@@ -63,13 +63,13 @@ pub fn la_kernel_init_mem() {
 pub fn la_app_init_mem(token: usize) {
     unsafe {
         // 设置页表项宽度等参数
-        asm!("mtcr pwcl, {}", in(reg) PWCL_VAL);
-        asm!("mtcr pwch, {}", in(reg) PWCH_VAL);
+        asm!("csrwr {}, 0x1c", in(reg) PWCL_VAL); // PWCL
+        asm!("csrwr {}, 0x1d", in(reg) PWCH_VAL); // PWCH
         // 设置PGD寄存器保存根页表物理地址
-        asm!("mtcr pgdl, {}", in(reg) token);// 低半地址空间，对应用户态
-        // asm!("mtcr pgdh, 0");
+        asm!("csrwr {}, 0x19", in(reg) token);// PGDL 低半地址空间，对应用户态
+        // asm!("csrwr {}, 0x1a", in(reg) 0);
         // 设置TLB重填处理函数地址
-        asm!("mtcr tvec, {}", in(reg) tlb_refill_handler as *const() as usize);
+        asm!("csrwr {}, 0x88", in(reg) tlb_refill_handler as *const() as usize); // TLBRENTRY
     }
 }
 
@@ -88,7 +88,8 @@ pub fn tlb_refill_handler() {
             // 临时保存 t0 寄存器，否则会被覆盖
             "csrwr $t0, 0x8B",
             // 加载根页表（dir2）地址
-            "csrrd $t0, 0x1B",
+            // 默认均为用户态发生缺页，从PGDL加载
+            "csrrd $t0, 0x19",
             // 摘自手册：
             // “LDDIR、LDPTE指令执行所需的出错虚地址信息
             // 将来自于CSR.TLBRBADV”
