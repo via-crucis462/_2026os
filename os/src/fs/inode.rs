@@ -105,6 +105,10 @@ impl File for OSInode {
     fn getdents(&self, buf: &mut [u8]) -> isize{
         self.inode.getdents(buf)
     }
+
+    fn get_dentry(&self) -> Option<Arc<super::Dentry>> {
+        Some(self.dentry.clone())
+    }
 }
 bitflags! {
     ///  The flags argument to the open() system call is constructed by ORing together zero or more of the following values:
