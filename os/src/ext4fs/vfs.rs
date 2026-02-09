@@ -176,6 +176,10 @@ impl VfsInode for Ext4Inode {
         Some(self.fs.get_inode(new_inode_id))
     }
 
+    fn delete_dir_entry(&self, name: &str) -> Option<u32> {
+        self.delete_dir_entry(name)
+    }
+
     fn getdents(&self, buf: &mut [u8]) -> isize {
         if !self.is_dir() {
             return -1;

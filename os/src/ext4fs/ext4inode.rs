@@ -392,4 +392,52 @@ impl Ext4Inode {
         }
         false
     }
+
+    pub fn delete_dir_entry(&self, name: &str) -> Option<u32> {
+        let mut offset = 0;
+        let block_size = BLOCK_SZ as *const () as usize;
+        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        let file_size_bytes = disk_inode.size() as *const () as usize;
+
+        while offset < file_size_bytes {
+            let mut buf = alloc::vec![0u8; BLOCK_SZ as *const () as usize];
+            self.read_at(offset, &mut buf);
+
+            let mut block_offset = 0;
+            let mut prev_offset = 0;
+            while block_offset < block_size {
+                let dirent = unsafe { &mut *(buf[block_offset..].as_ptr() as *mut Ext4DirEntry) };
+                let rec_len = dirent.rec_len as *const () as usize;
+                
+                if rec_len == 0 { break; } 
+
+                if dirent.inode != 0 && dirent.name() == name {
+                    let target_inode_id = dirent.inode;
+                    if block_offset == 0 {
+                        dirent.inode = 0;
+                    } else {
+                        let prev_dirent = unsafe { &mut *(buf[prev_offset..].as_ptr() as *mut Ext4DirEntry) };
+                        prev_dirent.rec_len += rec_len as u16;
+                    }
+                    self.write_at(offset, &buf);
+                    
+                    // 递减链接数并检查是否需要回收
+                    let links = self.fs.decrease_link_count(target_inode_id);
+                    if links == 0 {
+                        // 如果链接数为0，回收 Inode (目前暂不递归回收数据块，以防复杂性)
+                        self.fs.dealloc_inode(target_inode_id);
+                    }
+                    
+                    return Some(target_inode_id);
+                }
+
+                prev_offset = block_offset;
+                block_offset += rec_len;
+                if block_offset >= block_size { break; }
+            }
+            offset += block_size;
+        }
+        None
+    }
+    
 }

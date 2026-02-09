@@ -178,7 +178,7 @@ impl TaskControlBlock {
 
     /// Load a new elf to replace the original application address space and start execution
     pub fn exec(&self, elf_data: &[u8], args: Vec<String>) {
-        // memory_set with elf program headers/trampoline/trap context/user stack
+        // 1. 加载 ELF 文件生成新的地址空间
         let (memory_set, mut user_sp, entry_point) = MemorySet::from_elf(elf_data);
         info!(
             "[kernel] task::exec: entry_point={:#x}, user_sp={:#x}",
@@ -188,55 +188,66 @@ impl TaskControlBlock {
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
             .ppn();
-        // 读取用户栈顶（堆区底）地址
         let memory_top = user_sp;
 
-        // push arguments on user stack
-        user_sp -= (args.len() + 1) * core::mem::size_of::<usize>();
-        let argv_base = user_sp;
-        let mut argv: Vec<_> = (0..=args.len())
-            .map(|arg| {
-                translated_refmut(
-                    memory_set.token(),
-                    (argv_base + arg * core::mem::size_of::<usize>()) as *mut usize,
-                )
-            })
-            .collect();
-        *argv[args.len()] = 0;
-        for i in 0..args.len() {
-            user_sp -= args[i].len() + 1;
-            *argv[i] = user_sp;
+        // --- 开始构造符合 ABI 标准的用户栈 ---
+        
+        // 2. 首先压入具体的字符串内容（高地址）
+        let mut argv_ptrs: Vec<usize> = Vec::new();
+        for arg in args.iter() {
+            user_sp -= arg.len() + 1; // +1 是为了结尾的 '\0'
             let mut p = user_sp;
-            for c in args[i].as_bytes() {
+            for c in arg.as_bytes() {
                 *translated_refmut(memory_set.token(), p as *mut u8) = *c;
                 p += 1;
             }
-            *translated_refmut(memory_set.token(), p as *mut u8) = 0;
+            *translated_refmut(memory_set.token(), p as *mut u8) = 0; // 写入结尾 0
+            argv_ptrs.push(user_sp);
         }
-        // make the user_sp aligned to 8B for k210 platform
+
+        // 3. 对齐栈指针到 8 字节
         user_sp -= user_sp % core::mem::size_of::<usize>();
 
-        // **** access current TCB exclusively
+        // 4. 压入 argv 数组：先压入一个 NULL (0) 作为结尾
+        user_sp -= core::mem::size_of::<usize>();
+        *translated_refmut(memory_set.token(), user_sp as *mut usize) = 0;
+
+        // 5. 逆序压入 argv 的指针（从 argv[n-1] 到 argv[0]）
+        for arg_ptr in argv_ptrs.iter().rev() {
+            user_sp -= core::mem::size_of::<usize>();
+            *translated_refmut(memory_set.token(), user_sp as *mut usize) = *arg_ptr;
+        }
+
+        // 此时 user_sp 即为 argv[0] 的地址，也就是 argv 数组的起始地址
+        let argv_base = user_sp;
+
+        // 6. 最后压入 argc（这是栈的最顶部，即最低地址）
+        user_sp -= core::mem::size_of::<usize>();
+        *translated_refmut(memory_set.token(), user_sp as *mut usize) = args.len();
+
+        // --- 压栈结束，此时 user_sp 指向 argc ---
+
+        // 7. 更新 TCB 内部信息
         let mut inner = self.inner_exclusive_access();
-        // substitute memory_set
         inner.memory_set = memory_set;
-        // update trap_cx ppn
         inner.trap_cx_ppn = trap_cx_ppn;
-        // 加载新程序后需要更新堆区底、断点
         inner.heap_bottom = memory_top;
         inner.program_brk = memory_top;
-        // initialize trap_cx
+
+        // 8. 设置初始异常上下文 (TrapContext)
         let mut trap_cx = TrapContext::app_init_context(
             entry_point,
-            user_sp,
+            user_sp, // 让用户程序一进来 sp 就指向 argc
             KERNEL_SPACE.exclusive_access().token(),
             self.kernel_stack.get_top(),
             trap_handler as *const () as usize,
         );
-        trap_cx.set_a0(args.len());
-        trap_cx.set_a1(argv_base);
+        
+        // 虽然 crt.S 会用 sp 覆盖 a0，但我们还是按照惯例填好 a0 和 a1
+        trap_cx.x[10] = args.len();
+        trap_cx.x[11] = argv_base;
+        
         *inner.get_trap_cx() = trap_cx;
-        // **** release current PCB
     }
 
     /// Fork from parent to child

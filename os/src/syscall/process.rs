@@ -34,6 +34,17 @@ pub tms_stime: usize,  // 内核态时间
 pub tms_cutime: usize, // 子进程用户态时间
 pub tms_cstime: usize, // 子进程内核态时间
 }
+
+#[repr(C)]
+pub struct UtsName {
+    pub sysname: [u8; 65],
+    pub nodename: [u8; 65],
+    pub release: [u8; 65],
+    pub version: [u8; 65],
+    pub machine: [u8; 65],
+    pub domainname: [u8; 65],
+}
+
 pub fn sys_exit(exit_code: i32) -> ! {
     trace!("kernel:pid[{}] sys_exit",current_task().unwrap().pid.0);
     exit_current_and_run_next(exit_code);
@@ -58,6 +69,38 @@ pub fn sys_getppid() -> isize {
         None => 0, 
     }
 }
+
+pub fn sys_uname(uts: *mut UtsName) -> isize {
+    let token = current_user_token();
+    let uts_name = translated_refmut(token, uts);
+    
+    // 填充系统信息
+    let sysname = b"rCore";
+    let nodename = b"rCore-Nodename";
+    let release = b"5.10.0-rcore";
+    let version = b"v0.1.0";
+    let machine = b"riscv64";
+    let domainname = b"rcore.os";
+
+    // 辅助函数，安全复制并补 0
+    fn fill_str(dest: &mut [u8; 65], src: &[u8]) {
+        let len = src.len().min(64);
+        dest[..len].copy_from_slice(&src[..len]);
+        for i in len..65 {
+            dest[i] = 0;
+        }
+    }
+
+    fill_str(&mut uts_name.sysname, sysname);
+    fill_str(&mut uts_name.nodename, nodename);
+    fill_str(&mut uts_name.release, release);
+    fill_str(&mut uts_name.version, version);
+    fill_str(&mut uts_name.machine, machine);
+    fill_str(&mut uts_name.domainname, domainname);
+    
+    0
+}
+
 pub fn _sys_fork() -> isize {
 	trace!("kernel:pid[{}] sys_fork", current_task().unwrap().pid.0);
     let current_task = current_task().unwrap();

@@ -18,8 +18,8 @@ const SYSCALL_DUP2: usize = 24;
 const SYSCALL_UNLINKAT: usize = 35;
 /// linkat syscall
 const SYSCALL_LINKAT: usize = 37;
-/// open syscall
-const SYSCALL_OPEN: usize = 56;
+/// openat syscall
+const SYSCALL_OPENAT: usize = 56;
 /// close syscall
 const SYSCALL_CLOSE: usize = 57;
 /// pipe syscall
@@ -46,7 +46,7 @@ const SYSCALL_SIGRETURN: usize = 139;
 /// setpriority syscall
 const SYSCALL_SET_PRIORITY: usize = 140;
 const SYSCALL_TIMES: usize = 153;
-///const SYS_UNAME: usize = 160;
+const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 /// getpid syscall
 const SYSCALL_GETPID: usize = 172;
@@ -73,6 +73,10 @@ const SYSCALL_GETDENTS: usize = 61;
 const SYSCALL_GETCWD: usize = 17;
 /// chdir syscall
 const SYSCALL_CHDIR: usize = 49;
+/// mount syscall
+const SYSCALL_MOUNT: usize = 40;
+/// umount syscall
+const SYSCALL_UMOUNT: usize = 39;
 mod fs;
 mod process;
 
@@ -89,7 +93,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
-        SYSCALL_OPEN => sys_open(args[1] as *const u8, args[2] as u32),
+        SYSCALL_OPENAT => sys_openat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_CLOSE => sys_close(args[0]),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut usize),
         SYSCALL_LINKAT => sys_linkat(args[1] as *const u8, args[3] as *const u8),
@@ -120,6 +124,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         ),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_BRK => sys_brk(args[0] as *const () as usize),
+        SYSCALL_UNAME => sys_uname(args[0] as *mut UtsName),
         SYSCALL_SPAWN => sys_spawn(args[0] as *const u8),
         SYSCALL_SET_PRIORITY => sys_set_priority(args[0] as isize),
         SYSCALL_TIMES => sys_times(args[0] as *mut usize),
@@ -127,6 +132,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETDENTS => sys_getdents(args[0], args[1] as *mut u8, args[2]),
         SYSCALL_GETCWD => sys_getcwd(args[0] as *mut u8, args[1]),
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
+        SYSCALL_MOUNT => sys_mount(args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3] as u32),
+        SYSCALL_UMOUNT => sys_umount(args[0] as *const u8),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
