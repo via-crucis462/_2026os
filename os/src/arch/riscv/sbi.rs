@@ -4,10 +4,13 @@
 
 use core::arch::asm;
 
-const SBI_SET_TIMER: usize = 0;
+// 如果用qemu8，下列需要修改
+const SBI_SET_TIMER: usize = 0;//qemu7
+// const SBI_SET_TIMER: usize = 0x54494D45;//qemu8
 const SBI_CONSOLE_PUTCHAR: usize = 1;
 const SBI_CONSOLE_GETCHAR: usize = 2;
-const SBI_SHUTDOWN: usize = 8;
+const SBI_SHUTDOWN: usize = 8;//qemu7
+// const SBI_SHUTDOWN: usize = 0x53525354;//qemu8
 
 /// general sbi call
 #[inline(always)]

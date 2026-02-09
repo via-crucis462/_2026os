@@ -12,7 +12,6 @@ pub struct PageTable {
 }
 
 /// Assume that it won't oom when creating/mapping.
-/// 按照LA64标准重写方法
 impl PageTable {
     /// Create a new page table
     pub fn new() -> Self {
@@ -25,6 +24,7 @@ impl PageTable {
     /// Temporarily used to get arguments from user space.
     /// LA64根页表地址存储在CSR.PGDL或H，
     /// 这里存储的是2级页表的物理页号，因为弃用了3，4级页表
+    /// 参考rv64的rcore理解即可
     pub fn from_token(token: usize) -> Self {
         Self {
             root_ppn: PhysPageNum::from(token & ((1usize << 44) - 1)),
@@ -52,7 +52,8 @@ impl PageTable {
         result
     }
     /// Find PageTableEntry by VirtPageNum
-    fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+    /// 为了la64加入声明为pub
+    pub fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;

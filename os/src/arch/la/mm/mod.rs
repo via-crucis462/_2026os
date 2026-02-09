@@ -3,9 +3,16 @@
 //! 尚不完善
 pub mod pte;
 
-use crate::mm::address::VirtAddr;
+use crate::mm::address::*;
 use crate::arch::config::*;
 use core::arch::asm;
+
+// 摘自手册：当CSR.CRMD的DA=0且PG=1时，处理器核的MMU处于映射地址翻译模式。具体又分为直接映射
+// 地址翻译模式（简称“直接映射模式”）和页表映射地址翻译模式（简称“页表映射模式”）两种。
+// 0x1设置特权级plv0，0x10设置缓存开启
+const DMW0_VAL: usize = UNCHACHED_KERNEL_BASE | 0x1;
+const DMW1_VAL: usize = KERNEL_BASE | 0x11;
+const DMW2_VAL: usize = 0 | 0x1;
 
 const PA_WIDTH_SV39: usize = 56;
 const VA_WIDTH_SV39: usize = 39;
@@ -36,25 +43,65 @@ const PWCL_VAL: usize = (PT_BASE << 0) |
 // 弃用3/4级页表，给控制高位部分的寄存器置零
 const PWCH_VAL: usize = 0; 
 
-/// 启动时内存有关寄存器初始化，后续完善后在init()中调用
-/// token: 根页表物理地址
-pub fn la64_init_mem(token: usize) {
+/// 内核启动时设置映射窗口，特别地，屏蔽掉0开头的地址映射
+pub fn la_kernel_init_mem() {
+    // 设置直接映射配置窗口
+    unsafe {
+        asm!("csrwr {}, 0x180", in(reg) DMW0_VAL);
+        asm!("csrwr {}, 0x181", in(reg) DMW1_VAL);
+        asm!("csrwr {}, 0x182", in(reg) DMW2_VAL);
+        let mut t: usize;
+        asm!("csrrd {}, 0x0", out(reg) t);
+        t |= 1 << 4;
+        t &= !(1 << 3);
+        asm!("csrwr {}, 0x0", in(reg) t);
+    }
+}
+
+/// 内存相关寄存器初始化，需要在启动应用时调用，尚未完善
+/// token: 当前内存空间根页表物理地址
+pub fn la_app_init_mem(token: usize) {
     unsafe {
         // 设置页表项宽度等参数
         asm!("mtcr pwcl, {}", in(reg) PWCL_VAL);
         asm!("mtcr pwch, {}", in(reg) PWCH_VAL);
-        // 设置PGD寄存器，指向根页表
-        asm!("mtcr pgdl, {}", in(reg) token);
-        asm!("mtcr pgdh, 0");
+        // 设置PGD寄存器保存根页表物理地址
+        asm!("mtcr pgdl, {}", in(reg) token);// 低半地址空间，对应用户态
+        // asm!("mtcr pgdh, 0");
+        // 设置TLB重填处理函数地址
+        asm!("mtcr tvec, {}", in(reg) tlb_refill_handler as *const() as usize);
     }
 }
 
-/// TLB重填，未完成
+/// TLB重填软件逻辑，相比硬件处理效率较低，暂不实现
+#[allow(unused)]
 pub fn do_tlb_refill(_va: VirtAddr) {
     // TODO
 }
 
-// TLB重填异常处理
+/// TLB重填异常处理
+#[no_mangle]
 pub fn tlb_refill_handler() {
-    // TODO
+    // 硬件会自动保存异常虚拟地址到TLBRBADV
+    unsafe {
+        asm!(
+            // 临时保存 t0 寄存器，否则会被覆盖
+            "csrwr $t0, 0x8B",
+            // 加载根页表（dir2）地址
+            "csrrd $t0, 0x1B",
+            // 摘自手册：
+            // “LDDIR、LDPTE指令执行所需的出错虚地址信息
+            // 将来自于CSR.TLBRBADV”
+            // 根据触发异常的va逐级遍历dir2,dir1,pt
+            "lddir $t0, $t0, 2",
+            "lddir $t0, $t0, 1",
+            // la64“双页”，奇偶分别处理
+            "ldpte $t0, 0",
+            "ldpte $t0, 1",
+            // 执行重填并返回
+            "tlbfill",
+            "csrrd $t0, 0x8B",
+            "ertn",
+        );
+    }
 }

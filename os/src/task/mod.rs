@@ -192,10 +192,10 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
         task_inner.trap_ctx_backup = Some(*trap_ctx);
 
         // modify trapframe
-        trap_ctx.sepc = handler;
+        trap_ctx.set_rt(handler);
 
         // put args (a0)
-        trap_ctx.x[10] = sig;
+        trap_ctx.set_a0(sig);
     } else {
         // default action
         println!("[K] task/call_user_signal_handler: default action: ignore it or kill process");
