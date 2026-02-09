@@ -2,7 +2,9 @@ use super::{frame_alloc, FrameTracker};
 use super::{PageTable, pte::*, PTEFlags};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
-use crate::arch::config::{MEMORY_END, MMIO, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
+use crate::arch::config::{MEMORY_END,  PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
+#[cfg(target_arch = "riscv64")]
+use crate::arch::config::MMIO;
 use crate::mm::mmap;
 use crate::sync::UPSafeCell;
 use alloc::collections::BTreeMap;
@@ -107,8 +109,8 @@ impl MemorySet {
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
         self.page_table.map(
-            VirtAddr::from(TRAMPOLINE).into(),
-            PhysAddr::from(strampoline as *const () as usize).into(),
+            VirtAddr::from(TRAMPOLINE).into(),// 高位0xf...被截断
+            PhysAddr::from(strampoline as *const () as usize).into(),// 高位0x9...被截断
             PTEFlags::R | PTEFlags::X,
         );
     }
@@ -175,6 +177,8 @@ impl MemorySet {
             ),
             None,
         );
+        #[cfg(target_arch = "riscv64")]
+        {
         info!("mapping memory-mapped registers");
         for pair in MMIO {
             memory_set.push(
@@ -186,6 +190,7 @@ impl MemorySet {
                 ),
                 None,
             );
+        }
         }
         memory_set
     }
@@ -302,21 +307,12 @@ impl MemorySet {
         }
     }
     /// 对于龙芯，修改PGDL/H寄器
+    /// 只用了三级页表，H不用管
     #[cfg(target_arch = "loongarch64")]
     pub fn activate(&self) {
-        let pgd_pa = PhysAddr::from(
-            self.page_table.token() << crate::arch::config::PAGE_SIZE_BITS,
-        );
+        let pgdl = self.page_table.token();
         unsafe {
-            asm!(
-                "
-                csrw pgdl, {0}
-                csrw pgdh, {1}
-                sfence.vma
-                ",
-                in(reg) (pgd_pa.0 & 0xffff_ffff) as *const () as usize,
-                in(reg) ((pgd_pa.0 >> 32) & 0xffff_ffff) as *const () as usize,
-            );
+            asm!("csrwr {pgdl}, 0x1", pgdl = in(reg) pgdl,);
         }
     }
     

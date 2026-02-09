@@ -9,7 +9,7 @@ pub struct TaskContext {
     /// Stack pointer
     sp: usize,
     /// s0-11 register, callee saved
-    s: [usize; 12],
+    s: [usize; 12],// la64只有s0-s9，但不单独定义，牺牲一点空间换取简洁
 }
 
 impl TaskContext {

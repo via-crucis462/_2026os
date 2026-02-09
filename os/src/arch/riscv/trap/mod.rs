@@ -21,12 +21,9 @@ use crate::task::{
 };
 use crate::arch::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
-#[cfg(target_arch = "riscv64")]
-use riscv::register::{
-    mtvec::TrapMode,
-    scause::{self, Exception, Interrupt, Trap},
-    sie, stval, stvec,
-};
+use riscv::register::{scause, stval, stvec, sie};
+use scause::{Exception, Interrupt, Trap};
+use stvec::TrapMode;
 
 global_asm!(include_str!("trap.S"));
 
@@ -64,7 +61,7 @@ pub fn trap_handler() -> ! {
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
             let mut cx = current_trap_cx();
-            cx.sepc += 4;
+            cx.set_rt(cx.get_rt() + 4);
             // get system call return value
             let result = syscall(
                 cx.x[17], 
@@ -72,7 +69,7 @@ pub fn trap_handler() -> ! {
             );
             // cx is changed during sys_exec, so we have to call it again
             cx = current_trap_cx();
-            cx.x[10] = result as *const () as usize;
+            cx.set_a0(result as usize);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_trigger();
@@ -83,7 +80,7 @@ pub fn trap_handler() -> ! {
                 scause.cause(),
                 crate::task::current_task().unwrap().pid.0,
                 stval,
-                current_trap_cx().sepc,
+                current_trap_cx().get_rt(),
             );
             current_add_signal(SignalFlags::SIGSEGV);
         }
