@@ -96,11 +96,15 @@ pub fn rust_main() -> ! {
     info!("[kernel] Hello, world!");
     mm::init();
     mm::remap_test();
+    println!("1");
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger();
+    println!("2");
     fs::list_apps();
+    println!("3");
     task::add_initproc();
+    println!("4");
     task::run_tasks();
     panic!("Unreachable in rust_main!");
 }

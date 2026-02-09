@@ -61,17 +61,12 @@ impl TrapContext {
     ) -> Self {
         // app启动需设置特权级为用户态，也就是plv=3
         // 另，开启中断使能，开启分页
+        // 注意，_restore函数会将prmd的值写入prmd寄存器，然后才ertn，所以不应该设置到寄存器中，否则出问题
         let mut default_status: usize  = 0b0001_0111; 
-        // la通过修改prmd寄存器而非cx实现
-        unsafe {
-            asm!(
-                "csrwr {default_status}, 0x1", // 设置默认状态到prmd寄存器
-                default_status = in(reg) default_status,
-            )
-        }
+        
         let mut cx = Self {
             r: [0; 32],
-            prmd: 0,
+            prmd: default_status,
             era: entry,  // entry point of app
             kernel_token,  // addr of page table
             kernel_sp,    // kernel stack

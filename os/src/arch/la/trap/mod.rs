@@ -47,8 +47,8 @@ fn set_user_trap_entry() {
 pub fn enable_timer_interrupt() {
     unsafe {
         let mut ecfg: usize;
-        asm!("csrrd {}, 0x41", out(reg) ecfg);
-        asm!("csrwr {}, 0x41", in(reg) ecfg | (1 << 11),);
+        asm!("csrrd {}, 0x4", out(reg) ecfg);
+        asm!("csrwr {}, 0x4", in(reg) ecfg | (1 << 11),);
     }
 }
 
@@ -74,14 +74,15 @@ pub fn trap_handler() -> ! {
         asm!("csrrd {}, 0x5", out(reg) t);
         t
     };
-    let stval = unsafe {
+    // 出错虚地址
+    let badv = unsafe {
         let t: usize;
-        asm!("csrrd {}, 0x43", out(reg) t);
+        asm!("csrrd {}, 0x7", out(reg) t);
         t
     };
     let cause = if ((estat >> 11) & 1)  != 0 {
         Cause::TimeInterrupt
-    } else if ((estat >> 16) & 0xB) != 0 {
+    } else if ((estat >> 16) & 0x3fff) == 0xB {
         Cause::Syscall
     } else {
         Cause::Other
@@ -98,7 +99,7 @@ pub fn trap_handler() -> ! {
                 );
                 // cx is changed during sys_exec, so we have to call it again
                 cx = current_trap_cx();
-                cx.r[10] = result as *const () as usize;
+                cx.r[4] = result as *const () as usize;
             }
             Cause::TimeInterrupt => {
                 set_next_trigger();
@@ -108,7 +109,7 @@ pub fn trap_handler() -> ! {
                 error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, bad instruction = {:#x}",
                     cause,
                     crate::task::current_task().unwrap().pid.0,
-                    stval,
+                    badv,
                     current_trap_cx().get_rt(),
                 );
                 current_add_signal(SignalFlags::SIGSEGV);
@@ -126,11 +127,11 @@ pub fn trap_handler() -> ! {
 
 #[no_mangle]
 /// return to user space
+/// 参考riscv的实现，小幅度修改
 pub fn trap_return() -> ! {
-    /*
     set_user_trap_entry();
-    let _trap_cx_ptr = TRAP_CONTEXT_BASE;
-    // let _user_satp = current_user_token();
+    let trap_cx_ptr = TRAP_CONTEXT_BASE;
+    let user_satp = current_user_token();
     // println!("[kernel] trap_return: to user mode");
     extern "C" {
         fn __alltraps();
@@ -140,17 +141,13 @@ pub fn trap_return() -> ! {
     // trace!("[kernel] trap_return: ..before return");
     unsafe {
         asm!(
-            "fence.i",
+            "dbar 0", // Ensure ordering
             "jr {restore_va}",
             restore_va = in(reg) restore_va,
-            //in("a0") trap_cx_ptr,
-            //in("a1") user_satp,
+            in("$a0") trap_cx_ptr,
+            in("$a1") user_satp,
             options(noreturn)
         );
-    }
-    */
-    loop {
-        
     }
 }
 
@@ -159,14 +156,7 @@ pub fn trap_return() -> ! {
 /// Unimplement: traps/interrupts/exceptions from kernel mode
 /// Todo: Chapter 9: I/O device
 pub fn trap_from_kernel() -> ! {
-    loop {
-        
-    }
-    /* 
-    use riscv::register::sepc;
-    trace!("stval = {:#r}, sepc = {:#r}", stval::read(), sepc::read());
-    panic!("a trap {:?} from kernel!", scause::read().cause());
-    */
+    panic!("a trap from kernel!");
 }
 
 pub use context::TrapContext;
