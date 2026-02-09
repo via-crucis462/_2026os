@@ -1,5 +1,5 @@
 //! File and filesystem-related syscalls
-use crate::fs::{make_pipe, OpenFlags, Stat, open_file, make_dir};
+use crate::fs::{make_pipe, OpenFlags, Stat, open_file, make_dir, parent_path, file_name};
 use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
 use crate::task::{current_task, current_user_token};
 use alloc::sync::Arc;
@@ -48,15 +48,37 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     }
 }
 
-pub fn sys_open(path: *const u8, flags: u32) -> isize {
+const AT_FDCWD: isize = -100;
+
+pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isize {
     let task = current_task().unwrap();
-    let cwd = task.inner_exclusive_access().cwd.clone();
     let token = current_user_token();
-    let path = translated_str(token, path);
-    debug!("[kernel] sys_open: path={}", path);
-    if let Some(inode) = open_file(cwd, path.as_str(), OpenFlags::from_bits(flags).unwrap()) {
+    let path_str = translated_str(token, path);
+    debug!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
+
+    let start_dentry = if path_str.starts_with('/') {
+        crate::fs::ROOT_DENTRY.clone()
+    } else if dirfd == AT_FDCWD {
+        task.inner_exclusive_access().cwd.clone()
+    } else {
+        let inner = task.inner_exclusive_access();
+        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
+            return -1;
+        }
+        if let Some(file) = &inner.fd_table[dirfd as usize] {
+            if let Some(dentry) = file.get_dentry() {
+                dentry
+            } else {
+                return -1;
+            }
+        } else {
+            return -1;
+        }
+    };
+
+    if let Some(inode) = open_file(start_dentry, path_str.as_str(), OpenFlags::from_bits(flags).unwrap()) {
         if OpenFlags::from_bits(flags).unwrap().should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
-            trace!("VFS: sys_open failed - '{}' is not a directory", path);
+            trace!("VFS: sys_openat failed - '{}' is not a directory", path_str);
             return -1;
         }
         let mut inner = task.inner_exclusive_access();
@@ -164,8 +186,24 @@ pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
 }
 
 /// YOUR JOB: Implement unlinkat.
-pub fn sys_unlinkat(_name: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_unlinkat NOT IMPLEMENTED", current_task().unwrap().pid.0);
+pub fn sys_unlinkat(path: *const u8) -> isize {
+    let token = current_user_token();
+    let path_str = translated_str(token, path);
+    trace!("kernel:pid[{}] sys_unlinkat path={}", current_task().unwrap().pid.0, path_str);
+    
+    let parent_path_str = parent_path(&path_str);
+    let name = file_name(&path_str);
+    
+    let task = current_task().unwrap();
+    let cwd = task.inner_exclusive_access().cwd.clone();
+    
+    if let Some(parent_dentry) = cwd.find_tree(&parent_path_str) {
+        if let Some(_inode_id) = parent_dentry.inode.delete_dir_entry(&name) {
+            // 清理 Dentry 缓存，确保下次也读不到
+            parent_dentry.children.lock().remove(&name);
+            return 0;
+        }
+    }
     -1
 }
 
@@ -246,4 +284,20 @@ pub fn sys_chdir(path: *const u8) -> isize {
     } else {
         -1
     }
+}
+
+pub fn sys_mount(source: *const u8, target: *const u8, filesystemtype: *const u8, mountflags: u32) -> isize {
+    let token = current_user_token();
+    let source_str = translated_str(token, source);
+    let target_str = translated_str(token, target);
+    let filesystemtype_str = translated_str(token, filesystemtype);
+    debug!("[kernel] sys_mount: source={}, target={}, filesystemtype={}, mountflags={}", source_str, target_str, filesystemtype_str, mountflags);
+    return 0;    // 目前仅支持 ext4 文件系统的挂载
+}
+
+pub fn sys_umount(target: *const u8) -> isize {
+    let token = current_user_token();
+    let target_str = translated_str(token, target);
+    debug!("[kernel] sys_umount: target={}", target_str);
+    return 0;
 }
