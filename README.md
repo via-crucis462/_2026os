@@ -94,3 +94,9 @@ TODO：把现有的内核架构进一步拆分为抽象层和实现层，其中�
 3. 实现了mmap和munmap，在memory_set中添加了一个函数名为find_free_area，调用时当传入的虚拟地址有冲突时，调用这个函数似乎可以自动分配内存
 4. 给SuperBlock中添加了字段，用于记录其是否开启了extents扩展。
 5. 增加了alloc_blockid方法给EXT4Inode，用于动态分配文件的块大小内容。
+
+## 2026.2.9
+### tbw
+1. 伪实现了mount，unmount
+2. 实现了openat，修改了原open系统调用，现在接收第一个参数
+3. 实现了unmae系统调用，在process.rs中，只支持常量输出目前
