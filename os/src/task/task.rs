@@ -244,8 +244,8 @@ impl TaskControlBlock {
         );
         
         // 虽然 crt.S 会用 sp 覆盖 a0，但我们还是按照惯例填好 a0 和 a1
-        trap_cx.x[10] = args.len();
-        trap_cx.x[11] = argv_base;
+        trap_cx.set_a0(args.len());
+        trap_cx.set_a1(argv_base);
         
         *inner.get_trap_cx() = trap_cx;
     }
