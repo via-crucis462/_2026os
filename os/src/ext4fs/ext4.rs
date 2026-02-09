@@ -141,4 +141,60 @@ impl Ext4FS {
         }
         None
     }
+
+    pub fn dealloc_inode(&self, inode_id: u32) {
+        let inodes_per_group = self.superblock.inodes_per_group;
+        let group_idx = (inode_id - 1) / inodes_per_group;
+        let inode_idx = (inode_id - 1) % inodes_per_group;
+
+        let mut group = self.block_groups[group_idx as usize].lock();
+        let bitmap_block = group.inode_bitmap_id;
+        let block_cache = get_block_cache(bitmap_block as usize, self.block_dev.clone());
+        let mut bitmap_cache = block_cache.lock();
+        
+        let byte_idx = (inode_idx / 8) as usize;
+        let bit_idx = inode_idx % 8;
+        
+        bitmap_cache.modify(0, |bitmap: &mut [u8; 4096]| {
+            bitmap[byte_idx] &= !(1 << bit_idx);
+        });
+
+        group.free_inodes_count += 1;
+    }
+
+    pub fn dealloc_block(&self, block_id: u32) {
+        if block_id == 0 { return; }
+        let blocks_per_group = self.superblock.blocks_per_group;
+        let first_data_block = self.superblock.first_data_block;
+
+        let relative_block_id = block_id - first_data_block;
+        let group_idx = relative_block_id / blocks_per_group;
+        let block_idx = relative_block_id % blocks_per_group;
+
+        let mut group = self.block_groups[group_idx as usize].lock();
+        let bitmap_block = group.block_bitmap_id;
+        let block_cache = get_block_cache(bitmap_block as usize, self.block_dev.clone());
+        let mut bitmap_cache = block_cache.lock();
+
+        let byte_idx = (block_idx / 8) as usize;
+        let bit_idx = block_idx % 8;
+
+        bitmap_cache.modify(0, |bitmap: &mut [u8; 4096]| {
+            bitmap[byte_idx] &= !(1 << bit_idx);
+        });
+
+        group.free_blocks_count += 1;
+    }
+
+    pub fn decrease_link_count(&self, inode_id: u32) -> u16 {
+        let (block_id, offset) = self.get_inode_pos(inode_id);
+        let block_cache = get_block_cache(block_id as usize, self.block_dev.clone());
+        let mut cache = block_cache.lock();
+        cache.modify(offset, |disk_inode: &mut Ext4InodeDisk| {
+            if disk_inode.i_links_count > 0 {
+                disk_inode.i_links_count -= 1;
+            }
+            disk_inode.i_links_count
+        })
+    }
 }

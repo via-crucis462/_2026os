@@ -29,6 +29,8 @@ pub trait File: Send + Sync {
     fn get_stat(&self) -> Stat;
     /// 获取目录下的所有目录项
     fn getdents(&self, _buf: &mut [u8]) -> isize;
+    /// 获取文件的 Dentry
+    fn get_dentry(&self) -> Option<Arc<Dentry>> { None }
 }
 
 /// The stat of a inode
@@ -83,6 +85,7 @@ pub trait VfsInode: Send + Sync {
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>>;
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
     fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
+    fn delete_dir_entry(&self, name: &str) -> Option<u32>;
     fn getdents(&self, buf: &mut [u8]) -> isize;
 }
 
