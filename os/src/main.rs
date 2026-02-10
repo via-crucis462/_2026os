@@ -43,6 +43,8 @@ pub mod sync;
 pub mod syscall;
 pub mod task;
 
+#[allow(unused)]
+use crate::arch::sbi::*;
 use core::arch::global_asm;
 #[cfg(target_arch = "loongarch64")]
 #[allow(unused)]

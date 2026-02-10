@@ -1,8 +1,4 @@
-// LA64需要重写timer
-
-use crate::arch::config::CLOCK_FREQ;
-use crate::arch::sbi::set_timer;
-
+// 为LA64部分重写，尚未完善
 
 /// The number of ticks per second
 const TICKS_PER_SEC: usize = 100;
@@ -12,30 +8,44 @@ const MSEC_PER_SEC: usize = 1000;
 const MICRO_PER_SEC: usize = 1_000_000;
 
 use core::arch::asm;
+// 全局只初始化一次，所以unsafe是安全的
+static mut TIMER_FREQUENCY: usize = 0;
 
 /// Get the current time in ticks
 pub fn get_time() -> usize {
-    let time: usize;
+    let mut time: usize;
     unsafe {
         asm!("rdtime.d {}, $zero", out(reg) time);
     }
+
     time
+}
+
+/// 读取板载时钟频率，单位Hz
+pub fn init_board_freq() {
+    let freq;
+    unsafe {
+        asm!("cpucfg {}, {}", out(reg) freq, in(reg) 0x4);
+        TIMER_FREQUENCY = freq;
+    }
 }
 
 /// get current time in milliseconds
 pub fn get_time_ms() -> usize {
-    //TODO
-    let time = 0;
-    time * MSEC_PER_SEC / CLOCK_FREQ
+    let time = get_time();
+    time * MSEC_PER_SEC / unsafe { TIMER_FREQUENCY }
 }
 
 /// get current time in microseconds
 pub fn get_time_us() -> usize {
-    let time = 0;
-    time * MICRO_PER_SEC / CLOCK_FREQ
+    let time = get_time();
+    time * MICRO_PER_SEC / unsafe { TIMER_FREQUENCY }
 }
 
 /// Set the next timer interrupt
+/// la64计时器中断带循环，无需每次设置，弃用该函数
+#[allow(unused)]
 pub fn set_next_trigger() {
-    set_timer(get_time() + CLOCK_FREQ / TICKS_PER_SEC);
+    // 10ms后触发
+    // set_timer(get_time() + unsafe { TIMER_FREQUENCY } / TICKS_PER_SEC);
 }
