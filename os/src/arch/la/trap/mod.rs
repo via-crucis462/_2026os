@@ -45,10 +45,17 @@ fn set_user_trap_entry() {
 
 /// enable timer interrupt in supervisor mode
 pub fn enable_timer_interrupt() {
+    crate::arch::timer::init_board_freq();
     unsafe {
+        asm!("csrwr {}, 0x44", in(reg) 1);// 清除定时器中断
+        let tcfg = 0x100000usize | 0b11;// 循环模式并开启中断，周期0x100000
+        asm!("csrwr {}, 0x41", in(reg) tcfg);
         let mut ecfg: usize;
         asm!("csrrd {}, 0x4", out(reg) ecfg);
-        asm!("csrwr {}, 0x4", in(reg) ecfg | (1 << 11),);
+        asm!("csrwr {}, 0x4", in(reg) ecfg | (1 << 11)); // 使能定时器中断
+        let mut crmd: usize;
+        asm!("csrrd {}, 0x1", out(reg) crmd); // 进入用户态
+        asm!("csrwr {}, 0x1", in(reg) crmd | (1 << 2)); // 使能中断
     }
 }
 
@@ -67,7 +74,6 @@ enum Cause {
 /// 的111页和97页
 #[no_mangle]
 pub fn trap_handler() -> ! {
-
     set_kernel_trap_entry();
     let estat = unsafe {
         let t: usize;
@@ -102,7 +108,9 @@ pub fn trap_handler() -> ! {
                 cx.r[4] = result as *const () as usize;
             }
             Cause::TimeInterrupt => {
-                set_next_trigger();
+                unsafe {
+                    asm!("csrwr {}, 0x44", in(reg) 1);// 清除定时器中断
+                }
                 suspend_current_and_run_next();
             }
             _ => {
@@ -137,7 +145,10 @@ pub fn trap_return() -> ! {
         fn __alltraps();
         fn __restore();
     }
-    let restore_va = __restore as *const () as usize - __alltraps as *const () as usize + TRAMPOLINE;
+    let restore_va =
+        __restore as *const () as usize - 
+        __alltraps as *const () as usize + 
+        TRAMPOLINE;
     // trace!("[kernel] trap_return: ..before return");
     unsafe {
         asm!(
