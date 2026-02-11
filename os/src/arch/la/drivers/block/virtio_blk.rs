@@ -1,3 +1,4 @@
+//! 为la64重新实现virtio块设备驱动，完善中
 use super::BlockDevice;
 use crate::mm::{
     frame_alloc, frame_dealloc, kernel_token, FrameTracker, PageTable, PhysAddr, PhysPageNum,
@@ -6,10 +7,13 @@ use crate::mm::{
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
-use virtio_drivers::{Hal, VirtIOBlk, VirtIOHeader};
+use virtio_drivers_la::{Hal, VirtIOBlk, VirtIOHeader};
+use virtio_drivers_la::transport::pci;
 
 #[allow(unused)]
+/// 需要重写，改为动态扫描PCI设备
 const VIRTIO0: usize = 0x10001000;
+
 /// VirtIOBlock device driver strcuture for virtio_blk device
 pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<'static, VirtioHal>>);
 
@@ -71,7 +75,8 @@ impl VirtIOBlock {
 
 pub struct VirtioHal;
 
-impl Hal for VirtioHal {
+// 待实现
+unsafe impl Hal for VirtioHal {
     fn dma_alloc(pages: usize) -> usize {
         let mut ppn_base = PhysPageNum(0);
         for i in 0..pages {
@@ -96,14 +101,15 @@ impl Hal for VirtioHal {
         0
     }
 
-    fn phys_to_virt(addr: usize) -> usize {
-        addr
+    fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
+        paddr
     }
 
-    fn virt_to_phys(vaddr: usize) -> usize {
-        PageTable::from_token(kernel_token())
-            .translate_va(VirtAddr::from(vaddr))
-            .unwrap()
-            .0
+    unsafe fn share(buffer: core::ptr::NonNull<[u8]>, direction: virtio_drivers_la::BufferDirection) -> virtio_drivers_la::PhysAddr {
+        0
+    }
+
+    unsafe fn unshare(_buffer: core::ptr::NonNull<[u8]>, _direction: virtio_drivers_la::BufferDirection) {
+        // no-op
     }
 }

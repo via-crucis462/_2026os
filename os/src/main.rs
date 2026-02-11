@@ -103,6 +103,7 @@ pub fn rust_main() -> ! {
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger();
     println!("2");
+    drivers::search_pci();
     fs::list_apps();
     println!("3");
     task::add_initproc();
