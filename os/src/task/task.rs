@@ -15,6 +15,12 @@ use alloc::{
 };
 use core::cell::RefMut;
 
+const AT_PHDR: usize = 3;
+const AT_PHENT: usize = 4;
+const AT_PHNUM: usize = 5;
+const AT_PAGESZ: usize = 6;
+const AT_ENTRY: usize = 9;
+const AT_RANDOM: usize = 25;
 
 /// Task control block structure
 ///
@@ -120,7 +126,7 @@ impl TaskControlBlock {
     /// At present, it is only used for the creation of initproc
     pub fn new(elf_data: &[u8]) -> Self {
         // memory_set with elf program headers/trampoline/trap context/user stack
-        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let (memory_set, user_sp, entry_point, _phdr, _phnum, _phent) = MemorySet::from_elf(elf_data);
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
@@ -179,7 +185,7 @@ impl TaskControlBlock {
     /// Load a new elf to replace the original application address space and start execution
     pub fn exec(&self, elf_data: &[u8], args: Vec<String>) {
         // 1. 加载 ELF 文件生成新的地址空间
-        let (memory_set, mut user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let (memory_set, mut user_sp, entry_point, phdr_addr, phnum, phent) = MemorySet::from_elf(elf_data);
         info!(
             "[kernel] task::exec: entry_point={:#x}, user_sp={:#x}",
             entry_point, user_sp
@@ -205,23 +211,52 @@ impl TaskControlBlock {
             argv_ptrs.push(user_sp);
         }
 
+        // 随机字符串 (AT_RANDOM 使用) 16 字节
+        user_sp -= 16;
+        let random_at = user_sp;
+        for i in 0..16 {
+            *translated_refmut(memory_set.token(), (user_sp + i) as *mut u8) = 0x23; // 任意填充
+        }
+
         // 3. 对齐栈指针到 8 字节
         user_sp -= user_sp % core::mem::size_of::<usize>();
 
-        // 4. 压入 argv 数组：先压入一个 NULL (0) 作为结尾
+        // --- 构造 AUX Vector ---
+        let mut auxv = Vec::new();
+        auxv.push((AT_PHDR, phdr_addr));
+        auxv.push((AT_PHENT, phent));
+        auxv.push((AT_PHNUM, phnum));
+        auxv.push((AT_PAGESZ, 4096));
+        auxv.push((AT_ENTRY, entry_point));
+        auxv.push((AT_RANDOM, random_at));
+        auxv.push((0, 0)); // AT_NULL
+
+        // 压入 AUXV
+        for (id, val) in auxv.iter().rev() {
+            user_sp -= core::mem::size_of::<usize>();
+            *translated_refmut(memory_set.token(), user_sp as *mut usize) = *val;
+            user_sp -= core::mem::size_of::<usize>();
+            *translated_refmut(memory_set.token(), user_sp as *mut usize) = *id;
+        }
+
+        // 4. 压入 envp 数组：目前只压入一个 NULL (0)
         user_sp -= core::mem::size_of::<usize>();
         *translated_refmut(memory_set.token(), user_sp as *mut usize) = 0;
 
-        // 5. 逆序压入 argv 的指针（从 argv[n-1] 到 argv[0]）
+        // 5. 压入 argv 数组：先压入一个 NULL (0) 作为结尾
+        user_sp -= core::mem::size_of::<usize>();
+        *translated_refmut(memory_set.token(), user_sp as *mut usize) = 0;
+
+        // 逆序压入 argv 的指针
         for arg_ptr in argv_ptrs.iter().rev() {
             user_sp -= core::mem::size_of::<usize>();
             *translated_refmut(memory_set.token(), user_sp as *mut usize) = *arg_ptr;
         }
 
-        // 此时 user_sp 即为 argv[0] 的地址，也就是 argv 数组的起始地址
+        // 此时 user_sp 即为 argv[0] 的地址
         let argv_base = user_sp;
 
-        // 6. 最后压入 argc（这是栈的最顶部，即最低地址）
+        // 6. 最后压入 argc
         user_sp -= core::mem::size_of::<usize>();
         *translated_refmut(memory_set.token(), user_sp as *mut usize) = args.len();
 

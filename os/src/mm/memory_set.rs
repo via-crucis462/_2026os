@@ -70,6 +70,7 @@ impl MemorySet {
         self.push(
             MapArea::new(start_va, end_va, MapType::Framed, permission),
             None,
+            start_va.into(),
         );
     }
     /// 预留，用于文件映射, 目前只标记，啥都没做
@@ -82,6 +83,7 @@ impl MemorySet {
         self.push(
             MapArea::new(start_va, end_va, MapType::File, permission),
             None,
+            start_va.into(),
         );
     }
     /// remove a area
@@ -99,10 +101,10 @@ impl MemorySet {
     /// Add a new MapArea into this MemorySet.
     /// Assuming that there are no conflicts in the virtual address
     /// space.
-    fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
+    fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>, start_va: usize) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {
-            map_area.copy_data(&mut self.page_table, data);
+            map_area.copy_data(&mut self.page_table, data, start_va);
         }
         self.areas.push(map_area);
     }
@@ -136,6 +138,7 @@ impl MemorySet {
                 MapPermission::R | MapPermission::X,
             ),
             None,
+            stext as *const () as usize,
         );
         info!("mapping .rodata section");
         memory_set.push(
@@ -146,6 +149,7 @@ impl MemorySet {
                 MapPermission::R,
             ),
             None,
+            srodata as *const () as usize,
         );
         info!("mapping .data section");
         memory_set.push(
@@ -156,6 +160,7 @@ impl MemorySet {
                 MapPermission::R | MapPermission::W,
             ),
             None,
+            sdata as *const () as usize,
         );
         info!("mapping .bss section");
         memory_set.push(
@@ -166,6 +171,7 @@ impl MemorySet {
                 MapPermission::R | MapPermission::W,
             ),
             None,
+            sbss_with_stack as *const () as usize,
         );
         info!("mapping physical memory");
         memory_set.push(
@@ -176,6 +182,7 @@ impl MemorySet {
                 MapPermission::R | MapPermission::W,
             ),
             None,
+            ekernel as *const () as usize,
         );
         #[cfg(target_arch = "riscv64")]
         {
@@ -189,6 +196,7 @@ impl MemorySet {
                     MapPermission::R | MapPermission::W,
                 ),
                 None,
+                (*pair).0,
             );
         }
         }
@@ -196,7 +204,7 @@ impl MemorySet {
     }
     /// Include sections in elf and trampoline and TrapContext and user stack,
     /// also returns user_sp_base and entry point.
-    pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize) {
+    pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, usize, usize) {
         let mut memory_set = Self::new_bare();
         // map trampoline
         memory_set.map_trampoline();
@@ -207,6 +215,11 @@ impl MemorySet {
         assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
         let ph_count = elf_header.pt2.ph_count();
         let mut max_end_vpn = VirtPageNum(0);
+        
+        let mut phdr_addr = 0;
+        let phnum = ph_count as usize;
+        let phent = elf_header.pt2.ph_entry_size() as usize;
+
         for i in 0..ph_count {
             let ph = elf.program_header(i).unwrap();
             if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
@@ -228,7 +241,14 @@ impl MemorySet {
                 memory_set.push(
                     map_area,
                     Some(&elf.input[ph.offset() as *const () as usize..(ph.offset() + ph.file_size()) as *const () as usize]),
+                    ph.virtual_addr() as usize,
                 );
+
+                // 如果该 LOAD 段包含了程序头表，则记录其虚拟地址
+                if ph.offset() <= elf_header.pt2.ph_offset() && 
+                   elf_header.pt2.ph_offset() < ph.offset() + ph.file_size() {
+                    phdr_addr = (ph.virtual_addr() + (elf_header.pt2.ph_offset() - ph.offset())) as usize;
+                }
             }
         }
         // map user stack with U flags
@@ -245,6 +265,7 @@ impl MemorySet {
                 MapPermission::R | MapPermission::W | MapPermission::U,
             ),
             None,
+            user_stack_bottom,
         );
         // used in sbrk
         // 堆区空间设置在栈区之后
@@ -256,6 +277,7 @@ impl MemorySet {
                 MapPermission::R | MapPermission::W | MapPermission::U,
             ),
             None,
+            user_stack_top,
         );
         memory_set.brk_index = memory_set.areas.len() - 1;// 此时brk在最后一个区域
 
@@ -268,11 +290,15 @@ impl MemorySet {
                 MapPermission::R | MapPermission::W,
             ),
             None,
+            TRAP_CONTEXT_BASE,
         );
         (
             memory_set,
             user_stack_top,
             elf.header.pt2.entry_point() as *const () as usize,
+            phdr_addr,
+            phnum,
+            phent,
         )
     }
     /// Create a new address space by copy code&data from a exited process's address space.
@@ -283,7 +309,8 @@ impl MemorySet {
         // copy data sections/trap_context/user_stack
         for area in user_space.areas.iter() {
             let new_area = MapArea::from_another(area);
-            memory_set.push(new_area, None);
+            let start_va: usize = new_area.vpn_range.get_start().into();
+            memory_set.push(new_area, None, start_va << 12);
             // copy data from another space
             for vpn in area.vpn_range {
                 let src_ppn = user_space.translate(vpn).unwrap().ppn();
@@ -635,23 +662,24 @@ impl MapArea {
 
     /// data: start-aligned but maybe with shorter length
     /// assume that all frames were cleared before
-    pub fn copy_data(&mut self, page_table: &mut PageTable, data: &[u8]) {
+    pub fn copy_data(&mut self, page_table: &mut PageTable, data: &[u8], start_va: usize) {
         assert_eq!(self.map_type, MapType::Framed);
-        let mut start: usize = 0;
+        let mut data_offset: usize = 0;
         let mut current_vpn = self.vpn_range.get_start();
+        let mut page_offset = start_va % PAGE_SIZE;
         let len = data.len();
-        loop {
-            let src = &data[start..len.min(start + PAGE_SIZE)];
+
+        while data_offset < len {
+            let src_len = (len - data_offset).min(PAGE_SIZE - page_offset);
             let dst = &mut page_table
                 .translate(current_vpn)
                 .unwrap()
                 .ppn()
-                .get_bytes_array()[..src.len()];
-            dst.copy_from_slice(src);
-            start += PAGE_SIZE;
-            if start >= len {
-                break;
-            }
+                .get_bytes_array()[page_offset..page_offset + src_len];
+            dst.copy_from_slice(&data[data_offset..data_offset + src_len]);
+            
+            data_offset += src_len;
+            page_offset = 0;
             current_vpn.step();
         }
     }
