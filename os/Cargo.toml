@@ -18,12 +18,12 @@ lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 spin = "0.9.8"
 log = "0.4"
 xmas-elf = "0.7.0"
-virtio-drivers = { git = "https://github.com/rcore-os/virtio-drivers", rev = "4ee80e5" }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
+virtio-drivers = { git = "https://github.com/rcore-os/virtio-drivers", rev = "4ee80e5" }
 
 [target.'cfg(target_arch = "loongarch64")'.dependencies]
 # pci = "0.0.1" # 已经导入项目中并按规范复制许可证等
-
+virtio-drivers-la = { package = "virtio-drivers", version = "0.12.0" } # 重命名以避免冲突
 
