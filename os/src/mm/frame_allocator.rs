@@ -108,6 +108,10 @@ pub fn frame_alloc() -> Option<FrameTracker> {
         .alloc()
         .map(FrameTracker::new)
 }
+/// 连续分配物理页帧，返回起始物理地址
+pub fn frame_alloc_con(pages: usize) -> Option<PhysPageNum> {
+    FRAME_ALLOCATOR.exclusive_access().alloc_con(pages)
+}
 
 /// Deallocate a physical page frame with a given ppn
 pub fn frame_dealloc(ppn: PhysPageNum) {
