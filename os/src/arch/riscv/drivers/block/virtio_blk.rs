@@ -79,6 +79,8 @@ impl Hal for VirtioHal {
             if i == 0 {
                 ppn_base = frame.ppn;
             }
+            // 这里假设frame_alloc分配的物理页是连续的
+            // 可能有问题
             assert_eq!(frame.ppn.0, ppn_base.0 + i);
             QUEUE_FRAMES.exclusive_access().push(frame);
         }

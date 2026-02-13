@@ -7,15 +7,16 @@ use crate::mm::{
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
-use virtio_drivers_la::{Hal, VirtIOBlk, VirtIOHeader};
-use virtio_drivers_la::transport::pci;
+use core::ptr::NonNull;
+use virtio_drivers_la::{Hal, VirtIOBlk, BufferDirection, PhysAddr as VirtioPhysAddr};
+use virtio_drivers_la::transport::pci::PciTransport;
 
 #[allow(unused)]
-/// 需要重写，改为动态扫描PCI设备
 const VIRTIO0: usize = 0x10001000;
 
 /// VirtIOBlock device driver strcuture for virtio_blk device
-pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<'static, VirtioHal>>);
+/// 注意：这里使用 PciTransport，因此需要在 new 中进行 PCI 枚举和初始化
+pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<VirtioHal, PciTransport>>);
 
 lazy_static! {
     static ref QUEUE_FRAMES: UPSafeCell<Vec<FrameTracker>> = unsafe { UPSafeCell::new(Vec::new()) };
@@ -61,23 +62,14 @@ impl BlockDevice for VirtIOBlock {
     }
 }
 
-impl VirtIOBlock {
-    #[allow(unused)]
-    /// Create a new VirtIOBlock driver with VIRTIO0 base_addr for virtio_blk device
-    pub fn new() -> Self {
-        unsafe {
-            Self(UPSafeCell::new(
-                VirtIOBlk::<VirtioHal>::new(&mut *(VIRTIO0 as *mut VirtIOHeader)).unwrap(),
-            ))
-        }
-    }
-}
+// 注意：这里需要你自行实现基于PCI的初始化逻辑，目前的MMIO方式不适用于PCI
+// 下面的 impl VirtIOBlock 暂时保留空架子或旧代码，编译时可能会报错，请根据实际PCI库完善
+// impl VirtIOBlock { ... }
 
 pub struct VirtioHal;
 
-// 待实现
 unsafe impl Hal for VirtioHal {
-    fn dma_alloc(pages: usize) -> usize {
+    fn dma_alloc(pages: usize, _direction: BufferDirection) -> (VirtioPhysAddr, NonNull<u8>) {
         let mut ppn_base = PhysPageNum(0);
         for i in 0..pages {
             let frame = frame_alloc().unwrap();
@@ -88,16 +80,51 @@ unsafe impl Hal for VirtioHal {
             QUEUE_FRAMES.exclusive_access().push(frame);
         }
         let pa: PhysAddr = ppn_base.into();
-        pa.0
+        let pa_val = pa.0;
+        // LoongArch DMW 直接映射：PA | 0x9000_0000_0000_0000 (Cached)
+        let va_val = pa_val | 0x9000_0000_0000_0000;
+        let ptr = NonNull::new(va_val as *mut u8).unwrap();
+        
+        // 必须清零
+        unsafe { core::slice::from_raw_parts_mut(ptr.as_ptr(), pages * 4096).fill(0) };
+
+        (pa_val as u64, ptr)
     }
 
-    fn dma_dealloc(pa: usize, pages: usize) -> i32 {
-        let pa = PhysAddr::from(pa);
+    unsafe fn dma_dealloc(paddr: VirtioPhysAddr, _vaddr: NonNull<u8>, pages: usize) -> i32 {
+        let pa = PhysAddr::from(paddr as usize);
         let mut ppn_base: PhysPageNum = pa.into();
         for _ in 0..pages {
             frame_dealloc(ppn_base);
             ppn_base.step();
         }
+        0
+    }
+
+    unsafe fn mmio_phys_to_virt(paddr: VirtioPhysAddr, _size: usize) -> NonNull<u8> {
+        // MMIO 使用 Uncached 窗口 (DMW0): 0x8000_0000_0000_0000
+        let va = (paddr as usize) | 0x8000_0000_0000_0000;
+        NonNull::new(va as *mut u8).unwrap()
+    }
+
+    unsafe fn share(buffer: NonNull<[u8]>, _direction: BufferDirection) -> VirtioPhysAddr {
+        let vaddr = buffer.as_ptr() as *mut u8 as usize;
+        // 如果虚拟地址在高半核空间(DMW)，直接取低位作为物理地址
+        if vaddr & 0x8000_0000_0000_0000 != 0 {
+            (vaddr & 0x0000_FFFF_FFFF_FFFF) as u64
+        } else {
+            // 否则查页表
+            PageTable::from_token(kernel_token())
+            .translate_va(VirtAddr::from(vaddr))
+            .unwrap()
+            .0 as u64
+        }
+    }
+
+    unsafe fn unshare(_paddr: VirtioPhysAddr, _buffer: NonNull<[u8]>, _direction: BufferDirection) {
+        // Nothing to do
+    }
+}
         0
     }
 

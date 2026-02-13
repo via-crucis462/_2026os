@@ -31,7 +31,7 @@ pub const CLOCK_FREQ: usize = 12500000;
 pub const MEMORY_END: usize = 0x9000_0000_0800_0000;
 /// 查看qemu的源代码可以知道配置空间的基地址为0x2000_0000，这里写成虚拟地址
 pub const PCI_CONFIG_SPACE_BASE: usize = 0x8000_0000_2000_0000;
-/// MMIO范围
+/// MMIO范围，需要手动设置
 pub const MMIO: &[(usize, usize)] = &[
     (0x8000_0000_4000_0000, 0x1000_0000),
 ]; 
