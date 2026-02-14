@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
 
+
 /// tracker for physical page frame allocation and deallocation
 pub struct FrameTracker {
     /// physical page number
@@ -39,6 +40,8 @@ trait FrameAllocator {
     fn new() -> Self;
     fn alloc(&mut self) -> Option<PhysPageNum>;
     fn dealloc(&mut self, ppn: PhysPageNum);
+    // 连续分配
+    fn alloc_con(&mut self, pages: usize) -> Option<PhysPageNum>;
 }
 /// an implementation for frame allocator
 pub struct StackFrameAllocator {
@@ -81,6 +84,10 @@ impl FrameAllocator for StackFrameAllocator {
         // recycle
         self.recycled.push(ppn);
     }
+    // 待实现
+    fn alloc_con(&mut self, _pages: usize) -> Option<PhysPageNum> {
+        None
+    }
 }
 
 type FrameAllocatorImpl = StackFrameAllocator;
@@ -109,6 +116,7 @@ pub fn frame_alloc() -> Option<FrameTracker> {
         .map(FrameTracker::new)
 }
 /// 连续分配物理页帧，返回起始物理地址
+#[allow(unused)]
 pub fn frame_alloc_con(pages: usize) -> Option<PhysPageNum> {
     FRAME_ALLOCATOR.exclusive_access().alloc_con(pages)
 }
