@@ -1,5 +1,8 @@
 //! 为la64重新实现virtio块设备驱动，完善中
+
+# ![allow(unused)] // 目前还有一些未使用的函数和变量
 use super::BlockDevice;
+use crate::arch::config::UNCHACHED_KERNEL_BASE;
 use crate::mm::{
     frame_alloc, frame_dealloc, kernel_token, FrameTracker, PageTable, PhysAddr, PhysPageNum,
     StepByOne, VirtAddr,
@@ -8,18 +11,27 @@ use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
 use core::ptr::NonNull;
-use virtio_drivers_la::{Hal, VirtIOBlk, BufferDirection, PhysAddr as VirtioPhysAddr};
+use virtio_drivers_la::{Hal, BufferDirection, PhysAddr as VirtioPhysAddr};
 use virtio_drivers_la::transport::pci::PciTransport;
+use virtio_drivers_la::device::blk::VirtIOBlk;
 
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000;
 
 /// VirtIOBlock device driver strcuture for virtio_blk device
-/// 注意：这里使用 PciTransport，因此需要在 new 中进行 PCI 枚举和初始化
+/// 需要实现根据pci地址的情况动态扫描与初始化，待实现
 pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<VirtioHal, PciTransport>>);
 
 lazy_static! {
     static ref QUEUE_FRAMES: UPSafeCell<Vec<FrameTracker>> = unsafe { UPSafeCell::new(Vec::new()) };
+}
+
+#[allow(unused)]
+#[allow(dead_code)]
+impl VirtIOBlock {
+    pub unsafe  fn new() {
+        // 待实现
+    }
 }
 
 impl BlockDevice for VirtIOBlock {
@@ -38,7 +50,7 @@ impl BlockDevice for VirtIOBlock {
             let offset = i * SECTOR_SIZE;
             let sub_buf = &mut buf[offset..offset + SECTOR_SIZE];
             driver
-                .read_block(start_sector + i, sub_buf)
+                .read_blocks(start_sector + i, sub_buf)
                 .expect("Error when reading VirtIOBlk");
         }
     }
@@ -56,18 +68,17 @@ impl BlockDevice for VirtIOBlock {
             let offset = i * SECTOR_SIZE;
             let sub_buf = &buf[offset..offset + SECTOR_SIZE];
             driver
-                .write_block(start_sector + i, sub_buf)
+                .write_blocks(start_sector + i, sub_buf)
                 .expect("Error when writing VirtIOBlk");
         }
     }
 }
 
-// 注意：这里需要你自行实现基于PCI的初始化逻辑，目前的MMIO方式不适用于PCI
-// 下面的 impl VirtIOBlock 暂时保留空架子或旧代码，编译时可能会报错，请根据实际PCI库完善
-// impl VirtIOBlock { ... }
+
 
 pub struct VirtioHal;
 
+// 待实现
 unsafe impl Hal for VirtioHal {
     fn dma_alloc(pages: usize, _direction: BufferDirection) -> (VirtioPhysAddr, NonNull<u8>) {
         let mut ppn_base = PhysPageNum(0);
@@ -80,15 +91,10 @@ unsafe impl Hal for VirtioHal {
             QUEUE_FRAMES.exclusive_access().push(frame);
         }
         let pa: PhysAddr = ppn_base.into();
-        let pa_val = pa.0;
-        // LoongArch DMW 直接映射：PA | 0x9000_0000_0000_0000 (Cached)
-        let va_val = pa_val | 0x9000_0000_0000_0000;
+        // 转换成窗口映射的虚拟地址
+        let va_val = pa.0 | UNCHACHED_KERNEL_BASE;
         let ptr = NonNull::new(va_val as *mut u8).unwrap();
-        
-        // 必须清零
-        unsafe { core::slice::from_raw_parts_mut(ptr.as_ptr(), pages * 4096).fill(0) };
-
-        (pa_val as u64, ptr)
+        (pa.0 as u64, ptr)
     }
 
     unsafe fn dma_dealloc(paddr: VirtioPhysAddr, _vaddr: NonNull<u8>, pages: usize) -> i32 {
@@ -107,36 +113,13 @@ unsafe impl Hal for VirtioHal {
         NonNull::new(va as *mut u8).unwrap()
     }
 
-    unsafe fn share(buffer: NonNull<[u8]>, _direction: BufferDirection) -> VirtioPhysAddr {
-        let vaddr = buffer.as_ptr() as *mut u8 as usize;
-        // 如果虚拟地址在高半核空间(DMW)，直接取低位作为物理地址
-        if vaddr & 0x8000_0000_0000_0000 != 0 {
-            (vaddr & 0x0000_FFFF_FFFF_FFFF) as u64
-        } else {
-            // 否则查页表
-            PageTable::from_token(kernel_token())
-            .translate_va(VirtAddr::from(vaddr))
-            .unwrap()
-            .0 as u64
-        }
-    }
-
-    unsafe fn unshare(_paddr: VirtioPhysAddr, _buffer: NonNull<[u8]>, _direction: BufferDirection) {
-        // Nothing to do
-    }
-}
-        0
-    }
-
-    fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
-        paddr
-    }
-
     unsafe fn share(buffer: core::ptr::NonNull<[u8]>, direction: virtio_drivers_la::BufferDirection) -> virtio_drivers_la::PhysAddr {
         0
     }
 
-    unsafe fn unshare(_buffer: core::ptr::NonNull<[u8]>, _direction: virtio_drivers_la::BufferDirection) {
-        // no-op
+    unsafe fn unshare(_paddr: VirtioPhysAddr, _buffer: core::ptr::NonNull<[u8]>, _direction: virtio_drivers_la::BufferDirection) {
+        // do nothing
+        // 未实现
+        ()
     }
-}
+} 
