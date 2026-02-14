@@ -4,15 +4,14 @@ mod virtio_blk;
 
 pub use virtio_blk::VirtIOBlock;
 
-use alloc::sync::Arc;
-use crate::ext4fs::BlockDevice;
+use crate::{ext4fs::BlockDevice, sync::UPSafeCell};
 use lazy_static::*;
 
 type BlockDeviceImpl = virtio_blk::VirtIOBlock;
 
 lazy_static! {
     /// The global block device driver instance: BLOCK_DEVICE with BlockDevice trait
-    pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = Arc::new(BlockDeviceImpl::new());
+    pub static ref BLOCK_DEVICE: UPSafeCell<BlockDeviceImpl> = unsafe { UPSafeCell::new(BlockDeviceImpl::new()) };
 }
 
 #[allow(unused)]
