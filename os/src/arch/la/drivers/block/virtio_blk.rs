@@ -40,7 +40,7 @@ impl VirtIOBlock {
         let blk = VirtIOBlk::new(transport).expect("Failed to initialize VirtIOBlk");
         Self { inner: UPSafeCell::new(blk) }
     }
-    pub unsafe fn visit(&self) -> RefMut<VirtIOBlk<VirtioHal, PciTransport>> {
+    pub unsafe fn visit(&self) -> RefMut<'_,VirtIOBlk<VirtioHal, PciTransport>> {
         self.inner.exclusive_access()
     }
 }

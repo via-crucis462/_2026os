@@ -282,16 +282,22 @@ pub fn scan_bus(am: CSpaceAccessMethod) -> BusScan {
 
 // 此处仍需解决生命周期问题
 use crate::arch::la::drivers::block::VirtioHal;
+use alloc::boxed::Box;
 
 pub fn scan_and_init_pci_device() -> Option<PciTransport> {
     let am = CSpaceAccessMethod::MemoryMapped;
     for dev in scan_bus(am) {
-        //直接返回第一个
+        //直接取第一个
         let root = PciRoot::new(CSpaceAccessMethod::MemoryMapped);
-        return Some(PciTransport::new::<VirtioHal, CSpaceAccessMethod>(
-            root,
-             loc_to_func(dev.loc)).unwrap()
-            );
+        let r_oot = Box::new(root);
+        // 注：将生命周期暴力改为static，不过暂时不会有问题，因为不会反复调用
+        let ref_root  = Box::leak(r_oot);
+        return Some(
+            PciTransport::new::<VirtioHal, CSpaceAccessMethod>(
+                ref_root,
+                loc_to_func(dev.loc)
+            ).unwrap()
+        );
     }
     None
 }
