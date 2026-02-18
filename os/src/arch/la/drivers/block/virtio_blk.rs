@@ -10,6 +10,9 @@ use crate::mm::{
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
+use virtio_drivers_la::transport::{self, Transport};
+use core::cell::RefMut;
+use core::iter::Rev;
 use core::ptr::NonNull;
 use virtio_drivers_la::{Hal, BufferDirection, PhysAddr as VirtioPhysAddr};
 use virtio_drivers_la::transport::pci::PciTransport;
@@ -20,17 +23,25 @@ const VIRTIO0: usize = 0x10001000;
 
 /// VirtIOBlock device driver strcuture for virtio_blk device
 /// 需要实现根据pci地址的情况动态扫描与初始化，待实现
-pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<VirtioHal, PciTransport>>);
+pub struct VirtIOBlock{
+    inner: UPSafeCell<VirtIOBlk<VirtioHal, PciTransport>>,
+}
 
 lazy_static! {
     static ref QUEUE_FRAMES: UPSafeCell<Vec<FrameTracker>> = unsafe { UPSafeCell::new(Vec::new()) };
 }
 
+
 #[allow(unused)]
 #[allow(dead_code)]
 impl VirtIOBlock {
-    pub unsafe  fn new() {
-        // 待实现
+    pub unsafe fn new(transport: PciTransport) -> Self {
+        let hal = VirtioHal;
+        let blk = VirtIOBlk::new(transport).expect("Failed to initialize VirtIOBlk");
+        Self { inner: UPSafeCell::new(blk) }
+    }
+    pub unsafe fn visit(&self) -> RefMut<VirtIOBlk<VirtioHal, PciTransport>> {
+        self.inner.exclusive_access()
     }
 }
 
@@ -42,7 +53,7 @@ impl BlockDevice for VirtIOBlock {
         // 4096 / 512 = 8
         let sectors = len / SECTOR_SIZE;
         
-        let mut driver = self.0.exclusive_access();
+        let mut driver = self.inner.exclusive_access();
         
         let start_sector = block_id * sectors;
         // 滑动窗口说是
@@ -61,7 +72,7 @@ impl BlockDevice for VirtIOBlock {
         const SECTOR_SIZE: usize = 512;
         let sectors = len / SECTOR_SIZE;
         
-        let mut driver = self.0.exclusive_access();
+        let mut driver = self.inner.exclusive_access();
         let start_sector = block_id * sectors;
 
         for i in 0..sectors {

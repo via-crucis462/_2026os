@@ -25,6 +25,10 @@ const CONFIG_DATA: u16 = 0x0CFC;
 use crate::arch::config::*;
 const BASE_ADDR: usize = PCI_CONFIG_SPACE_BASE;
 
+use virtio_drivers_la::transport::pci::{PciTransport, bus::ConfigurationAccess};
+use virtio_drivers_la::transport::pci::bus::{DeviceFunction, PciRoot};
+
+
 // 参考了loongarchrcore的实现
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum CSpaceAccessMethod {
@@ -275,3 +279,61 @@ pub unsafe fn probe_function(loc: Location, am: CSpaceAccessMethod) -> Option<PC
 pub fn scan_bus(am: CSpaceAccessMethod) -> BusScan {
     BusScan { loc: Location { base_addr: BASE_ADDR, bus: 0, device: 0, function: 0 }, am: am }
 }
+
+// 此处仍需解决生命周期问题
+use crate::arch::la::drivers::block::VirtioHal;
+
+pub fn scan_and_init_pci_device() -> Option<PciTransport> {
+    let am = CSpaceAccessMethod::MemoryMapped;
+    for dev in scan_bus(am) {
+        //直接返回第一个
+        let root = PciRoot::new(CSpaceAccessMethod::MemoryMapped);
+        return Some(PciTransport::new::<VirtioHal, CSpaceAccessMethod>(
+            root,
+             loc_to_func(dev.loc)).unwrap()
+            );
+    }
+    None
+}
+
+// 为CSAM实现CA接口供使用
+impl ConfigurationAccess for CSpaceAccessMethod{
+    fn read_word(&self, device_function: DeviceFunction, register_offset: u8) -> u32 {
+        unsafe{
+            self.read32(Location { 
+                    base_addr: BASE_ADDR, 
+                    bus: device_function.bus, 
+                    device: device_function.device, 
+                    function: device_function.function 
+                }, 
+                register_offset as u16
+            )
+        }
+    }
+    fn write_word(&mut self, device_function: DeviceFunction, register_offset: u8, data: u32) {
+                unsafe{
+            self.write32(Location { 
+                    base_addr: BASE_ADDR, 
+                    bus: device_function.bus, 
+                    device: device_function.device, 
+                    function: device_function.function 
+                }, 
+                register_offset as u16,
+                data
+            )
+        }
+    }
+    unsafe fn unsafe_clone(&self) -> Self {
+        *self
+    }
+}
+
+pub fn loc_to_func(loc: Location) -> DeviceFunction {
+    DeviceFunction {
+        bus: loc.bus,
+        device: loc.device,
+        function: loc.function,
+    }
+}
+
+
