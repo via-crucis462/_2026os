@@ -79,6 +79,10 @@ impl Ext4Inode {
         self.mode & 0xF000 == 0x8000
     }
 
+    pub fn is_symlink(&self) -> bool {
+        self.mode & 0xF000 == 0xA000
+    }
+
     /// 根据逻辑块号寻找对应的物理块号 (支持 Extents 和直接块)
     /// 根据逻辑块号寻找对应的物理块号 (支持 Extents 和直接块)
     pub fn find_physical_block(&self, logical_block_id: u32) -> u32 {
@@ -86,6 +90,10 @@ impl Ext4Inode {
         let disk_inode = self.fs.get_disk_inode(self.inode_id);
         let flags = disk_inode.i_flags;
         let i_block = disk_inode.i_block;
+
+        if self.is_symlink() && (disk_inode.size() as usize) < 60 {
+            return 0;
+        }
 
         if flags & 0x80000 != 0 {
             // Extents 模式 (EXT4_EXTENTS_FL = 0x80000)
@@ -250,6 +258,16 @@ impl Ext4Inode {
         
         let end = core::cmp::min(offset + buf.len(), disk_size_bytes);
         if curr_offset >= end { return 0; }
+
+        if self.is_symlink() && disk_size_bytes < 60 {
+            let mut i_block_bytes = [0u8; 60];
+            for i in 0..15 {
+                i_block_bytes[i * 4..(i + 1) * 4].copy_from_slice(&disk_inode.i_block[i].to_le_bytes());
+            }
+            let read_len = end - curr_offset;
+            buf[0..read_len].copy_from_slice(&i_block_bytes[curr_offset..end]);
+            return read_len;
+        }
 
         while curr_offset < end {
             let inner_block_id = (curr_offset / block_size) as u32;
