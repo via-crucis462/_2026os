@@ -111,7 +111,7 @@ impl PageTable {
 /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
 pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
     let page_table = PageTable::from_token(token);
-    let mut start = ptr as *const () as usize;
+    let mut start = ptr as usize;
     let end = start + len;
     let mut v = Vec::new();
     while start < end {
@@ -135,7 +135,7 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
 pub fn translated_str(token: usize, ptr: *const u8) -> String {
     let page_table = PageTable::from_token(token);
     let mut string = String::new();
-    let mut va = ptr as *const () as usize;
+    let mut va = ptr as usize;
     loop {
         let ch: u8 = *(page_table
             .translate_va(VirtAddr::from(va))
@@ -154,14 +154,14 @@ pub fn translated_str(token: usize, ptr: *const u8) -> String {
 pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
     let page_table = PageTable::from_token(token);
     page_table
-        .translate_va(VirtAddr::from(ptr as *const () as usize))
+        .translate_va(VirtAddr::from(ptr as usize))
         .unwrap()
         .get_ref()
 }
 /// Translate a ptr[u8] array through page table and return a mutable reference of T
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
     let page_table = PageTable::from_token(token);
-    let va = ptr as *const () as usize;
+    let va = ptr as usize;
     page_table
         .translate_va(VirtAddr::from(va))
         .unwrap()

@@ -28,7 +28,7 @@ impl BlockCache {
     }
 
     fn addr_of_offset(&self, offset: usize) -> usize {
-        &self.cache[offset] as *const _ as *const () as usize
+        &self.cache[offset] as *const _  as usize
     }
 
     pub fn get_ref<T>(&self, offset: usize) -> &T

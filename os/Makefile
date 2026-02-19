@@ -93,7 +93,7 @@ $(LA_KERNEL_BIN): kernel-la
 
 kernel-la:
 	@echo Building for loongarch64...
-	@LOG=$(LOG) cargo build --target loongarch64-unknown-none $(MODE_ARG)
+	@LOG=INFO cargo build --target loongarch64-unknown-none $(MODE_ARG)
 
 build-la: env-la kernel-la
 
