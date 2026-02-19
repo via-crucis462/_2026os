@@ -148,7 +148,33 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         }
     }
     trace!("[kernel] sys_exec: before open_file");
-    if let Some(app_inode) = open_file(cwd,path.as_str(), OpenFlags::RDONLY) {
+    if let Some(mut app_inode) = open_file(cwd.clone(), path.as_str(), OpenFlags::RDONLY) {
+        // 符号链接解析循环（最多追踪 8 次以防死循环）
+        for _ in 0..8 {
+            let stat = app_inode.inode.get_stat();
+            if (stat.mode & 0xF000) == 0xA000 {
+                let size = stat.size as usize;
+                let mut buffer = alloc::vec![0u8; size];
+                app_inode.inode.read_at(0, &mut buffer);
+                let target_path = core::str::from_utf8(&buffer).unwrap();
+                
+                // 如果是相对路径，从当前符号链接所在的父目录开始找
+                let base_dentry = if target_path.starts_with('/') {
+                    crate::fs::ROOT_DENTRY.clone()
+                } else {
+                    app_inode.dentry.parent.upgrade().unwrap_or(cwd.clone())
+                };
+
+                if let Some(next_inode) = open_file(base_dentry, target_path, OpenFlags::RDONLY) {
+                    app_inode = next_inode;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
