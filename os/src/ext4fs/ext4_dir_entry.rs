@@ -34,7 +34,7 @@ impl Ext4DirEntry {
 
     /// 获取当前目录项中的文件名字符串
     pub fn name(&self) -> &str {
-        let len = self.name_len as *const () as usize;
+        let len = self.name_len as usize;
         core::str::from_utf8(&self.name[0..len]).unwrap_or("")
     }
 

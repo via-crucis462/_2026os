@@ -13,7 +13,7 @@ impl PageTableEntry {
     /// Create a new page table entry
     pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
         PageTableEntry {
-            bits: ppn.0 << 10 | flags.bits() as *const () as usize,
+            bits: ppn.0 << 10 | flags.bits() as usize,
         }
     }
     /// Create an empty page table entry

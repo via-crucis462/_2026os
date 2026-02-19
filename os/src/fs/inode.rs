@@ -208,7 +208,7 @@ pub fn list_apps() {
     let len = ROOT_INODE.inode.getdents(&mut buf);
     if len > 0 {
         let mut offset = 0;
-        while offset < len as *const () as usize {
+        while offset < len as usize {
             let entry = unsafe { &*(buf[offset..].as_ptr() as *const super::DirEntry) };
             if entry.d_reclen == 0 { break; }
             
@@ -216,7 +216,7 @@ pub fn list_apps() {
             let name = core::str::from_utf8(&entry.d_name[..name_len]).unwrap_or("");
             println!("{}", name);
             
-            offset += entry.d_reclen as *const () as usize;
+            offset += entry.d_reclen as usize;
         }
     }
     info!("**************/");
