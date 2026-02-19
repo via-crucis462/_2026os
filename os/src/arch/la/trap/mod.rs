@@ -105,7 +105,7 @@ pub fn trap_handler() -> ! {
                 );
                 // cx is changed during sys_exec, so we have to call it again
                 cx = current_trap_cx();
-                cx.r[4] = result as *const () as usize;
+                cx.r[4] = result as usize;
             }
             Cause::TimeInterrupt => {
                 unsafe {

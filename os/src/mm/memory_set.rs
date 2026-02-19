@@ -3,7 +3,6 @@ use super::{PageTable, pte::*, PTEFlags};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
 use crate::arch::config::{MEMORY_END,  PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
-#[cfg(target_arch = "riscv64")]
 use crate::arch::config::MMIO;
 use crate::mm::mmap;
 use crate::sync::UPSafeCell;
@@ -184,8 +183,7 @@ impl MemorySet {
             None,
             ekernel as *const () as usize,
         );
-        #[cfg(target_arch = "riscv64")]
-        {
+        // 对于la, 实际上也有MMIO空间
         info!("mapping memory-mapped registers");
         for pair in MMIO {
             memory_set.push(
@@ -198,7 +196,6 @@ impl MemorySet {
                 None,
                 (*pair).0,
             );
-        }
         }
         memory_set
     }
@@ -223,8 +220,8 @@ impl MemorySet {
         for i in 0..ph_count {
             let ph = elf.program_header(i).unwrap();
             if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
-                let start_va: VirtAddr = (ph.virtual_addr() as *const () as usize).into();
-                let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as *const () as usize).into();
+                let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
+                let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize).into();
                 let mut map_perm = MapPermission::U;
                 let ph_flags = ph.flags();
                 if ph_flags.is_read() {
