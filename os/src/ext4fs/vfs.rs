@@ -11,7 +11,7 @@ impl VfsInode for Ext4Inode {
             return None;
         }
         let mut offset = 0;
-        let file_size_bytes = self.size as *const () as usize;
+        let file_size_bytes = self.size as usize;
 
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; 4096];
@@ -33,7 +33,7 @@ impl VfsInode for Ext4Inode {
                             )));
                         }
                     }
-                    let rec_len = dirent.rec_len() as *const () as usize;
+                    let rec_len = dirent.rec_len() as usize;
                     if rec_len == 0 { break; }
                     block_offset += rec_len;
                 } else {
@@ -54,7 +54,7 @@ impl VfsInode for Ext4Inode {
     }
     
     fn get_size(&self) -> usize {
-        self.size as *const () as usize
+        self.size as usize
     }
 
     fn get_stat(&self) -> crate::fs::Stat {
@@ -89,7 +89,7 @@ impl VfsInode for Ext4Inode {
         
         // 3. 在磁盘上初始化该 Inode 结构
         let (block_id, offset) = self.fs.get_inode_pos(new_inode_id);
-        let block_cache = get_block_cache(block_id as *const () as usize, self.fs.block_dev.clone());
+        let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
         block_cache.lock().modify(offset, |disk_inode: &mut Ext4InodeDisk| {
             // 设置基本信息
             disk_inode.i_mode = mode as u16; 
@@ -118,7 +118,7 @@ impl VfsInode for Ext4Inode {
 
         // 5. 更新父目录（当前 Inode）的元数据：确保 size 至少占用了1个块
         let (p_block_id, p_offset) = self.fs.get_inode_pos(self.inode_id);
-        let p_block_cache = get_block_cache(p_block_id as *const () as usize, self.fs.block_dev.clone());
+        let p_block_cache = get_block_cache(p_block_id as usize, self.fs.block_dev.clone());
         p_block_cache.lock().modify(p_offset, |p_disk_inode: &mut Ext4InodeDisk| {
             if p_disk_inode.i_size_lo < 4096 {
                 p_disk_inode.i_size_lo = 4096;
@@ -144,7 +144,7 @@ impl VfsInode for Ext4Inode {
         println!("VFS: Creating directory '{}' with inode id {}", name, new_inode_id);
         // 3. 在磁盘上初始化该 Inode 结构
         let (block_id, offset) = self.fs.get_inode_pos(new_inode_id);
-        let block_cache = get_block_cache(block_id as *const () as usize, self.fs.block_dev.clone());
+        let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
         block_cache.lock().modify(offset, |disk_inode: &mut Ext4InodeDisk| {
             // 设置基本信息
             disk_inode.i_mode = mode as u16; 
@@ -164,7 +164,7 @@ impl VfsInode for Ext4Inode {
 
         // 5. 更新父目录（当前 Inode）的元数据：链接数 +1，且确保 size 至少占用了1个块
         let (p_block_id, p_offset) = self.fs.get_inode_pos(self.inode_id);
-        let p_block_cache = get_block_cache(p_block_id as *const () as usize, self.fs.block_dev.clone());
+        let p_block_cache = get_block_cache(p_block_id as usize, self.fs.block_dev.clone());
         p_block_cache.lock().modify(p_offset, |p_disk_inode: &mut Ext4InodeDisk| {
             p_disk_inode.i_links_count += 1;
             // 确保目录大小至少为1个块 (size 这里的单位保持为字节，即 4096)
@@ -186,7 +186,7 @@ impl VfsInode for Ext4Inode {
         }
         let mut offset = 0;
         let mut buf_offset = 0;
-        let file_size_bytes = self.size as *const () as usize;
+        let file_size_bytes = self.size as usize;
         let buf_len = buf.len();
         let mut last_name = String::new();
 
@@ -209,7 +209,7 @@ impl VfsInode for Ext4Inode {
                             ext4_dirent.file_type,
                         );
                         
-                        let rec_len = abi_entry.d_reclen as *const () as usize;
+                        let rec_len = abi_entry.d_reclen as usize;
                         if buf_offset + rec_len > buf_len {
                             println!("VFS: getdents buffer full, stopping read");
                             break; 
@@ -222,7 +222,7 @@ impl VfsInode for Ext4Inode {
                         
                         buf_offset += rec_len;
                     }
-                    let disk_rec_len = ext4_dirent.rec_len() as *const () as usize;
+                    let disk_rec_len = ext4_dirent.rec_len() as usize;
                     if disk_rec_len == 0 { break; }
                     block_offset += disk_rec_len;
                 } else {

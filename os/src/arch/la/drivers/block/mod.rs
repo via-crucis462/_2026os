@@ -32,8 +32,8 @@ pub unsafe fn block_device_test() {
         for byte in write_buffer.iter_mut() {
             *byte = i as u8;
         }
-        block_device.write_block(i as *const () as usize, &write_buffer);
-        block_device.read_block(i as *const () as usize, &mut read_buffer);
+        block_device.write_block(i as usize, &write_buffer);
+        block_device.read_block(i as usize, &mut read_buffer);
         assert_eq!(write_buffer, read_buffer);
     }
     println!("block device test passed!");
