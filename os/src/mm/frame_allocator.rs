@@ -1,4 +1,5 @@
 use super::{PhysAddr, PhysPageNum};
+#[allow(unused)]
 use crate::arch::config::{DMA_SIZE, MEMORY_END};
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;

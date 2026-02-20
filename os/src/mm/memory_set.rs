@@ -2,6 +2,7 @@ use super::{frame_alloc, FrameTracker};
 use super::{PageTable, pte::*, PTEFlags};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
+#[allow(unused)]
 use crate::arch::config::{DMA_SIZE, MEMORY_END,  PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
 use crate::arch::config::MMIO;
 use crate::mm::mmap;
