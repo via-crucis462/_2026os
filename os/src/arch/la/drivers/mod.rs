@@ -21,8 +21,8 @@ pub fn search_pci() {
     for device in scan_bus(pci::CSpaceAccessMethod::MemoryMapped).into_iter() {
         manager.push(device);
     }
-    // 列出设备
-    manager.list();
+    // 列出设备，调试用
+    // manager.list();
 }
 
 
