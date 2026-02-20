@@ -15,7 +15,7 @@ type BlockDeviceImpl = virtio_blk::VirtIOBlock;
 lazy_static! {
     /// The global block device driver instance: BLOCK_DEVICE with BlockDevice trait
     pub static ref BLOCK_DEVICE: Arc<BlockDeviceImpl> = {
-        let pci_device_trans = pci::scan_and_init_pci_device().expect("Failed to find PCI device");
+        let pci_device_trans = pci::scan_pci_device_to_trans().expect("Failed to find PCI device");
         unsafe {
              Arc::new(BlockDeviceImpl::new(pci_device_trans))
         }

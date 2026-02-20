@@ -3,9 +3,9 @@
 # ![allow(unused)] // 目前还有一些未使用的函数和变量
 use super::BlockDevice;
 use crate::arch::config::UNCHACHED_KERNEL_BASE;
+use crate::mm::address::VPNRange;
 use crate::mm::{
-    frame_alloc, frame_dealloc, kernel_token, FrameTracker, PageTable, PhysAddr, PhysPageNum,
-    StepByOne, VirtAddr,
+    FrameTracker, KERNEL_SPACE, MapArea, PageTable, PhysAddr, PhysPageNum, StepByOne, VirtAddr, frame_alloc, frame_dealloc, kernel_token
 };
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
@@ -18,17 +18,34 @@ use virtio_drivers_la::{Hal, BufferDirection, PhysAddr as VirtioPhysAddr};
 use virtio_drivers_la::transport::pci::PciTransport;
 use virtio_drivers_la::device::blk::VirtIOBlk;
 
-#[allow(unused)]
 const VIRTIO0: usize = 0x10001000;
-
+use crate::arch::config::*;
 /// VirtIOBlock device driver strcuture for virtio_blk device
 /// 需要实现根据pci地址的情况动态扫描与初始化，待实现
 pub struct VirtIOBlock{
     inner: UPSafeCell<VirtIOBlk<VirtioHal, PciTransport>>,
 }
 
-lazy_static! {
-    static ref QUEUE_FRAMES: UPSafeCell<Vec<FrameTracker>> = unsafe { UPSafeCell::new(Vec::new()) };
+// 维护DMA区域的内存的管理器，不过回收还没完全实现
+pub struct DmaMemManager {
+    pub start_ppn: PhysPageNum,
+    pub end_ppn: PhysPageNum,
+    pub current_ppn: PhysPageNum,
+    pub allocated: Vec<VPNRange>,
+}
+
+extern "C"{
+    fn ekernel();
+}
+
+/// 固定DMA区域的物理页管理器
+lazy_static!{
+    pub static ref QUEUE_FRAMES: UPSafeCell<DmaMemManager> = unsafe { UPSafeCell::new(DmaMemManager {
+        start_ppn: PhysPageNum(ekernel as *const() as usize / PAGE_SIZE),
+        end_ppn: PhysAddr(ekernel as *const() as usize + DMA_SIZE).floor(),
+        current_ppn: PhysPageNum(ekernel as *const() as usize / PAGE_SIZE),
+        allocated: Vec::new(),
+    }) };
 }
 
 
@@ -89,23 +106,34 @@ impl BlockDevice for VirtIOBlock {
 
 pub struct VirtioHal;
 
+use crate::mm;
+
 // 待实现
 unsafe impl Hal for VirtioHal {
+    // 在la64中，无须严格区分虚拟地址和物理地址，因为使用窗口映射，只关心数值即可
     fn dma_alloc(pages: usize, _direction: BufferDirection) -> (VirtioPhysAddr, NonNull<u8>) {
-        let mut ppn_base = PhysPageNum(0);
-        for i in 0..pages {
-            let frame = frame_alloc().unwrap();
-            if i == 0 {
-                ppn_base = frame.ppn;
+        let mut manager = QUEUE_FRAMES.exclusive_access();
+        let start_ppn = manager.start_ppn;
+        let end_ppn = manager.end_ppn;
+
+        let mut current_ppn = manager.current_ppn;
+        while current_ppn.0 + pages <= end_ppn.0 {
+            let range = VPNRange::new(
+                current_ppn.0.into(),
+                (current_ppn.0 + pages).into()
+            );
+            // 检查是否与已分配的范围重叠
+            if !manager.allocated.iter().any(|&r| 
+                r.get_end() > range.get_start() && r.get_start() < range.get_end()
+            ) {
+                manager.allocated.push(range);
+                let paddr = PhysAddr::from(current_ppn.0 * PAGE_SIZE);
+                manager.current_ppn = PhysPageNum(current_ppn.0 + pages);
+                return (paddr.0 as VirtioPhysAddr, NonNull::new(paddr.0 as *mut u8).unwrap());
             }
-            assert_eq!(frame.ppn.0, ppn_base.0 + i);
-            QUEUE_FRAMES.exclusive_access().push(frame);
+            current_ppn = PhysPageNum(current_ppn.0 + pages);
         }
-        let pa: PhysAddr = ppn_base.into();
-        // 转换成窗口映射的虚拟地址
-        let va_val = pa.0 | UNCHACHED_KERNEL_BASE;
-        let ptr = NonNull::new(va_val as *mut u8).unwrap();
-        (pa.0 as u64, ptr)
+        panic!("Out of DMA memory!");
     }
 
     unsafe fn dma_dealloc(paddr: VirtioPhysAddr, _vaddr: NonNull<u8>, pages: usize) -> i32 {
@@ -123,14 +151,13 @@ unsafe impl Hal for VirtioHal {
         let va = (paddr as usize) | 0x8000_0000_0000_0000;
         NonNull::new(va as *mut u8).unwrap()
     }
-
-    unsafe fn share(buffer: core::ptr::NonNull<[u8]>, direction: virtio_drivers_la::BufferDirection) -> virtio_drivers_la::PhysAddr {
-        0
+    // 暂时直接返回
+    unsafe fn share(buffer: core::ptr::NonNull<[u8]>, _direction: virtio_drivers_la::BufferDirection) -> virtio_drivers_la::PhysAddr {
+        (buffer.as_ptr() as *const() as usize  & 0x0000_FFFF_FFFF_FFFF) as virtio_drivers_la::PhysAddr
     }
 
     unsafe fn unshare(_paddr: VirtioPhysAddr, _buffer: core::ptr::NonNull<[u8]>, _direction: virtio_drivers_la::BufferDirection) {
         // do nothing
         // 未实现
-        ()
     }
 } 

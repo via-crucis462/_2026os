@@ -11,6 +11,8 @@
     //"rust-analyzer.checkOnSave.allTargets": false,
     "rust-analyzer.check.allTargets": false,
     "makefile.configureOnOpen": false,
+    "search.useIgnoreFiles": false,
+    "search.useGlobalIgnoreFiles": false,
     // "rust-analyzer.cargo.features": [
     //     "board_qemu"
     // ]

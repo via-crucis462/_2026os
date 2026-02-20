@@ -28,6 +28,8 @@ pub use frame_allocator::{frame_alloc, frame_dealloc, FrameTracker};
 pub use memory_set::remap_test;
 pub use memory_set::{kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
 pub use crate::arch::mm::pte;
+#[allow(unused)]
+pub use memory_set::{MapArea, MapType};
 
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {
