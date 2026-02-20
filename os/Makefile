@@ -31,6 +31,9 @@ ifeq ($(FS) , EFS)
 else ifeq ($(FS) , EXT4)
 	FS_IMG := ../fs_img/$(ARCH)_ext4.img
 endif
+
+LA_FS_IMG := ../fs_img/la64_ext4.img
+
 # KERNEL ENTRY
 KERNEL_ENTRY_PA := 0x80200000
 

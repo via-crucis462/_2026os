@@ -13,6 +13,7 @@
  * Changes:
  * 1. 重命名模块,将其作为一个mod放入项目中.
  * 2. 为适配LA64修改部分代码,删除了portio相关代码.
+ * 3. 完善部分逻辑,增加扫描转换函数.
  */
 
  /* 
@@ -23,10 +24,30 @@ const CONFIG_ADDRESS: u16 = 0x0CF8;
 const CONFIG_DATA: u16 = 0x0CFC;
 
 use crate::arch::config::*;
+use crate::mm::PhysAddr;
 const BASE_ADDR: usize = PCI_CONFIG_SPACE_BASE;
 
 use virtio_drivers_la::transport::pci::{PciTransport, bus::ConfigurationAccess};
 use virtio_drivers_la::transport::pci::bus::{DeviceFunction, PciRoot};
+use lazy_static::lazy_static;
+use crate::sync::UPSafeCell;
+
+lazy_static!(
+    // 维护当前已分配的MMIO地址
+    pub static ref CURRENT_MMIO_END: UPSafeCell<usize> = unsafe { UPSafeCell::new(PCI_MMIO_BASE) };
+);
+
+// 只分配，暂时不考虑回收问题
+pub fn mmio_alloc(size: usize) -> usize {
+    let mut next = CURRENT_MMIO_END.exclusive_access();
+    let current = next.clone();
+    // 对齐
+    let ppn = PhysAddr(current).ceil();
+    let start = ppn.0 * PAGE_SIZE;
+    *next = start + size;
+
+    start
+}
 
 
 // 参考了loongarchrcore的实现
@@ -157,21 +178,24 @@ pub enum BAR {
 }
 
 impl BAR {
+    // 解析和探测
     pub unsafe fn decode(loc: Location, am: CSpaceAccessMethod, idx: u16) -> (Option<BAR>, usize) {
         let raw = am.read32(loc, 16 + (idx << 2));
         if raw & 1 == 0 {
             let mut bits64 = false;
             let base: u64 =
             match (raw & 0b110) >> 1 {
-                0 => { bits64 = true; ((raw & !0xF) as u64) | ((am.read32(loc, 16 + ((idx + 1) << 2)) as u64) << 32) }
-                2 => (raw & !0xF) as u64,
+                // 原作者似乎写反了,10才是64位，已修改
+                0b10 => { bits64 = true; ((raw & !0xF) as u64) | ((am.read32(loc, 16 + ((idx + 1) << 2)) as u64) << 32) }
+                0b00 => (raw & !0xF) as u64,
                 _ => { debug_assert!(false, "bad type in memory BAR"); return (None, idx as usize + 1) },
             };
             am.write32(loc, 16 + (idx << 2), !0);
-            let len = !am.read32(loc, 16 + (idx << 2/*原作者写的12，似乎不太对*/)) + 1;
+            let len32 = am.read32(loc, 16 + (idx << 2));
+            let len = !(len32 & !0xF) as u64 + 1;
             am.write32(loc, 16 + (idx << 2), raw);
-            (Some(BAR::Memory(base, len, if raw & 0b1000 == 0 { Prefetchable::No } else { Prefetchable::Yes },
-                        if bits64 { Type::Bits64 } else { Type::Bits32 })),
+            (if len > 1 { Some(BAR::Memory(base, len as u32, if raw & 0b1000 == 0 { Prefetchable::No } else { Prefetchable::Yes },
+                        if bits64 { Type::Bits64 } else { Type::Bits32 })) } else { None },
              if bits64 { idx + 2 } else { idx + 1 } as usize)
         } else {
             (Some(BAR::IO(raw & !0x3)), idx as usize + 1)
@@ -281,16 +305,58 @@ pub fn scan_bus(am: CSpaceAccessMethod) -> BusScan {
 }
 
 // 此处仍需解决生命周期问题
-use crate::arch::la::drivers::block::VirtioHal;
+use crate::arch::la::drivers::block::*;
 use alloc::boxed::Box;
 
-pub fn scan_and_init_pci_device() -> Option<PciTransport> {
+pub fn scan_pci_device_to_trans() -> Option<PciTransport> {
     let am = CSpaceAccessMethod::MemoryMapped;
     for dev in scan_bus(am) {
-        //直接取第一个
+        // 只扫描块设备
+        if dev.id.vendor_id != 0x1AF4 || dev.id.device_id != 0x1001 {
+            continue;
+        }
+
+        // 调试用，输出信息
+        info!("Find a boclk device: bus={} dev={} func={}", dev.loc.bus, dev.loc.device, dev.loc.function);
+
+        // 初始化bar
+        for (idx, obar) in dev.bars.iter().enumerate() {
+            if let Some(bar) = obar {
+                match bar {
+                    BAR::Memory(_base, len, prefetchable, ty) => {
+                        info!("BAR{}: Memory at {:#x}, length {:#x}, {:?}, {:?}", idx, _base, len, prefetchable, ty);
+                        // 分配MMIO地址
+                        let base_addr = mmio_alloc(*len as usize);
+                        // 写入 BAR
+                        if ty == &Type::Bits64 {
+                            unsafe{
+                                CSpaceAccessMethod::MemoryMapped.write32(dev.loc, 16 + (idx << 2) as u16, (base_addr & 0xFFFF_FFFF) as u32);
+                                CSpaceAccessMethod::MemoryMapped.write32(dev.loc, 16 + ((idx + 1) << 2) as u16, (base_addr >> 32) as u32);
+                            }
+                        } else {
+                            unsafe{
+                                CSpaceAccessMethod::MemoryMapped.write32(dev.loc, 16 + (idx << 2) as u16, base_addr as u32);
+                            }
+                        }
+                    }
+                    BAR::IO(port) => {
+                        println!("BAR{}: IO at {:#x}", idx, port);
+                    }
+                }
+            }
+        }
+
+        // 启用设备
+        unsafe {
+            // 设置cmd寄存器，开启内存访问，开始相应dma请求
+            let old = am.read16(dev.loc, 0x04);
+            let new = old | 0x6;
+            am.write16(dev.loc, 0x04, new);
+        }
+
         let root = PciRoot::new(CSpaceAccessMethod::MemoryMapped);
         let r_oot = Box::new(root);
-        // 注：将生命周期暴力改为static，不过暂时不会有问题，因为不会反复调用
+        // 注：将生命周期暴力改为static（会泄露内存），不过暂时不会有问题，因为不会反复调用
         let ref_root  = Box::leak(r_oot);
         return Some(
             PciTransport::new::<VirtioHal, CSpaceAccessMethod>(
