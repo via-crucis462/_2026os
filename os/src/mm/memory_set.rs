@@ -2,7 +2,7 @@ use super::{frame_alloc, FrameTracker};
 use super::{PageTable, pte::*, PTEFlags};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
-use crate::arch::config::{MEMORY_END,  PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
+use crate::arch::config::{DMA_SIZE, MEMORY_END,  PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
 use crate::arch::config::MMIO;
 use crate::mm::mmap;
 use crate::sync::UPSafeCell;
@@ -100,11 +100,12 @@ impl MemorySet {
     /// Add a new MapArea into this MemorySet.
     /// Assuming that there are no conflicts in the virtual address
     /// space.
-    fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>, start_va: usize) {
+    pub fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>, start_va: usize) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {
             map_area.copy_data(&mut self.page_table, data, start_va);
         }
+        info!("map area: [{:#x}, {:#x}), {:?}", map_area.vpn_range.get_start().0 * PAGE_SIZE, map_area.vpn_range.get_end().0 * PAGE_SIZE, map_area.map_perm);
         self.areas.push(map_area);
     }
     /// Mention that trampoline is not collected by areas.
@@ -172,18 +173,46 @@ impl MemorySet {
             None,
             sbss_with_stack as *const () as usize,
         );
-        info!("mapping physical memory");
-        memory_set.push(
-            MapArea::new(
-                (ekernel as *const () as usize).into(),
-                (MEMORY_END - 4096).into(),
-                MapType::Identical,
-                MapPermission::R | MapPermission::W,
-            ),
-            None,
-            ekernel as *const () as usize,
-        );
-        // 对于la, 实际上也有MMIO空间
+        #[cfg( target_arch = "loongarch64")]{
+            // 实际上riscv也最好改成这样，暂时只改la
+            info!("mapping memory for devices");
+            let ekernel_addr = ekernel as *const () as usize;
+            memory_set.push(
+                MapArea::new(
+                    (ekernel_addr).into(),
+                    (ekernel_addr + DMA_SIZE).into(),
+                    MapType::Identical,
+                    MapPermission::R | MapPermission::W,
+                ),
+                None,
+                ekernel_addr,
+            );
+            info!("mapping physical memory");
+            memory_set.push(
+                MapArea::new(
+                    (ekernel_addr + DMA_SIZE).into(),
+                    (MEMORY_END - 4096).into(),
+                    MapType::Identical,
+                    MapPermission::R | MapPermission::W,
+                ),
+                None,
+                ekernel_addr + DMA_SIZE,
+            );
+        }
+        #[cfg(target_arch = "riscv64")]{
+            info!("mapping physical memory");
+            memory_set.push(
+                MapArea::new(
+                    (ekernel as *const () as usize).into(),
+                    (MEMORY_END - 4096).into(),
+                    MapType::Identical,
+                    MapPermission::R | MapPermission::W,
+                ),
+                None,
+                ekernel as *const () as usize,
+            );
+        }
+        // 两者均有MMIO空间，地址可能不同
         info!("mapping memory-mapped registers");
         for pair in MMIO {
             memory_set.push(
