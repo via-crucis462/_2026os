@@ -107,5 +107,5 @@ run-inner-la:
 		-machine virt \
 		-nographic \
 		-kernel $(LA_KERNEL_ELF) \
-		-drive file=$(FS_IMG),if=none,format=raw,id=x0 \
+		-drive file=$(LA_FS_IMG),if=none,format=raw,id=x0 \
 		-device virtio-blk-pci,drive=x0

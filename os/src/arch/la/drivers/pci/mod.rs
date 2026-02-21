@@ -11,26 +11,22 @@
 /* 
  * Modified by 贝壳OS in 2026 for _2026os.
  * Changes:
- * 1. 重命名模块,将其作为一个mod放入项目中.
+ * 1. 重命名模块,将其作为一个mod放入项目中,并引入项目相关模块.
  * 2. 为适配LA64修改部分代码,删除了portio相关代码.
  * 3. 完善部分逻辑,增加扫描转换函数.
  */
 
- /* 
-  * 参考了https://godones.github.io/rCoreloongArch/pci.html
-  */
-
-const CONFIG_ADDRESS: u16 = 0x0CF8;
-const CONFIG_DATA: u16 = 0x0CFC;
+/* 
+* 参考了https://godones.github.io/rCoreloongArch/pci.html
+*/
 
 use crate::arch::config::*;
 use crate::mm::PhysAddr;
 const BASE_ADDR: usize = PCI_CONFIG_SPACE_BASE;
-
-use virtio_drivers_la::transport::pci::{PciTransport, bus::ConfigurationAccess};
-use virtio_drivers_la::transport::pci::bus::{DeviceFunction, PciRoot};
 use lazy_static::lazy_static;
 use crate::sync::UPSafeCell;
+use virtio_drivers_la::transport::pci::{PciTransport, bus::ConfigurationAccess};
+use virtio_drivers_la::transport::pci::bus::{DeviceFunction, PciRoot};
 
 lazy_static!(
     // 维护当前已分配的MMIO地址
@@ -63,13 +59,11 @@ impl CSpaceAccessMethod {
         let val = self.read32(loc, offset & 0b11111100);
         ((val >> ((offset as usize & 0b11) << 3)) & 0xFF) as u8
     }
-
     /// Returns a value in native endian.
     pub unsafe fn read16(self, loc: Location, offset: u16) -> u16 {
         let val = self.read32(loc, offset & 0b11111100);
         ((val >> ((offset as usize & 0b10) << 3)) & 0xFFFF) as u16
     }
-
     /// Returns a value in native endian.
     pub unsafe fn read32(self, loc: Location, offset: u16) -> u32 {
         debug_assert!(
@@ -79,19 +73,18 @@ impl CSpaceAccessMethod {
         let addr = loc.encode() + (offset as usize);
         match self {
             CSpaceAccessMethod::MemoryMapped => {
-                let addr = addr as *const u32;
+                // 改为窗口映射后的地址
+                let addr = (addr | UNCHACHED_KERNEL_BASE) as *const u32;
                 addr.read_volatile()
                 }
         }
     }
-
     pub unsafe fn write8(self, loc: Location, offset: u16, val: u8) {
         let old = self.read32(loc, offset);
         let dest = offset as usize & 0b11 << 3;
         let mask = (0xFF << dest) as u32;
         self.write32(loc, offset, ((val as u32) << dest | (old & !mask)).to_le());
     }
-
     /// Converts val to little endian before writing.
     pub unsafe fn write16(self, loc: Location, offset: u16, val: u16) {
         let old = self.read32(loc, offset);
@@ -99,8 +92,7 @@ impl CSpaceAccessMethod {
         let mask = (0xFFFF << dest) as u32;
         self.write32(loc, offset, ((val as u32) << dest | (old & !mask)).to_le());
     }
-
-     pub unsafe fn write32(self, loc: Location, offset: u16, val: u32) {
+    pub unsafe fn write32(self, loc: Location, offset: u16, val: u32) {
         debug_assert!(
             (offset & 0b11) == 0,
             "misaligned PCI configuration dword u32 read"
@@ -108,8 +100,8 @@ impl CSpaceAccessMethod {
         let addr = loc.encode() + (offset as usize);
         match self {
             CSpaceAccessMethod::MemoryMapped => {
-                let addr = addr as *mut u32;
-                addr.write_volatile(val)
+                let addr = (addr | UNCHACHED_KERNEL_BASE) as *mut u32;
+                addr.write_volatile(val);
             }
         }
     }
@@ -134,7 +126,6 @@ impl Location {
     }
 }
 
-
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Identifier {
     pub vendor_id: u16,
@@ -153,10 +144,6 @@ pub struct PCIDevice {
     pub id: Identifier,
     pub bars: [Option<BAR>; 6],
     pub cspace_access_method: CSpaceAccessMethod,
-}
-
-pub enum PCIScanError {
-
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -304,48 +291,63 @@ pub fn scan_bus(am: CSpaceAccessMethod) -> BusScan {
     BusScan { loc: Location { base_addr: BASE_ADDR, bus: 0, device: 0, function: 0 }, am: am }
 }
 
-// 此处仍需解决生命周期问题
+
 use crate::arch::la::drivers::block::*;
 use alloc::boxed::Box;
 
 pub fn scan_pci_device_to_trans() -> Option<PciTransport> {
+    //! bug: root会被泄露到堆中，可能会有问题
+    //! 如果不使用这样的方式，此函数会有生命周期问题，不过目前的实现能跑
     let am = CSpaceAccessMethod::MemoryMapped;
+    // 调用库中的扫描函数扫描第一个块设备
     for dev in scan_bus(am) {
-        // 只扫描块设备
+        // 只初始化块设备
         if dev.id.vendor_id != 0x1AF4 || dev.id.device_id != 0x1001 {
             continue;
         }
-
         // 调试用，输出信息
-        info!("Find a boclk device: bus={} dev={} func={}", dev.loc.bus, dev.loc.device, dev.loc.function);
-
+        info!("found a boclk device: bus={:#x} dev={:#x} func={:#x}", 
+            dev.loc.bus,
+            dev.loc.device,
+            dev.loc.function
+        );
         // 初始化bar
         for (idx, obar) in dev.bars.iter().enumerate() {
             if let Some(bar) = obar {
                 match bar {
                     BAR::Memory(_base, len, prefetchable, ty) => {
-                        info!("BAR{}: Memory at {:#x}, length {:#x}, {:?}, {:?}", idx, _base, len, prefetchable, ty);
+                        info!("BAR{}: type Memory at {:#x}, length {:#x}, {:?}, {:?}",
+                            idx, _base, len, prefetchable, ty
+                        );
                         // 分配MMIO地址
                         let base_addr = mmio_alloc(*len as usize);
                         // 写入 BAR
                         if ty == &Type::Bits64 {
                             unsafe{
-                                CSpaceAccessMethod::MemoryMapped.write32(dev.loc, 16 + (idx << 2) as u16, (base_addr & 0xFFFF_FFFF) as u32);
-                                CSpaceAccessMethod::MemoryMapped.write32(dev.loc, 16 + ((idx + 1) << 2) as u16, (base_addr >> 32) as u32);
+                                CSpaceAccessMethod::MemoryMapped.write32(
+                                    dev.loc, 16 + (idx << 2) as u16,
+                                    (base_addr & 0xFFFF_FFFF) as u32
+                                );
+                                CSpaceAccessMethod::MemoryMapped.write32(
+                                    dev.loc, 16 + ((idx + 1) << 2) as u16,
+                                    (base_addr >> 32) as u32
+                                );
                             }
                         } else {
                             unsafe{
-                                CSpaceAccessMethod::MemoryMapped.write32(dev.loc, 16 + (idx << 2) as u16, base_addr as u32);
+                                CSpaceAccessMethod::MemoryMapped.write32(
+                                    dev.loc, 16 + (idx << 2) as u16,
+                                    base_addr as u32
+                                );
                             }
                         }
                     }
                     BAR::IO(port) => {
-                        println!("BAR{}: IO at {:#x}", idx, port);
+                        println!("BAR{}: type IO at {:#x}", idx, port);
                     }
                 }
             }
         }
-
         // 启用设备
         unsafe {
             // 设置cmd寄存器，开启内存访问，开始相应dma请求
@@ -353,7 +355,6 @@ pub fn scan_pci_device_to_trans() -> Option<PciTransport> {
             let new = old | 0x6;
             am.write16(dev.loc, 0x04, new);
         }
-
         let root = PciRoot::new(CSpaceAccessMethod::MemoryMapped);
         let r_oot = Box::new(root);
         // 注：将生命周期暴力改为static（会泄露内存），不过暂时不会有问题，因为不会反复调用
@@ -368,7 +369,7 @@ pub fn scan_pci_device_to_trans() -> Option<PciTransport> {
     None
 }
 
-// 为CSAM实现CA接口供使用
+// 为CSAM实现CA接口供库使用
 impl ConfigurationAccess for CSpaceAccessMethod{
     fn read_word(&self, device_function: DeviceFunction, register_offset: u8) -> u32 {
         unsafe{
