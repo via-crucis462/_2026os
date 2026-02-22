@@ -5,11 +5,11 @@ use crate::arch::trap::trap_return;
 /// task context structure containing some registers
 pub struct TaskContext {
     /// Ret position after task switching
-    ra: usize,
+    pub ra: usize,
     /// Stack pointer
-    sp: usize,
+    pub sp: usize,
     /// s0-11 register, callee saved
-    s: [usize; 12],// la64只有s0-s9，但不单独定义，牺牲一点空间换取简洁
+    pub s: [usize; 12],// la64只有s0-s9，但不单独定义，牺牲一点空间换取简洁
 }
 
 impl TaskContext {
@@ -23,6 +23,7 @@ impl TaskContext {
     }
     /// Create a new task context with a trap return addr and a kernel stack pointer
     pub fn goto_trap_return(kstack_ptr: usize) -> Self {
+        println!("goto_trap_return: kstack_ptr={:#x}", kstack_ptr);
         Self {
             ra: trap_return as *const () as usize,
             sp: kstack_ptr,

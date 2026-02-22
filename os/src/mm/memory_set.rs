@@ -111,6 +111,7 @@ impl MemorySet {
     }
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
+        info!("mapping trampoline");
         self.page_table.map(
             VirtAddr::from(TRAMPOLINE).into(),// 高位0xf...被截断
             PhysAddr::from(strampoline as *const () as usize).into(),// 高位0x9...被截断
@@ -361,12 +362,12 @@ impl MemorySet {
         }
     }
     /// 对于龙芯，修改PGDL/H寄器
-    /// 只用了三级页表，H不用管
+    /// 用户处于低半地址空间
     #[cfg(target_arch = "loongarch64")]
     pub fn activate(&self) {
         let pgdl = self.page_table.token();
         unsafe {
-            asm!("csrwr {pgdl}, 0x1", pgdl = in(reg) pgdl,);
+            asm!("csrwr {pgdl}, 0x19", pgdl = in(reg) pgdl,);
         }
     }
     

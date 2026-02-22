@@ -104,7 +104,7 @@ impl PageTable {
     }
     #[cfg(target_arch = "loongarch64")]
     pub fn token(&self) -> usize {
-        self.root_ppn.0 //la64的PGD寄存器直接存储物理页号
+        PhysAddr::from(self.root_ppn).into()
     }
 }
 

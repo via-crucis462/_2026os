@@ -98,16 +98,24 @@ pub fn rust_main() -> ! {
     info!("[kernel] Hello, world!");
     mm::init();
     mm::remap_test();
-    println!("1");
     arch::trap::init();
-    arch::trap::enable_timer_interrupt();
-    arch::timer::set_next_trigger();
-    println!("2");
     drivers::search_pci();
     fs::list_apps();
-    println!("3");
     task::add_initproc();
-    println!("4");
+    arch::trap::enable_timer_interrupt();
     task::run_tasks();
     panic!("Unreachable in rust_main!");
+}
+
+use core::arch::{asm};
+#[cfg(target_arch = "loongarch64")]
+#[no_mangle]
+pub fn debug_csr_info() {
+    let mut pgdl:usize= 0;
+    let mut crmd:usize= 0;
+    unsafe{
+        asm!("csrrd {}, 0x18", out(reg) pgdl);
+        asm!("csrrd {}, 0x0", out(reg) crmd);
+    }
+    println!("pgdl: {:#x}, crmd: {:#b}", pgdl, crmd);
 }

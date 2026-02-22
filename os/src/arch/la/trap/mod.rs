@@ -5,6 +5,7 @@ mod context;
 
 use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 
+use crate::debug_csr_info;
 use crate::syscall::syscall;
 use crate::task::{
     check_signals_error_of_current, current_add_signal, current_trap_cx, current_user_token,
@@ -37,7 +38,7 @@ fn set_user_trap_entry() {
     unsafe {
         asm!(
             "csrwr {trap_handler},0xe",
-            //需要截断高位，转成低半地址空间的地址
+            //会自动截断高位，转成低半地址空间的地址
             trap_handler = in(reg) VirtAddr::from(TRAMPOLINE).0,
         );
     }
@@ -48,15 +49,16 @@ pub fn enable_timer_interrupt() {
     crate::arch::timer::init_board_freq();
     unsafe {
         asm!("csrwr {}, 0x44", in(reg) 1);// 清除定时器中断
-        let tcfg = 0x100000usize | 0b11;// 循环模式并开启中断，周期0x100000
+        let tcfg: usize = 0x100000 | 0b11;// 循环模式并开启中断，周期0x100000
         asm!("csrwr {}, 0x41", in(reg) tcfg);
         let mut ecfg: usize;
         asm!("csrrd {}, 0x4", out(reg) ecfg);
         asm!("csrwr {}, 0x4", in(reg) ecfg | (1 << 11)); // 使能定时器中断
         let mut crmd: usize;
-        asm!("csrrd {}, 0x1", out(reg) crmd); // 进入用户态
-        asm!("csrwr {}, 0x1", in(reg) crmd | (1 << 2)); // 使能中断
+        asm!("csrrd {}, 0x0", out(reg) crmd);
+        asm!("csrwr {}, 0x0", in(reg) crmd | (1 << 2)); // 使能中断
     }
+    debug_csr_info();
 }
 
 
@@ -74,6 +76,7 @@ enum Cause {
 /// 的111页和97页
 #[no_mangle]
 pub fn trap_handler() -> ! {
+    println!("[kernel] called trap_handler");
     set_kernel_trap_entry();
     let estat = unsafe {
         let t: usize;
@@ -140,19 +143,24 @@ pub fn trap_return() -> ! {
     set_user_trap_entry();
     let trap_cx_ptr = TRAP_CONTEXT_BASE;
     let user_satp = current_user_token();
+ 
     // println!("[kernel] trap_return: to user mode");
+    info!("[kernel] trap_return: to user mode, satp = {:#x}", user_satp);
     extern "C" {
         fn __alltraps();
         fn __restore();
     }
+    // 相对地址+跳板基址
     let restore_va =
         __restore as *const () as usize - 
         __alltraps as *const () as usize + 
         TRAMPOLINE;
     // trace!("[kernel] trap_return: ..before return");
+    // 初始化内存空间到用户态
+    crate::arch::mm::la_app_init_mem(user_satp);
     unsafe {
         asm!(
-            "dbar 0", // Ensure ordering
+            "dbar 0",
             "jr {restore_va}",
             restore_va = in(reg) restore_va,
             in("$a0") trap_cx_ptr,
@@ -166,6 +174,7 @@ pub fn trap_return() -> ! {
 /// handle trap from kernel
 /// Unimplement: traps/interrupts/exceptions from kernel mode
 /// Todo: Chapter 9: I/O device
+/// 在我们现在的实现中，io设备不需要使用这个函数，但尊重rcore原作先不删除
 pub fn trap_from_kernel() -> ! {
     panic!("a trap from kernel!");
 }

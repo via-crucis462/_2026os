@@ -73,7 +73,7 @@ impl PageTableEntry {
     /// Get the physical page number from the page table entry
     pub fn ppn(&self) -> PhysPageNum {
         // LA64基本页页表项与SV39一致，也是固定12字节偏移
-        (self.bits >> 12 & ((1usize << 44) - 1)).into()
+        (self.bits >> 12 & ((1usize << 36) - 1)).into()
     }
     /// Get the flags from the page table entry
     pub fn flags(&self) -> PTEFlagsLA64 {
