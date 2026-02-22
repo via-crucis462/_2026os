@@ -14,11 +14,12 @@ const DMW0_VAL: usize = UNCHACHED_KERNEL_BASE | 0x1;
 const DMW1_VAL: usize = KERNEL_BASE | 0x11;
 const DMW2_VAL: usize = 0 | 0x1;
 
-const PA_WIDTH_SV39: usize = 56;
-const VA_WIDTH_SV39: usize = 39;
+// 本来是56,la64 qemu改为48
+pub const PA_WIDTH_SV39: usize = 48;
+pub const VA_WIDTH_SV39: usize = 39;
 
 // 为使虚拟地址结构与SV39一致，定义如下常量
-// 这些参数需要在内存初始化时写进寄存器
+// qemu使用的物理地址只到48位
 const PA_LEN : usize = PA_WIDTH_SV39;
 const VA_LEN : usize = VA_WIDTH_SV39;
 // PT可以理解为dir0
@@ -67,6 +68,7 @@ pub fn la_app_init_mem(token: usize) {
         asm!("csrwr {}, 0x1d", in(reg) PWCH_VAL); // PWCH
         // 设置PGD寄存器保存根页表物理地址
         asm!("csrwr {}, 0x19", in(reg) token);// PGDL 低半地址空间，对应用户态
+        asm!("csrwr {}, 0x1a", in(reg) token);// PGDH 临时也指向用户页表，保证内核态访问trap_ctx生效
         // asm!("csrwr {}, 0x1a", in(reg) 0);
         // 设置TLB重填处理函数地址
         asm!("csrwr {}, 0x88", in(reg) tlb_refill_handler as *const() as usize); // TLBRENTRY

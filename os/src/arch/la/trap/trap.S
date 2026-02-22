@@ -9,7 +9,7 @@
     .section .text.trampoline
     .globl __alltraps
     .globl __restore
-    .align 4
+    .align 2
 __alltraps:
     # csrrw sp, sscratch, sp
     # 需要交换 sp 与 0x30(SAVE0) 寄存器的值
@@ -63,12 +63,12 @@ __restore:
     move $t0, $a0
     csrwr $t0, 0x30
     move $sp, $a0
-    
     # 恢复之前保存的csr
     ld.d $t0, $sp, 32*8
     ld.d $t1, $sp, 33*8
-    csrwr $t0, 0x1
+    csrwr $t0, 0x1 #prmd
     csrwr $t1, 0x6
+
     # 恢复之前保存的通用寄存器
     ld.d $r1, $sp, 1*8
     ld.d $r2, $sp, 2*8

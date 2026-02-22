@@ -32,4 +32,4 @@ __switch:
     .endr
     # restore kernel stack of next task
     ld.d $sp, $a1, 8
-    ret
+    jr $ra
