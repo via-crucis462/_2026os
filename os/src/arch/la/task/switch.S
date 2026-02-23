@@ -16,14 +16,14 @@ __switch:
     # )
     # save kernel stack of current task
     st.d $sp, $a0, 8
-    # save ra & s0~s11 of current execution
+    # save ra & s0~s9 of current execution
     st.d $ra, $a0, 0
     .set n, 0 
     .rept 10
         SAVE_SN %n
         .set n, n + 1
     .endr
-    # restore ra & s0~s11 of next execution
+    # restore ra & s0~s9 of next execution
     ld.d $ra, $a1, 0
     .set n, 0
     .rept 10
@@ -31,5 +31,5 @@ __switch:
         .set n, n + 1
     .endr
     # restore kernel stack of next task
-    ld.d $sp, $a1, 8
-    jr $ra
+    ld.d $sp, $a1, 8    
+    ret

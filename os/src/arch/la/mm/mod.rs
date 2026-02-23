@@ -48,30 +48,36 @@ const PWCH_VAL: usize = 0;
 pub fn la_kernel_init_mem() {
     // 设置直接映射配置窗口
     unsafe {
-        asm!("csrwr {}, 0x180", in(reg) DMW0_VAL);
-        asm!("csrwr {}, 0x181", in(reg) DMW1_VAL);
-        asm!("csrwr {}, 0x182", in(reg) DMW2_VAL);
+        asm!("csrwr {dmw0}, 0x180", dmw0 = inout(reg) DMW0_VAL => _);
+        asm!("csrwr {dmw1}, 0x181", dmw1 = inout(reg) DMW1_VAL => _);
+        asm!("csrwr {dmw2}, 0x182", dmw2 = inout(reg) DMW2_VAL => _);
         let mut t: usize;
         asm!("csrrd {}, 0x0", out(reg) t);
         t |= 1 << 4;
         t &= !(1 << 3);
-        asm!("csrwr {}, 0x0", in(reg) t);
+        asm!("csrwr {crmd}, 0x0", crmd = inout(reg) t => _);
     }
+    init_tlb();
 }
 
 /// 内存相关寄存器初始化，需要在启动应用时调用，尚未完善
-/// token: 当前内存空间根页表物理地址
+fn init_tlb() {
+    unsafe {
+        asm!("csrwr {pwcl}, 0x1c", pwcl = inout(reg) PWCL_VAL => _); // PWCL
+        asm!("csrwr {pwch}, 0x1d", pwch = inout(reg) PWCH_VAL => _); // PWCH
+        asm!(
+            "csrwr {tlbrfl}, 0x88",
+            tlbrfl = inout(reg) (tlb_refill_handler as *const() as usize) => _
+        );
+    }
+}
+
+// 修改根页表地址
 pub fn la_app_init_mem(token: usize) {
     unsafe {
-        // 设置页表项宽度等参数
-        asm!("csrwr {}, 0x1c", in(reg) PWCL_VAL); // PWCL
-        asm!("csrwr {}, 0x1d", in(reg) PWCH_VAL); // PWCH
-        // 设置PGD寄存器保存根页表物理地址
-        asm!("csrwr {}, 0x19", in(reg) token);// PGDL 低半地址空间，对应用户态
-        asm!("csrwr {}, 0x1a", in(reg) token);// PGDH 临时也指向用户页表，保证内核态访问trap_ctx生效
-        // asm!("csrwr {}, 0x1a", in(reg) 0);
-        // 设置TLB重填处理函数地址
-        asm!("csrwr {}, 0x88", in(reg) tlb_refill_handler as *const() as usize); // TLBRENTRY
+        // 设置PGDL/PGDH，供TLB重填时加载页表根地址
+        asm!("csrwr {pgdl}, 0x19", pgdl = inout(reg) token => _); // PGDL
+        asm!("csrwr {pgdh}, 0x1a", pgdh = inout(reg) 0usize => _); // PGDH
     }
 }
 
