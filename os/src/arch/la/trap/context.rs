@@ -25,6 +25,17 @@ pub struct TrapContext {
 
 // 封装了对两平台名称不同寄存器的访问为同名接口
 impl TrapContext {
+    /// 创建一个空TC
+    pub fn new_bare() -> Self {
+        Self {
+            r: [0; 32],
+            prmd: 0,
+            era: 0,
+            kernel_token: 0,
+            kernel_sp: 0,
+            trap_handler: 0,
+        }
+    }
     /// 将sp存入r3
     pub fn set_sp(&mut self, sp: usize) {
         self.r[3] = sp;
@@ -59,11 +70,14 @@ impl TrapContext {
         kernel_sp: usize,
         trap_handler: usize,
     ) -> Self {
-        println!("app_init_context: entry={:#x}, sp={:#x}, kernel_token={:#x}, kernel_sp={:#x}, trap_handler={:#x}", entry, sp, kernel_token, kernel_sp, trap_handler);
+        println!(
+            "app_init_context: entry={:#x}, sp={:#x}, kernel_token={:#x}, kernel_sp={:#x}, trap_handler={:#x}", 
+            entry, sp, kernel_token, kernel_sp, trap_handler
+        );
         // app启动需设置特权级为用户态，也就是plv=3
         // 另，开启中断使能，开启分页
         // 注意，_restore函数会将prmd的值写入prmd寄存器，然后才ertn，所以不应该设置到crmd寄存器中，否则出问题
-        let mut default_status: usize  = 0b0001_0111; 
+        let default_status: usize  = 0b0001_0111; 
         
         let mut cx = Self {
             r: [0; 32],

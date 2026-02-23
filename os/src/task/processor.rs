@@ -67,7 +67,7 @@ pub fn run_tasks() {
             task_inner.task_status = TaskStatus::Running;
             // release coming task_inner manually
             drop(task_inner);
-            println!("[kernel] run_tasks: switch to pid={}", task.pid.0);
+            println!("[kernel] run_tasks: switching to pid={}", task.pid.0);
             // release coming task TCB manually
             processor.current = Some(task);
             // release processor manually

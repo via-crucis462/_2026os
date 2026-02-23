@@ -3,7 +3,7 @@
 //! Assign PID to the process here. At the same time, the position of the application KernelStack
 //! is determined according to the PID.
 
-use crate::arch::config::{KERNEL_STACK_SIZE, PAGE_SIZE, TRAMPOLINE};
+use crate::arch::config::*;
 use crate::mm::{MapPermission, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
@@ -63,8 +63,10 @@ pub fn pid_alloc() -> PidHandle {
 }
 
 /// Return (bottom, top) of a kernel stack in kernel space.
+#[cfg(target_arch = "loongarch64")]
 pub fn kernel_stack_position(app_id: usize) -> (usize, usize) {
-    let top = TRAMPOLINE - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE);
+    let top = 0x800_0000 - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE);
+    let top = top | KERNEL_BASE; // 使用内核空间地址
     let bottom = top - KERNEL_STACK_SIZE;
     (bottom, top)
 }
@@ -97,16 +99,23 @@ impl Drop for KernelStack {
 
 impl KernelStack {
     /// Push a variable of type T into the top of the KernelStack and return its raw pointer
+    /// 为la64调整，rv64需要改回去，暂时不改
     #[allow(unused)]
+    #[cfg(target_arch = "loongarch64")]
     pub fn push_on_top<T>(&self, value: T) -> *mut T
     where
         T: Sized,
     {
         let kernel_stack_top = self.get_top();
-        let ptr_mut = (kernel_stack_top - core::mem::size_of::<T>()) as *mut T;
+        let size = core::mem::size_of::<T>();
+        let align = core::mem::align_of::<T>();
+        let sp = (kernel_stack_top - size) & !(align - 1);
+        let ptr_mut = sp as *mut T;
+        println!("push_on_top: kernel_stack_top={:#x}, size={}, align={}, sp={:#x}", kernel_stack_top, size, align, sp);
         unsafe {
-            *ptr_mut = value;
+            core::ptr::write(ptr_mut, value);
         }
+        println!("push_on_top: value pushed at {:#x}", ptr_mut as usize);
         ptr_mut
     }
     /// Get the top of the KernelStack

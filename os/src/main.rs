@@ -92,12 +92,12 @@ pub fn rust_main() -> ! {
 #[cfg(target_arch = "loongarch64")]
 #[no_mangle]
 pub fn rust_main() -> ! {
-    la::mm::la_kernel_init_mem();// 设置映射窗口，其实不写也可以，qemu会自动处理，但这里写上防止移植出现bug
+    la::mm::la_kernel_init_mem();// 设置映射窗口
     clear_bss();
     logging::init();
     info!("[kernel] Hello, world!");
     mm::init();
-    mm::remap_test();
+    // mm::remap_test(); // 内核态取消了页表映射，因此跳过测试
     arch::trap::init();
     drivers::search_pci();
     fs::list_apps();
@@ -114,7 +114,7 @@ pub fn debug_csr_info() {
     let mut pgdl:usize= 0;
     let mut crmd:usize= 0;
     unsafe{
-        asm!("csrrd {}, 0x18", out(reg) pgdl);
+        asm!("csrrd {}, 0x19", out(reg) pgdl);
         asm!("csrrd {}, 0x0", out(reg) crmd);
     }
     println!("pgdl: {:#x}, crmd: {:#b}", pgdl, crmd);

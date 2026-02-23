@@ -27,22 +27,37 @@ impl PageTable {
     /// 参考rv64的rcore理解即可
     pub fn from_token(token: usize) -> Self {
         Self {
+            #[cfg(target_arch = "riscv64")]
             root_ppn: PhysPageNum::from(token & ((1usize << 44) - 1)),
+            #[cfg(target_arch = "loongarch64")]
+            root_ppn: PhysAddr(token).floor(),
             frames: Vec::new(),
         }
     }
     /// Find PageTableEntry by VirtPageNum, create a frame for a 4KB page table if not exist
     fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+        let judge = if vpn.0 % 4096 == 0 {
+            1
+        } else {
+            0
+        };
+        if judge == 1 {
+            
+        }   
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
+            if judge == 1 {
+                    info!("find_pte_create: vpn = {:?}, i = {}", vpn, i);
+                }
             if i == 2 {
                 result = Some(pte);
                 break;
             }
             if !pte.is_valid() {
+
                 let frame = frame_alloc().unwrap();
                 *pte = PageTableEntry::new(frame.ppn, PTEFlags::V);
                 self.frames.push(frame);
@@ -59,6 +74,7 @@ impl PageTable {
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
+            println!("find_pte: vpn = {:?}, i = {}", vpn, i);
             if i == 2 {
                 result = Some(pte);
                 break;
@@ -109,6 +125,7 @@ impl PageTable {
 }
 
 /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
+/// 其中ptr是用户空间地址
 pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
     let page_table = PageTable::from_token(token);
     let mut start = ptr as usize;
