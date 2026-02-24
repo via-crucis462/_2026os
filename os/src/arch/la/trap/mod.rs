@@ -16,6 +16,7 @@ use crate::arch::timer::set_next_trigger;
 use crate::arch::mm::tlb_refill_handler;
 
 use core::arch::{asm, global_asm};
+use core::ops::BitAndAssign;
 
 global_asm!(include_str!("trap.S"));
 
@@ -124,19 +125,25 @@ enum Cause {
 #[no_mangle]
 pub fn trap_handler() -> ! {
     println!("[kernel] called trap_handler");
-    let estat = unsafe {
-        let t: usize;
-        asm!("csrrd {}, 0x5", out(reg) t);
-        t
+    let estat :usize;
+    let era :usize;
+    let badv :usize;
+    let badi :usize;
+
+
+    unsafe {
+        asm!("csrrd {}, 0x5", out(reg) estat);
+        asm!("csrrd {}, 0x6", out(reg) era);
+        asm!("csrrd {}, 0x7", out(reg) badv);
+        asm!("csrrd {}, 0x8", out(reg) badi);
     };
     // 具体需要查表，位于手册111页表格
-    println!("[kernel] trap_handler: ESTAT={:#x}", estat);//11_0000_0000_0000_0000
-    // 出错虚地址
-    let badv = unsafe {
-        let t: usize;
-        asm!("csrrd {}, 0x7", out(reg) t);
-        t
-    };
+    //11_0000_0000_0000_0000=>页表
+    //3_0000_0000_0000_0000=>取指操作页无效例外
+    println!("[kernel] trap_handler: ESTAT={:#x}, ERA={:#x}, BADV={:#x}, BADI={:#x}", estat, era, badv, badi);
+
+    
+
 
 
     let cause = if ((estat >> 11) & 1)  != 0 {
@@ -195,7 +202,7 @@ pub fn trap_return() -> ! {
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
     
-//    crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
+//  crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
     info!("[kernel] trap_return: going to user mode, satp = {:#x}", user_satp);
     
     
@@ -206,8 +213,10 @@ pub fn trap_return() -> ! {
     // la64因为是先切换特权级再跳，切换特权级时会自动关闭内存窗口可用性，不需要用跳板，restore直接跳转即可
     let restore = __restore as *const() as usize;
 
-    let debug_buff = translated_byte_buffer(user_satp, 0x20_000 as *const u8, 128);
-    println!("[kernel] trap_return: debug_buff = {:?}", &debug_buff[..]);
+    // 调试打印，观察程序内存是否正常映射
+    let debug_buff = translated_byte_buffer(user_satp, 0x20_0000 as *const u8, 128);
+    println!("[kernel] trap_return: debug_buff = {:x?}", debug_buff);
+
     // 1_001000_0000_0000_0000_0000 访存指令地址错例外，这表明页表并没有正确映射好
     println!("[kernel] calling __restore, address: {:#x}", restore);
 
@@ -233,7 +242,7 @@ pub extern "C" fn debug_print(){
 #[no_mangle]
 pub unsafe extern "C" fn csr_info(){
     let csr: usize;
-    asm!("csrrd {}, 0x19", out(reg) csr);
+    asm!("csrrd {}, 0x89", out(reg) csr);
     println!("[kernel] csr_info: CSR = {:#x}", csr );
 }
 

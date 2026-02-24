@@ -10,7 +10,7 @@
     .globl __alltraps
     .globl __restore
     .globl csr_info 
-    .align 4
+    .align 2
 __alltraps:
     # csrrw sp, sscratch, sp
     # 需要交换 sp 与 0x30(SAVE0) 寄存器的值
@@ -90,8 +90,4 @@ __restore:
         .set n, n+1
     .endr
     ld.d $sp, $sp, 3*8 # 恢复trap前用户栈
-
-    bl csr_info
-    // 刷新tlb
-    invtlb 0, $zero, $zero
     ertn
