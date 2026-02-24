@@ -42,5 +42,5 @@ pub const MMIO: &[(usize, usize)] = &[
     (0x8000_0000_4000_0000, 0x1000_0000), // PCI MMIO
 ]; 
 
-/// 调试用低位地址似乎不允许被访问
-pub const OFFSET_FOR_USER_APP: usize = 0x20_0000;
+/// 调试用:低位地址似乎不允许被访问?
+pub const OFFSET_FOR_USER_APP: usize = 0;

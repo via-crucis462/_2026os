@@ -13,6 +13,7 @@ use core::arch::asm;
 const DMW0_VAL: usize = UNCHACHED_KERNEL_BASE | 0x1;
 const DMW1_VAL: usize = KERNEL_BASE | 0x11;
 const DMW2_VAL: usize = 0 | 0x1;
+const DMW3_VAL: usize = 0 | 0x1;
 
 // 本来是56,la64 qemu改为48
 pub const PA_WIDTH_SV39: usize = 48;
@@ -51,6 +52,7 @@ pub fn la_kernel_init_mem() {
         asm!("csrwr {dmw0}, 0x180", dmw0 = inout(reg) DMW0_VAL => _);
         asm!("csrwr {dmw1}, 0x181", dmw1 = inout(reg) DMW1_VAL => _);
         asm!("csrwr {dmw2}, 0x182", dmw2 = inout(reg) DMW2_VAL => _);
+        asm!("csrwr {dmw3}, 0x183", dmw3 = inout(reg) DMW3_VAL => _);
         let mut t: usize;
         asm!("csrrd {}, 0x0", out(reg) t);
         t |= 1 << 4;
@@ -70,6 +72,12 @@ fn init_tlb() {
             tlbrfl = inout(reg) (tlb_refill_handler as *const() as usize) => _
         );
     }
+
+    let cfg01:usize;
+    unsafe{
+        asm!("cpucfg {}, {}", out(reg) cfg01, in(reg) 0x1);
+    }
+    println!("[kernel] cfg01: {:#x}", cfg01);
 }
 
 // 修改根页表地址
@@ -87,30 +95,9 @@ pub fn do_tlb_refill(_va: VirtAddr) {
     // TODO
 }
 
-/// TLB重填异常处理
-#[no_mangle]
-pub fn tlb_refill_handler() {
-    // 硬件会自动保存异常虚拟地址到TLBRBADV
-    unsafe {
-        asm!(
-            // 临时保存 t0 寄存器，否则会被覆盖
-            "csrwr $t0, 0x8B",
-            // 加载根页表（dir2）地址
-            // 默认均为用户态发生缺页，从PGDL加载
-            "csrrd $t0, 0x19",
-            // 摘自手册：
-            // “LDDIR、LDPTE指令执行所需的出错虚地址信息
-            // 将来自于CSR.TLBRBADV”
-            // 根据触发异常的va逐级遍历dir2,dir1,pt
-            "lddir $t0, $t0, 2",
-            "lddir $t0, $t0, 1",
-            // la64“双页”，奇偶分别处理
-            "ldpte $t0, 0",
-            "ldpte $t0, 1",
-            // 执行重填并返回
-            "tlbfill",
-            "csrrd $t0, 0x8B",
-            "ertn",
-        );
-    }
+use core::arch::global_asm;
+global_asm!(include_str!("refill.S"));
+
+extern  "C" {
+    pub fn tlb_refill_handler();
 }
