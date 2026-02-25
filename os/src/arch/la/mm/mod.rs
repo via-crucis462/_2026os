@@ -3,7 +3,6 @@
 //! 尚不完善
 pub mod pte;
 
-use crate::mm::address::*;
 use crate::arch::config::*;
 use core::arch::asm;
 
@@ -64,6 +63,7 @@ pub fn la_kernel_init_mem() {
 
 /// 内存相关寄存器初始化，需要在启动应用时调用，尚未完善
 fn init_tlb() {
+    let mut temp: usize;
     unsafe {
         asm!("csrwr {pwcl}, 0x1c", pwcl = inout(reg) PWCL_VAL => _); // PWCL
         asm!("csrwr {pwch}, 0x1d", pwch = inout(reg) PWCH_VAL => _); // PWCH
@@ -71,8 +71,11 @@ fn init_tlb() {
             "csrwr {tlbrfl}, 0x88",
             tlbrfl = inout(reg) (tlb_refill_handler as *const() as usize) => _
         );
+        asm!("csrrd {}, 0x8E", out(reg) temp);
+        temp |= 12;
+        asm!("csrwr {tlbctl}, 0x8E", tlbctl = inout(reg) temp => _);
     }
-
+    println!("[kernel] init_tlb: temp={:#x}", temp);
     let cfg01:usize;
     unsafe{
         asm!("cpucfg {}, {}", out(reg) cfg01, in(reg) 0x1);
@@ -89,15 +92,10 @@ pub fn la_app_init_mem(token: usize) {
     }
 }
 
-/// TLB重填软件逻辑，相比硬件处理效率较低，暂不实现
-#[allow(unused)]
-pub fn do_tlb_refill(_va: VirtAddr) {
-    // TODO
-}
-
 use core::arch::global_asm;
 global_asm!(include_str!("refill.S"));
 
 extern  "C" {
     pub fn tlb_refill_handler();
 }
+

@@ -21,6 +21,12 @@ bitflags!{
     }
 }
 
+impl PTEFlagsLA64{
+    fn default() -> Self {
+        PTEFlagsLA64::V | PTEFlagsLA64::MAT0 | PTEFlagsLA64::P | PTEFlagsLA64::W
+    }
+}
+
 fn from_riscv_flags(riscv_flags: PTEFlags) -> PTEFlagsLA64 {
     // 默认设置为 Cache Coherent (CC, MAT=1)，否则访问内存极其缓慢
     // let mut la64_flags = PTEFlagsLA64::MAT0; // ai补充
@@ -53,9 +59,11 @@ fn from_riscv_flags(riscv_flags: PTEFlags) -> PTEFlagsLA64 {
 }
 
 
+
+
 #[derive(Copy, Clone)]
 #[repr(C)]
-/// 对于LA64，目录项和页表项格式相同，无需区分
+/// 对于LA64，目录项和页表项格式类似，但目录项无权限位，需要注意
 pub struct PageTableEntry {
     /// bits of page table entry
     pub bits: usize,
@@ -67,6 +75,16 @@ impl PageTableEntry {
     pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
         let bits = ppn.0 << 12;
         let la64_flags = from_riscv_flags(flags);
+        PageTableEntry { bits: bits | la64_flags.bits as usize }
+    }
+    // la64目录项不含权限位
+    pub fn new_dir(ppn: PhysPageNum) -> Self {
+        let bits = ppn.0 << 12;
+        PageTableEntry {bits: bits}
+    }
+    pub fn new_defualt(ppn: PhysPageNum) -> Self {
+        let bits = ppn.0 << 12;
+        let la64_flags = PTEFlagsLA64::default();
         PageTableEntry { bits: bits | la64_flags.bits as usize }
     }
     /// Create an empty page table entry
@@ -81,6 +99,9 @@ impl PageTableEntry {
     /// Get the flags from the page table entry
     pub fn flags(&self) -> PTEFlagsLA64 {
         PTEFlagsLA64::from_bits_truncate(self.bits as u64)//修改为只截取flags部分
+    }
+    pub fn is_empty(&self) -> bool {
+        self.bits == 0
     }
     /// The page pointered by page table entry is valid?
     pub fn is_valid(&self) -> bool {
