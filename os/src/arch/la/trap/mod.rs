@@ -174,7 +174,7 @@ pub fn trap_handler() -> ! {
                 suspend_current_and_run_next();
             }
             _ => {
-                error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, bad instruction = {:#x}",
+                error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, rtn addr = {:#x}",
                     cause,
                     crate::task::current_task().unwrap().pid.0,
                     badv,
@@ -241,9 +241,11 @@ pub extern "C" fn debug_print(){
 
 #[no_mangle]
 pub unsafe extern "C" fn csr_info(){
-    let csr: usize;
-    asm!("csrrd {}, 0x89", out(reg) csr);
-    println!("[kernel] csr_info: CSR = {:#x}", csr );
+    let mut csr: usize;
+    asm!("csrrd {}, 0x8C", out(reg) csr); // TLBRELO0?
+    println!("[kernel] csr_info: TLBRELO0 = {:#x}", csr );
+    asm!("csrrd {}, 0x8D", out(reg) csr); // TLBRELO1?
+    println!("[kernel] csr_info: TLBRELO1 = {:#x}", csr );
 }
 
 pub use context::TrapContext;
