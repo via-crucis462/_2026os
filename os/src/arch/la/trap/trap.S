@@ -9,7 +9,8 @@
     .section .text.trampoline
     .globl __alltraps
     .globl __restore
-    .align 4
+    .globl csr_info 
+    .align 2
 __alltraps:
     # csrrw sp, sscratch, sp
     # 需要交换 sp 与 0x30(SAVE0) 寄存器的值
@@ -54,11 +55,16 @@ __alltraps:
     # 跳转到trap_handler
     jr $t1
 
+# a0: trap_cx_ptr, a1: user_satp
 __restore:
-    la.global $t0, tlb_refill_handler # tlb_refill_handler函数地址
+    la.global $t0, tlb_refill_handler
     csrwr $t0, 0x88 # 设置tlb重填异常处理函数
-    csrwr $a1, 0x19 # 设置低半部为用户根页表
+    move $t0, $a1
+    csrwr $t0, 0x19 # 设置低半部为用户根页表
+    la.global $t0, __alltraps
+    csrwr $t0, 0xc # 例外入口地址
     invtlb 0, $zero, $zero # 刷新TLB
+
     # la的csrwr是交换，不能直接写入，需要备份到t0
     move $t0, $a0
     csrwr $t0, 0x30
@@ -67,8 +73,9 @@ __restore:
     # 恢复之前保存的csr
     ld.d $t0, $sp, 32*8
     ld.d $t1, $sp, 33*8
-    csrwr $t0, 0x1
+    csrwr $t0, 0x1 #prmd
     csrwr $t1, 0x6
+
     # 恢复之前保存的通用寄存器
     ld.d $r1, $sp, 1*8
     ld.d $r2, $sp, 2*8

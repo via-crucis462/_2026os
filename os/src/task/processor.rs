@@ -53,7 +53,10 @@ lazy_static! {
 ///The main part of process execution and scheduling
 ///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
 pub fn run_tasks() {
+    let mut counter: usize = 0;
     loop {
+        counter += 1;
+        println!("run_tasks counter: {}", counter);
         let mut processor = PROCESSOR.exclusive_access();
         if let Some(task) = fetch_task() {
             info!("[kernel] run_tasks: fetched pid={}", task.pid.0);
@@ -64,7 +67,7 @@ pub fn run_tasks() {
             task_inner.task_status = TaskStatus::Running;
             // release coming task_inner manually
             drop(task_inner);
-            debug!("[kernel] run_tasks: switch to pid={}", task.pid.0);
+            println!("[kernel] run_tasks: switching to pid={}", task.pid.0);
             // release coming task TCB manually
             processor.current = Some(task);
             // release processor manually

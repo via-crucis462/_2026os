@@ -17,13 +17,12 @@ pub const KERNEL_HEAP_SIZE: usize = 0x200_0000;
 /// page size : 4KB 
 pub const PAGE_SIZE: usize = 0x1000;
 /// page size bits: 12
-pub const PAGE_SIZE_BITS: usize = 0xc;
+pub const PAGE_SIZE_BITS: usize = 12;
 /// the virtual addr of trampoline
-/// 对用户程序，转成va时会自动置零高25位，
-/// 但这里/2使其本身就位于低半地址空间，更方便
-pub const TRAMPOLINE: usize = usize::MAX / 2 - PAGE_SIZE + 1;
+/// 由于映射窗口的存在，trampoline的地址不需要设置在高位了，直接放在内核空间的末尾就行
+/// pub const TRAMPOLINE: usize = (1 << 39) - PAGE_SIZE;
 /// the virtual addr of trap context 
-pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
+/// pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
 /// clock frequency
 /// la64需要从cpu寄存器中获取计时器频率，这里先不管
 pub const CLOCK_FREQ: usize = 12500000;
@@ -42,3 +41,6 @@ pub const MMIO: &[(usize, usize)] = &[
     (0x8000_0000_2000_0000, 0x1000_0000), // PCI配置空间
     (0x8000_0000_4000_0000, 0x1000_0000), // PCI MMIO
 ]; 
+
+/// 调试用:低位地址似乎不允许被访问?
+pub const OFFSET_FOR_USER_APP: usize = 0;

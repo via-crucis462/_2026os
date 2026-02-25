@@ -2,9 +2,9 @@
 
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
 use crate::{
-    arch::{config::TRAP_CONTEXT_BASE, trap::{TrapContext, trap_handler}},
+    arch::trap::{TrapContext, trap_handler},
     fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout},
-    mm::{KERNEL_SPACE, MemorySet, PhysPageNum, VirtAddr, mmap, translated_refmut},
+    mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, translated_refmut},
     sync::UPSafeCell,
 };
 use alloc::{
@@ -13,7 +13,10 @@ use alloc::{
     vec,
     vec::Vec,
 };
+#[allow(unused)]
+use crate::arch::config::*;
 use core::cell::RefMut;
+
 
 const AT_PHDR: usize = 3;
 const AT_PHENT: usize = 4;
@@ -50,8 +53,8 @@ impl TaskControlBlock {
 }
 
 pub struct TaskControlBlockInner {
-    /// The physical page number of the frame where the trap context is placed
-    pub trap_cx_ppn: PhysPageNum,
+    /// 此处改为直接保存地址
+    pub trap_cx_addr: usize,
 
     /// Application data can only appear in areas
     /// where the application address space is lower than base_size
@@ -99,7 +102,7 @@ pub struct TaskControlBlockInner {
 
 impl TaskControlBlockInner {
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
-        self.trap_cx_ppn.get_mut()
+        PhysAddr(self.trap_cx_addr).get_mut()
     }
     pub fn get_user_token(&self) -> usize {
         self.memory_set.token()
@@ -122,26 +125,49 @@ impl TaskControlBlockInner {
 
 impl TaskControlBlock {
     /// Create a new process
-    ///
+    /// 为la64修改
     /// At present, it is only used for the creation of initproc
     pub fn new(elf_data: &[u8]) -> Self {
-        // memory_set with elf program headers/trampoline/trap context/user stack
-        let (memory_set, user_sp, entry_point, _phdr, _phnum, _phent) = MemorySet::from_elf(elf_data);
-        let trap_cx_ppn = memory_set
+        println!("[kernel] TaskControlBlock::new: start creating a new process");
+        let (memory_set, user_sp, entry_point, _phdr, _phnum, _phent)
+            = MemorySet::from_elf(elf_data);
+        println!(
+            "[kernel] TaskControlBlock::new: entry_point={:#x}, user_sp={:#x}",
+            entry_point, user_sp
+        );
+        #[cfg(target_arch = "riscv64")]
+        let trap_cx_addr = {
+            let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
             .ppn();
+            let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
+            trap_cx_pa.into()
+        };
         // alloc a pid and a kernel stack in kernel space
+        // 注意：push_on_top已经被修改，请及时改回！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
         let pid_handle = pid_alloc();
         let kernel_stack = kstack_alloc();
+
+        println!("[kernel] TaskControlBlock::new");
+
+        #[cfg(target_arch = "loongarch64")]
+        let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
+
+        println!("[kernel] TaskControlBlock::new: kernel_stack_top={:#x}", kernel_stack.get_top());
+
+        #[cfg(target_arch = "riscv64")]
         let kernel_stack_top = kernel_stack.get_top();
+        #[cfg(target_arch = "loongarch64")]
+        let kernel_stack_top = trap_cx_addr;
+
         // push a task context which goes to trap_return to the top of kernel stack
         let task_control_block = Self {
             pid: pid_handle,
             kernel_stack,
             inner: unsafe {
                 UPSafeCell::new(TaskControlBlockInner {
-                    trap_cx_ppn,
+                    trap_cx_addr,
                     base_size: user_sp,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
@@ -172,6 +198,8 @@ impl TaskControlBlock {
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
+        // 发现问题：这样解引用写入会炸
+        // 已解决：只分配了128MB内存，之前的实现写到了有效区之外
         *trap_cx = TrapContext::app_init_context(
             entry_point,
             user_sp,
@@ -179,6 +207,7 @@ impl TaskControlBlock {
             kernel_stack_top,
             trap_handler as *const () as usize,
         );
+        println!("[kernel] TaskControlBlock::new: finished creating a new process");
         task_control_block
     }
 
@@ -190,10 +219,17 @@ impl TaskControlBlock {
             "[kernel] task::exec: entry_point={:#x}, user_sp={:#x}",
             entry_point, user_sp
         );
+        #[cfg(target_arch = "riscv64")]
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
             .ppn();
+        #[cfg(target_arch = "riscv64")]
+        let trap_cx_addr = {
+            let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
+            let trap_cx_addr = trap_cx_pa.0;
+            trap_cx_addr
+        };
         let memory_top = user_sp;
 
         // --- 开始构造符合 ABI 标准的用户栈 ---
@@ -265,16 +301,24 @@ impl TaskControlBlock {
         // 7. 更新 TCB 内部信息
         let mut inner = self.inner_exclusive_access();
         inner.memory_set = memory_set;
-        inner.trap_cx_ppn = trap_cx_ppn;
+        #[cfg(target_arch = "riscv64")]
+        {
+            inner.trap_cx_addr = trap_cx_addr;
+        }
         inner.heap_bottom = memory_top;
         inner.program_brk = memory_top;
+
+        #[cfg(target_arch = "riscv64")]
+        let kernel_stack_top = self.kernel_stack.get_top();
+        #[cfg(target_arch = "loongarch64")]
+        let kernel_stack_top = inner.trap_cx_addr;
 
         // 8. 设置初始异常上下文 (TrapContext)
         let mut trap_cx = TrapContext::app_init_context(
             entry_point,
             user_sp, // 让用户程序一进来 sp 就指向 argc
             KERNEL_SPACE.exclusive_access().token(),
-            self.kernel_stack.get_top(),
+            kernel_stack_top,
             trap_handler as *const () as usize,
         );
         
@@ -292,14 +336,29 @@ impl TaskControlBlock {
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
         let memory_set = MemorySet::from_existed_user(&parent_inner.memory_set);
+        #[cfg(target_arch = "riscv64")]
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
             .ppn();
+        #[cfg(target_arch = "riscv64")]
+        let trap_cx_addr = {
+            let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
+            let trap_cx_addr: usize = trap_cx_pa.into();
+            trap_cx_addr
+        };
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = pid_alloc();
         let kernel_stack = kstack_alloc();
+        #[cfg(target_arch = "loongarch64")]
+        let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
+        #[cfg(target_arch = "riscv64")]
         let kernel_stack_top = kernel_stack.get_top();
+        #[cfg(target_arch = "loongarch64")]
+        let kernel_stack_top = trap_cx_addr;
+
+        #[cfg(target_arch = "loongarch64")]
+        let parent_trap_cx = *parent_inner.get_trap_cx();
         // copy fd table
         let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
         for fd in parent_inner.fd_table.iter() {
@@ -314,7 +373,7 @@ impl TaskControlBlock {
             kernel_stack,
             inner: unsafe {
                 UPSafeCell::new(TaskControlBlockInner {
-                    trap_cx_ppn,
+                    trap_cx_addr,
                     base_size: parent_inner.base_size,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
@@ -342,6 +401,10 @@ impl TaskControlBlock {
         // modify kernel_sp in trap_cx
         // **** access child PCB exclusively
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
+        #[cfg(target_arch = "loongarch64")]
+        {
+            *trap_cx = parent_trap_cx;
+        }
         
         trap_cx.kernel_sp = kernel_stack_top;
         if let Some(sp) = sp {

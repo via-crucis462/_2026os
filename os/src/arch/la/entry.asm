@@ -1,4 +1,4 @@
-#相较于riscv版本，其实只有语法不同，逻辑是一致的
+# 相较于riscv版本，其实只有语法不同，逻辑是一致的
     .section .text.entry
     .globl _start
 _start:
