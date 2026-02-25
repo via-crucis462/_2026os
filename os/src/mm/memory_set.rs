@@ -1,10 +1,10 @@
 use super::{frame_alloc, FrameTracker};
 use super::{PageTable, pte::*, PTEFlags};
+#[allow(unused)]
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
 #[allow(unused)]
-use crate::arch::config::{DMA_SIZE, MEMORY_END,  PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
-use crate::arch::config::MMIO;
+use crate::arch::config::*;
 use crate::mm::mmap;
 use crate::sync::UPSafeCell;
 use alloc::collections::BTreeMap;
@@ -25,6 +25,7 @@ extern "C" {
     fn sbss_with_stack();
     fn ebss();
     fn ekernel();
+    #[cfg(target_arch = "riscv64")]
     fn strampoline();
 }
 
@@ -110,7 +111,10 @@ impl MemorySet {
         self.areas.push(map_area);
     }
     /// Mention that trampoline is not collected by areas.
+    #[allow(unused)]
+    #[cfg(target_arch = "riscv64")]
     fn map_trampoline(&mut self) {
+        info!("mapping trampoline");
         self.page_table.map(
             VirtAddr::from(TRAMPOLINE).into(),// 高位0xf...被截断
             PhysAddr::from(strampoline as *const () as usize).into(),// 高位0x9...被截断
@@ -121,6 +125,8 @@ impl MemorySet {
     pub fn new_kernel() -> Self {
         let mut memory_set = Self::new_bare();
         // map trampoline
+        // la64下不映射到内核空间
+        #[cfg(target_arch = "riscv64")]
         memory_set.map_trampoline();
         // map kernel sections
         info!(".text [{:#x}, {:#x})", stext as *const () as usize, etext as *const () as usize);
@@ -189,10 +195,11 @@ impl MemorySet {
                 ekernel_addr,
             );
             info!("mapping physical memory");
+            // 临时：留下最后0x100_0000给内核栈
             memory_set.push(
                 MapArea::new(
                     (ekernel_addr + DMA_SIZE).into(),
-                    (MEMORY_END - 4096).into(),
+                    (MEMORY_END - 0x100_0000).into(),
                     MapType::Identical,
                     MapPermission::R | MapPermission::W,
                 ),
@@ -231,9 +238,11 @@ impl MemorySet {
     }
     /// Include sections in elf and trampoline and TrapContext and user stack,
     /// also returns user_sp_base and entry point.
+
     pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, usize, usize) {
         let mut memory_set = Self::new_bare();
         // map trampoline
+        #[cfg(target_arch = "riscv64")]
         memory_set.map_trampoline();
         // map program headers of elf, with U flag
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
@@ -250,8 +259,10 @@ impl MemorySet {
         for i in 0..ph_count {
             let ph = elf.program_header(i).unwrap();
             if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
-                let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
-                let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize).into();
+                let start_va: VirtAddr = (ph.virtual_addr() as usize 
+                    + OFFSET_FOR_USER_APP).into();
+                let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize
+                    + OFFSET_FOR_USER_APP).into();
                 let mut map_perm = MapPermission::U;
                 let ph_flags = ph.flags();
                 if ph_flags.is_read() {
@@ -268,7 +279,7 @@ impl MemorySet {
                 memory_set.push(
                     map_area,
                     Some(&elf.input[ph.offset() as *const () as usize..(ph.offset() + ph.file_size()) as *const () as usize]),
-                    ph.virtual_addr() as usize,
+                    ph.virtual_addr() as usize + OFFSET_FOR_USER_APP,
                 );
 
                 // 如果该 LOAD 段包含了程序头表，则记录其虚拟地址
@@ -278,6 +289,7 @@ impl MemorySet {
                 }
             }
         }
+        println!("[kernel] MemorySet::from_elf: mapped common areas");
         // map user stack with U flags
         let max_end_va: VirtAddr = max_end_vpn.into();
         let mut user_stack_bottom: usize = max_end_va.into();
@@ -307,8 +319,10 @@ impl MemorySet {
             user_stack_top,
         );
         memory_set.brk_index = memory_set.areas.len() - 1;// 此时brk在最后一个区域
-
+        println!("[kernel] MemorySet::from_elf: mapped all areas");
         // map TrapContext
+        // la64下不需要映射
+        #[cfg(target_arch = "riscv64")]
         memory_set.push(
             MapArea::new(
                 TRAP_CONTEXT_BASE.into(),
@@ -322,7 +336,7 @@ impl MemorySet {
         (
             memory_set,
             user_stack_top,
-            elf.header.pt2.entry_point() as *const () as usize,
+            elf.header.pt2.entry_point() as *const () as usize + OFFSET_FOR_USER_APP,
             phdr_addr,
             phnum,
             phent,
@@ -332,6 +346,7 @@ impl MemorySet {
     pub fn from_existed_user(user_space: &Self) -> Self {
         let mut memory_set = Self::new_bare();
         // map trampoline
+        #[cfg(target_arch = "riscv64")]
         memory_set.map_trampoline();
         // copy data sections/trap_context/user_stack
         for area in user_space.areas.iter() {
@@ -361,12 +376,12 @@ impl MemorySet {
         }
     }
     /// 对于龙芯，修改PGDL/H寄器
-    /// 只用了三级页表，H不用管
+    /// 用户处于低半地址空间
     #[cfg(target_arch = "loongarch64")]
     pub fn activate(&self) {
         let pgdl = self.page_table.token();
         unsafe {
-            asm!("csrwr {pgdl}, 0x1", pgdl = in(reg) pgdl,);
+            asm!("csrwr {pgdl}, 0x19", pgdl = in(reg) pgdl);
         }
     }
     
@@ -488,7 +503,7 @@ impl MemorySet {
             }
         }
         
-        if current_addr + length < TRAP_CONTEXT_BASE {
+        if current_addr + length < 0x8000_0000 { // 确保不超过用户空间上限
             Some(current_addr)
         } else {
             None
@@ -649,6 +664,12 @@ impl MapArea {
             }
         }
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+        #[cfg(target_arch = "loongarch64")]
+        // la64在内核态不需要用页表
+        if self.map_type !=  MapType::Identical{
+            page_table.map(vpn, ppn, pte_flags);
+        }
+        #[cfg(target_arch = "riscv64")]
         page_table.map(vpn, ppn, pte_flags);
     }
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {

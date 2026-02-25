@@ -23,16 +23,20 @@ impl PageTable {
     }
     /// Temporarily used to get arguments from user space.
     /// LA64根页表地址存储在CSR.PGDL或H，
-    /// 这里存储的是2级页表的物理页号，因为弃用了3，4级页表
+    /// 这里存储的是2级页表的物理地址，因为弃用了3，4级页表
     /// 参考rv64的rcore理解即可
     pub fn from_token(token: usize) -> Self {
         Self {
+            #[cfg(target_arch = "riscv64")]
             root_ppn: PhysPageNum::from(token & ((1usize << 44) - 1)),
+            #[cfg(target_arch = "loongarch64")]
+            root_ppn: PhysAddr(token).floor(),
             frames: Vec::new(),
         }
     }
     /// Find PageTableEntry by VirtPageNum, create a frame for a 4KB page table if not exist
-    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+    #[cfg(target_arch = "riscv64")]
+    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {  
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;
@@ -43,6 +47,7 @@ impl PageTable {
                 break;
             }
             if !pte.is_valid() {
+
                 let frame = frame_alloc().unwrap();
                 *pte = PageTableEntry::new(frame.ppn, PTEFlags::V);
                 self.frames.push(frame);
@@ -51,14 +56,37 @@ impl PageTable {
         }
         result
     }
+    #[cfg(target_arch = "loongarch64")]
+    // 参考了loongarch rocre
+    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {  
+        let idxs = vpn.indexes();
+        let mut ppn = self.root_ppn;
+        let mut result: Option<&mut PageTableEntry> = None;
+        for (i, idx) in idxs.iter().enumerate() {
+            let pte = &mut ppn.get_pte_array()[*idx];
+            if i == 2 {
+                result = Some(pte);
+                break;
+            }
+            if pte.is_empty() {
+                let frame = frame_alloc().unwrap();
+                *pte = PageTableEntry::new_dir(frame.ppn);
+                self.frames.push(frame);
+            }
+            ppn = pte.ppn();
+        }
+        result
+    }
+
     /// Find PageTableEntry by VirtPageNum
-    /// 为了la64加入声明为pub
+    #[cfg(target_arch = "riscv64")]
     pub fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
+            println!("find_pte: vpn = {:?}, i = {}", vpn, i);
             if i == 2 {
                 result = Some(pte);
                 break;
@@ -70,12 +98,39 @@ impl PageTable {
         }
         result
     }
+    #[cfg(target_arch = "loongarch64")]
+    pub fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+        let idxs = vpn.indexes();
+        let mut ppn = self.root_ppn;
+        let mut result: Option<&mut PageTableEntry> = None;
+        for (i, idx) in idxs.iter().enumerate() {
+            let pte = &mut ppn.get_pte_array()[*idx];
+            println!("find_pte: vpn = {:?}, i = {}", vpn, i);
+            if pte.is_empty() {
+                return None;
+            }
+            if i == 2 {
+                result = Some(pte);
+                break;
+            }
+            ppn = pte.ppn();
+        }
+        result
+    }
     /// set the map between virtual page number and physical page number
     #[allow(unused)]
+    #[cfg(target_arch = "riscv64")]
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
+    }
+    #[allow(unused)]
+    #[cfg(target_arch = "loongarch64")]
+    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
+        let pte = self.find_pte_create(vpn).unwrap();
+        assert!(pte.is_empty(), "vpn {:?} is mapped before mapping", vpn);
+        *pte = PageTableEntry::new_defualt(ppn);
     }
     /// remove the map between virtual page number and physical page number
     #[allow(unused)]
@@ -104,11 +159,12 @@ impl PageTable {
     }
     #[cfg(target_arch = "loongarch64")]
     pub fn token(&self) -> usize {
-        self.root_ppn.0 //la64的PGD寄存器直接存储物理页号
+        PhysAddr::from(self.root_ppn).into()
     }
 }
 
 /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
+/// 其中ptr是用户空间地址
 pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
     let page_table = PageTable::from_token(token);
     let mut start = ptr as usize;

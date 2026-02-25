@@ -3,7 +3,6 @@
 //! 尚不完善
 pub mod pte;
 
-use crate::mm::address::*;
 use crate::arch::config::*;
 use core::arch::asm;
 
@@ -13,12 +12,14 @@ use core::arch::asm;
 const DMW0_VAL: usize = UNCHACHED_KERNEL_BASE | 0x1;
 const DMW1_VAL: usize = KERNEL_BASE | 0x11;
 const DMW2_VAL: usize = 0 | 0x1;
+const DMW3_VAL: usize = 0 | 0x1;
 
-const PA_WIDTH_SV39: usize = 56;
-const VA_WIDTH_SV39: usize = 39;
+// 本来是56,la64 qemu改为48
+pub const PA_WIDTH_SV39: usize = 48;
+pub const VA_WIDTH_SV39: usize = 39;
 
 // 为使虚拟地址结构与SV39一致，定义如下常量
-// 这些参数需要在内存初始化时写进寄存器
+// qemu使用的物理地址只到48位
 const PA_LEN : usize = PA_WIDTH_SV39;
 const VA_LEN : usize = VA_WIDTH_SV39;
 // PT可以理解为dir0
@@ -47,62 +48,54 @@ const PWCH_VAL: usize = 0;
 pub fn la_kernel_init_mem() {
     // 设置直接映射配置窗口
     unsafe {
-        asm!("csrwr {}, 0x180", in(reg) DMW0_VAL);
-        asm!("csrwr {}, 0x181", in(reg) DMW1_VAL);
-        asm!("csrwr {}, 0x182", in(reg) DMW2_VAL);
+        asm!("csrwr {dmw0}, 0x180", dmw0 = inout(reg) DMW0_VAL => _);
+        asm!("csrwr {dmw1}, 0x181", dmw1 = inout(reg) DMW1_VAL => _);
+        asm!("csrwr {dmw2}, 0x182", dmw2 = inout(reg) DMW2_VAL => _);
+        asm!("csrwr {dmw3}, 0x183", dmw3 = inout(reg) DMW3_VAL => _);
         let mut t: usize;
         asm!("csrrd {}, 0x0", out(reg) t);
         t |= 1 << 4;
         t &= !(1 << 3);
-        asm!("csrwr {}, 0x0", in(reg) t);
+        asm!("csrwr {crmd}, 0x0", crmd = inout(reg) t => _);
     }
+    init_tlb();
 }
 
 /// 内存相关寄存器初始化，需要在启动应用时调用，尚未完善
-/// token: 当前内存空间根页表物理地址
+fn init_tlb() {
+    let mut temp: usize;
+    unsafe {
+        asm!("csrwr {pwcl}, 0x1c", pwcl = inout(reg) PWCL_VAL => _); // PWCL
+        asm!("csrwr {pwch}, 0x1d", pwch = inout(reg) PWCH_VAL => _); // PWCH
+        asm!(
+            "csrwr {tlbrfl}, 0x88",
+            tlbrfl = inout(reg) (tlb_refill_handler as *const() as usize) => _
+        );
+        asm!("csrrd {}, 0x8E", out(reg) temp);
+        temp |= 12;
+        asm!("csrwr {tlbctl}, 0x8E", tlbctl = inout(reg) temp => _);
+    }
+    println!("[kernel] init_tlb: temp={:#x}", temp);
+    let cfg01:usize;
+    unsafe{
+        asm!("cpucfg {}, {}", out(reg) cfg01, in(reg) 0x1);
+    }
+    println!("[kernel] cfg01: {:#x}", cfg01);
+}
+
+// 修改根页表地址
 pub fn la_app_init_mem(token: usize) {
     unsafe {
-        // 设置页表项宽度等参数
-        asm!("csrwr {}, 0x1c", in(reg) PWCL_VAL); // PWCL
-        asm!("csrwr {}, 0x1d", in(reg) PWCH_VAL); // PWCH
-        // 设置PGD寄存器保存根页表物理地址
-        asm!("csrwr {}, 0x19", in(reg) token);// PGDL 低半地址空间，对应用户态
-        // asm!("csrwr {}, 0x1a", in(reg) 0);
-        // 设置TLB重填处理函数地址
-        asm!("csrwr {}, 0x88", in(reg) tlb_refill_handler as *const() as usize); // TLBRENTRY
+        // 设置PGDL/PGDH，供TLB重填时加载页表根地址
+        asm!("csrwr {pgdl}, 0x19", pgdl = inout(reg) token => _); // PGDL
+        asm!("csrwr {pgdh}, 0x1a", pgdh = inout(reg) 0usize => _); // PGDH
     }
 }
 
-/// TLB重填软件逻辑，相比硬件处理效率较低，暂不实现
-#[allow(unused)]
-pub fn do_tlb_refill(_va: VirtAddr) {
-    // TODO
+use core::arch::global_asm;
+global_asm!(include_str!("refill.S"));
+
+extern  "C" {
+    pub fn tlb_refill_handler();
 }
 
-/// TLB重填异常处理
-#[no_mangle]
-pub fn tlb_refill_handler() {
-    // 硬件会自动保存异常虚拟地址到TLBRBADV
-    unsafe {
-        asm!(
-            // 临时保存 t0 寄存器，否则会被覆盖
-            "csrwr $t0, 0x8B",
-            // 加载根页表（dir2）地址
-            // 默认均为用户态发生缺页，从PGDL加载
-            "csrrd $t0, 0x19",
-            // 摘自手册：
-            // “LDDIR、LDPTE指令执行所需的出错虚地址信息
-            // 将来自于CSR.TLBRBADV”
-            // 根据触发异常的va逐级遍历dir2,dir1,pt
-            "lddir $t0, $t0, 2",
-            "lddir $t0, $t0, 1",
-            // la64“双页”，奇偶分别处理
-            "ldpte $t0, 0",
-            "ldpte $t0, 1",
-            // 执行重填并返回
-            "tlbfill",
-            "csrrd $t0, 0x8B",
-            "ertn",
-        );
-    }
-}
