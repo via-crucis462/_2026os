@@ -28,11 +28,8 @@ impl PTEFlagsLA64{
 }
 
 fn from_riscv_flags(riscv_flags: PTEFlags) -> PTEFlagsLA64 {
-    // 默认设置为 Cache Coherent (CC, MAT=1)，否则访问内存极其缓慢
-    // let mut la64_flags = PTEFlagsLA64::MAT0; // ai补充
-
-    // 调试，先使用强序非缓存
-    let mut la64_flags = PTEFlagsLA64::empty();
+    // 默认设置
+    let mut la64_flags = PTEFlagsLA64::V | PTEFlagsLA64::MAT0 | PTEFlagsLA64::P | PTEFlagsLA64::W;
     if (riscv_flags & PTEFlags::V) != PTEFlags::empty() {
         la64_flags |= PTEFlagsLA64::V;
     }

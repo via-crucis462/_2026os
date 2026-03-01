@@ -66,7 +66,6 @@ pub fn pid_alloc() -> PidHandle {
 #[cfg(target_arch = "loongarch64")]
 pub fn kernel_stack_position(app_id: usize) -> (usize, usize) {
     let top = 0x800_0000 - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE);
-    let top = top | KERNEL_BASE; // 使用内核空间地址
     let bottom = top - KERNEL_STACK_SIZE;
     (bottom, top)
 }

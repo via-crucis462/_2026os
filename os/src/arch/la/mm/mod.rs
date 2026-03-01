@@ -14,6 +14,9 @@ const DMW1_VAL: usize = KERNEL_BASE | 0x11;
 const DMW2_VAL: usize = 0 | 0x1;
 const DMW3_VAL: usize = 0 | 0x1;
 
+const PAGE_SIZE: usize = 0x4096;
+const PAGE_SIZE_BITS: usize = 12;
+
 // 本来是56,la64 qemu改为48
 pub const PA_WIDTH_SV39: usize = 48;
 pub const VA_WIDTH_SV39: usize = 39;
@@ -30,7 +33,7 @@ const DIR1_WIDTH: usize = 9;
 const DIR2_BASE: usize = DIR1_BASE + DIR1_WIDTH;
 const DIR2_WIDTH: usize = 9;
 
-const PTE_WIDTH_VAL: usize = 0;// 64位宽页表项对应0 
+const PTE_WIDTH: usize = 0; // 页表项位宽
 
 // 定义虚拟内存的低位布局，设置第0~2页表
 const PWCL_VAL: usize = (PT_BASE << 0) |
@@ -39,7 +42,7 @@ const PWCL_VAL: usize = (PT_BASE << 0) |
                         (DIR1_WIDTH << 15) |
                         (DIR2_BASE << 20) |
                         (DIR2_WIDTH << 25) |
-                        (PTE_WIDTH_VAL << 30);
+                        (PTE_WIDTH<< 30);
 
 // 弃用3/4级页表，给控制高位部分的寄存器置零
 const PWCH_VAL: usize = 0; 
@@ -67,6 +70,8 @@ fn init_tlb() {
     unsafe {
         asm!("csrwr {pwcl}, 0x1c", pwcl = inout(reg) PWCL_VAL => _); // PWCL
         asm!("csrwr {pwch}, 0x1d", pwch = inout(reg) PWCH_VAL => _); // PWCH
+        // 写入页大小        
+        asm!("csrwr {pgsz}, 0x1e", pgsz = inout(reg) PAGE_SIZE_BITS => _); // STLBPS
         asm!(
             "csrwr {tlbrfl}, 0x88",
             tlbrfl = inout(reg) (tlb_refill_handler as *const() as usize) => _

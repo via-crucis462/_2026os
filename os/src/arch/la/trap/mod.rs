@@ -55,6 +55,12 @@ pub fn trap_from_kernel() -> ! {
 
 /// Initialize trap handling
 pub fn init() {
+    unsafe{
+        let mut crmd: usize;
+        asm!("csrrd {}, 0x0", out(reg) crmd);
+        crmd &= !(1 << 2); // 先关闭中断
+        asm!("csrwr {}, 0x0", in(reg) crmd);
+    }
     set_kernel_trap_entry();
 }
 
@@ -82,7 +88,8 @@ fn set_kernel_trap_entry() {
 /// 插入__all_trap的地址
 /// 当发生trap时，硬件会切换权限级，这时窗口映射生效
 /// 直接访问0x9开始物理地址即可
-fn set_user_trap_entry() {
+
+/*fn set_user_trap_entry() {
     let target = __alltraps as *const () as usize;
     let mut trap: usize = target;
     unsafe {
@@ -91,7 +98,7 @@ fn set_user_trap_entry() {
             trap = inout(reg) trap,
         );
     }
-}
+}*/
 
 /// enable timer interrupt in supervisor mode
 pub fn enable_timer_interrupt() {
@@ -201,26 +208,22 @@ pub fn trap_return() -> ! {
     // 直接用物理地址
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
-    
 //  crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
     info!("[kernel] trap_return: going to user mode, satp = {:#x}", user_satp);
-    
-    
     extern "C" {
         fn __alltraps();
         fn __restore();
     }
     // la64因为是先切换特权级再跳，切换特权级时会自动关闭内存窗口可用性，不需要用跳板，restore直接跳转即可
     let restore = __restore as *const() as usize;
-
     // 调试打印，观察程序内存是否正常映射
     let debug_buff = translated_byte_buffer(user_satp, 0x20_0000 as *const u8, 128);
     println!("[kernel] trap_return: debug_buff = {:x?}", debug_buff);
-
-    // 1_001000_0000_0000_0000_0000 访存指令地址错例外，这表明页表并没有正确映射好
+    // 1_001000_0000_0000_0000_0000 访存指令地址错例外
     println!("[kernel] calling __restore, address: {:#x}", restore);
 
-    
+
+    csr_info();
 
     unsafe {
         asm!(
@@ -240,12 +243,14 @@ pub extern "C" fn debug_print(){
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn csr_info(){
-    let mut csr: usize;
-    asm!("csrrd {}, 0x8C", out(reg) csr); // TLBRELO0?
-    println!("[kernel] csr_info: TLBRELO0 = {:#x}", csr );
-    asm!("csrrd {}, 0x8D", out(reg) csr); // TLBRELO1?
-    println!("[kernel] csr_info: TLBRELO1 = {:#x}", csr );
+pub  extern "C" fn csr_info(){
+    unsafe {
+        let mut csr: usize;
+        asm!("csrrd {}, 0x8C", out(reg) csr); // TLBRELO0?
+        println!("[kernel] csr_info: TLBRELO0 = {:#x}", csr );
+        asm!("csrrd {}, 0x8D", out(reg) csr); // TLBRELO1?
+        println!("[kernel] csr_info: TLBRELO1 = {:#x}", csr );
+    }
 }
 
 pub use context::TrapContext;

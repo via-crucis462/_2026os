@@ -16,8 +16,8 @@ tlb_refill_handler:
     // la64“双页”，奇偶分别处理
     ldpte $t0, 0
     ldpte $t0, 1
-    bl csr_info
-    // 执行重填并返回
     tlbfill
+    bl csr_info
+
     csrrd $t0, 0x8B
     ertn
