@@ -106,7 +106,7 @@ pub fn rust_main() -> ! {
     task::run_tasks();
     panic!("Unreachable in rust_main!");
 }
-
+#[allow(unused)]
 use core::arch::{asm};
 #[cfg(target_arch = "loongarch64")]
 #[no_mangle]

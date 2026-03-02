@@ -1,7 +1,7 @@
     .section .text
     .globl tlb_refill_handler
     .globl csr_info
-    .align 2
+    .align 4//2^4=16字节对齐
 tlb_refill_handler:
     // 临时保存 t0 寄存器，否则会被覆盖
     csrwr $t0, 0x8B
@@ -17,7 +17,6 @@ tlb_refill_handler:
     ldpte $t0, 0
     ldpte $t0, 1
     tlbfill
-    bl csr_info
 
     csrrd $t0, 0x8B
     ertn

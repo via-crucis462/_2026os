@@ -405,6 +405,12 @@ impl TaskControlBlock {
         {
             *trap_cx = parent_trap_cx;
         }
+        #[cfg(target_arch = "riscv64")]{
+            trap_cx.kernel_sp = kernel_stack_top;
+        }
+        if let Some(sp) = sp {
+            trap_cx.set_sp(sp);
+        }
         // return
         task_control_block
         // **** release child PCB
