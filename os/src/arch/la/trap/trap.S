@@ -10,7 +10,7 @@
     .globl __alltraps
     .globl __restore
     .globl csr_info 
-    .align 2
+    .align 4
 __alltraps:
     # csrrw sp, sscratch, sp
     # 需要交换 sp 与 0x502(SAVE0) 寄存器的值

@@ -2,6 +2,8 @@ use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAdd
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+#[allow(unused)]
+
 
 /// page table structure
 pub struct PageTable {
@@ -127,10 +129,12 @@ impl PageTable {
     }
     #[allow(unused)]
     #[cfg(target_arch = "loongarch64")]
+    
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
         assert!(pte.is_empty(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new_defualt(ppn);
+        *pte = PageTableEntry { bits: pte.bits | from_riscv_flags(flags).bits() as usize};
     }
     /// remove the map between virtual page number and physical page number
     #[allow(unused)]
