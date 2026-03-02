@@ -222,9 +222,6 @@ pub fn trap_return() -> ! {
     // 1_001000_0000_0000_0000_0000 访存指令地址错例外
     println!("[kernel] calling __restore, address: {:#x}", restore);
 
-
-    csr_info();
-
     unsafe {
         asm!(
             "dbar 0", // 相当于sfence.vma
@@ -248,7 +245,9 @@ pub  extern "C" fn csr_info(){
         let mut csr: usize;
         asm!("csrrd {}, 0x8C", out(reg) csr); // TLBRELO0?
         println!("[kernel] csr_info: TLBRELO0 = {:#x}", csr );
+        //11001001001011000110010001
         asm!("csrrd {}, 0x8D", out(reg) csr); // TLBRELO1?
+        //11001001001110000110010001
         println!("[kernel] csr_info: TLBRELO1 = {:#x}", csr );
     }
 }
