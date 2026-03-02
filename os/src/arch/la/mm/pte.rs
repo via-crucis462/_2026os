@@ -119,5 +119,9 @@ impl PageTableEntry {
     pub fn executable(&self) -> bool {
         (self.flags() & PTEFlagsLA64::NX) == PTEFlagsLA64::empty()
     }
+    //设置脏位
+    pub fn set_dirty(&mut self) {
+        self.bits |= PTEFlagsLA64::D.bits() as usize;
+    }
 }
 

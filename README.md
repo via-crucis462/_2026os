@@ -141,3 +141,6 @@ pci驱动能跑了
     [kernel] csr_info: TLBRELO0 = 0x324c191
     [kernel] csr_info: TLBRELO1 = 0x324f191
 ```
+
+## 2.27~3.2
+终于解决了卡死问题，现在进入用户程序后正常syscall，但任务执行有关实现还存在问题。

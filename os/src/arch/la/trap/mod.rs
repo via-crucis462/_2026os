@@ -101,6 +101,7 @@ fn set_kernel_trap_entry() {
 }*/
 
 /// enable timer interrupt in supervisor mode
+/// 可能有问题，后续修复
 pub fn enable_timer_interrupt() {
     crate::arch::timer::init_board_freq();
     unsafe {
@@ -160,7 +161,7 @@ pub fn trap_handler() -> ! {
     } else {
         Cause::Other
     };
-    
+        // 目前实现还不完善
         match cause {
             Cause::Syscall => {
                 let mut cx = current_trap_cx();

@@ -135,6 +135,8 @@ impl PageTable {
         assert!(pte.is_empty(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new_defualt(ppn);
         *pte = PageTableEntry { bits: pte.bits | from_riscv_flags(flags).bits() as usize};
+        // 直接设置为脏，后续可能需要修改
+        pte.set_dirty();
     }
     /// remove the map between virtual page number and physical page number
     #[allow(unused)]

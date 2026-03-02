@@ -102,7 +102,7 @@ pub fn rust_main() -> ! {
     drivers::search_pci();
     fs::list_apps();
     task::add_initproc();
-    //arch::trap::enable_timer_interrupt();
+    arch::trap::enable_timer_interrupt();
     task::run_tasks();
     panic!("Unreachable in rust_main!");
 }
