@@ -14,7 +14,7 @@ const DMW1_VAL: usize = KERNEL_BASE | 0x11;
 const DMW2_VAL: usize = 0 | 0x1;
 const DMW3_VAL: usize = 0;
 
-// 本来是56,la64 qemu改为48
+// 本来是56,la64 qemu改为48(由cpucfg读取)
 pub const PA_WIDTH: usize = 48;
 pub const VA_WIDTH: usize = 39;
 
