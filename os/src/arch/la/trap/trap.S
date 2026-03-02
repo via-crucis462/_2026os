@@ -16,7 +16,6 @@ __alltraps:
     # 需要交换 sp 与 0x502(SAVE0) 寄存器的值
     csrwr $sp, 0x502 # 将用户栈地址写入0x502寄存器，供后续保存到TrapContext
     # now sp->*TrapContext, 0x502->user stack
-    addi.d  $sp, $sp, -8*35 # 为TrapContext预留空间
 
     st.d $r1, $sp, 1*8 
     st.d $r2, $sp, 2*8
@@ -74,7 +73,6 @@ __restore:
         LOAD_GP %n
         .set n, n+1
     .endr
-    addi.d $sp, $sp, 35*8
 
     # 交换栈指针
     csrwr $sp, 0x502
