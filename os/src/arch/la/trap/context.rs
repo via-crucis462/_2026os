@@ -15,10 +15,6 @@ pub struct TrapContext {
     prmd: usize,
     /// era, trap返回后下一步执行的地址
     era: usize,
-    /// Token of kernel address space
-    pub kernel_token: usize,
-    /// Kernel stack pointer of the current application
-    pub kernel_sp: usize,
     /// Virtual address of trap handler entry point in kernel
     pub trap_handler: usize,
 }
@@ -31,8 +27,6 @@ impl TrapContext {
             r: [0; 32],
             prmd: 0,
             era: 0,
-            kernel_token: 0,
-            kernel_sp: 0,
             trap_handler: 0,
         }
     }
@@ -83,8 +77,6 @@ impl TrapContext {
             r: [0; 32],
             prmd: default_status,
             era: entry,  // entry point of app
-            kernel_token,  // addr of page table
-            kernel_sp,    // kernel stack
             trap_handler, // addr of trap_handler function
         };
         cx.set_sp(sp); // app's user stack pointer

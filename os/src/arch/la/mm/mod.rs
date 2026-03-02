@@ -12,16 +12,16 @@ use core::arch::asm;
 const DMW0_VAL: usize = UNCHACHED_KERNEL_BASE | 0x1;
 const DMW1_VAL: usize = KERNEL_BASE | 0x11;
 const DMW2_VAL: usize = 0 | 0x1;
-const DMW3_VAL: usize = 0 | 0x1;
+const DMW3_VAL: usize = 0;
 
-// 本来是56,la64 qemu改为48
-pub const PA_WIDTH_SV39: usize = 48;
-pub const VA_WIDTH_SV39: usize = 39;
+// 本来是56,la64 qemu改为48(由cpucfg读取)
+pub const PA_WIDTH: usize = 48;
+pub const VA_WIDTH: usize = 39;
 
 // 为使虚拟地址结构与SV39一致，定义如下常量
 // qemu使用的物理地址只到48位
-const PA_LEN : usize = PA_WIDTH_SV39;
-const VA_LEN : usize = VA_WIDTH_SV39;
+const PA_LEN : usize = PA_WIDTH;
+const VA_LEN : usize = VA_WIDTH;
 // PT可以理解为dir0
 const PT_BASE : usize = PAGE_SIZE_BITS;//页大小4K对应12位
 const PT_WIDTH: usize = 9;
@@ -30,7 +30,7 @@ const DIR1_WIDTH: usize = 9;
 const DIR2_BASE: usize = DIR1_BASE + DIR1_WIDTH;
 const DIR2_WIDTH: usize = 9;
 
-const PTE_WIDTH_VAL: usize = 0;// 64位宽页表项对应0 
+const PTE_WIDTH: usize = 0; // 页表项位宽64
 
 // 定义虚拟内存的低位布局，设置第0~2页表
 const PWCL_VAL: usize = (PT_BASE << 0) |
@@ -39,7 +39,7 @@ const PWCL_VAL: usize = (PT_BASE << 0) |
                         (DIR1_WIDTH << 15) |
                         (DIR2_BASE << 20) |
                         (DIR2_WIDTH << 25) |
-                        (PTE_WIDTH_VAL << 30);
+                        (PTE_WIDTH<< 30);
 
 // 弃用3/4级页表，给控制高位部分的寄存器置零
 const PWCH_VAL: usize = 0; 
@@ -63,19 +63,18 @@ pub fn la_kernel_init_mem() {
 
 /// 内存相关寄存器初始化，需要在启动应用时调用，尚未完善
 fn init_tlb() {
-    let mut temp: usize;
     unsafe {
         asm!("csrwr {pwcl}, 0x1c", pwcl = inout(reg) PWCL_VAL => _); // PWCL
         asm!("csrwr {pwch}, 0x1d", pwch = inout(reg) PWCH_VAL => _); // PWCH
+        // 写入页大小        
+        asm!("csrwr {pgsz}, 0x1e", pgsz = inout(reg) PAGE_SIZE_BITS => _); // STLBPS
         asm!(
             "csrwr {tlbrfl}, 0x88",
             tlbrfl = inout(reg) (tlb_refill_handler as *const() as usize) => _
         );
-        asm!("csrrd {}, 0x8E", out(reg) temp);
-        temp |= 12;
-        asm!("csrwr {tlbctl}, 0x8E", tlbctl = inout(reg) temp => _);
+        // 清空TLB
+        asm!("invtlb 0, $r0, $r0");
     }
-    println!("[kernel] init_tlb: temp={:#x}", temp);
     let cfg01:usize;
     unsafe{
         asm!("cpucfg {}, {}", out(reg) cfg01, in(reg) 0x1);
@@ -84,6 +83,7 @@ fn init_tlb() {
 }
 
 // 修改根页表地址
+/*
 pub fn la_app_init_mem(token: usize) {
     unsafe {
         // 设置PGDL/PGDH，供TLB重填时加载页表根地址
@@ -91,6 +91,7 @@ pub fn la_app_init_mem(token: usize) {
         asm!("csrwr {pgdh}, 0x1a", pgdh = inout(reg) 0usize => _); // PGDH
     }
 }
+*/
 
 use core::arch::global_asm;
 global_asm!(include_str!("refill.S"));

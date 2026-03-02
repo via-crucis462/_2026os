@@ -1,5 +1,8 @@
 //! la64的页表项定义
 
+use crate::arch::config::*;
+use crate::arch::mm::*;
+
 use crate::mm::{PhysPageNum, PTEFlags};
 
 bitflags!{
@@ -27,12 +30,9 @@ impl PTEFlagsLA64{
     }
 }
 
-fn from_riscv_flags(riscv_flags: PTEFlags) -> PTEFlagsLA64 {
-    // 默认设置为 Cache Coherent (CC, MAT=1)，否则访问内存极其缓慢
-    // let mut la64_flags = PTEFlagsLA64::MAT0; // ai补充
-
-    // 调试，先使用强序非缓存
-    let mut la64_flags = PTEFlagsLA64::empty();
+pub fn from_riscv_flags(riscv_flags: PTEFlags) -> PTEFlagsLA64 {
+    // 默认设置
+    let mut la64_flags = PTEFlagsLA64::V | PTEFlagsLA64::MAT0 | PTEFlagsLA64::P | PTEFlagsLA64::W;
     if (riscv_flags & PTEFlags::V) != PTEFlags::empty() {
         la64_flags |= PTEFlagsLA64::V;
     }
@@ -73,17 +73,17 @@ pub struct PageTableEntry {
 impl PageTableEntry {
     /// Create a new page table entry
     pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
-        let bits = ppn.0 << 12;
+        let bits = ppn.0 << PAGE_SIZE_BITS;
         let la64_flags = from_riscv_flags(flags);
         PageTableEntry { bits: bits | la64_flags.bits as usize }
     }
     // la64目录项不含权限位
     pub fn new_dir(ppn: PhysPageNum) -> Self {
-        let bits = ppn.0 << 12;
+        let bits = ppn.0 << PAGE_SIZE_BITS;
         PageTableEntry {bits: bits}
     }
     pub fn new_defualt(ppn: PhysPageNum) -> Self {
-        let bits = ppn.0 << 12;
+        let bits = ppn.0 << PAGE_SIZE_BITS;
         let la64_flags = PTEFlagsLA64::default();
         PageTableEntry { bits: bits | la64_flags.bits as usize }
     }
@@ -93,8 +93,8 @@ impl PageTableEntry {
     }
     /// Get the physical page number from the page table entry
     pub fn ppn(&self) -> PhysPageNum {
-        // LA64基本页页表项与SV39一致，也是固定12字节偏移
-        (self.bits >> 12 & ((1usize << 36) - 1)).into()
+        // 设置12字节偏移
+        (self.bits >> PAGE_SIZE_BITS & ((1usize << (PA_WIDTH - PAGE_SIZE_BITS)) - 1)).into()
     }
     /// Get the flags from the page table entry
     pub fn flags(&self) -> PTEFlagsLA64 {
@@ -118,6 +118,10 @@ impl PageTableEntry {
     /// The page pointered by page table entry is executable?
     pub fn executable(&self) -> bool {
         (self.flags() & PTEFlagsLA64::NX) == PTEFlagsLA64::empty()
+    }
+    //设置脏位
+    pub fn set_dirty(&mut self) {
+        self.bits |= PTEFlagsLA64::D.bits() as usize;
     }
 }
 
