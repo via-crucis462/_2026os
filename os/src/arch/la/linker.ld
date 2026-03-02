@@ -1,8 +1,8 @@
 # 本文件相比riscv版本仅OUTPUT_ARCH和BASE_ADDRESS不同,其他部分完全一样
 OUTPUT_ARCH(loongarch)
 ENTRY(_start)
-BASE_ADDRESS = 0x9000000000200000; # 偏移2MB留给启动和硬件等
-
+# BASE_ADDRESS = 0x9000000000200000; # 偏移2MB留给启动和硬件等
+BASE_ADDRESS = 0x200000;
 SECTIONS
 {
     . = BASE_ADDRESS;
@@ -11,14 +11,14 @@ SECTIONS
     stext = .;
     .text : {
         *(.text.entry)
-        . = ALIGN(4K);
+        . = ALIGN(16K);
         strampoline = .;
         *(.text.trampoline);
-        . = ALIGN(4K);
+        . = ALIGN(16K);
         *(.text .text.*)
     }
 
-    . = ALIGN(4K);
+    . = ALIGN(16K);
     etext = .;
     srodata = .;
     .rodata : {
@@ -26,7 +26,7 @@ SECTIONS
         *(.srodata .srodata.*)
     }
 
-    . = ALIGN(4K);
+    . = ALIGN(16K);
     erodata = .;
     sdata = .;
     .data : {
@@ -34,7 +34,7 @@ SECTIONS
         *(.sdata .sdata.*)
     }
 
-    . = ALIGN(4K);
+    . = ALIGN(16K);
     edata = .;
     sbss_with_stack = .;
     .bss : {
@@ -44,7 +44,7 @@ SECTIONS
         *(.sbss .sbss.*)
     }
 
-    . = ALIGN(4K);
+    . = ALIGN(16K);
     ebss = .;
     ekernel = .;
 

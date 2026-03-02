@@ -382,6 +382,7 @@ impl MemorySet {
         let pgdl = self.page_table.token();
         unsafe {
             asm!("csrwr {pgdl}, 0x19", pgdl = in(reg) pgdl);
+            asm!("dbar 0");
         }
     }
     

@@ -126,6 +126,7 @@ lazy_static! {
 pub fn add_initproc() {
     add_task(INITPROC.clone());
     println!("[kernel] add_initproc: pid={}", INITPROC.getpid());
+
 }
 
 /// Check if the current task has any signal to handle
