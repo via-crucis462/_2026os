@@ -289,7 +289,7 @@ impl MemorySet {
                 }
             }
         }
-        //println!("[kernel] MemorySet::from_elf: mapped common areas");
+        debug!("MemorySet::from_elf: mapped common areas");
         // map user stack with U flags
         let max_end_va: VirtAddr = max_end_vpn.into();
         let mut user_stack_bottom: usize = max_end_va.into();
@@ -319,7 +319,7 @@ impl MemorySet {
             user_stack_top,
         );
         memory_set.brk_index = memory_set.areas.len() - 1;// 此时brk在最后一个区域
-        //println!("[kernel] MemorySet::from_elf: mapped all areas");
+        debug!("MemorySet::from_elf: mapped all areas");
         // map TrapContext
         // la64下不需要映射
         #[cfg(target_arch = "riscv64")]

@@ -128,11 +128,11 @@ impl TaskControlBlock {
     /// 为la64修改
     /// At present, it is only used for the creation of initproc
     pub fn new(elf_data: &[u8]) -> Self {
-        
+        println!("[kernel] TaskControlBlock::new: start creating a new process");
         let (memory_set, user_sp, entry_point, _phdr, _phnum, _phent)
             = MemorySet::from_elf(elf_data);
-        println!(
-            "[kernel] TaskControlBlock::new: entry_point={:#x}, user_sp={:#x}",
+        debug!(
+            "TaskControlBlock::new: entry_point={:#x}, user_sp={:#x}",
             entry_point, user_sp
         );
         #[cfg(target_arch = "riscv64")]
@@ -149,12 +149,10 @@ impl TaskControlBlock {
         let pid_handle = pid_alloc();
         let kernel_stack = kstack_alloc();
 
-        println!("[kernel] TaskControlBlock::new");
-
         #[cfg(target_arch = "loongarch64")]
         let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
 
-        println!("[kernel] TaskControlBlock::new: kernel_stack_top={:#x}", kernel_stack.get_top());
+        debug!("TaskControlBlock::new: kernel_stack_top={:#x}", kernel_stack.get_top());
 
         #[cfg(target_arch = "riscv64")]
         let kernel_stack_top = kernel_stack.get_top();
@@ -207,7 +205,7 @@ impl TaskControlBlock {
             kernel_stack_top,
             trap_handler as *const () as usize,
         );
-        println!("[kernel] TaskControlBlock::new: finished creating a new process");
+        debug!("TaskControlBlock::new: finished creating a new process");
         task_control_block
     }
 
@@ -215,7 +213,7 @@ impl TaskControlBlock {
     pub fn exec(&self, elf_data: &[u8], args: Vec<String>) {
         // 1. 加载 ELF 文件生成新的地址空间
         let (memory_set, mut user_sp, entry_point, phdr_addr, phnum, phent) = MemorySet::from_elf(elf_data);
-        info!(
+        debug!(
             "[kernel] task::exec: entry_point={:#x}, user_sp={:#x}",
             entry_point, user_sp
         );
@@ -406,6 +404,7 @@ impl TaskControlBlock {
             *trap_cx = parent_trap_cx;
         }
         #[cfg(target_arch = "riscv64")]{
+            *trap_cx = *parent_inner.get_trap_cx();
             trap_cx.kernel_sp = kernel_stack_top;
         }
         if let Some(sp) = sp {
