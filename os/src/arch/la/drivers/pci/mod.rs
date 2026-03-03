@@ -343,7 +343,7 @@ pub fn scan_pci_device_to_trans() -> Option<PciTransport> {
                         }
                     }
                     BAR::IO(port) => {
-                        println!("BAR{}: type IO at {:#x}", idx, port);
+                        info!("BAR{}: type IO at {:#x}", idx, port);
                     }
                 }
             }

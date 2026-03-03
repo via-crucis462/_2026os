@@ -203,7 +203,7 @@ pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
 }
 /// List all apps in the root directory
 pub fn list_apps() {
-    info!("/**** APPS ****");
+    println!("/**** APPS ****");
     let mut buf = [0u8; 4096];
     let len = ROOT_INODE.inode.getdents(&mut buf);
     if len > 0 {
@@ -219,7 +219,7 @@ pub fn list_apps() {
             offset += entry.d_reclen as usize;
         }
     }
-    info!("**************/");
+    println!("**************/");
 }
 lazy_static! {
     pub static ref ROOT_VFS_INODE: Arc<dyn VfsInode> = {

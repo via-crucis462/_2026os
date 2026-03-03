@@ -116,7 +116,7 @@ lazy_static! {
     /// the name "initproc" may be changed to any other app name like "usertests",
     /// but we have user_shell, so we don't need to change it.
     pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new({
-        let inode = open_file(ROOT_DENTRY.clone(),"ch7b_user_shell", OpenFlags::RDONLY).unwrap();
+        let inode = open_file(ROOT_DENTRY.clone(),"ch7b_initproc", OpenFlags::RDONLY).unwrap();
         let v = inode.read_all();
         TaskControlBlock::new(v.as_slice())
     });
@@ -125,7 +125,7 @@ lazy_static! {
 ///Add init process to the manager
 pub fn add_initproc() {
     add_task(INITPROC.clone());
-    println!("[kernel] add_initproc: pid={}", INITPROC.getpid());
+    info!("add_initproc: pid={}", INITPROC.getpid());
 
 }
 
