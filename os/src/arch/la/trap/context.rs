@@ -1,9 +1,4 @@
 //! 按照loongarch64架构修改
-
-use core::{arch::asm, default};
-
-use xmas_elf::program::ProgramHeader;
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 /// 复用riscv的设计，小幅度修改
@@ -15,8 +10,6 @@ pub struct TrapContext {
     prmd: usize,
     /// era, trap返回后下一步执行的地址
     era: usize,
-    /// Virtual address of trap handler entry point in kernel
-    pub trap_handler: usize,
 }
 
 // 封装了对两平台名称不同寄存器的访问为同名接口
@@ -27,7 +20,6 @@ impl TrapContext {
             r: [0; 32],
             prmd: 0,
             era: 0,
-            trap_handler: 0,
         }
     }
     /// 将sp存入r3
@@ -60,13 +52,13 @@ impl TrapContext {
     pub fn app_init_context(
         entry: usize,
         sp: usize,
-        kernel_token: usize,
-        kernel_sp: usize,
-        trap_handler: usize,
+        _kernel_token: usize,
+        _kernel_sp: usize,
+        _trap_handler: usize,
     ) -> Self {
-        println!(
-            "app_init_context: entry={:#x}, sp={:#x}, kernel_token={:#x}, kernel_sp={:#x}, trap_handler={:#x}", 
-            entry, sp, kernel_token, kernel_sp, trap_handler
+        debug!(
+            "app_init_context: entry={:#x}, sp={:#x}", 
+            entry, sp
         );
         // app启动需设置特权级为用户态，也就是plv=3
         // 另，开启中断使能，开启分页
@@ -77,7 +69,6 @@ impl TrapContext {
             r: [0; 32],
             prmd: default_status,
             era: entry,  // entry point of app
-            trap_handler, // addr of trap_handler function
         };
         cx.set_sp(sp); // app's user stack pointer
         cx // return initial Trap Context of app

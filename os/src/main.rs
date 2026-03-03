@@ -117,5 +117,5 @@ pub fn debug_csr_info() {
         asm!("csrrd {}, 0x19", out(reg) pgdl);
         asm!("csrrd {}, 0x0", out(reg) crmd);
     }
-    println!("pgdl: {:#x}, crmd: {:#b}", pgdl, crmd);
+    debug!("pgdl: {:#x}, crmd: {:#b}", pgdl, crmd);
 }

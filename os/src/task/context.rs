@@ -23,7 +23,7 @@ impl TaskContext {
     }
     /// Create a new task context with a trap return addr and a kernel stack pointer
     pub fn goto_trap_return(kstack_ptr: usize) -> Self {
-        println!("goto_trap_return: kstack_ptr={:#x}", kstack_ptr);
+        //println!("goto_trap_return: kstack_ptr={:#x}", kstack_ptr);
         Self {
             ra: trap_return as *const () as usize,
             sp: kstack_ptr,
