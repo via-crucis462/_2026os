@@ -14,6 +14,7 @@
 const SYSCALL_DUP: usize = 23;
 /// dup2 syscall
 const SYSCALL_DUP2: usize = 24;
+const SYSCALL_FCNTL: usize = 25;    
 const SYSCALL_IOCTL: usize = 29;
 /// unlinkat syscall
 const SYSCALL_UNLINKAT: usize = 35;
@@ -48,6 +49,10 @@ const SYSCALL_SIGRETURN: usize = 139;
 /// setpriority syscall
 const SYSCALL_SET_PRIORITY: usize = 140;
 const SYSCALL_TIMES: usize = 153;
+const SYSCALL_SETPGID: usize = 154;
+const SYSCALL_GETPGID: usize = 155;
+const SYSCALL_GETSID:  usize = 156;
+const SYSCALL_SETSID:  usize = 157;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 /// getpid syscall
@@ -126,6 +131,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETEUID => sys_getuid(), // 偷懒：全部返回 0 (Root)
         SYSCALL_GETGID => sys_getuid(),  // 偷懒：全部返回 0 (Root)
         SYSCALL_GETEGID => sys_getuid(), // 偷懒：全部返回 0 (Root)
+        SYSCALL_SETPGID => sys_setpgid(args[0], args[1]),
+        SYSCALL_GETPGID => sys_getpgid(args[0]),
+        SYSCALL_GETSID => sys_getsid(args[0]),
+        SYSCALL_SETSID => sys_setsid(),
         SYSCALL_GETTID => sys_gettid(),
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2]),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize),
@@ -135,6 +144,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[0], args[1], args[2] as i32, 
             args[3] as i32, args[4] as i32, args[5]
         ),
+        SYSCALL_FCNTL => sys_fcntl(args[0], args[1], args[2]),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
         SYSCALL_READLINKAT => sys_readlinkat(

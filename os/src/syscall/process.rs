@@ -63,6 +63,25 @@ pub fn sys_gettid() -> isize {
 pub fn sys_getuid() -> isize {
     0 
 }
+// 假装获取成功，返回 PGID 为 0
+pub fn sys_getpgid(_pid: usize) -> isize { 
+    0 
+}
+
+// 假装设置成功，返回 0
+pub fn sys_setpgid(_pid: usize, _pgid: usize) -> isize { 
+    0 
+}
+
+// 假装获取会话 ID 成功，返回 0
+pub fn sys_getsid(_pid: usize) -> isize { 
+    0 
+}
+
+// 假装创建新会话成功，返回新的 SID (这里用 0 代替)
+pub fn sys_setsid() -> isize { 
+    0 
+}
 pub fn sys_getpid() -> isize {
 	trace!("kernel: sys_getpid pid:{}", current_task().unwrap().pid.0);
     current_task().unwrap().pid.0 as isize
