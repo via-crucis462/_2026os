@@ -128,7 +128,7 @@ impl TaskControlBlock {
     /// 为la64修改
     /// At present, it is only used for the creation of initproc
     pub fn new(elf_data: &[u8]) -> Self {
-        println!("[kernel] TaskControlBlock::new: start creating a new process");
+        
         let (memory_set, user_sp, entry_point, _phdr, _phnum, _phent)
             = MemorySet::from_elf(elf_data);
         println!(

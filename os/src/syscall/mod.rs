@@ -14,6 +14,7 @@
 const SYSCALL_DUP: usize = 23;
 /// dup2 syscall
 const SYSCALL_DUP2: usize = 24;
+
 /// unlinkat syscall
 const SYSCALL_UNLINKAT: usize = 35;
 /// linkat syscall
@@ -29,6 +30,7 @@ const SYSCALL_READ: usize = 63;
 /// write syscall
 const SYSCALL_WRITE: usize = 64;
 /// fstat syscall
+const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTAT: usize = 80;
 /// exit syscall
 const SYSCALL_EXIT: usize = 93;
@@ -51,6 +53,11 @@ const SYSCALL_GET_TIME: usize = 169;
 /// getpid syscall
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
+const SYSCALL_GETUID: usize = 174;
+const SYSCALL_GETEUID: usize = 175;
+const SYSCALL_GETGID: usize = 176;
+const SYSCALL_GETEGID: usize = 177;
+const SYSCALL_GETTID: usize = 178;
 /// brk syscall
 const SYSCALL_BRK: usize = 214;
 /// munmap syscall
@@ -61,6 +68,7 @@ const SYSCALL_CLONE: usize = 220;
 const SYSCALL_EXEC: usize = 221;
 /// mmap syscall
 const SYSCALL_MMAP: usize = 222;
+const SYSCALL_MPROTECT: usize = 226;
 /// waitpid syscall
 const SYSCALL_WAIT4: usize = 260;
 /// spawn syscall
@@ -114,6 +122,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
+        SYSCALL_GETUID => sys_getuid(),
+        SYSCALL_GETEUID => sys_getuid(), // 偷懒：全部返回 0 (Root)
+        SYSCALL_GETGID => sys_getuid(),  // 偷懒：全部返回 0 (Root)
+        SYSCALL_GETEGID => sys_getuid(), // 偷懒：全部返回 0 (Root)
+        SYSCALL_GETTID => sys_gettid(),
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2]),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize),
         SYSCALL_WAIT4 => sys_wait4(args[0] as isize, args[1] as *mut i32, args[2]),
@@ -121,6 +134,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MMAP => sys_mmap(
             args[0], args[1], args[2] as i32, 
             args[3] as i32, args[4] as i32, args[5]
+        ),
+        SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
+        SYSCALL_READLINKAT => sys_readlinkat(
+        args[0] as isize, 
+        args[1] as *const u8, 
+        args[2] as *mut u8, 
+        args[3]
         ),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_BRK => sys_brk(args[0] as *const () as usize),

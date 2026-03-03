@@ -56,7 +56,13 @@ pub fn sys_yield() -> isize {
     suspend_current_and_run_next();
     0
 }
-
+pub fn sys_gettid() -> isize {
+    // 目前线程ID和进程ID是一样的
+    sys_getpid()
+}
+pub fn sys_getuid() -> isize {
+    0 
+}
 pub fn sys_getpid() -> isize {
 	trace!("kernel: sys_getpid pid:{}", current_task().unwrap().pid.0);
     current_task().unwrap().pid.0 as isize
@@ -292,6 +298,9 @@ pub fn sys_nanosleep(req: *const TimeSpec, _rem: *mut TimeSpec) -> isize {
     while get_time_ms() < start + duration_ms {
         suspend_current_and_run_next();
     }
+    0
+}
+pub fn sys_mprotect(_start: usize, _len: usize, _prot: usize) -> isize {
     0
 }
 /// YOUR JOB: Implement mmap.
