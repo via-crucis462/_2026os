@@ -184,7 +184,10 @@ pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
     trace!("kernel:pid[{}] sys_linkat NOT IMPLEMENTED", current_task().unwrap().pid.0);
     -1
 }
+pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usize) -> isize {
 
+    -1
+}
 /// YOUR JOB: Implement unlinkat.
 pub fn sys_unlinkat(path: *const u8) -> isize {
     let token = current_user_token();

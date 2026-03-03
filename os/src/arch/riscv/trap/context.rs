@@ -1,5 +1,5 @@
 //! Implementation of [`TrapContext`]
-use riscv::register::sstatus::{self, Sstatus, SPP};
+use riscv::register::sstatus::{self, Sstatus, SPP, FS};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -56,18 +56,24 @@ impl TrapContext {
         kernel_sp: usize,
         trap_handler: usize,
     ) -> Self {
-        let mut sstatus = sstatus::read();
-        // set CPU privilege to User after trapping back
-        sstatus.set_spp(SPP::User);
-        let mut cx = Self {
-            x: [0; 32],
-            sstatus,
-            sepc: entry,  // entry point of app
-            kernel_satp,  // addr of page table
-            kernel_sp,    // kernel stack
-            trap_handler, // addr of trap_handler function
-        };
-        cx.set_sp(sp); // app's user stack pointer
-        cx // return initial Trap Context of app
+        unsafe {
+
+            sstatus::set_fs(FS::Clean); 
+
+            let mut sstatus = sstatus::read();
+ 
+            sstatus.set_spp(SPP::User); 
+
+            let mut cx = Self {
+                x: [0; 32],
+                sstatus,
+                sepc: entry,
+                kernel_satp,
+                kernel_sp,
+                trap_handler,
+            };
+            cx.set_sp(sp);
+            cx
+        }
     }
 }

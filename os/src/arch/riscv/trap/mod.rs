@@ -76,6 +76,9 @@ pub fn trap_handler() -> ! {
             suspend_current_and_run_next();
         }
         _ => {
+            println!("[kernel] Trap! Source: User");
+            println!("[kernel] Scause: {:?} (Code: {})", scause.cause(), scause.bits());
+            println!("[kernel] Stval:  {:#x} (Bad Address)", stval);
             error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, bad instruction = {:#x}",
                 scause.cause(),
                 crate::task::current_task().unwrap().pid.0,
