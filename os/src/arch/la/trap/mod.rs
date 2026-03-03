@@ -1,22 +1,13 @@
 // 正在为la64重写
 // 参考https://godones.github.io/rCoreloongArch/app.html
-#![allow(unused)]
 mod context;
-
-
-use crate::arch::trap;
-use crate::debug_csr_info;
 use crate::syscall::syscall;
 use crate::task::{
     check_signals_error_of_current, current_add_signal, current_trap_cx, current_user_token,
     exit_current_and_run_next, handle_signals, suspend_current_and_run_next, SignalFlags,
 };
-use crate::mm::{VirtAddr, translated_byte_buffer};
-use crate::arch::timer::set_next_trigger;
-use crate::arch::mm::tlb_refill_handler;
 
 use core::arch::{asm, global_asm};
-use core::ops::BitAndAssign;
 
 global_asm!(include_str!("trap.S"));
 
@@ -64,25 +55,17 @@ pub fn init() {
     set_kernel_trap_entry();
 }
 
-// 从内核trap时
+// 从内核trap时的入口
 fn set_kernel_trap_entry() {
     let target = trap_from_kernel as *const () as usize;
-    let mut trap_handler: usize = target;
+    let trap_handler: usize = target;
     unsafe {
         asm!(
             "csrwr {trap_handler},0xc",
-            trap_handler = inout(reg) trap_handler,
+            trap_handler = inout(reg) trap_handler => _,
         );
     }
-    let mut eentry: usize;
-    unsafe {
-        asm!("csrrd {eentry}, 0xc", eentry = out(reg) eentry);
-    }
-    info!(
-        "[kernel] set_kernel_trap_entry: target={:#x}, eentry={:#x}",
-        target,
-        eentry
-    );
+    debug!("[kernel] set_kernel_trap_entry: trap_handler address = {:#x}", trap_handler);
 }
 
 /// 插入__all_trap的地址
@@ -115,7 +98,6 @@ pub fn enable_timer_interrupt() {
         asm!("csrrd {}, 0x0", out(reg) crmd);
         asm!("csrwr {}, 0x0", in(reg) crmd | (1 << 2)); // 使能中断
     }
-    debug_csr_info();
 }
 
 
@@ -182,11 +164,13 @@ pub fn trap_handler() -> ! {
                 suspend_current_and_run_next();
             }
             _ => {
-                error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, rtn addr = {:#x}",
+                error!("[kernel] trap_handler: {:?} in PID {}, estat={:#x}, era={:#x}, badv={:#x},badi={:#x}",
                     cause,
                     crate::task::current_task().unwrap().pid.0,
+                    estat,
+                    era,
                     badv,
-                    current_trap_cx().get_rt(),
+                    badi
                 );
                 current_add_signal(SignalFlags::SIGSEGV);
             }
