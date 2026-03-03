@@ -79,7 +79,7 @@ fn init_tlb() {
     unsafe{
         asm!("cpucfg {}, {}", out(reg) cfg01, in(reg) 0x1);
     }
-    println!("[kernel] cfg01: {:#x}", cfg01);
+   debug!("[kernel] cfg01: {:#x}", cfg01);
 }
 
 // 修改根页表地址

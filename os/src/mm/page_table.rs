@@ -88,7 +88,7 @@ impl PageTable {
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
-            
+            //println!("find_pte: vpn = {:?}, i = {}", vpn, i);
             if i == 2 {
                 result = Some(pte);
                 break;
@@ -107,7 +107,7 @@ impl PageTable {
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
-            
+            //println!("find_pte: vpn = {:?}, i = {}", vpn, i);
             if pte.is_empty() {
                 return None;
             }

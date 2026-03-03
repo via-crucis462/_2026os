@@ -58,9 +58,6 @@ pub fn from_riscv_flags(riscv_flags: PTEFlags) -> PTEFlagsLA64 {
     la64_flags
 }
 
-
-
-
 #[derive(Copy, Clone)]
 #[repr(C)]
 /// 对于LA64，目录项和页表项格式类似，但目录项无权限位，需要注意
