@@ -63,6 +63,8 @@ const SYSCALL_EXEC: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 /// waitpid syscall
 const SYSCALL_WAIT4: usize = 260;
+/// statx syscall
+const SYSCALL_STATX: usize = 291;
 /// spawn syscall
 const SYSCALL_SPAWN: usize = 400;
 /// mkdir syscall
@@ -134,6 +136,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
         SYSCALL_MOUNT => sys_mount(args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3] as u32),
         SYSCALL_UMOUNT => sys_umount(args[0] as *const u8),
+        SYSCALL_STATX => sys_statx(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32, args[4] as *mut Stat),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

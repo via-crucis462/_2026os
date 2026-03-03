@@ -151,7 +151,6 @@ pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
     new_fd as isize
 }
 
-/// YOUR JOB: Implement fstat.
 pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
@@ -169,6 +168,12 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
         -1
     }
 }
+
+pub fn sys_statx(_dirfd: isize, _pathname: *const u8, _mask: u32, _flags: u32, _st: *mut Stat) -> isize {
+    //todo
+    sys_fstat(_dirfd as usize, _st)
+}
+
 pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
     let token = current_user_token();
     let path = translated_str(token, path);
@@ -185,7 +190,6 @@ pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
     -1
 }
 
-/// YOUR JOB: Implement unlinkat.
 pub fn sys_unlinkat(path: *const u8) -> isize {
     let token = current_user_token();
     let path_str = translated_str(token, path);
