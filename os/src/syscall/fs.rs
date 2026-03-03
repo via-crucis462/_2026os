@@ -189,8 +189,11 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
     -1
 }
 pub fn sys_ioctl(_fd: usize, _request: usize, _argp: usize) -> isize {
-
     0
+}
+pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
+    println!("[Stub] sys_fcntl(fd={}, cmd={}, arg={})", fd, cmd, arg);
+    -1
 }
 /// YOUR JOB: Implement unlinkat.
 pub fn sys_unlinkat(path: *const u8) -> isize {
