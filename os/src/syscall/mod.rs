@@ -14,7 +14,7 @@
 const SYSCALL_DUP: usize = 23;
 /// dup2 syscall
 const SYSCALL_DUP2: usize = 24;
-
+const SYSCALL_IOCTL: usize = 29;
 /// unlinkat syscall
 const SYSCALL_UNLINKAT: usize = 35;
 /// linkat syscall
@@ -135,6 +135,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[0], args[1], args[2] as i32, 
             args[3] as i32, args[4] as i32, args[5]
         ),
+        SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
         SYSCALL_READLINKAT => sys_readlinkat(
         args[0] as isize, 

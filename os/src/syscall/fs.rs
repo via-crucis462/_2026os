@@ -188,6 +188,10 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
 
     -1
 }
+pub fn sys_ioctl(_fd: usize, _request: usize, _argp: usize) -> isize {
+
+    0
+}
 /// YOUR JOB: Implement unlinkat.
 pub fn sys_unlinkat(path: *const u8) -> isize {
     let token = current_user_token();
