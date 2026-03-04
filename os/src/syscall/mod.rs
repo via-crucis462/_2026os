@@ -54,6 +54,7 @@ const SYSCALL_GETPGID: usize = 155;
 const SYSCALL_GETSID:  usize = 156;
 const SYSCALL_SETSID:  usize = 157;
 const SYSCALL_UNAME: usize = 160;
+const SYSCALL_PRCTL: usize = 167;
 const SYSCALL_GET_TIME: usize = 169;
 /// getpid syscall
 const SYSCALL_GETPID: usize = 172;
@@ -96,9 +97,10 @@ const SYSCALL_UMOUNT: usize = 39;
 const SYSCALL_GETRANDOM: usize = 278;
 mod fs;
 mod process;
+mod prctl;
 
 use fs::*;
-pub use process::*;
+use process::*;
 
 use crate::{fs::Stat, task::SignalAction};
 
@@ -171,6 +173,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_UMOUNT => sys_umount(args[0] as *const u8),
         SYSCALL_STATX => sys_statx(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32, args[4] as *mut Stat),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2] as u32),
+        SYSCALL_PRCTL => sys_prctl(args[0], args[1], args[2], args[3], args[4]),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
