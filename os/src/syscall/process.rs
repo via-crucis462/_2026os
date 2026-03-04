@@ -481,7 +481,6 @@ pub fn sys_times(tms_ptr: *mut usize) -> isize {
     current_ms as isize
 }
 
-#[allow(warnings)]
 pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> isize {
     let token = current_user_token();
     let mut user_buf = translated_byte_buffer(token, buf, len);
@@ -493,4 +492,44 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> isize {
     }
 
     len as isize
+}
+
+use super::prctl::*;
+pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
+    trace!("kernel:pid[{}] sys_prctl option={}", current_task().unwrap().pid.0, option);
+    let opt = PrctlOption::from_bits_truncate(option);
+    match opt {
+        PrctlOption::PR_SETNAME => {
+            let buff = translated_byte_buffer(current_user_token(), _arg2 as *const u8, 16);
+            let mut name_bytes = String::new();
+            for buf in buff.iter() {
+                for &b in buf.iter() {
+                    if b == 0 {
+                        break;
+                    }
+                    name_bytes.push(b as char);
+                }
+            }
+            0
+        },
+        PrctlOption::PR_GETNAME => {
+            let mut buff = translated_byte_buffer(current_user_token(), _arg2 as *const u8, 16);
+            let task = current_task().unwrap();
+            let mut name = task.pname.as_bytes().as_ptr();
+            for buf in buff.iter_mut() {
+                for b in buf.iter_mut() {
+                    if name.is_null() {
+                        *b = 0;
+                    } else {
+                        unsafe {
+                            *b = *name;
+                            name = name.add(1);
+                        }
+                    }
+                }
+            }
+            0
+        },
+        _ => -1,
+    }
 }
