@@ -92,11 +92,13 @@ const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_MOUNT: usize = 40;
 /// umount syscall
 const SYSCALL_UMOUNT: usize = 39;
+/// random syscall
+const SYSCALL_GETRANDOM: usize = 278;
 mod fs;
 mod process;
 
 use fs::*;
-use process::*;
+pub use process::*;
 
 use crate::{fs::Stat, task::SignalAction};
 
@@ -168,6 +170,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MOUNT => sys_mount(args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3] as u32),
         SYSCALL_UMOUNT => sys_umount(args[0] as *const u8),
         SYSCALL_STATX => sys_statx(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32, args[4] as *mut Stat),
+        SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2] as u32),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
