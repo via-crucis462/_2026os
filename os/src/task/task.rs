@@ -33,8 +33,6 @@ pub struct TaskControlBlock {
     /// Process identifier
     pub pid: PidHandle,
 
-    pub pname: String,
-
     /// Kernel stack corresponding to PID
     pub kernel_stack: KernelStack,
 
@@ -55,6 +53,9 @@ impl TaskControlBlock {
 }
 
 pub struct TaskControlBlockInner {
+    /// 进程名
+    pub pname: String,
+
     /// 此处改为直接保存地址
     pub trap_cx_addr: usize,
 
@@ -164,11 +165,11 @@ impl TaskControlBlock {
         // push a task context which goes to trap_return to the top of kernel stack
         let task_control_block = Self {
             pid: pid_handle,
-            //默认用pid
-            pname: String::from("{pidhandle.0}"),
+            //默认用pid,
             kernel_stack,
             inner: unsafe {
                 UPSafeCell::new(TaskControlBlockInner {
+                    pname: String::from("{pidhandle.0}"),
                     trap_cx_addr,
                     base_size: user_sp,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
@@ -373,10 +374,10 @@ impl TaskControlBlock {
         let task_control_block = Arc::new(TaskControlBlock {
             pid: pid_handle,
             // 父进程名加子进程pid
-            pname: String::from("{parent_inner.pname}-{pid_handle.0}"),
             kernel_stack,
             inner: unsafe {
                 UPSafeCell::new(TaskControlBlockInner {
+                    pname: String::from("{parent_inner.pname}-{pid_handle.0}"),
                     trap_cx_addr,
                     base_size: parent_inner.base_size,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),

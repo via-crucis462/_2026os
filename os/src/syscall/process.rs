@@ -1,12 +1,12 @@
 //! Process management syscalls
 
 
-use crate::{
+pub use crate::{
     arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, fs::*, mm::{UserBuffer, mmap, translated_byte_buffer, translated_ref, translated_refmut, translated_str}, task::{
         MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_token, exit_current_and_run_next, fork::*, pid2task, suspend_current_and_run_next
     }
 };
-use alloc::{string::String, sync::Arc, vec::Vec};
+pub use alloc::{string::String, sync::Arc, vec::Vec};
 
 
 
@@ -492,44 +492,4 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> isize {
     }
 
     len as isize
-}
-
-use super::prctl::*;
-pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
-    trace!("kernel:pid[{}] sys_prctl option={}", current_task().unwrap().pid.0, option);
-    let opt = PrctlOption::from_bits_truncate(option);
-    match opt {
-        PrctlOption::PR_SETNAME => {
-            let buff = translated_byte_buffer(current_user_token(), _arg2 as *const u8, 16);
-            let mut name_bytes = String::new();
-            for buf in buff.iter() {
-                for &b in buf.iter() {
-                    if b == 0 {
-                        break;
-                    }
-                    name_bytes.push(b as char);
-                }
-            }
-            0
-        },
-        PrctlOption::PR_GETNAME => {
-            let mut buff = translated_byte_buffer(current_user_token(), _arg2 as *const u8, 16);
-            let task = current_task().unwrap();
-            let mut name = task.pname.as_bytes().as_ptr();
-            for buf in buff.iter_mut() {
-                for b in buf.iter_mut() {
-                    if name.is_null() {
-                        *b = 0;
-                    } else {
-                        unsafe {
-                            *b = *name;
-                            name = name.add(1);
-                        }
-                    }
-                }
-            }
-            0
-        },
-        _ => -1,
-    }
 }
