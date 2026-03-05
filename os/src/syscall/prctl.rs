@@ -40,6 +40,7 @@ const PR_TSC_SIGSEGV: usize = 2;
 const EINVAL: isize = 22;
 
 pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
+    // todo：实现真正的多用户，权限机制和多线程
     trace!("kernel:pid[{}] sys_prctl option={}", current_task().unwrap().pid.0, option);
     match option {
         PR_SETNAME => {
@@ -162,3 +163,10 @@ pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5:
         _ => -EINVAL,
     }
 }
+
+#[allow(unused)]
+pub fn sys_arch_prctl(option: usize, addr: usize) -> isize {
+    // 摘自linux手册：仅支持 Linux/x86-64 的 64 位程序
+    // 不实现
+    -1
+} 
