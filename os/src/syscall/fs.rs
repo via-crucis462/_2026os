@@ -104,6 +104,39 @@ pub fn sys_close(fd: usize) -> isize {
     0
 }
 
+pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> isize {
+    let task = current_task().unwrap();
+    let token = current_user_token();
+    let path_str = translated_str(token, path);
+    debug!("[kernel] sys_accessat: dirfd={}, path={}, mode={}", dirfd, path_str, _mode);
+
+    let start_dentry = if path_str.starts_with('/') {
+        crate::fs::ROOT_DENTRY.clone()
+    } else if dirfd == AT_FDCWD {
+        task.inner_exclusive_access().cwd.clone()
+    } else {
+        let inner = task.inner_exclusive_access();
+        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
+            return -1;
+        }
+        if let Some(file) = &inner.fd_table[dirfd as usize] {
+            if let Some(dentry) = file.get_dentry() {
+                dentry
+            } else {
+                return -1;
+            }
+        } else {
+            return -1;
+        }
+    };
+
+    if let Some(_inode) = open_file(start_dentry, path_str.as_str(), OpenFlags::RDONLY) {
+        0
+    } else {
+        -1
+    }
+}
+
 pub fn sys_pipe(pipe: *mut usize) -> isize {
 	trace!("kernel:pid[{}] sys_pipe", current_task().unwrap().pid.0);
     let task = current_task().unwrap();
@@ -169,9 +202,48 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     }
 }
 
-pub fn sys_statx(_dirfd: isize, _pathname: *const u8, _mask: u32, _flags: u32, _st: *mut Stat) -> isize {
-    //todo
-    sys_fstat(_dirfd as usize, _st)
+pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut Stat) -> isize {
+    let task = current_task().unwrap();
+    let token = current_user_token();
+    let path_str = translated_str(token, path);
+    debug!("[kernel] sys_statx: dirfd={}, path={}, mask={:#x}, flags={:#x}", dirfd, path_str, mask, flags);
+
+    if path_str.is_empty() {
+        return sys_newfstat(dirfd as usize, st);
+    }
+
+    let start_dentry = if path_str.starts_with('/') {
+        crate::fs::ROOT_DENTRY.clone()
+    } else if dirfd == AT_FDCWD {
+        task.inner_exclusive_access().cwd.clone()
+    } else {
+        let inner = task.inner_exclusive_access();
+        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
+            return -1;
+        }
+        if let Some(file) = &inner.fd_table[dirfd as usize] {
+            if let Some(dentry) = file.get_dentry() {
+                dentry
+            } else {
+                return -1;
+            }
+        } else {
+            return -1;
+        }
+    };
+
+    let follow_links = (flags & (1 << 8)) == 0; // AT_SYMLINK_NOFOLLOW (0x100)
+    if let Some(target_dentry) = start_dentry.find_tree(&path_str, follow_links) {
+        let mut stat = target_dentry.inode.get_stat();
+        
+        // 处理 mask: 将请求的 mask 返回给用户空间，表示这些字段在内核中已成功填充
+        stat.mask = mask; 
+        
+        *translated_refmut(token, st) = stat;
+        0
+    } else {
+        -1
+    }
 }
 
 pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
@@ -212,7 +284,7 @@ pub fn sys_unlinkat(path: *const u8) -> isize {
     let task = current_task().unwrap();
     let cwd = task.inner_exclusive_access().cwd.clone();
     
-    if let Some(parent_dentry) = cwd.find_tree(&parent_path_str) {
+    if let Some(parent_dentry) = cwd.find_tree(&parent_path_str, true) {
         if let Some(_inode_id) = parent_dentry.inode.delete_dir_entry(&name) {
             // 清理 Dentry 缓存，确保下次也读不到
             parent_dentry.children.lock().remove(&name);
@@ -315,4 +387,28 @@ pub fn sys_umount(target: *const u8) -> isize {
     let target_str = translated_str(token, target);
     debug!("[kernel] sys_umount: target={}", target_str);
     return 0;
+}
+
+pub fn sys_newfstat(fd: usize, st: *mut Stat) -> isize {
+    sys_fstat(fd, st)
+}
+
+pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isize {
+    let token = current_user_token();
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return -1;
+    }
+    if let Some(file) = &inner.fd_table[fd] {
+        let file = file.clone();
+        drop(inner);
+        if !file.readable() {
+            return -1;
+        }
+        trace!("[kernel] sys_pread64: fd={}, count={}, offset={}", fd, count, offset);
+        file.pread(offset, UserBuffer::new(translated_byte_buffer(token, buf, count))) as isize
+    } else {
+        -1
+    }
 }

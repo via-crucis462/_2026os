@@ -65,7 +65,7 @@ impl Dentry {
         new_child
     }
     /// 递归查找完整路径，例如 "bin/sh" 或 "/bin/sh"
-    pub fn find_tree(self: &Arc<Self>, path: &str) -> Option<Arc<Dentry>> {
+    pub fn find_tree(self: &Arc<Self>, path: &str, follow_links: bool) -> Option<Arc<Dentry>> {
         if path == "." || path == "" {
             return Some(self.clone());
         }
@@ -75,17 +75,45 @@ impl Dentry {
             .collect();
         
         let mut current = self.clone();
-        for seg in segments {
+        let num_segments = segments.len();
+        
+        for (i, seg) in segments.into_iter().enumerate() {
             if seg == "." {
                 continue;
             } else if seg == ".." {
                 if let Some(parent) = current.parent.upgrade() {
                     current = parent;
                 }
-                // 如果没有 parent，说明是根目录，则保持不变
                 continue;
             }
-            current = current.find_child(seg)?;
+            
+            let next = current.find_child(seg)?;
+            
+            // 符号链接处理
+            let stat = next.inode.get_stat();
+            if (stat.mode & 0o170000) == 0o120000 { // S_IFLNK
+                // 如果是最后一个路径分量且不需要追踪链接，则直接返回
+                if i == num_segments - 1 && !follow_links {
+                    return Some(next);
+                }
+                
+                // 否则追踪链接
+                let size = stat.size as usize;
+                let mut buffer = alloc::vec![0u8; size];
+                next.inode.read_at(0, &mut buffer);
+                let target_path = core::str::from_utf8(&buffer).unwrap();
+                
+                let base = if target_path.starts_with('/') {
+                    ROOT_DENTRY.clone()
+                } else {
+                    current.clone()
+                };
+                
+                // 递归查找目标路径（限制深度以防死循环）
+                current = base.find_tree(target_path, true)?;
+            } else {
+                current = next;
+            }
         }
         Some(current)
     }
