@@ -35,6 +35,7 @@ const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTAT: usize = 80;
 /// exit syscall
 const SYSCALL_EXIT: usize = 93;
+const SYSCALL_SET_ROBUST_LIST: usize = 99;// RISCV
 const SYSCALL_SLEEP:usize =101;
 /// yield syscall
 const SYSCALL_YIELD: usize = 124;
@@ -95,6 +96,8 @@ const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_UMOUNT: usize = 39;
 /// random syscall
 const SYSCALL_GETRANDOM: usize = 278;
+/// resq
+const SYSCALL_RESQ: usize = 293;
 mod fs;
 mod process;
 mod prctl;
@@ -175,6 +178,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_STATX => sys_statx(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32, args[4] as *mut Stat),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2] as u32),
         SYSCALL_PRCTL => sys_prctl(args[0], args[1], args[2], args[3], args[4]),
+        SYSCALL_SET_ROBUST_LIST => sys_robust_list(),
+        SYSCALL_RESQ => sys_resq(),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
