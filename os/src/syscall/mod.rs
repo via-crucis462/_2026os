@@ -37,6 +37,7 @@ const SYSCALL_NEWFSTAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 /// exit syscall
 const SYSCALL_EXIT: usize = 93;
+const SYSCALL_SET_ROBUST_LIST: usize = 99;// RISCV
 const SYSCALL_SLEEP:usize =101;
 /// yield syscall
 const SYSCALL_YIELD: usize = 124;
@@ -56,6 +57,7 @@ const SYSCALL_GETPGID: usize = 155;
 const SYSCALL_GETSID:  usize = 156;
 const SYSCALL_SETSID:  usize = 157;
 const SYSCALL_UNAME: usize = 160;
+const SYSCALL_PRCTL: usize = 167;
 const SYSCALL_GET_TIME: usize = 169;
 /// getpid syscall
 const SYSCALL_GETPID: usize = 172;
@@ -94,13 +96,19 @@ const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_MOUNT: usize = 40;
 /// umount syscall
 const SYSCALL_UMOUNT: usize = 39;
+/// random syscall
+const SYSCALL_GETRANDOM: usize = 278;
+/// resq
+const SYSCALL_RESQ: usize = 293;
 /// accessat syscall
 const SYSCALL_ACCESSAT: usize = 48;
 mod fs;
 mod process;
+mod prctl;
 
 use fs::*;
 use process::*;
+use prctl::*;
 
 use crate::{fs::Stat, task::SignalAction};
 
@@ -173,6 +181,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MOUNT => sys_mount(args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3] as u32),
         SYSCALL_UMOUNT => sys_umount(args[0] as *const u8),
         SYSCALL_STATX => sys_statx(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32, args[4] as *mut Stat),
+        SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2] as u32),
+        SYSCALL_PRCTL => sys_prctl(args[0], args[1], args[2], args[3], args[4]),
+        SYSCALL_SET_ROBUST_LIST => sys_robust_list(),
+        SYSCALL_RESQ => sys_resq(),
         SYSCALL_NEWFSTAT => sys_newfstat(args[0], args[1] as *mut Stat),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
