@@ -101,6 +101,7 @@ mod prctl;
 
 use fs::*;
 use process::*;
+use prctl::*;
 
 use crate::{fs::Stat, task::SignalAction};
 
