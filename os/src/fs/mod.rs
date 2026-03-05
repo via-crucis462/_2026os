@@ -20,6 +20,7 @@ pub trait File: Send + Sync {
     /// read from the file to buf, return the number of bytes read
     fn read(&self, _buf: UserBuffer) -> usize { 0 }
     /// write to the file from buf, return the number of bytes written
+    fn pread(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
     fn write(&self, _buf: UserBuffer) -> usize { 0 }
     /// read from the file to buf at a given offset, return the number of bytes read
     fn read_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
@@ -74,8 +75,10 @@ pub struct Stat {
     pub ctime_sec: i64,
     /// time of last status change (nanoseconds)
     pub ctime_nsec: i64,
-    /// unused
-    pub __unused: [u32; 2],
+    /// mask returned by statx
+    pub mask: u32,
+    /// padding
+    pub __unused: [u32; 1],
 }
 pub trait VfsInode: Send + Sync {
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize;

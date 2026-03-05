@@ -30,8 +30,10 @@ const SYSCALL_PIPE: usize = 59;
 const SYSCALL_READ: usize = 63;
 /// write syscall
 const SYSCALL_WRITE: usize = 64;
-/// fstat syscall
+const SYSCALL_PREAD64: usize = 67;
 const SYSCALL_READLINKAT: usize = 78;
+const SYSCALL_NEWFSTAT: usize = 79;
+/// fstat syscall
 const SYSCALL_FSTAT: usize = 80;
 /// exit syscall
 const SYSCALL_EXIT: usize = 93;
@@ -98,6 +100,8 @@ const SYSCALL_UMOUNT: usize = 39;
 const SYSCALL_GETRANDOM: usize = 278;
 /// resq
 const SYSCALL_RESQ: usize = 293;
+/// accessat syscall
+const SYSCALL_ACCESSAT: usize = 48;
 mod fs;
 mod process;
 mod prctl;
@@ -118,6 +122,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
         SYSCALL_OPENAT => sys_openat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_CLOSE => sys_close(args[0]),
+        SYSCALL_ACCESSAT => sys_accessat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut usize),
         SYSCALL_LINKAT => sys_linkat(args[1] as *const u8, args[3] as *const u8),
         SYSCALL_UNLINKAT => sys_unlinkat(args[1] as *const u8),
@@ -180,6 +185,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_PRCTL => sys_prctl(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_SET_ROBUST_LIST => sys_robust_list(),
         SYSCALL_RESQ => sys_resq(),
+        SYSCALL_NEWFSTAT => sys_newfstat(args[0], args[1] as *mut Stat),
+        SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
