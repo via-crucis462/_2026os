@@ -17,8 +17,11 @@ pub fn get_time() -> usize {
     unsafe {
         asm!("rdtime.d {}, $zero", out(reg) time);
     }
-
     time
+}
+
+pub fn get_timer_ticks() -> usize {
+    get_time()
 }
 
 /// 读取板载时钟频率，单位Hz
