@@ -53,6 +53,9 @@ impl TaskControlBlock {
 }
 
 pub struct TaskControlBlockInner {
+    /// 进程名
+    pub pname: String,
+
     /// 此处改为直接保存地址
     pub trap_cx_addr: usize,
 
@@ -162,9 +165,11 @@ impl TaskControlBlock {
         // push a task context which goes to trap_return to the top of kernel stack
         let task_control_block = Self {
             pid: pid_handle,
+            //默认用pid,
             kernel_stack,
             inner: unsafe {
                 UPSafeCell::new(TaskControlBlockInner {
+                    pname: String::from("{pidhandle.0}"),
                     trap_cx_addr,
                     base_size: user_sp,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
@@ -197,7 +202,7 @@ impl TaskControlBlock {
         // prepare TrapContext in user space
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
         // 发现问题：这样解引用写入会炸
-        // 已解决：只分配了128MB内存，之前的实现写到了有效区之外
+        // 已解决：只分配了256MB内存，之前的实现写到了有效区之外
         *trap_cx = TrapContext::app_init_context(
             entry_point,
             user_sp,
@@ -368,9 +373,11 @@ impl TaskControlBlock {
         }
         let task_control_block = Arc::new(TaskControlBlock {
             pid: pid_handle,
+            // 父进程名加子进程pid
             kernel_stack,
             inner: unsafe {
                 UPSafeCell::new(TaskControlBlockInner {
+                    pname: String::from("{parent_inner.pname}-{pid_handle.0}"),
                     trap_cx_addr,
                     base_size: parent_inner.base_size,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),

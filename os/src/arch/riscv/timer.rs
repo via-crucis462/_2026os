@@ -12,6 +12,10 @@ const MSEC_PER_SEC: usize = 1000;
 /// The number of microseconds per second
 const MICRO_PER_SEC: usize = 1_000_000;
 
+pub fn get_timer_ticks() -> usize {
+    time::read()
+}
+
 /// Get the current time in ticks
 pub fn get_time() -> usize {
     time::read()

@@ -1,16 +1,12 @@
 //! Process management syscalls
 
-use crate::{
-    fs::{*}, 
-    mm::{mmap, translated_ref, translated_refmut, translated_str, translated_byte_buffer, UserBuffer}, 
-    task::{
-        add_task, current_task, current_user_token, exit_current_and_run_next, pid2task,
-        suspend_current_and_run_next, SignalAction, SignalFlags, MAX_SIG
-    },
-    arch::timer::{get_time_ms,get_time_us},
-    task::fork::*,
+
+pub use crate::{
+    arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, fs::*, mm::{UserBuffer, mmap, translated_byte_buffer, translated_ref, translated_refmut, translated_str}, task::{
+        MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_token, exit_current_and_run_next, fork::*, pid2task, suspend_current_and_run_next
+    }
 };
-use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
+pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 
 
 
@@ -474,4 +470,27 @@ pub fn sys_times(tms_ptr: *mut usize) -> isize {
 
     // 5. 返回当前时间滴答数 (只要 >= 0，assert就过了)
     current_ms as isize
+}
+
+pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> isize {
+    let token = current_user_token();
+    let mut user_buf = translated_byte_buffer(token, buf, len);
+    for (i, buf) in user_buf.iter_mut().enumerate() {
+        let seed = get_timer_ticks() + buf.as_ptr() as usize + i;
+        // 类LGC算法，时间滴答作种
+        buf[0] = (((25214903917usize * seed) & ((1 << 48) - 1)) >> (8 * (i % 6))) as u8;
+    }
+    len as isize
+}
+
+pub fn sys_robust_list() -> isize {
+    trace!("kernel:pid[{}] sys_robust_list NOT IMPLEMENTED", current_task().unwrap().pid.0);
+    // 目前还没有实现多线程（每个任务是独立的内存空间)，不需要管理锁，伪实现不会导致死锁
+    0
+}
+
+pub fn sys_resq() -> isize {
+    trace!("kernel:pid[{}] sys_resq NOT IMPLEMENTED", current_task().unwrap().pid.0);
+    // 未实现多线程，这里伪实现
+    0
 }
