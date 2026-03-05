@@ -20,7 +20,7 @@ pub struct OSInode {
 }
 
 pub struct OSInodeInner {
-    offset: usize,
+    offset: usize,  //记录当前文件的读写偏移量，read/write系统调用会更新这个偏移量
 }
 
 impl OSInode {
@@ -109,6 +109,10 @@ impl File for OSInode {
     fn get_dentry(&self) -> Option<Arc<super::Dentry>> {
         Some(self.dentry.clone())
     }
+    fn pread(&self, offset: usize, buf: UserBuffer) -> usize {
+        let read_len = self.read_at(offset, buf);
+        read_len
+    }
 }
 bitflags! {
     ///  The flags argument to the open() system call is constructed by ORing together zero or more of the following values:
@@ -125,6 +129,8 @@ bitflags! {
         const TRUNC = 1 << 9;
         /// 用于mkdir中，open二次确认是否新建的文件是目录类型
         const DIRECTORY = 1 << 16;
+        /// 不追踪符号链接
+        const NOFOLLOW = 1 << 17;
     }
 }
 impl OpenFlags {
@@ -145,6 +151,9 @@ impl OpenFlags {
     pub fn should_be_directory(&self) -> bool {
         self.contains(Self::DIRECTORY)
     }
+    pub fn is_nofollow(&self) -> bool {
+        self.contains(Self::NOFOLLOW)
+    }
 }
 pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     let start_node = if path.starts_with('/') {
@@ -155,7 +164,7 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags) -> Option<Arc<O
     
     // 使用全局 Dentry 树递归查找路径，并自动填充缓存
     // 1. 查找文件是否已存在
-    let target_dentry = start_node.find_tree(path);
+    let target_dentry = start_node.find_tree(path, !flags.is_nofollow());
     // 2.1 若不存在
     // 2.1.1 若文件不需要创建，返回 None
     if target_dentry.is_none() {
@@ -166,7 +175,7 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags) -> Option<Arc<O
         // 创建新文件的逻辑（简化处理，只创建空文件）
     // 2.1.2 创建新文件
         let parent_path = parent_path(path);
-        let parent_dentry = start_node.find_tree(&parent_path)?;
+        let parent_dentry = start_node.find_tree(&parent_path, true)?;
         let file_name = file_name(path);
         let new_dentry = create_file_in_dentry(&parent_dentry, file_name);
         let (readable, writable) = flags.read_write();
@@ -190,12 +199,12 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags) -> Option<Arc<O
 
 pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
     // 1. 检查目录是否已存在
-    if ROOT_DENTRY.find_tree(path).is_some() {
+    if ROOT_DENTRY.find_tree(path, true).is_some() {
         println!("VFS: make_dir - target '{}' already exists", path);
         return None; 
     }
     let parent_path = parent_path(path);
-    let parent_dentry = ROOT_DENTRY.find_tree(&parent_path)?;
+    let parent_dentry = ROOT_DENTRY.find_tree(&parent_path, true)?;
     let dir_name = file_name(path);
     println!("VFS: make_dir - creating directory '{}' in parent '{}'", dir_name, parent_path);
     let new_dentry = create_dir_in_dentry(&parent_dentry, dir_name , _mode);
