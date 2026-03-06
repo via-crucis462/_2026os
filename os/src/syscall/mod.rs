@@ -117,10 +117,9 @@ use crate::{fs::Stat, task::SignalAction};
 /// handle syscall exception with `syscall_id` and other arguments
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
-    if syscall_id != 64 && syscall_id != 63 {
+    /*if syscall_id != 64 && syscall_id != 63 {
         println!("[Syscall Trace] ID: {}, args: {:#x?}", syscall_id, args);
-        println!("Size of Rust Stat: {}", core::mem::size_of::<crate::fs::Stat>());
-    }
+    } */
     //info!("[kernel] syscall: id={}, args={:?}", syscall_id, args);
     match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
@@ -145,7 +144,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SLEEP => sys_nanosleep(args[0] as *const TimeSpec, args[1] as *mut TimeSpec),
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as u32),
         SYSCALL_SIGRETURN => sys_sigreturn(),
-        SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1]),
+        SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1]as *mut _),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
         SYSCALL_GETUID => sys_getuid(),
@@ -193,6 +192,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RESQ => sys_resq(),
         SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
-        _ => panic!("Unsupported syscall_id: {}", syscall_id),
+        _ =>  panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
