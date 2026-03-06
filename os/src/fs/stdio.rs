@@ -23,12 +23,17 @@ impl File for Stdin {
         let mut c: usize;
         loop {
             c = console_getchar();
+            if c == 13 || c == '\r' as usize {
+                c = 10;
+            }
+            
             if c == 0 || c == 0xffffffffffffffff {
                 suspend_current_and_run_next();
                 continue;
             } else {
                 break;
             }
+
         }
         let ch = c as u8;
         let mut count = 0;
