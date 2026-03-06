@@ -1,27 +1,59 @@
 //! File and filesystem-related syscalls
-use crate::fs::{make_pipe, OpenFlags, Stat, open_file, make_dir, parent_path, file_name};
+use crate::fs::{make_pipe, OpenFlags, Stat,Statx, open_file, make_dir, parent_path, file_name};
 use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
 use crate::task::{current_task, current_user_token};
 use alloc::sync::Arc;
+use alloc::string::ToString;
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return -1;
+    }
 
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    
+    //获取文件名（需确保 File trait 实现了 get_dentry）
+    let _filename = if let Some(dentry) = file.get_dentry() {
+        dentry.name.clone()
+    } else {
+        "unknown".to_string()
+    };
+    
+    // 安全地获取用户缓冲区内容进行打印
+    let user_buffers = translated_byte_buffer(token, buf, len);
+    let mut print_content = alloc::vec![0u8; len];
+    let mut current_offset = 0;
+    for buffer in user_buffers {
+        let l = buffer.len();
+        print_content[current_offset..current_offset + l].copy_from_slice(buffer);
+        current_offset += l;
+    }
+
+    
     if fd >= inner.fd_table.len() {
         return -1;
     }
     if let Some(file) = &inner.fd_table[fd] {
         if !file.writable() {
+            //warn!("VFS: sys_write failed - fd {} ('{}') is not writable", fd, filename);
             return -1;
         }
         let file = file.clone();
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
         trace!("[kernel] sys_write: fd={}, len={}", fd, len);
-        file.write(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
+        //println!("buf: {:p}, len: {}, content: {:?}", buf, len, unsafe { core::slice::from_raw_parts(buf, len) });
+        //let utf8_content = alloc::string::String::from_utf8_lossy(&print_content);
+
+        //println!("VFS: sys_write called on fd {} ('{}') with len {} , content: \"{}\"", fd, _filename, len, utf8_content);
+        let ax = file.write(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize;
+        //println!("VFS: sys_write wrote {} bytes to fd {} ('{}')", ax, fd, _filename);
+        ax
     } else {
+        //warn!("VFS: sys_write failed - fd {} ('{}') is not open", fd, filename);
         -1
     }
 }
@@ -137,8 +169,8 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> i
     }
 }
 
-pub fn sys_pipe(pipe: *mut usize) -> isize {
-	trace!("kernel:pid[{}] sys_pipe", current_task().unwrap().pid.0);
+pub fn sys_pipe(pipe: *mut u32) -> isize {
+	println!("kernel:pid[{}] sys_pipe", current_task().unwrap().pid.0);
     let task = current_task().unwrap();
     let token = current_user_token();
     let mut inner = task.inner_exclusive_access();
@@ -147,8 +179,8 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     inner.fd_table[read_fd] = Some(pipe_read);
     let write_fd = inner.alloc_fd();
     inner.fd_table[write_fd] = Some(pipe_write);
-    *translated_refmut(token, pipe) = read_fd;
-    *translated_refmut(token, unsafe { pipe.add(1) }) = write_fd;
+    *translated_refmut(token, pipe) = read_fd as u32;
+    *translated_refmut(token, unsafe { pipe.add(1) }) = write_fd as u32;
     0
 }
 
@@ -202,15 +234,12 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     }
 }
 
-pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut Stat) -> isize {
+pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut Statx) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
     let path_str = translated_str(token, path);
-    debug!("[kernel] sys_statx: dirfd={}, path={}, mask={:#x}, flags={:#x}", dirfd, path_str, mask, flags);
+    println!("[kernel] sys_statx: dirfd={}, path={}, mask={:#x}, flags={:#x}", dirfd, path_str, mask, flags);
 
-    if path_str.is_empty() {
-        return sys_newfstat(dirfd as usize, st);
-    }
 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
@@ -234,10 +263,8 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
 
     let follow_links = (flags & (1 << 8)) == 0; // AT_SYMLINK_NOFOLLOW (0x100)
     if let Some(target_dentry) = start_dentry.find_tree(&path_str, follow_links) {
-        let mut stat = target_dentry.inode.get_stat();
+        let stat = target_dentry.inode.get_statx();
         
-        // 处理 mask: 将请求的 mask 返回给用户空间，表示这些字段在内核中已成功填充
-        stat.mask = mask; 
         
         *translated_refmut(token, st) = stat;
         0
