@@ -180,19 +180,18 @@ impl VfsInode for Ext4Inode {
         self.delete_dir_entry(name)
     }
 
-    fn getdents(&self, buf: &mut [u8]) -> isize {
+    fn getdents(&self, offset: &mut usize,buf: &mut [u8]) -> isize {
         if !self.is_dir() {
             return -1;
         }
-        let mut offset = 0;
         let mut buf_offset = 0;
         let file_size_bytes = self.size as usize;
         let buf_len = buf.len();
         let mut last_name = String::new();
 
-        while offset < file_size_bytes && buf_offset < buf_len {
+        while *offset < file_size_bytes && buf_offset < buf_len {
             let mut temp_buf = vec![0u8; 4096];
-            let read_len = self.read_at(offset, &mut temp_buf);
+            let read_len = self.read_at(*offset, &mut temp_buf);
             if read_len == 0 { break; }
 
             let mut block_offset = 0;
@@ -228,8 +227,9 @@ impl VfsInode for Ext4Inode {
                 } else {
                     break;
                 }
+                *offset += read_len;
             }
-            offset += read_len;
+            
         }
 
         if !last_name.is_empty() {
