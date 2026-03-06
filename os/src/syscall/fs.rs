@@ -5,6 +5,7 @@ use crate::task::{current_task, current_user_token};
 use alloc::sync::Arc;
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
+   
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
@@ -27,6 +28,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
 }
 
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
+
     trace!("kernel:pid[{}] sys_read", current_task().unwrap().pid.0);
     let token = current_user_token();
     let task = current_task().unwrap();
@@ -51,6 +53,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
 const AT_FDCWD: isize = -100;
 
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isize {
+    println!("[Trace] sys_open(path={:?}, flags={:#x})", path, flags);
     let task = current_task().unwrap();
     let token = current_user_token();
     let path_str = translated_str(token, path);
@@ -266,10 +269,41 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
     -1
 }
 pub fn sys_ioctl(_fd: usize, _request: usize, _argp: usize) -> isize {
-    0
+    -1
 }
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
-    println!("[Stub] sys_fcntl(fd={}, cmd={}, arg={})", fd, cmd, arg);
+
+    if cmd == 0 || cmd == 1030 {
+   
+        let task = current_task().unwrap();
+        let mut inner = task.inner_exclusive_access();
+
+        if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+            return -1; 
+        }
+
+        // 4. 开始找新口袋！题目要求新口袋编号必须 >= arg (比如 10)
+        let mut new_fd = arg;
+        
+        // 我们先看看现有的口袋里，有没有编号 >= 10 且是空的
+        while new_fd < inner.fd_table.len() {
+            if inner.fd_table[new_fd].is_none() {
+                break; // 找到了一个空口袋，跳出循环！
+            }
+            new_fd += 1;
+        }
+
+        if new_fd >= inner.fd_table.len() {
+            while inner.fd_table.len() <= new_fd {
+                inner.fd_table.push(None);
+            }
+        }
+
+        inner.fd_table[new_fd] = Some(Arc::clone(inner.fd_table[fd].as_ref().unwrap()));
+
+        return new_fd as isize;
+    }
+
     -1
 }
 /// YOUR JOB: Implement unlinkat.
