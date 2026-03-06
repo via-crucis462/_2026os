@@ -119,7 +119,7 @@ use crate::{fs::Stat, task::SignalAction};
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     /*if syscall_id != 64 && syscall_id != 63 {
         println!("[Syscall Trace] ID: {}, args: {:#x?}", syscall_id, args);
-    } */
+    }*/
     //info!("[kernel] syscall: id={}, args={:?}", syscall_id, args);
     match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
