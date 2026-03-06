@@ -460,6 +460,8 @@ impl MemorySet {
                 return Err(-1);
             }
         }
+        // 最少分配一页
+        let length = (length + PAGE_SIZE) & !(PAGE_SIZE - 1);
 
         // 检查冲突
         if self.has_conflict(start_va, length) {
@@ -492,9 +494,9 @@ impl MemorySet {
     }
 
     pub fn find_free_area(&self, length: usize) -> Option<usize> {
-        // 从 0x4000_0000 开始往上找，避开程序段和堆，并保留足够的安全距离
+        // 从用户空间的 0x4000_0000 开始往上找
         let mut current_addr = 0x4000_0000;
-        let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1); // 对齐到页
+        
         
         let mut sorted_areas: Vec<_> = self.areas.iter().collect();
         sorted_areas.sort_by_key(|a| a.vpn_range.get_start());
@@ -510,7 +512,7 @@ impl MemorySet {
             }
         }
         
-        if current_addr + length < 0x8000_0000 { // 确保不超过用户空间上限
+        if current_addr + length < 0x8000_0000 {
             Some(current_addr)
         } else {
             None
@@ -524,11 +526,6 @@ impl MemorySet {
         let _brk_start = brk_area.vpn_range.get_start().0 * PAGE_SIZE;
         let brk_end = brk_area.vpn_range.get_end().0 * PAGE_SIZE;
 
-        // 检查是否越界
-        if start < brk_area.vpn_range.get_end().0 * PAGE_SIZE {
-            return Err(-1);
-        }
-
         let end = start + length;
         let start_vpn = VirtAddr::from(start).floor();// 目标起始页号
         let end_vpn = VirtAddr::from(end).ceil();// 目标结束页号
@@ -536,9 +533,8 @@ impl MemorySet {
         // 可能存在的新area，写在外面以避免for循环中self引用问题引发的报错
         let mut new_area: Option<MapArea> = None;
 
-        // 注意只遍历brk之后的area
-        for area in self.areas[brk_idx+1..].iter_mut() {
-            // 暂时未检查是否：取消映射trap_context、trampoline
+        for area in self.areas.iter_mut() {
+            // 暂时未检查是否：取消映射trampoline
 
             // 找到有重合部分的区域
             if area.vpn_range.get_start() < end_vpn && area.vpn_range.get_end() > start_vpn {// 有交集;
