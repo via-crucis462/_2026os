@@ -103,7 +103,9 @@ impl File for OSInode {
     }
 
     fn getdents(&self, buf: &mut [u8]) -> isize{
-        self.inode.getdents(buf)
+        let mut inner = self.inner.lock();
+        let read_bytes = self.inode.getdents(&mut inner.offset, buf);
+        read_bytes
     }
 
     fn get_dentry(&self) -> Option<Arc<super::Dentry>> {
@@ -214,7 +216,8 @@ pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
 pub fn list_apps() {
     println!("/**** APPS ****");
     let mut buf = [0u8; 4096];
-    let len = ROOT_INODE.inode.getdents(&mut buf);
+    let mut file_offset = 0;
+    let len = ROOT_INODE.inode.getdents(&mut file_offset,&mut buf);
     if len > 0 {
         let mut offset = 0;
         while offset < len as usize {
