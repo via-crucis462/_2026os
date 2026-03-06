@@ -78,6 +78,9 @@ pub fn sys_getsid(_pid: usize) -> isize {
 pub fn sys_setsid() -> isize { 
     0 
 }
+pub fn sys_clock_gettime(_clock_id: usize, _tp: usize) -> isize {
+    0
+}
 pub fn sys_getpid() -> isize {
 	trace!("kernel: sys_getpid pid:{}", current_task().unwrap().pid.0);
     current_task().unwrap().pid.0 as isize
@@ -154,6 +157,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let cwd = task.inner_exclusive_access().cwd.clone();
     drop(task);
     let path = translated_str(token, path);
+    println!("[Trace] sys_exec: trying to run '{}'", path);
     debug!("[kernel] sys_exec: path={}, args_ptr={:#x}", path, args as *const () as usize);
     let mut args_vec: Vec<String> = Vec::new();
     loop {

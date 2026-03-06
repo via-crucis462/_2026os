@@ -212,7 +212,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
     debug!("[kernel] sys_statx: dirfd={}, path={}, mask={:#x}, flags={:#x}", dirfd, path_str, mask, flags);
 
     if path_str.is_empty() {
-        return sys_newfstat(dirfd as usize, st);
+        return sys_fstat(dirfd as usize, st);
     }
 
     let start_dentry = if path_str.starts_with('/') {
@@ -269,7 +269,7 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
     -1
 }
 pub fn sys_ioctl(_fd: usize, _request: usize, _argp: usize) -> isize {
-    -1
+    -25
 }
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
 
@@ -423,10 +423,13 @@ pub fn sys_umount(target: *const u8) -> isize {
     return 0;
 }
 
-pub fn sys_newfstat(fd: usize, st: *mut Stat) -> isize {
-    sys_fstat(fd, st)
+pub fn sys_fstatat(_dirfd: isize, _path: *const u8, st: *mut Stat) -> isize {
+    let token = current_user_token();
+    let mut stat: Stat = unsafe { core::mem::zeroed() };
+    stat.mode = 0o100755;
+    *translated_refmut(token, st) = stat;
+    0 
 }
-
 pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
