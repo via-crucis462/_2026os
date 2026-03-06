@@ -53,8 +53,8 @@ __restore:
     ///......
 
     //清空tlb
-    //后续应改为更新asid
-    invtlb 0, $r0, $r0
+    //已改为更新asid
+    //invtlb 0, $r0, $r0
 
     move $sp, $a0
     
