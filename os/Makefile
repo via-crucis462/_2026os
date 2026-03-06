@@ -104,6 +104,7 @@ run-la: build-la run-inner-la
 
 run-inner-la:
 	@qemu-system-loongarch64 \
+		-m 1G\
 		-machine virt \
 		-nographic \
 		-kernel $(LA_KERNEL_ELF) \
