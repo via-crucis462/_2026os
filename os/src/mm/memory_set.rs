@@ -3,6 +3,7 @@ use super::{PageTable, pte::*, PTEFlags};
 #[allow(unused)]
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
+use super::id::*;
 #[allow(unused)]
 use crate::arch::config::*;
 use crate::mm::mmap;
@@ -44,6 +45,7 @@ pub fn kernel_token() -> usize {
 /// 注意维护brk_index
 pub struct MemorySet {
     page_table: PageTable,
+    asid: ASIDHandle,
     areas: Vec<MapArea>,
     brk_index: usize, //新增，用于记录brk所在area（堆区）的索引，请注意维护，后续可能会删除
 }
@@ -53,6 +55,7 @@ impl MemorySet {
     pub fn new_bare() -> Self {
         Self {
             page_table: PageTable::new(),
+            asid: asid_alloc().into(),
             areas: Vec::new(),
             brk_index: 0,// 注意维护！！
         }
@@ -60,6 +63,9 @@ impl MemorySet {
     /// Get the page table token
     pub fn token(&self) -> usize {
         self.page_table.token()
+    }
+    pub fn asid(&self) -> usize {
+        self.asid.0
     }
     /// Assume that no conflicts.
     pub fn insert_framed_area(

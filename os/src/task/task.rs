@@ -50,6 +50,10 @@ impl TaskControlBlock {
         let inner = self.inner_exclusive_access();
         inner.memory_set.token()
     }
+    pub fn get_asid(&self) -> usize {
+        let inner = self.inner_exclusive_access();
+        inner.memory_set.asid()
+    }
 }
 
 pub struct TaskControlBlockInner {
@@ -109,6 +113,9 @@ impl TaskControlBlockInner {
     }
     pub fn get_user_token(&self) -> usize {
         self.memory_set.token()
+    }
+    pub fn get_asid(&self) -> usize {
+        self.memory_set.asid()
     }
     fn get_status(&self) -> TaskStatus {
         self.task_status
