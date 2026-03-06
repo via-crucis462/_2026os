@@ -8,26 +8,25 @@ pub use crate::{
 };
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 
-/*#[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Termios {
-    pub c_iflag: u32,       // 输入模式标志
-    pub c_oflag: u32,       // 输出模式标志
-    pub c_cflag: u32,       // 控制模式标志
-    pub c_lflag: u32,       // 本地模式标志
-    pub c_line: u8,         // 行规程 (line discipline)
-    pub c_cc: [u8; 19],     // 特殊控制字符数组 (musl 通常是 19-32 字节)
+    pub c_iflag: u32,
+    pub c_oflag: u32,
+    pub c_cflag: u32,
+    pub c_lflag: u32,
+    pub c_line: u8,
+    pub c_cc: [u8; 19], // 控制字符数组
 }
 
-// 常见标志位常量 (八进制表示，与 Linux 保持一致)
-const IGNBRK: u32 = 0o000001;
-const ICRNL: u32 = 0o000400;
-const ONLCR: u32 = 0o000004;
-const ISIG: u32 = 0o000001;
-const ICANON: u32 = 0o000002;
-const ECHO: u32 = 0o000010;
-*/
-
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Winsize {
+    pub ws_row: u16,    // 行数
+    pub ws_col: u16,    // 列数
+    pub ws_xpixel: u16, // 像素宽度 (通常不用，填 0)
+    pub ws_ypixel: u16, // 像素高度 (通常不用，填 0)
+}
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeVal {
@@ -109,44 +108,70 @@ pub fn sys_clock_gettime(_clock_id: usize, tp: *mut TimeSpec) -> isize {
     time_spec.tv_nsec = nsec;
     0
 }
-pub fn sys_ioctl(_fd: usize, _request: usize, _argp: usize) -> isize {
-   /* const TCGETS: usize = 0x5401;
+pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
+    const TCGETS: usize = 0x5401;
+    const TIOCGWINSZ: usize = 0x5413;
 
-    // 暂时只处理 stdout (fd=1) 或 stdin (fd=0) 的终端属性查询
-    if request == TCGETS {
-        let token = current_user_token();
-        
-        // 1. 构造一个标准的“假终端”配置
-        let mut termios = Termios {
-            c_iflag: IGNBRK | ICRNL,
-            c_oflag: ONLCR,
-            c_cflag: 0,
-            c_lflag: ISIG | ICANON | ECHO,
-            c_line: 0,
-            c_cc: [0; 19],
-        };
-        // 设置一些默认的控制字符，比如 Ctrl+C (VINTR)
-        termios.c_cc[0] = 3;  // VINTR = 3 (^C)
-        termios.c_cc[1] = 28; // VQUIT = 28 (^\)
-        termios.c_cc[2] = 127; // VERASE = 127 (DEL)
-
-        // 2. 将这块合法的内存数据写入用户态
-        if argp != 0 {
-            let user_termios = translated_refmut(token, argp as *mut Termios);
-            *user_termios = termios;
-            
-            // 打印一行调试信息，确认我们真的填了数据
-             println!("[DEBUG ioctl] TCGETS handled for fd {}, data written to {:#x}", fd, argp);
-            return 0;
-        } else {
-            return -14; // EFAULT
-        }
+    // 只有标准输入(0), 标准输出(1), 标准错误(2) 我们才认为是终端
+    if fd != 1 {
+        return -25; // ENOTTY
     }
 
-    // 对于其他不支持的 ioctl，老老实实返回 -25 (ENOTTY，表示这不是一个终端设备)
-    // 这样 C 库就会知道：“哦，这地方不支持高级 IO 控制”，从而走简单的读写逻辑
-    // println!("[DEBUG ioctl] Unsupported request {:#x} for fd {}, returning -25", request, fd);*/ 
-    -25
+    let token = current_user_token(); // 获取当前进程的页表 token
+
+    match request {
+        TCGETS => {
+            // 1. 构造一个标准的终端配置 (完全模拟真实的 Linux 终端)
+            let mut termios = Termios {
+                c_iflag: 0o012402, // IGNBRK | ICRNL 等标志位的组合值
+                c_oflag: 0o000005, // OPOST | ONLCR
+                c_cflag: 0o002277, // 标准的控制模式
+                c_lflag: 0o0105011, // ISIG | ICANON | ECHO 等
+                c_line: 0,
+                c_cc: [0; 19],
+            };
+            // 设置关键的控制字符
+            termios.c_cc[0] = 3;   // VINTR = ^C (终止进程)
+            termios.c_cc[1] = 28;  // VQUIT = ^\
+            termios.c_cc[2] = 127; // VERASE = DEL (退格)
+            termios.c_cc[4] = 4;   // VEOF = ^D
+
+            // 2. 将数据写回用户态
+            if argp != 0 {
+                // 假设你有 translated_refmut 这个函数能安全地把物理内存借用出来
+                let user_termios = translated_refmut(token, argp as *mut Termios);
+                *user_termios = termios;
+                println!("[DEBUG ioctl] TCGETS handled for fd {}", fd);
+                0 // 成功返回 0
+            } else {
+                -14 // EFAULT: 用户传了个空指针
+            }
+        }
+        TIOCGWINSZ => {
+            // 1. 构造终端窗口大小 (比如经典的 24行 80列)
+            let winsize = Winsize {
+                ws_row: 24,
+                ws_col: 80,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+
+            // 2. 将数据写回用户态
+            if argp != 0 {
+                let user_winsize = translated_refmut(token, argp as *mut Winsize);
+                *user_winsize = winsize;
+                println!("[DEBUG ioctl] TIOCGWINSZ handled, setting 24x80");
+                0 // 成功返回 0
+            } else {
+                -14 // EFAULT
+            }
+        }
+        _ => {
+            // 对于未知的终端请求，安全地返回 -25，C 库能正确处理真正的降级
+            println!("[DEBUG ioctl] Unsupported request {:#x} for fd {}, returning -25", request, fd);
+            -25 // ENOTTY
+        }
+    }
 }
 pub fn sys_getpid() -> isize {
 	trace!("kernel: sys_getpid pid:{}", current_task().unwrap().pid.0);

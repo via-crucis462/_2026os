@@ -180,7 +180,7 @@ impl VfsInode for Ext4Inode {
         self.delete_dir_entry(name)
     }
 
-    fn getdents(&self, offset: &mut usize,buf: &mut [u8]) -> isize {
+    fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
         if !self.is_dir() {
             return -1;
         }
@@ -195,41 +195,64 @@ impl VfsInode for Ext4Inode {
             if read_len == 0 { break; }
 
             let mut block_offset = 0;
+  
             while block_offset < read_len && buf_offset < buf_len {
                 if let Some(ext4_dirent) = Ext4DirEntry::from_bytes(&temp_buf[block_offset..]) {
+                    let disk_rec_len = ext4_dirent.rec_len() as usize;
+                    if disk_rec_len == 0 { break; } // 防止死循环
+
                     if ext4_dirent.inode() != 0 && ext4_dirent.name_len() > 0 {
                         let name = ext4_dirent.name();
                         last_name = String::from(name);
                         
-                        // 构造符合 ABI 的 DirEntry (linux_dirent64)
-                        let abi_entry = crate::fs::DirEntry::new(
-                            String::from(name),
-                            ext4_dirent.inode(),
-                            ext4_dirent.file_type,
-                        );
+                        let name_bytes = name.as_bytes();
+                        let name_len = name_bytes.len();
                         
-                        let rec_len = abi_entry.d_reclen as usize;
-                        if buf_offset + rec_len > buf_len {
+            
+                        let total_len = 19 + name_len + 1;
+                        
+              
+                        let d_reclen = (total_len + 7) & !7; 
+                        
+                        if buf_offset + d_reclen > buf_len {
                             println!("VFS: getdents buffer full, stopping read");
                             break; 
                         }
 
-                        // 将 abi_entry 复制到用户缓冲区
-                        let entry_ptr = &abi_entry as *const _ as *const u8;
-                        let entry_slice = unsafe { core::slice::from_raw_parts(entry_ptr, rec_len) };
-                        buf[buf_offset..buf_offset + rec_len].copy_from_slice(entry_slice);
+        
+                        let d_ino: u64 = ext4_dirent.inode() as u64;
+                        buf[buf_offset..buf_offset+8].copy_from_slice(&d_ino.to_ne_bytes());
+                  
+                        let next_offset: i64 = (*offset + block_offset + disk_rec_len) as i64;
+                        buf[buf_offset+8..buf_offset+16].copy_from_slice(&next_offset.to_ne_bytes());
                         
-                        buf_offset += rec_len;
+    
+                        let reclen_u16 = d_reclen as u16;
+                        buf[buf_offset+16..buf_offset+18].copy_from_slice(&reclen_u16.to_ne_bytes());
+                        
+
+                        let d_type: u8 = ext4_dirent.file_type;
+                        buf[buf_offset+18] = d_type;
+                        
+
+                        buf[buf_offset+19..buf_offset+19+name_len].copy_from_slice(name_bytes);
+                        
+
+                        for i in (buf_offset+19+name_len)..(buf_offset+d_reclen) {
+                            buf[i] = 0;
+                        }
+
+
+
+                        buf_offset += d_reclen; 
                     }
-                    let disk_rec_len = ext4_dirent.rec_len() as usize;
-                    if disk_rec_len == 0 { break; }
-                    block_offset += disk_rec_len;
+                    block_offset += disk_rec_len; 
                 } else {
                     break;
                 }
-                *offset += read_len;
-            }
-            
+            } 
+
+            *offset += read_len; 
         }
 
         if !last_name.is_empty() {
