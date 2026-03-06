@@ -2,6 +2,7 @@
 // 参考https://godones.github.io/rCoreloongArch/app.html
 mod context;
 use crate::syscall::syscall;
+use crate::task::processor::current_user_asid;
 use crate::task::{
     check_signals_error_of_current, current_add_signal, current_trap_cx, current_user_token,
     exit_current_and_run_next, handle_signals, suspend_current_and_run_next, SignalFlags,
@@ -193,6 +194,7 @@ pub fn trap_return() -> ! {
     // 直接用物理地址
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
+    let id = current_user_asid();
 //  crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
     //info!("trap_return: going to user mode, satp = {:#x}", user_satp);
     extern "C" {
@@ -208,6 +210,7 @@ pub fn trap_return() -> ! {
     //println!("[kernel] calling __restore, address: {:#x}", restore);
 
     unsafe {
+        asm!("csrwr {}, 0x18", in(reg) id); // 设置asid为pid
         asm!(
             "dbar 0", // 相当于sfence.vma
             "jr {restore}",

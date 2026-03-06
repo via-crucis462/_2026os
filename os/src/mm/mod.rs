@@ -10,6 +10,7 @@
 mod frame_allocator;
 mod heap_allocator;
 mod memory_set;
+mod id;
 
 pub mod flags;
 /// mmap系统调用相关
