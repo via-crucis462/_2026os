@@ -201,8 +201,6 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
         let file = file.clone();
         drop(inner);
         let stat = file.get_stat();
-        println!("[DEBUG fstat] fd: {}, mode: {:#o}, size: {}, blksize: {}", 
-            fd, stat.mode, stat.size, stat.blksize);
         *translated_refmut(token, st) = stat;
         0
     } else {

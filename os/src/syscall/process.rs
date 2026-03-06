@@ -112,16 +112,16 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     const TCGETS: usize = 0x5401;
     const TIOCGWINSZ: usize = 0x5413;
 
-    // 只有标准输入(0), 标准输出(1), 标准错误(2) 我们才认为是终端
+
     if fd != 1 {
         return -25; // ENOTTY
     }
 
-    let token = current_user_token(); // 获取当前进程的页表 token
+    let token = current_user_token(); 
 
     match request {
         TCGETS => {
-            // 1. 构造一个标准的终端配置 (完全模拟真实的 Linux 终端)
+            
             let mut termios = Termios {
                 c_iflag: 0o012402, // IGNBRK | ICRNL 等标志位的组合值
                 c_oflag: 0o000005, // OPOST | ONLCR
@@ -138,10 +138,8 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
 
             // 2. 将数据写回用户态
             if argp != 0 {
-                // 假设你有 translated_refmut 这个函数能安全地把物理内存借用出来
                 let user_termios = translated_refmut(token, argp as *mut Termios);
                 *user_termios = termios;
-                println!("[DEBUG ioctl] TCGETS handled for fd {}", fd);
                 0 // 成功返回 0
             } else {
                 -14 // EFAULT: 用户传了个空指针
@@ -249,7 +247,6 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let cwd = task.inner_exclusive_access().cwd.clone();
     drop(task);
     let path = translated_str(token, path);
-    println!("[Trace] sys_exec: trying to run '{}'", path);
     debug!("[kernel] sys_exec: path={}, args_ptr={:#x}", path, args as *const () as usize);
     let mut args_vec: Vec<String> = Vec::new();
     loop {

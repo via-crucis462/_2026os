@@ -76,10 +76,6 @@ pub fn trap_handler() -> ! {
             suspend_current_and_run_next();
         }
         _ => {
-            let cx = current_trap_cx(); 
-            let ra = cx.x[1];
-            println!("[FATAL] Instruction Page Fault!");
-            println!("[FATAL] ra  = {:#x}", ra);
             println!("[kernel] Trap! Source: User");
             println!("[kernel] Scause: {:?} (Code: {})", scause.cause(), scause.bits());
             println!("[kernel] Stval:  {:#x} (Bad Address)", stval);
