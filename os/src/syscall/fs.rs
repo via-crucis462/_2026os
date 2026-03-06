@@ -79,8 +79,10 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
         }
     };
 
-    if let Some(inode) = open_file(start_dentry, path_str.as_str(), OpenFlags::from_bits(flags).unwrap()) {
-        if OpenFlags::from_bits(flags).unwrap().should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
+    let open_flags = OpenFlags::from_bits(flags).unwrap_or(OpenFlags::empty());
+
+    if let Some(inode) = open_file(start_dentry, path_str.as_str(), open_flags) {
+        if open_flags.should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
             trace!("VFS: sys_openat failed - '{}' is not a directory", path_str);
             return -1;
         }
@@ -89,6 +91,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
         inner.fd_table[fd] = Some(inode);
         fd as isize
     } else {
+        trace!("VFS: File '{}' not found", path_str);
         -1
     }
 }
@@ -198,6 +201,8 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
         let file = file.clone();
         drop(inner);
         let stat = file.get_stat();
+        println!("[DEBUG fstat] fd: {}, mode: {:#o}, size: {}, blksize: {}", 
+            fd, stat.mode, stat.size, stat.blksize);
         *translated_refmut(token, st) = stat;
         0
     } else {
@@ -262,15 +267,13 @@ pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
 }
 pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
     trace!("kernel:pid[{}] sys_linkat NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    -38
 }
 pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usize) -> isize {
 
-    -1
+    -38
 }
-pub fn sys_ioctl(_fd: usize, _request: usize, _argp: usize) -> isize {
-    -25
-}
+
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
 
     if cmd == 0 || cmd == 1030 {
@@ -282,10 +285,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             return -1; 
         }
 
-        // 4. 开始找新口袋！题目要求新口袋编号必须 >= arg (比如 10)
         let mut new_fd = arg;
         
-        // 我们先看看现有的口袋里，有没有编号 >= 10 且是空的
         while new_fd < inner.fd_table.len() {
             if inner.fd_table[new_fd].is_none() {
                 break; // 找到了一个空口袋，跳出循环！
@@ -423,11 +424,26 @@ pub fn sys_umount(target: *const u8) -> isize {
     return 0;
 }
 
-pub fn sys_fstatat(_dirfd: isize, _path: *const u8, st: *mut Stat) -> isize {
+pub fn sys_fstatat(_dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
     let token = current_user_token();
+    let path = crate::mm::translated_str(token, path_ptr); 
+
     let mut stat: Stat = unsafe { core::mem::zeroed() };
-    stat.mode = 0o100755;
-    *translated_refmut(token, st) = stat;
+    stat.dev = 1;
+    stat.ino = 1;
+    stat.nlink = 1;
+    stat.blksize = 4096;
+    stat.size = 0;
+
+    if path == "." || path == "/" || path.ends_with('/') {
+        stat.mode = 0o040755; // S_IFDIR | rwxr-xr-x (目录类型)
+    } else {
+        stat.mode = 0o100755; // S_IFREG | rwxr-xr-x (普通文件类型)
+    }
+
+    let user_stat = translated_refmut(token, st);
+    *user_stat = stat;
+
     0 
 }
 pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isize {

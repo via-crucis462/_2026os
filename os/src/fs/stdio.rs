@@ -62,6 +62,7 @@ impl File for Stdin {
     fn get_stat(&self) -> super::Stat {
         super::Stat {
             mode: 0o020000,
+            blksize: 4096,
             ..Default::default()
         }
     }
@@ -97,6 +98,7 @@ impl File for Stdout {
     fn get_stat(&self) -> super::Stat {
         super::Stat {
             mode: 0o020000,
+            blksize: 4096,
             ..Default::default()
         }
     }

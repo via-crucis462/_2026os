@@ -8,7 +8,25 @@ pub use crate::{
 };
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 
+/*#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Termios {
+    pub c_iflag: u32,       // 输入模式标志
+    pub c_oflag: u32,       // 输出模式标志
+    pub c_cflag: u32,       // 控制模式标志
+    pub c_lflag: u32,       // 本地模式标志
+    pub c_line: u8,         // 行规程 (line discipline)
+    pub c_cc: [u8; 19],     // 特殊控制字符数组 (musl 通常是 19-32 字节)
+}
 
+// 常见标志位常量 (八进制表示，与 Linux 保持一致)
+const IGNBRK: u32 = 0o000001;
+const ICRNL: u32 = 0o000400;
+const ONLCR: u32 = 0o000004;
+const ISIG: u32 = 0o000001;
+const ICANON: u32 = 0o000002;
+const ECHO: u32 = 0o000010;
+*/
 
 #[repr(C)]
 #[derive(Debug)]
@@ -78,8 +96,57 @@ pub fn sys_getsid(_pid: usize) -> isize {
 pub fn sys_setsid() -> isize { 
     0 
 }
-pub fn sys_clock_gettime(_clock_id: usize, _tp: usize) -> isize {
+pub fn sys_clock_gettime(_clock_id: usize, tp: *mut TimeSpec) -> isize {
+    let total_us = get_time_us();
+    let sec = total_us / 1_000_000;
+    let nsec = (total_us % 1_000_000) * 1_000;
+    if tp as usize == 0 {
+        return -14; 
+    }
+    let token = current_user_token();
+    let time_spec = translated_refmut(token, tp);
+    time_spec.tv_sec = sec;
+    time_spec.tv_nsec = nsec;
     0
+}
+pub fn sys_ioctl(_fd: usize, _request: usize, _argp: usize) -> isize {
+   /* const TCGETS: usize = 0x5401;
+
+    // 暂时只处理 stdout (fd=1) 或 stdin (fd=0) 的终端属性查询
+    if request == TCGETS {
+        let token = current_user_token();
+        
+        // 1. 构造一个标准的“假终端”配置
+        let mut termios = Termios {
+            c_iflag: IGNBRK | ICRNL,
+            c_oflag: ONLCR,
+            c_cflag: 0,
+            c_lflag: ISIG | ICANON | ECHO,
+            c_line: 0,
+            c_cc: [0; 19],
+        };
+        // 设置一些默认的控制字符，比如 Ctrl+C (VINTR)
+        termios.c_cc[0] = 3;  // VINTR = 3 (^C)
+        termios.c_cc[1] = 28; // VQUIT = 28 (^\)
+        termios.c_cc[2] = 127; // VERASE = 127 (DEL)
+
+        // 2. 将这块合法的内存数据写入用户态
+        if argp != 0 {
+            let user_termios = translated_refmut(token, argp as *mut Termios);
+            *user_termios = termios;
+            
+            // 打印一行调试信息，确认我们真的填了数据
+             println!("[DEBUG ioctl] TCGETS handled for fd {}, data written to {:#x}", fd, argp);
+            return 0;
+        } else {
+            return -14; // EFAULT
+        }
+    }
+
+    // 对于其他不支持的 ioctl，老老实实返回 -25 (ENOTTY，表示这不是一个终端设备)
+    // 这样 C 库就会知道：“哦，这地方不支持高级 IO 控制”，从而走简单的读写逻辑
+    // println!("[DEBUG ioctl] Unsupported request {:#x} for fd {}, returning -25", request, fd);*/ 
+    -25
 }
 pub fn sys_getpid() -> isize {
 	trace!("kernel: sys_getpid pid:{}", current_task().unwrap().pid.0);
