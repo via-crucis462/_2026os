@@ -105,6 +105,12 @@ pub struct TaskControlBlockInner {
     pub program_brk: usize,// 注意需要在exec中维护，rcore忽略了这点，运行测例时brk失效，已修复
 
     pub cwd: Arc<Dentry>, // 当前工作目录
+
+    pub uid: u32,  // 真实用户 ID
+    pub gid: u32,  // 真实组 ID
+    pub euid: u32, // 有效用户 ID (Effective)
+    pub egid: u32, // 有效组 ID (Effective)
+    pub clear_child_tid: usize,// 线程清理指针
 }
 
 impl TaskControlBlockInner {
@@ -203,6 +209,11 @@ impl TaskControlBlock {
                     heap_bottom: user_sp,
                     program_brk: user_sp,
                     cwd: ROOT_DENTRY.clone(),
+                    uid: 0,
+                    gid: 0,
+                    euid: 0,
+                    egid: 0,
+                    clear_child_tid: 0,
                 })
             },
         };
@@ -405,6 +416,11 @@ impl TaskControlBlock {
                     heap_bottom: sp.unwrap_or(parent_inner.heap_bottom),
                     program_brk: parent_inner.program_brk,
                     cwd: parent_inner.cwd.clone(),
+                    uid: parent_inner.uid,
+                    gid: parent_inner.gid,
+                    euid: parent_inner.euid,
+                    egid: parent_inner.egid,
+                    clear_child_tid: 0,
                 })
             },
         });
