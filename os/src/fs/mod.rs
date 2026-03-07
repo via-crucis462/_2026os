@@ -75,16 +75,48 @@ pub struct Stat {
     pub ctime_sec: i64,
     /// time of last status change (nanoseconds)
     pub ctime_nsec: i64,
-    /// mask returned by statx
-    pub mask: u32,
     /// padding
     pub __unused: [u32; 1],
+}
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Statx {
+    pub stx_mask: u32,
+    pub stx_blksize: u32,
+    pub stx_attributes: u64,
+    pub stx_nlink: u32,
+    pub stx_uid: u32,
+    pub stx_gid: u32,
+    pub stx_mode: u16,  // 注意：statx 中 mode 是 u16
+    pub __spare0: [u16; 1],
+    pub stx_ino: u64,
+    pub stx_size: u64,
+    pub stx_blocks: u64,
+    pub stx_attributes_mask: u64,
+    pub stx_atime: StatxTimestamp,
+    pub stx_btime: StatxTimestamp,
+    pub stx_ctime: StatxTimestamp,
+    pub stx_mtime: StatxTimestamp,
+    pub stx_rdev_major: u32,
+    pub stx_rdev_minor: u32,
+    pub stx_dev_major: u32,
+    pub stx_dev_minor: u32,
+    pub __spare2: [u64; 14],
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StatxTimestamp {
+    pub tv_sec: i64,
+    pub tv_nsec: u32,
+    pub __reserved: i32,
 }
 pub trait VfsInode: Send + Sync {
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize;
     fn write_at(&self, offset: usize, buf: &[u8]) -> usize;
     fn get_size(&self) -> usize;
     fn get_stat(&self) -> Stat;
+    fn get_statx(&self) -> Statx;
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>>;
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
     fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
