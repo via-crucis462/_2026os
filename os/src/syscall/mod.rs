@@ -32,7 +32,7 @@ const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_PREAD64: usize = 67;
 const SYSCALL_READLINKAT: usize = 78;
-const SYSCALL_NEWFSTAT: usize = 79;
+const SYSCALL_FSTATAT: usize = 79;
 /// fstat syscall
 const SYSCALL_FSTAT: usize = 80;
 /// exit syscall
@@ -44,6 +44,7 @@ const SYSCALL_YIELD: usize = 124;
 /// kill syscall
 const SYSCALL_KILL: usize = 129;
 /// sigaction syscall
+const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_SIGACTION: usize = 134;
 /// sigprocmask syscall
 const SYSCALL_SIGPROCMASK: usize = 135;
@@ -116,6 +117,9 @@ use crate::{fs::Stat, task::SignalAction};
 /// handle syscall exception with `syscall_id` and other arguments
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
+    /*if syscall_id != 64 && syscall_id != 63 {
+        println!("[Syscall Trace] ID: {}, args: {:#x?}", syscall_id, args);
+    }*/
     //info!("[kernel] syscall: id={}, args={:?}", syscall_id, args);
     match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
@@ -140,12 +144,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SLEEP => sys_nanosleep(args[0] as *const TimeSpec, args[1] as *mut TimeSpec),
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as u32),
         SYSCALL_SIGRETURN => sys_sigreturn(),
+        SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1]as *mut _),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
         SYSCALL_GETUID => sys_getuid(),
-        SYSCALL_GETEUID => sys_getuid(), // 偷懒：全部返回 0 (Root)
-        SYSCALL_GETGID => sys_getuid(),  // 偷懒：全部返回 0 (Root)
-        SYSCALL_GETEGID => sys_getuid(), // 偷懒：全部返回 0 (Root)
+        SYSCALL_GETEUID => sys_getuid(), 
+        SYSCALL_GETGID => sys_getuid(),  
+        SYSCALL_GETEGID => sys_getuid(), 
         SYSCALL_SETPGID => sys_setpgid(args[0], args[1]),
         SYSCALL_GETPGID => sys_getpgid(args[0]),
         SYSCALL_GETSID => sys_getsid(args[0]),
@@ -185,8 +190,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_PRCTL => sys_prctl(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_SET_ROBUST_LIST => sys_robust_list(),
         SYSCALL_RESQ => sys_resq(),
-        SYSCALL_NEWFSTAT => sys_newfstat(args[0], args[1] as *mut Stat),
+        SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
-        _ => panic!("Unsupported syscall_id: {}", syscall_id),
+        _ =>  panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

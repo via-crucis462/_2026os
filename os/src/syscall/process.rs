@@ -8,8 +8,25 @@ pub use crate::{
 };
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Termios {
+    pub c_iflag: u32,
+    pub c_oflag: u32,
+    pub c_cflag: u32,
+    pub c_lflag: u32,
+    pub c_line: u8,
+    pub c_cc: [u8; 19], // 控制字符数组
+}
 
-
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Winsize {
+    pub ws_row: u16,    // 行数
+    pub ws_col: u16,    // 列数
+    pub ws_xpixel: u16, // 像素宽度 (通常不用，填 0)
+    pub ws_ypixel: u16, // 像素高度 (通常不用，填 0)
+}
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeVal {
@@ -77,6 +94,82 @@ pub fn sys_getsid(_pid: usize) -> isize {
 // 假装创建新会话成功，返回新的 SID (这里用 0 代替)
 pub fn sys_setsid() -> isize { 
     0 
+}
+pub fn sys_clock_gettime(_clock_id: usize, tp: *mut TimeSpec) -> isize {
+    let total_us = get_time_us();
+    let sec = total_us / 1_000_000;
+    let nsec = (total_us % 1_000_000) * 1_000;
+    if tp as usize == 0 {
+        return -14; 
+    }
+    let token = current_user_token();
+    let time_spec = translated_refmut(token, tp);
+    time_spec.tv_sec = sec;
+    time_spec.tv_nsec = nsec;
+    0
+}
+pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
+    const TCGETS: usize = 0x5401;
+    const TIOCGWINSZ: usize = 0x5413;
+
+
+    if fd != 1 {
+        return -25; // ENOTTY
+    }
+
+    let token = current_user_token(); 
+
+    match request {
+        TCGETS => {
+            
+            let mut termios = Termios {
+                c_iflag: 0o012402, // IGNBRK | ICRNL 等标志位的组合值
+                c_oflag: 0o000005, // OPOST | ONLCR
+                c_cflag: 0o002277, // 标准的控制模式
+                c_lflag: 0o0105011, // ISIG | ICANON | ECHO 等
+                c_line: 0,
+                c_cc: [0; 19],
+            };
+            // 设置关键的控制字符
+            termios.c_cc[0] = 3;   // VINTR = ^C (终止进程)
+            termios.c_cc[1] = 28;  // VQUIT = ^\
+            termios.c_cc[2] = 127; // VERASE = DEL (退格)
+            termios.c_cc[4] = 4;   // VEOF = ^D
+
+            // 2. 将数据写回用户态
+            if argp != 0 {
+                let user_termios = translated_refmut(token, argp as *mut Termios);
+                *user_termios = termios;
+                0 // 成功返回 0
+            } else {
+                -14 // EFAULT: 用户传了个空指针
+            }
+        }
+        TIOCGWINSZ => {
+            // 1. 构造终端窗口大小 (比如经典的 24行 80列)
+            let winsize = Winsize {
+                ws_row: 24,
+                ws_col: 80,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+
+            // 2. 将数据写回用户态
+            if argp != 0 {
+                let user_winsize = translated_refmut(token, argp as *mut Winsize);
+                *user_winsize = winsize;
+                println!("[DEBUG ioctl] TIOCGWINSZ handled, setting 24x80");
+                0 // 成功返回 0
+            } else {
+                -14 // EFAULT
+            }
+        }
+        _ => {
+            // 对于未知的终端请求，安全地返回 -25，C 库能正确处理真正的降级
+            println!("[DEBUG ioctl] Unsupported request {:#x} for fd {}, returning -25", request, fd);
+            -25 // ENOTTY
+        }
+    }
 }
 pub fn sys_getpid() -> isize {
 	trace!("kernel: sys_getpid pid:{}", current_task().unwrap().pid.0);

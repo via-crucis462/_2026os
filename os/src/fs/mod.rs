@@ -121,7 +121,7 @@ pub trait VfsInode: Send + Sync {
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
     fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
     fn delete_dir_entry(&self, name: &str) -> Option<u32>;
-    fn getdents(&self, buf: &mut [u8]) -> isize;
+    fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize;
 }
 
 bitflags! {
