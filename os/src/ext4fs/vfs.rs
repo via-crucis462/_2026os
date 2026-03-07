@@ -261,4 +261,45 @@ impl VfsInode for Ext4Inode {
 
         buf_offset as isize
     }
+    fn get_statx(&self) -> crate::fs::Statx {
+        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        crate::fs::Statx {
+            stx_mask: 0,
+            stx_blksize: 512,
+            stx_attributes: 0,
+            stx_nlink: disk_inode.i_links_count as u32,
+            stx_uid: disk_inode.i_uid as u32,
+            stx_gid: disk_inode.i_gid as u32,
+            stx_mode: disk_inode.i_mode as u16,
+            stx_ino: self.inode_id as u64,
+            stx_size: disk_inode.size() as u64,
+            stx_blocks: disk_inode.i_blocks_lo as u64,
+            stx_attributes_mask: 0,
+            stx_atime: crate::fs::StatxTimestamp {
+                tv_sec: disk_inode.i_atime as i64,
+                tv_nsec: 0, // ext4 Inode 没有 atime 的纳秒部分
+                __reserved: 0,
+            },
+            stx_btime: crate::fs::StatxTimestamp {
+                tv_sec: 0, // ext4 Inode 没有 btime
+                tv_nsec: 0,
+                __reserved: 0,
+            },
+            stx_ctime: crate::fs::StatxTimestamp {
+                tv_sec: disk_inode.i_ctime as i64,
+                tv_nsec: 0, // ext4 Inode 没有 ctime 的纳秒部分
+                __reserved: 0,
+            },
+            stx_mtime: crate::fs::StatxTimestamp {
+                tv_sec: disk_inode.i_mtime as i64,
+                tv_nsec: 0, // ext4 Inode 没有 mtime 的纳秒部分
+                __reserved: 0,
+            },
+            stx_rdev_major: 0,
+            stx_rdev_minor: 0,
+            stx_dev_major: 0,
+            stx_dev_minor: 0,
+            ..Default::default()
+        }
+    }
 }
