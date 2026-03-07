@@ -74,7 +74,9 @@ pub fn sys_gettid() -> isize {
     sys_getpid()
 }
 pub fn sys_getuid() -> isize {
-    0 
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    inner.uid as isize
 }
 // 假装获取成功，返回 PGID 为 0
 pub fn sys_getpgid(_pid: usize) -> isize { 
@@ -86,6 +88,50 @@ pub fn sys_setpgid(_pid: usize, _pgid: usize) -> isize {
     0 
 }
 
+
+pub fn sys_getgid() -> isize {
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    inner.gid as isize
+}
+
+pub fn sys_geteuid() -> isize {
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    inner.euid as isize
+}
+
+
+pub fn sys_getegid() -> isize {
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    inner.egid as isize
+}
+pub fn sys_setuid(uid: u32) -> isize {
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.uid = uid;
+    inner.euid = uid;
+    0 
+}
+
+
+pub fn sys_setgid(gid: u32) -> isize {
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    
+    inner.gid = gid;
+    inner.egid = gid;
+    0 
+}
+
+pub fn sys_set_tid_address(tidptr: usize) -> isize {
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    
+    inner.clear_child_tid = tidptr;
+    task.pid.0 as isize 
+}
 // 假装获取会话 ID 成功，返回 0
 pub fn sys_getsid(_pid: usize) -> isize { 
     0 
