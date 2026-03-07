@@ -6,6 +6,7 @@ use alloc::sync::Arc;
 use alloc::string::ToString;
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
+   
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
@@ -59,6 +60,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
 }
 
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
+
     trace!("kernel:pid[{}] sys_read", current_task().unwrap().pid.0);
     let token = current_user_token();
     let task = current_task().unwrap();
@@ -83,6 +85,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
 const AT_FDCWD: isize = -100;
 
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isize {
+    println!("[Trace] sys_open(path={:?}, flags={:#x})", path, flags);
     let task = current_task().unwrap();
     let token = current_user_token();
     let path_str = translated_str(token, path);
@@ -108,8 +111,10 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
         }
     };
 
-    if let Some(inode) = open_file(start_dentry, path_str.as_str(), OpenFlags::from_bits(flags).unwrap()) {
-        if OpenFlags::from_bits(flags).unwrap().should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
+    let open_flags = OpenFlags::from_bits(flags).unwrap_or(OpenFlags::empty());
+
+    if let Some(inode) = open_file(start_dentry, path_str.as_str(), open_flags) {
+        if open_flags.should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
             trace!("VFS: sys_openat failed - '{}' is not a directory", path_str);
             return -1;
         }
@@ -118,6 +123,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
         inner.fd_table[fd] = Some(inode);
         fd as isize
     } else {
+        trace!("VFS: File '{}' not found", path_str);
         -1
     }
 }
@@ -240,6 +246,9 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
     let path_str = translated_str(token, path);
     println!("[kernel] sys_statx: dirfd={}, path={}, mask={:#x}, flags={:#x}", dirfd, path_str, mask, flags);
 
+    if path_str.is_empty() {
+        return sys_fstat(dirfd as usize, st);
+    }
 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
@@ -286,17 +295,44 @@ pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
 }
 pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
     trace!("kernel:pid[{}] sys_linkat NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    -38
 }
 pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usize) -> isize {
 
-    -1
+    -38
 }
-pub fn sys_ioctl(_fd: usize, _request: usize, _argp: usize) -> isize {
-    0
-}
+
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
-    println!("[Stub] sys_fcntl(fd={}, cmd={}, arg={})", fd, cmd, arg);
+
+    if cmd == 0 || cmd == 1030 {
+   
+        let task = current_task().unwrap();
+        let mut inner = task.inner_exclusive_access();
+
+        if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+            return -1; 
+        }
+
+        let mut new_fd = arg;
+        
+        while new_fd < inner.fd_table.len() {
+            if inner.fd_table[new_fd].is_none() {
+                break; // 找到了一个空口袋，跳出循环！
+            }
+            new_fd += 1;
+        }
+
+        if new_fd >= inner.fd_table.len() {
+            while inner.fd_table.len() <= new_fd {
+                inner.fd_table.push(None);
+            }
+        }
+
+        inner.fd_table[new_fd] = Some(Arc::clone(inner.fd_table[fd].as_ref().unwrap()));
+
+        return new_fd as isize;
+    }
+
     -1
 }
 /// YOUR JOB: Implement unlinkat.
@@ -416,10 +452,28 @@ pub fn sys_umount(target: *const u8) -> isize {
     return 0;
 }
 
-pub fn sys_newfstat(fd: usize, st: *mut Stat) -> isize {
-    sys_fstat(fd, st)
-}
+pub fn sys_fstatat(_dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
+    let token = current_user_token();
+    let path = crate::mm::translated_str(token, path_ptr); 
 
+    let mut stat: Stat = unsafe { core::mem::zeroed() };
+    stat.dev = 1;
+    stat.ino = 1;
+    stat.nlink = 1;
+    stat.blksize = 4096;
+    stat.size = 0;
+
+    if path == "." || path == "/" || path.ends_with('/') {
+        stat.mode = 0o040755; // S_IFDIR | rwxr-xr-x (目录类型)
+    } else {
+        stat.mode = 0o100755; // S_IFREG | rwxr-xr-x (普通文件类型)
+    }
+
+    let user_stat = translated_refmut(token, st);
+    *user_stat = stat;
+
+    0 
+}
 pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
