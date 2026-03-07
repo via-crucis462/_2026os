@@ -245,9 +245,25 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
     let token = current_user_token();
     let path_str = translated_str(token, path);
     println!("[kernel] sys_statx: dirfd={}, path={}, mask={:#x}, flags={:#x}", dirfd, path_str, mask, flags);
-
+    const AT_EMPTY_PATH: u32 = 0x1000;
     if path_str.is_empty() {
-        return sys_fstat(dirfd as usize, st);
+        if (flags & AT_EMPTY_PATH) == 0 {
+            return -2; 
+        }
+
+        let inner = task.inner_exclusive_access();
+        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
+            return -9; 
+        }
+
+        if let Some(file) = &inner.fd_table[dirfd as usize] {
+            if let Some(dentry) = file.get_dentry() {
+                let statx_data = dentry.inode.get_statx();
+                *translated_refmut(token, st) = statx_data;
+                return 0;
+            }
+        }
+        return -9; 
     }
 
     let start_dentry = if path_str.starts_with('/') {
