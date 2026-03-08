@@ -63,13 +63,15 @@ clean:
 run: build run-inner
 
 run-inner:
+	@rm -f kernel_output.log
 	@qemu-system-riscv64 \
 		-machine virt \
 		-nographic \
 		-bios $(BOOTLOADER) \
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 		-drive file=$(FS_IMG),if=none,format=raw,id=x0 \
-        -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+        -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		| tee kernel_output.log
 
 gdbserver: build
 	@qemu-system-riscv64 -M 128m -machine virt -nographic -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
@@ -103,10 +105,12 @@ build-la: env-la kernel-la
 run-la: build-la run-inner-la
 
 run-inner-la:
+	@rm -f kernel_output.log
 	@qemu-system-loongarch64 \
 		-m 1G\
 		-machine virt \
 		-nographic \
 		-kernel $(LA_KERNEL_ELF) \
 		-drive file=$(LA_FS_IMG),if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0
+		-device virtio-blk-pci,drive=x0 \
+		| tee kernel_output.log
