@@ -37,6 +37,7 @@ const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 /// exit syscall
 const SYSCALL_EXIT: usize = 93;
+const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;// RISCV
 const SYSCALL_SLEEP:usize =101;
@@ -84,6 +85,7 @@ const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
 /// waitpid syscall
 const SYSCALL_WAIT4: usize = 260;
+const SYSCALL_WAITPID: usize = 261;
 /// statx syscall
 const SYSCALL_STATX: usize = 291;
 /// spawn syscall
@@ -137,6 +139,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut Stat),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
+        SYSCALL_EXIT_GROUP => sys_exit(args[0] as i32),
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_KILL => sys_kill(args[0], args[1] as i32),
         SYSCALL_SIGACTION => sys_sigaction(
@@ -164,7 +167,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETTID => sys_gettid(),
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2]),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize),
-        SYSCALL_WAIT4 => sys_wait4(args[0] as isize, args[1] as *mut i32, args[2]),
+        SYSCALL_WAIT4 | SYSCALL_WAITPID => sys_wait4(args[0] as isize, args[1] as *mut i32, args[2]),//注意：为了跑通脚本，暂时将waitpid和wait4合并了
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_MMAP => sys_mmap(
             args[0], args[1], args[2] as i32, 
