@@ -19,8 +19,8 @@ pushall.sh
 ci-user/
 user/
 os/vendor/
-fs_img/la64/*
-fs_img/riscv64/*
+fs_img/la64*
+fs_img/riscv64*
 fs_img/*.img
 testsuits-for-oskernel
 toolchains/
