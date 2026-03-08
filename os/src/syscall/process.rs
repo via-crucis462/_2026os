@@ -313,13 +313,13 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
 
         if app_inode.get_dentry().name.ends_with(".sh") {
             let mut new_args:Vec<String> = Vec::new();
-            new_args.push("bin/busybox".to_string());
+            new_args.push("busybox".to_string());
             new_args.push("sh".to_string());
             for arg in args_vec.iter(){
                 new_args.push(arg.clone());
             }
             args_vec = new_args;
-            if let Some(busybox_inode) = open_file(cwd.clone(), "bin/busybox", OpenFlags::RDONLY) {
+            if let Some(busybox_inode) = open_file(ROOT_DENTRY.clone(), "busybox", OpenFlags::RDONLY) {
                 app_inode = busybox_inode;
             } else {
                 warn!("[kernel] sys_exec: open busybox failed");
