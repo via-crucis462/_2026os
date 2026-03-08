@@ -93,7 +93,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
-    } else if dirfd == AT_FDCWD {
+    } else if true {
         task.inner_exclusive_access().cwd.clone()
     } else {
         let inner = task.inner_exclusive_access();
