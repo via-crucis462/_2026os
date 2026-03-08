@@ -1,6 +1,7 @@
 #[allow(unused)]
 use super::File;
 use crate::drivers::BLOCK_DEVICE;
+use crate::task::current_task;
 use alloc::sync::Arc;
 use bitflags::*;
 use lazy_static::*;
@@ -200,18 +201,25 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags) -> Option<Arc<O
 }
 
 pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
-    // 1. 检查目录是否已存在
-    if ROOT_DENTRY.find_tree(path, true).is_some() {
+    // 获取目标路径的起点
+    let start = if path.starts_with('/') {
+        ROOT_DENTRY.clone()
+    } else {
+        current_task().unwrap().inner_exclusive_access().cwd.clone()
+    };
+    // 从起点开始检查目标路径是否已存在
+    if start.find_tree(path, true).is_some() {
         println!("VFS: make_dir - target '{}' already exists", path);
         return None; 
     }
     let parent_path = parent_path(path);
-    let parent_dentry = ROOT_DENTRY.find_tree(&parent_path, true)?;
+    let parent_dentry = start.find_tree(&parent_path, true)?;
     let dir_name = file_name(path);
     println!("VFS: make_dir - creating directory '{}' in parent '{}'", dir_name, parent_path);
     let new_dentry = create_dir_in_dentry(&parent_dentry, dir_name , _mode);
     Some(new_dentry.inode.get_stat().ino as u32)
 }
+
 /// List all apps in the root directory
 pub fn list_apps() {
     println!("/**** APPS ****");

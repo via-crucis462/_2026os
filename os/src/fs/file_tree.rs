@@ -65,6 +65,7 @@ impl Dentry {
         new_child
     }
     /// 递归查找完整路径，例如 "bin/sh" 或 "/bin/sh"
+    /// 将self作为起点，不考虑路径是否以'/'开头
     pub fn find_tree(self: &Arc<Self>, path: &str, follow_links: bool) -> Option<Arc<Dentry>> {
         if path == "." || path == "" {
             return Some(self.clone());
@@ -193,9 +194,9 @@ pub fn parent_path(path: &str) -> String {
     if let Some(pos) = path.rfind('/') {
         if pos == 0 {
             String::from("/")
-        } else {
+        }else{
             String::from(&path[..pos])
-        }
+        }   
     } else {
         String::from(".")
     }
@@ -203,6 +204,9 @@ pub fn parent_path(path: &str) -> String {
 
 pub fn file_name(path: &str) -> String {
     let path = path.trim_end_matches('/');
+    if path.is_empty() {
+        return String::from("/");
+    }
     if let Some(pos) = path.rfind('/') {
         String::from(&path[pos + 1..])
     } else {
