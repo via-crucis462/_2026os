@@ -396,6 +396,10 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
 
     -1
 }
+pub fn sys_utimensat(_dirfd: i32, _path_ptr: usize, _times_ptr: usize, _flags: usize) -> isize {
+
+    0
+}
 /// YOUR JOB: Implement unlinkat.
 pub fn sys_unlinkat(path: *const u8) -> isize {
     let token = current_user_token();

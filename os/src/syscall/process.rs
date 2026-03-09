@@ -265,7 +265,6 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             if argp != 0 {
                 let user_winsize = translated_refmut(token, argp as *mut Winsize);
                 *user_winsize = winsize;
-                println!("[DEBUG ioctl] TIOCGWINSZ handled, setting 24x80");
                 0 // 成功返回 0
             } else {
                 -14 // EFAULT
@@ -348,6 +347,59 @@ pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
     do_clone(func, stack, flags)
 }
 
+pub fn sys_syslog(_type_: usize, _buf: usize, _len: usize) -> isize {
+    0
+}
+#[repr(C)]
+#[derive(Debug)]
+pub struct Sysinfo {
+    pub uptime: isize,      // 启动到现在经过的秒数
+    pub loads: [usize; 3],  // 1, 5, 15 分钟的平均负载
+    pub totalram: usize,    // 总的可用内存大小
+    pub freeram: usize,     // 还剩多少可用内存
+    pub sharedram: usize,   // 共享内存大小
+    pub bufferram: usize,   // 缓冲区大小
+    pub totalswap: usize,   // 交换空间总大小
+    pub freeswap: usize,    // 交换空间剩余大小
+    pub procs: u16,         // 当前进程数
+    pub pad: u16,           // 结构体对齐填充
+    pub totalhigh: usize,   // 高端内存大小
+    pub freehigh: usize,    // 高端内存剩余大小
+    pub mem_unit: u32,      // 内存单位（比如 1 表示以 byte 为单位计算）
+    pub _pad: u32,          // 补齐到 112 字节
+}
+
+pub fn sys_sysinfo(sysinfo_ptr: usize) -> isize {
+    if sysinfo_ptr == 0 {
+        return -1;
+    }
+
+    let task = current_task().unwrap();
+    let token = task.inner_exclusive_access().memory_set.token();
+    
+    // 把用户态的指针“捞”进内核，变成我们可以直接修改的引用
+    // (这招你在 sys_ppoll 里已经用得很熟练了！)
+    let sysinfo = translated_refmut(token, sysinfo_ptr as *mut Sysinfo);
+
+    // 🌟 强行塞入硬核的假数据糊弄 Busybox！
+    sysinfo.uptime = 1000;              // 假装我们已经开机了 1000 秒
+    sysinfo.loads = [0, 0, 0];          // 系统空闲，毫无压力
+    sysinfo.totalram = 128 * 1024 * 1024; // 告诉它我们有 128 MB 的豪华大内存
+    sysinfo.freeram = 64 * 1024 * 1024;   // 告诉它还剩一半 (64 MB) 可以尽情用
+    sysinfo.sharedram = 0;
+    sysinfo.bufferram = 0;
+    sysinfo.totalswap = 0;              // 没有交换分区
+    sysinfo.freeswap = 0;
+    sysinfo.procs = 2;                  // 假装有 2 个进程在跑
+    sysinfo.pad = 0;
+    sysinfo.totalhigh = 0;
+    sysinfo.freehigh = 0;
+    sysinfo.mem_unit = 1;               // 上面填的数字全都是以 1 byte 为单位的
+    sysinfo._pad = 0;
+
+    // 返回 0 表示获取成功！
+    0
+}
 pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
