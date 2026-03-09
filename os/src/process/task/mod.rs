@@ -12,7 +12,7 @@
 mod action;
 mod context;
 mod manager;
-pub mod id;
+
 /// 任务处理器，改为pub供外部调用
 pub mod processor;
 mod signal;
@@ -24,6 +24,7 @@ pub mod task;
 
 use crate::fs::ROOT_DENTRY;
 use crate::fs::{open_file, OpenFlags};
+pub use crate::process::id::*;
 use alloc::sync::Arc;
 pub use context::TaskContext;
 use lazy_static::*;
@@ -34,11 +35,13 @@ pub use task::{TaskControlBlock, TaskStatus};
 
 pub use action::{SignalAction, SignalActions};
 pub use manager::{add_task, pid2task};
-pub use id::{kstack_alloc, pid_alloc, KernelStack, IdHandle};
+
 pub use processor::{
     current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
 };
 pub use signal::{SignalFlags, MAX_SIG};
+
+
 
 /// Make current task suspended and switch to the next task
 pub fn suspend_current_and_run_next() {

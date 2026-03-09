@@ -45,6 +45,8 @@ impl RecycleAllocator {
 lazy_static! {
     static ref PID_ALLOCATOR: MPSafeCell<RecycleAllocator> =
         MPSafeCell::new(RecycleAllocator::new());
+    static ref TID_ALLOCATOR: MPSafeCell<RecycleAllocator> =
+        MPSafeCell::new(RecycleAllocator::new());
     static ref KSTACK_ALLOCATOR: MPSafeCell<RecycleAllocator> =
         MPSafeCell::new(RecycleAllocator::new());    
 }
@@ -62,6 +64,10 @@ impl Drop for IdHandle {
 /// Allocate a new PID
 pub fn pid_alloc() -> IdHandle {
     IdHandle(PID_ALLOCATOR.exclusive_access().alloc())
+}
+
+pub fn tid_alloc() -> IdHandle {
+    IdHandle(TID_ALLOCATOR.exclusive_access().alloc())
 }
 
 /// Return (bottom, top) of a kernel stack in kernel space.
