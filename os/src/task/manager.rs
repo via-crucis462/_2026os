@@ -4,7 +4,7 @@
 //! Other CPU process monitoring functions are in Processor.
 
 use super::TaskControlBlock;
-use crate::sync::UPSafeCell;
+use crate::sync::MPSafeCell;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use lazy_static::*;
@@ -33,11 +33,11 @@ impl TaskManager {
 
 lazy_static! {
     /// TASK_MANAGER instance through lazy_static!
-    pub static ref TASK_MANAGER: UPSafeCell<TaskManager> =
-        unsafe { UPSafeCell::new(TaskManager::new()) };
+    pub static ref TASK_MANAGER: MPSafeCell<TaskManager> =
+        MPSafeCell::new(TaskManager::new());
     /// PID2PCB instance (map of pid to pcb)
-    pub static ref PID2TCB: UPSafeCell<BTreeMap<usize, Arc<TaskControlBlock>>> =
-        unsafe { UPSafeCell::new(BTreeMap::new()) };
+    pub static ref PID2TCB: MPSafeCell<BTreeMap<usize, Arc<TaskControlBlock>>> =
+        MPSafeCell::new(BTreeMap::new());
 }
 
 /// Add process to ready queue

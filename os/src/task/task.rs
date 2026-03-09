@@ -5,7 +5,7 @@ use crate::{
     arch::trap::{TrapContext, trap_handler},
     fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout},
     mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, translated_refmut},
-    sync::UPSafeCell,
+    sync::MPSafeCell,
 };
 use alloc::{
     string::String,
@@ -15,7 +15,6 @@ use alloc::{
 };
 #[allow(unused)]
 use crate::arch::config::*;
-use core::cell::RefMut;
 
 
 const AT_PHDR: usize = 3;
@@ -37,12 +36,12 @@ pub struct TaskControlBlock {
     pub kernel_stack: KernelStack,
 
     /// Mutable
-    inner: UPSafeCell<TaskControlBlockInner>,
+    inner: MPSafeCell<TaskControlBlockInner>,
 }
 
 impl TaskControlBlock {
     /// Get the mutable reference of the inner TCB
-    pub fn inner_exclusive_access(&self) -> RefMut<'_, TaskControlBlockInner> {
+    pub fn inner_exclusive_access(&self) -> spin::MutexGuard<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }
     /// Get the address of app's page table
@@ -180,42 +179,40 @@ impl TaskControlBlock {
             pid: pid_handle,
             //默认用pid,
             kernel_stack,
-            inner: unsafe {
-                UPSafeCell::new(TaskControlBlockInner {
-                    pname: String::from("{pidhandle.0}"),
-                    trap_cx_addr,
-                    base_size: user_sp,
-                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                    task_status: TaskStatus::Ready,
-                    memory_set,
-                    parent: None,
-                    children: Vec::new(),
-                    exit_code: 0,
-                    fd_table: vec![
-                        // 0 -> stdin
-                        Some(Arc::new(Stdin)),
-                        // 1 -> stdout
-                        Some(Arc::new(Stdout)),
-                        // 2 -> stderr
-                        Some(Arc::new(Stdout)),
-                    ],
-                    signals: SignalFlags::empty(),
-                    signal_mask: SignalFlags::empty(),
-                    handling_sig: -1,
-                    signal_actions: SignalActions::default(),
-                    killed: false,
-                    frozen: false,
-                    trap_ctx_backup: None,
-                    heap_bottom: user_sp,
-                    program_brk: user_sp,
-                    cwd: ROOT_DENTRY.clone(),
-                    uid: 0,
-                    gid: 0,
-                    euid: 0,
-                    egid: 0,
-                    clear_child_tid: 0,
-                })
-            },
+            inner:MPSafeCell::new(TaskControlBlockInner {
+                pname: String::from("{pidhandle.0}"),
+                trap_cx_addr,
+                base_size: user_sp,
+                task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                task_status: TaskStatus::Ready,
+                memory_set,
+                parent: None,
+                children: Vec::new(),
+                exit_code: 0,
+                fd_table: vec![
+                    // 0 -> stdin
+                    Some(Arc::new(Stdin)),
+                    // 1 -> stdout
+                    Some(Arc::new(Stdout)),
+                    // 2 -> stderr
+                    Some(Arc::new(Stdout)),
+                ],
+                signals: SignalFlags::empty(),
+                signal_mask: SignalFlags::empty(),
+                handling_sig: -1,
+                signal_actions: SignalActions::default(),
+                killed: false,
+                frozen: false,
+                trap_ctx_backup: None,
+                heap_bottom: user_sp,
+                program_brk: user_sp,
+                cwd: ROOT_DENTRY.clone(),
+                uid: 0,
+                gid: 0,
+                euid: 0,
+                egid: 0,
+                clear_child_tid: 0,
+            }),
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
@@ -393,36 +390,34 @@ impl TaskControlBlock {
             pid: pid_handle,
             // 父进程名加子进程pid
             kernel_stack,
-            inner: unsafe {
-                UPSafeCell::new(TaskControlBlockInner {
-                    pname: String::from("{parent_inner.pname}-{pid_handle.0}"),
-                    trap_cx_addr,
-                    base_size: parent_inner.base_size,
-                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                    task_status: TaskStatus::Ready,
-                    memory_set,
-                    parent: Some(Arc::downgrade(self)),
-                    children: Vec::new(),
-                    exit_code: 0,
-                    fd_table: new_fd_table,
-                    signals: SignalFlags::empty(),
-                    // inherit the signal_mask and signal_action
-                    signal_mask: parent_inner.signal_mask,
-                    handling_sig: -1,
-                    signal_actions: parent_inner.signal_actions.clone(),
-                    killed: false,
-                    frozen: false,
-                    trap_ctx_backup: None,
-                    heap_bottom: sp.unwrap_or(parent_inner.heap_bottom),
-                    program_brk: parent_inner.program_brk,
-                    cwd: parent_inner.cwd.clone(),
-                    uid: parent_inner.uid,
-                    gid: parent_inner.gid,
-                    euid: parent_inner.euid,
-                    egid: parent_inner.egid,
-                    clear_child_tid: 0,
-                })
-            },
+            inner: MPSafeCell::new(TaskControlBlockInner {
+                pname: String::from("{parent_inner.pname}-{pid_handle.0}"),
+                trap_cx_addr,
+                base_size: parent_inner.base_size,
+                task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                task_status: TaskStatus::Ready,
+                memory_set,
+                parent: Some(Arc::downgrade(self)),
+                children: Vec::new(),
+                exit_code: 0,
+                fd_table: new_fd_table,
+                signals: SignalFlags::empty(),
+                // inherit the signal_mask and signal_action
+                signal_mask: parent_inner.signal_mask,
+                handling_sig: -1,
+                signal_actions: parent_inner.signal_actions.clone(),
+                killed: false,
+                frozen: false,
+                trap_ctx_backup: None,
+                heap_bottom: sp.unwrap_or(parent_inner.heap_bottom),
+                program_brk: parent_inner.program_brk,
+                cwd: parent_inner.cwd.clone(),
+                uid: parent_inner.uid,
+                gid: parent_inner.gid,
+                euid: parent_inner.euid,
+                egid: parent_inner.egid,
+                clear_child_tid: 0,
+            }),
         });
         // add child
         parent_inner.children.push(task_control_block.clone());

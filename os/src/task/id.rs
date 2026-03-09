@@ -5,7 +5,7 @@
 
 use crate::arch::config::*;
 use crate::mm::{MapPermission, VirtAddr, KERNEL_SPACE};
-use crate::sync::UPSafeCell;
+use crate::sync::MPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
 #[allow(unused)]
@@ -43,10 +43,10 @@ impl RecycleAllocator {
 }
 
 lazy_static! {
-    static ref PID_ALLOCATOR: UPSafeCell<RecycleAllocator> =
-        unsafe { UPSafeCell::new(RecycleAllocator::new()) };
-    static ref KSTACK_ALLOCATOR: UPSafeCell<RecycleAllocator> =
-        unsafe { UPSafeCell::new(RecycleAllocator::new()) };    
+    static ref PID_ALLOCATOR: MPSafeCell<RecycleAllocator> =
+        MPSafeCell::new(RecycleAllocator::new());
+    static ref KSTACK_ALLOCATOR: MPSafeCell<RecycleAllocator> =
+        MPSafeCell::new(RecycleAllocator::new());    
 }
 
 /// Abstract structure of PID

@@ -3,7 +3,7 @@
 #![allow(unused)]
 use lazy_static::lazy_static;
 
-use crate::sync::UPSafeCell;
+use crate::sync::MPSafeCell;
 use super::config::*;
 use core::{arch::asm, panic};
 // 使用uart模拟sbi
@@ -15,9 +15,9 @@ struct UartSbi {
 const UART_BASE: usize = UNCHACHED_KERNEL_BASE | 0x1fe001e0;
 
 lazy_static! {
-    static ref UART_SBI: UPSafeCell<UartSbi> = 
+    static ref UART_SBI: MPSafeCell<UartSbi> = 
     unsafe { 
-        UPSafeCell::new(UartSbi { base_addr: UART_BASE })
+        MPSafeCell::new(UartSbi { base_addr: UART_BASE })
     };
 }
 

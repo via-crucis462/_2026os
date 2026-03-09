@@ -4,13 +4,13 @@
 
 use crate::task::id::*;
 use lazy_static::*;
-use crate::sync::UPSafeCell;
+use crate::sync::MPSafeCell;
 #[allow(unused)]
 use core::arch::asm;
 
 lazy_static! {
-    pub static ref ASID_ALLOCATOR: UPSafeCell<RecycleAllocator> =
-        unsafe { UPSafeCell::new(RecycleAllocator::new()) };
+    pub static ref ASID_ALLOCATOR: MPSafeCell<RecycleAllocator> =
+        MPSafeCell::new(RecycleAllocator::new());
 }
 
 pub struct ASIDHandle(pub usize);
