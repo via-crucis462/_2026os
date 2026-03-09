@@ -98,11 +98,15 @@ pub fn trap_handler() -> ! {
     trap_return();
 }
 
+pub fn current_trap_cx_user_va() -> usize {
+    TRAP_CONTEXT_BASE - current_tid()
+}
+
 #[no_mangle]
 /// return to user space
 pub fn trap_return() -> ! {
     set_user_trap_entry();
-    let trap_cx_ptr = TRAP_CONTEXT_BASE;
+    let trap_cx_ptr = current_trap_cx_user_va();
     let user_satp = current_user_token();
     // println!("[kernel] trap_return: to user mode");
     extern "C" {
