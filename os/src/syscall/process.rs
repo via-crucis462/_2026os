@@ -277,6 +277,45 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
         }
     }
 }
+pub fn sys_renameat2(
+    _olddirfd: i32, oldpath_ptr: usize,
+    _newdirfd: i32, newpath_ptr: usize, _flags: usize
+) -> isize {
+    let task = current_task().unwrap();
+    let token = task.inner_exclusive_access().memory_set.token();
+
+    let old_path = translated_str(token, oldpath_ptr as *const u8);
+    let new_path = translated_str(token, newpath_ptr as *const u8);
+    
+    // 假设你有解析父目录和文件名的辅助函数
+    let old_parent_path = parent_path(&old_path);
+    let old_name = file_name(&old_path);
+    let new_parent_path = parent_path(&new_path);
+    let new_name = file_name(&new_path);
+
+    let cwd = task.inner_exclusive_access().cwd.clone();
+
+    // 找到新老父目录的内存 Dentry
+    if let (Some(old_parent), Some(new_parent)) = (
+        cwd.find_tree(&old_parent_path, true),
+        cwd.find_tree(&new_parent_path, true)
+    ) {
+       
+        let moved_dentry_opt = {
+            let mut old_children = old_parent.children.lock(); // 加锁
+            old_children.remove(&old_name)
+        }; 
+
+        if let Some(moved_dentry) = moved_dentry_opt {
+           
+            let mut new_children = new_parent.children.lock();
+            new_children.insert(new_name.to_string(), moved_dentry);
+            return 0;
+        }
+    }
+    
+    -1
+}
 pub fn sys_getpid() -> isize {
 	trace!("kernel: sys_getpid pid:{}", current_task().unwrap().pid.0);
     current_task().unwrap().pid.0 as isize
