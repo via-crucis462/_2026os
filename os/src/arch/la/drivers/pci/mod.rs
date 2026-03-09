@@ -30,7 +30,7 @@ use virtio_drivers_la::transport::pci::bus::{DeviceFunction, PciRoot};
 
 lazy_static!(
     // 维护当前已分配的MMIO地址
-    pub static ref CURRENT_MMIO_END: MPSafeCell<usize> = unsafe { MPSafeCell::new(PCI_MMIO_BASE) };
+    pub static ref CURRENT_MMIO_END: MPSafeCell<usize> = MPSafeCell::new(PCI_MMIO_BASE);
 );
 
 // 只分配，暂时不考虑回收问题
