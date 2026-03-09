@@ -2,6 +2,7 @@
 use crate::fs::{make_pipe, OpenFlags, Stat,Statx, open_file, make_dir, parent_path, file_name};
 use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
 use crate::task::{current_task, current_user_token};
+use alloc::vec;
 use alloc::sync::Arc;
 use alloc::string::ToString;
 
@@ -392,7 +393,70 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
         -1
     }
 }
+pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usize) -> isize {
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    
+    // 1. 检查越界并拿到文件对象 (这俩都是 Arc<dyn File>)
+    if out_fd >= inner.fd_table.len() || in_fd >= inner.fd_table.len() {
+        return -1;
+    }
+    let out_file = match &inner.fd_table[out_fd] {
+        Some(file) => file.clone(),
+        None => return -1,
+    };
+    let in_file = match &inner.fd_table[in_fd] {
+        Some(file) => file.clone(),
+        None => return -1,
+    };
+    
+    drop(inner); // 必须解锁！
 
+    // 2. 准备内核中转站
+    let mut buffer = [0u8; 4096];
+    let mut total_transferred = 0;
+
+    while total_transferred < count {
+        let remain = count - total_transferred;
+        let read_len = remain.min(buffer.len());
+
+        // 🌟 核心魔法：捏造一个假的 UserBuffer，骗过通用的 read 函数
+        let read_slice = unsafe {
+            core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), read_len)
+        };
+        let user_buf = UserBuffer { buffers: vec![read_slice] };
+
+        // 直接调用多态的 read！无论是啥文件都能读！
+        let read_bytes = in_file.read(user_buf);
+        if read_bytes == 0 {
+            break; // 读到底了
+        }
+
+        let mut written_so_far = 0;
+        while written_so_far < read_bytes {
+            let write_len = read_bytes - written_so_far;
+            
+            // 🌟 再捏造一个 UserBuffer，骗过通用的 write 函数
+            let write_slice = unsafe {
+                core::slice::from_raw_parts_mut(
+                    buffer.as_mut_ptr().add(written_so_far), 
+                    write_len
+                )
+            };
+            let w_user_buf = UserBuffer { buffers: vec![write_slice] };
+
+            let write_bytes = out_file.write(w_user_buf);
+            if write_bytes == 0 {
+                if total_transferred == 0 { return -1; } else { break; }
+            }
+            written_so_far += write_bytes;
+        }
+
+        total_transferred += written_so_far;
+    }
+
+    total_transferred as isize
+}
 pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
