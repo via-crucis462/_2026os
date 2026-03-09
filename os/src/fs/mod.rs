@@ -32,6 +32,7 @@ pub trait File: Send + Sync {
     fn getdents(&self, _buf: &mut [u8]) -> isize;
     /// 获取文件的 Dentry
     fn get_dentry(&self) -> Option<Arc<Dentry>> { None }
+    
 }
 
 /// The stat of a inode

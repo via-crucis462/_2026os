@@ -124,7 +124,68 @@ pub fn sys_setgid(gid: u32) -> isize {
     inner.egid = gid;
     0 
 }
+#[repr(C)]
+pub struct PollFd {
+    pub fd: i32,     // 监视的文件描述符
+    pub events: i16, // 事件
+    pub revents: i16,// 内核返回的实际发生的事件
+}
 
+const POLLIN: i16 = 0x001;
+const POLLOUT: i16 = 0x004;
+const POLLERR: i16 = 0x008;
+
+pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, _tmo_p: usize, _sigmask: usize) -> isize {
+    let task = current_task().unwrap();
+    let token = task.inner_exclusive_access().memory_set.token();
+    let inner = task.inner_exclusive_access();
+    
+   
+    if ufds_ptr == 0 || nfds == 0 {
+        return 0; 
+    }
+
+    let mut ready_count = 0;
+
+    // 遍历用户传进来的 pollfd 数组
+    for i in 0..nfds {
+        // 根据虚拟地址算出真实物理地址，并拿到可变引用
+        let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
+        let pollfd = translated_refmut(token, pollfd_ptr);
+        
+        let fd = pollfd.fd;
+        pollfd.revents = 0; // 先清空返回状态
+
+        // 负数的 fd 按照 POSIX 标准被忽略
+        if fd < 0 {
+            continue;
+        }
+
+        let fd_usize = fd as usize;
+        
+        // 检查 fd 是否合法
+        if fd_usize >= inner.fd_table.len() || inner.fd_table[fd_usize].is_none() {
+            pollfd.revents = POLLERR; // 报错：坏的描述符
+            ready_count += 1;
+        } else {
+            let file = inner.fd_table[fd_usize].as_ref().unwrap();
+            // 没做复杂的阻塞等待，直接查看文件状态并标记
+            if (pollfd.events & POLLIN) != 0 && file.readable() {
+                pollfd.revents |= POLLIN;
+            }
+            if (pollfd.events & POLLOUT) != 0 && file.writable() {
+                pollfd.revents |= POLLOUT;
+            }
+            
+            if pollfd.revents != 0 {
+                ready_count += 1;
+            }
+        }
+    }
+
+    // 返回有多少个 FD 已经准备好了
+    ready_count as isize
+}
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
