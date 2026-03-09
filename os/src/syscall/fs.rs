@@ -5,6 +5,8 @@ use crate::task::{current_task, current_user_token};
 use alloc::vec;
 use alloc::sync::Arc;
 use alloc::string::ToString;
+use crate::syscall::translated_ref;
+
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
    
@@ -240,7 +242,49 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
         -1
     }
 }
+#[repr(C)]
+pub struct IoVec {
+    pub base: usize, // 这块碎片的起始地址
+    pub len: usize,  // 这块碎片的长度
+}
 
+pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    
+
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return -1;
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+
+    let token = inner.memory_set.token();
+    
+
+    drop(inner);
+    
+    let mut total_written = 0;
+
+    for i in 0..iovcnt {
+
+        let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
+
+        let iovec: &IoVec = translated_ref(token, iov_addr as *const IoVec);
+        
+        if iovec.len == 0 {
+            continue; 
+        }
+        let user_buffer = UserBuffer {
+            buffers: translated_byte_buffer(token, iovec.base as *const u8, iovec.len),
+        };
+
+
+        let written = file.write(user_buffer);
+        total_written += written;
+    }
+
+    total_written as isize
+}
 pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut Statx) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
