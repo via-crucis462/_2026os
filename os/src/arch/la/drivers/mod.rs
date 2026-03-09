@@ -9,9 +9,7 @@ use lazy_static::lazy_static;
 use crate::{drivers::pci::{PCIDevice,scan_bus}, sync::MPSafeCell};
 
 lazy_static!(
-    pub static ref DEVICE_MANAGER: MPSafeCell<DeviceManager> = unsafe{
-        MPSafeCell::new(DeviceManager::new())
-    };
+    pub static ref DEVICE_MANAGER: MPSafeCell<DeviceManager> = MPSafeCell::new(DeviceManager::new());
 );
 
 pub fn search_pci() {
