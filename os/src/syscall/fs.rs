@@ -400,7 +400,53 @@ pub fn sys_utimensat(_dirfd: i32, _path_ptr: usize, _times_ptr: usize, _flags: u
 
     0
 }
+pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    
+    // 1. 检查文件描述符
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return -1; // EBADF
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    let token = inner.memory_set.token();
+    
+
+    drop(inner);
+    
+    let mut total_read = 0;
+
+    // 2. 遍历用户传进来的 iovec 数组
+    for i in 0..iovcnt {
+        let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
+        
+        // 读取 iovec 结构体本身
+        let iovec: &IoVec = crate::mm::translated_ref(token, iov_addr as *const IoVec);
+        
+        if iovec.len == 0 {
+            continue;
+        }
+
+        // 3. 把这块用户态内存转化为物理内存切片数组
+        // 这里需要写入用户内存，所以 translated_byte_buffer 返回的 &'static mut [u8] 正好合适
+        let user_buffer = crate::mm::UserBuffer {
+            buffers: crate::mm::translated_byte_buffer(token, iovec.base as *const u8, iovec.len),
+        };
+
+        // 4. 调用通用的 read 接口！
+        let read_bytes = file.read(user_buffer);
+        total_read += read_bytes;
+
+        // 如果这次读到的数据比提供的缓冲区小，说明文件已经读到底了，直接结束
+        if read_bytes < iovec.len {
+            break;
+        }
+    }
+
+    total_read as isize
+}
 /// YOUR JOB: Implement unlinkat.
+
 pub fn sys_unlinkat(path: *const u8) -> isize {
     let token = current_user_token();
     let path_str = translated_str(token, path);
