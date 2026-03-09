@@ -65,6 +65,7 @@ const SYSCALL_UNAME: usize = 160;
 const SYSCALL_PRCTL: usize = 167;
 const SYSCALL_GET_TIME: usize = 169;
 /// getpid syscall
+const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_GETUID: usize = 174;
@@ -165,6 +166,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETSID => sys_getsid(args[0]),
         SYSCALL_SETSID => sys_setsid(),
         SYSCALL_GETTID => sys_gettid(),
+        SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2]),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize),
         SYSCALL_WAIT4 | SYSCALL_WAITPID => sys_wait4(args[0] as isize, args[1] as *mut i32, args[2]),//注意：为了跑通脚本，暂时将waitpid和wait4合并了
