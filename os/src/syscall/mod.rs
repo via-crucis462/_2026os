@@ -110,6 +110,7 @@ const SYSCALL_MOUNT: usize = 40;
 /// umount syscall
 const SYSCALL_UMOUNT: usize = 39;
 /// random syscall
+const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 /// resq
 const SYSCALL_RESQ: usize = 293;
@@ -176,6 +177,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
         SYSCALL_SYSLOG => sys_syslog(args[0], args[1], args[2]),
         SYSCALL_SYSINFO => sys_sysinfo(args[0]),
+        SYSCALL_RENAMEAT2 => sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], args[4]),
         SYSCALL_UTIMENSAT => sys_utimensat(args[0] as i32, args[1], args[2], args[3]),
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
         SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
