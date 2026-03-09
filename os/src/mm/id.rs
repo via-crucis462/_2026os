@@ -2,7 +2,7 @@
 //! 为每个地址空间分配一个唯一的ASID
 //! 主要用于la64的TLB管理
 
-use crate::task::id::*;
+use crate::process::id::*;
 use lazy_static::*;
 use crate::sync::MPSafeCell;
 #[allow(unused)]

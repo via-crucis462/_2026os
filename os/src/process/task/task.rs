@@ -1,6 +1,6 @@
 //! Types related to task management & Functions for completely changing TCB
 
-use super::{kstack_alloc, pid_alloc, KernelStack, IdHandle, SignalActions, SignalFlags, TaskContext};
+use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, IdHandle, SignalActions, SignalFlags, TaskContext};
 use crate::{
     arch::trap::{TrapContext, trap_handler},
     fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout},
@@ -29,8 +29,11 @@ const AT_RANDOM: usize = 25;
 /// Directly save the contents that will not change during running
 pub struct TaskControlBlock {
     // Immutable
-    /// Process identifier
+    /// 线程所在进程的PID
     pub pid: IdHandle,
+
+    /// 线程id
+    pub tid: IdHandle,
 
     /// Kernel stack corresponding to PID
     pub kernel_stack: KernelStack,
@@ -162,6 +165,7 @@ impl TaskControlBlock {
         // alloc a pid and a kernel stack in kernel space
         // 注意：push_on_top已经被修改，请及时改回！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
         let pid_handle = pid_alloc();
+        let tid_handle = tid_alloc();
         let kernel_stack = kstack_alloc();
 
         #[cfg(target_arch = "loongarch64")]
@@ -177,6 +181,7 @@ impl TaskControlBlock {
         // push a task context which goes to trap_return to the top of kernel stack
         let task_control_block = Self {
             pid: pid_handle,
+            tid: tid_handle,
             //默认用pid,
             kernel_stack,
             inner:MPSafeCell::new(TaskControlBlockInner {
@@ -367,6 +372,7 @@ impl TaskControlBlock {
         };
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = pid_alloc();
+        let tid_handle = tid_alloc();
         let kernel_stack = kstack_alloc();
         #[cfg(target_arch = "loongarch64")]
         let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
@@ -388,7 +394,7 @@ impl TaskControlBlock {
         }
         let task_control_block = Arc::new(TaskControlBlock {
             pid: pid_handle,
-            // 父进程名加子进程pid
+            tid: tid_handle,
             kernel_stack,
             inner: MPSafeCell::new(TaskControlBlockInner {
                 pname: String::from("{parent_inner.pname}-{pid_handle.0}"),

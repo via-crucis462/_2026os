@@ -41,8 +41,9 @@ pub mod logging;
 pub mod mm;
 pub mod sync;
 pub mod syscall;
-pub mod task;
+pub mod process;
 
+pub use process::task;
 #[allow(unused)]
 use crate::arch::sbi::*;
 use core::arch::global_asm;
