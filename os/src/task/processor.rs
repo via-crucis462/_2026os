@@ -7,7 +7,7 @@
 use super::__switch;
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
-use crate::sync::UPSafeCell;
+use crate::sync::MPSafeCell;
 use crate::arch::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
@@ -47,7 +47,7 @@ impl Processor {
 }
 
 lazy_static! {
-    pub static ref PROCESSOR: UPSafeCell<Processor> = unsafe { UPSafeCell::new(Processor::new()) };
+    pub static ref PROCESSOR: MPSafeCell<Processor> = MPSafeCell::new(Processor::new());
 }
 
 ///The main part of process execution and scheduling

@@ -6,11 +6,11 @@ pub use block::BLOCK_DEVICE;
 
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
-use crate::{drivers::pci::{PCIDevice,scan_bus}, sync::UPSafeCell};
+use crate::{drivers::pci::{PCIDevice,scan_bus}, sync::MPSafeCell};
 
 lazy_static!(
-    pub static ref DEVICE_MANAGER: UPSafeCell<DeviceManager> = unsafe{
-        UPSafeCell::new(DeviceManager::new())
+    pub static ref DEVICE_MANAGER: MPSafeCell<DeviceManager> = unsafe{
+        MPSafeCell::new(DeviceManager::new())
     };
 );
 

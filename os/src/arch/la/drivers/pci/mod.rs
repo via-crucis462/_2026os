@@ -24,13 +24,13 @@ use crate::arch::config::*;
 use crate::mm::PhysAddr;
 const BASE_ADDR: usize = PCI_CONFIG_SPACE_BASE;
 use lazy_static::lazy_static;
-use crate::sync::UPSafeCell;
+use crate::sync::MPSafeCell;
 use virtio_drivers_la::transport::pci::{PciTransport, bus::ConfigurationAccess};
 use virtio_drivers_la::transport::pci::bus::{DeviceFunction, PciRoot};
 
 lazy_static!(
     // 维护当前已分配的MMIO地址
-    pub static ref CURRENT_MMIO_END: UPSafeCell<usize> = unsafe { UPSafeCell::new(PCI_MMIO_BASE) };
+    pub static ref CURRENT_MMIO_END: MPSafeCell<usize> = unsafe { MPSafeCell::new(PCI_MMIO_BASE) };
 );
 
 // 只分配，暂时不考虑回收问题

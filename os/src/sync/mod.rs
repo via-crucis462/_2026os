@@ -2,4 +2,4 @@
 
 mod up;
 
-pub use up::UPSafeCell;
+pub use up::MPSafeCell;

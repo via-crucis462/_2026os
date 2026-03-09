@@ -7,7 +7,7 @@ use crate::mm::address::VPNRange;
 use crate::mm::{
     FrameTracker, KERNEL_SPACE, MapArea, PageTable, PhysAddr, PhysPageNum, StepByOne, VirtAddr, frame_alloc, frame_dealloc, kernel_token
 };
-use crate::sync::UPSafeCell;
+use crate::sync::MPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
 use virtio_drivers_la::transport::{self, Transport};
@@ -24,7 +24,7 @@ use crate::arch::config::*;
 pub struct VirtIOBlock{
     // 相比rv64的旧版实现，使用了新版库的Transport泛型（PciTransport），
     // 新版库会由此自动完成原驱动到pci的转换
-    inner: UPSafeCell<VirtIOBlk<VirtioHal, PciTransport>>,
+    inner: MPSafeCell<VirtIOBlk<VirtioHal, PciTransport>>,
 }
 
 // 维护DMA区域的内存的管理器，不过回收还没完全实现
@@ -42,7 +42,7 @@ extern "C"{
 /// 固定的DMA区域物理页管理器
 /// 现在摆脱了对FA的依赖并且保证了分配的连续性
 lazy_static!{
-    pub static ref QUEUE_FRAMES: UPSafeCell<DmaMemManager> = unsafe { UPSafeCell::new(DmaMemManager {
+    pub static ref QUEUE_FRAMES: MPSafeCell<DmaMemManager> = unsafe { MPSafeCell::new(DmaMemManager {
         start_ppn: PhysPageNum(ekernel as *const() as usize / PAGE_SIZE),
         end_ppn: PhysAddr(ekernel as *const() as usize + DMA_SIZE).floor(),
         allocated: Vec::new(),
@@ -55,7 +55,7 @@ impl VirtIOBlock {
     pub unsafe fn new(transport: PciTransport) -> Self {
         let hal = VirtioHal;
         let blk = VirtIOBlk::new(transport).expect("Failed to initialize VirtIOBlk");
-        Self { inner: UPSafeCell::new(blk) }
+        Self { inner: MPSafeCell::new(blk) }
     }
     pub unsafe fn visit(&self) -> RefMut<'_,VirtIOBlk<VirtioHal, PciTransport>> {
         self.inner.exclusive_access()

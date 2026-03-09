@@ -7,7 +7,7 @@ use super::id::*;
 #[allow(unused)]
 use crate::arch::config::*;
 use crate::mm::mmap;
-use crate::sync::UPSafeCell;
+use crate::sync::MPSafeCell;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -32,8 +32,8 @@ extern "C" {
 
 lazy_static! {
     /// The kernel's initial memory mapping(kernel address space)
-    pub static ref KERNEL_SPACE: Arc<UPSafeCell<MemorySet>> =
-        Arc::new(unsafe { UPSafeCell::new(MemorySet::new_kernel()) });
+    pub static ref KERNEL_SPACE: Arc<MPSafeCell<MemorySet>> =
+        Arc::new(MPSafeCell::new(MemorySet::new_kernel()));
 }
 
 /// the kernel token

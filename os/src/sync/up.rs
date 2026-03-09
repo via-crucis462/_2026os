@@ -1,30 +1,29 @@
-//! Uniprocessor interior mutability primitives
-use core::cell::{RefCell, RefMut};
+//! 多核安全数据管理器
+use spin::{Mutex, MutexGuard};
 
 /// Wrap a static data structure inside it so that we are
 /// able to access it without any `unsafe`.
 ///
-/// We should only use it in uniprocessor.
+/// 可以多核访问
 ///
 /// In order to get mutable reference of inner data, call
 /// `exclusive_access`.
-pub struct UPSafeCell<T> {
+pub struct MPSafeCell<T> {
     /// inner data
-    inner: RefCell<T>,
+    inner: Mutex<T>,
 }
 
-unsafe impl<T> Sync for UPSafeCell<T> {}
+unsafe impl<T> Sync for MPSafeCell<T> {}
 
-impl<T> UPSafeCell<T> {
-    /// User is responsible to guarantee that inner struct is only used in
-    /// uniprocessor.
-    pub unsafe fn new(value: T) -> Self {
+impl<T> MPSafeCell<T> {
+    // 现已支持多核
+    pub fn new(value: T) -> Self {
         Self {
-            inner: RefCell::new(value),
+            inner: Mutex::new(value),
         }
     }
-    /// Panic if the data has been borrowed.
-    pub fn exclusive_access(&self) -> RefMut<'_, T> {
-        self.inner.borrow_mut()
+    /// 当数据已经被其他线程访问时，调用此函数会忙等待，直到数据可用
+    pub fn exclusive_access(&self) -> MutexGuard<'_, T> {
+        self.inner.lock()
     }
 }

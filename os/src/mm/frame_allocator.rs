@@ -1,7 +1,7 @@
 use super::{PhysAddr, PhysPageNum};
 #[allow(unused)]
 use crate::arch::config::{DMA_SIZE, MEMORY_END};
-use crate::sync::UPSafeCell;
+use crate::sync::MPSafeCell;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
@@ -95,8 +95,8 @@ type FrameAllocatorImpl = StackFrameAllocator;
 
 lazy_static! {
     /// frame allocator instance through lazy_static!
-    pub static ref FRAME_ALLOCATOR: UPSafeCell<FrameAllocatorImpl> =
-        unsafe { UPSafeCell::new(FrameAllocatorImpl::new()) };
+    pub static ref FRAME_ALLOCATOR: MPSafeCell<FrameAllocatorImpl> =
+        MPSafeCell::new(FrameAllocatorImpl::new());
 }
 /// initiate the frame allocator using `ekernel` and `MEMORY_END`
 pub fn init_frame_allocator() {
