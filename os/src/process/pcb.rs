@@ -1,8 +1,7 @@
 #![allow(unused)]
-use super::task::*;
-use task::*;
+use super::*;
 use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, IdHandle, SignalActions, SignalFlags, TaskContext};
-use super::schedule::*;
+use schedule::*;
 
 use crate::{
     arch::trap::{TrapContext, trap_handler, current_trap_cx_user_va, trap_cx_va_by_tid},
@@ -68,7 +67,7 @@ impl ProcessControlBlock {
         let kernel_stack_top = trap_cx_addr;
 
         // 进程控制块
-        let proc_control_block = ProcessControlBlock {
+        let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),// 注意：实际上只克隆了指针
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 pname: String::from("initproc"),
@@ -88,10 +87,10 @@ impl ProcessControlBlock {
                 clear_child_tid: 0,
                 tasks: Vec::new(),
             })
-        };
+        });
         // 为pcb创建主线程
         let task_control_block = TaskControlBlock{
-            pid: pid_handle.clone(),
+            process: Arc::downgrade(&proc_control_block),
             tid: tid_handle.clone(),
             kernel_stack,
             inner: MPSafeCell::new(TaskControlBlockInner {
@@ -124,7 +123,7 @@ impl ProcessControlBlock {
         debug!("TaskControlBlock::new: finished creating a new process");
         proc_control_block.inner.exclusive_access().tasks.push(Arc::new(task_control_block));
         // 返回PCB
-        Arc::new(proc_control_block)
+        proc_control_block
     }
 
         /// Create a new process
@@ -134,7 +133,7 @@ impl ProcessControlBlock {
 
     /// Load a new elf to replace the original application address space and 
     /// 待修改
-    pub fn exec(&self, elf_data: &[u8], args: Vec<String>) {
+    pub fn exec(self: &Arc<ProcessControlBlock>, elf_data: &[u8], args: Vec<String>) {
         // 1. 加载 ELF 文件生成新的地址空间
         let (memory_set, mut user_sp, entry_point, phdr_addr, phnum, phent) = MemorySet::from_elf(elf_data);
         debug!(
@@ -251,7 +250,7 @@ impl ProcessControlBlock {
         //*inner.get_trap_cx() = trap_cx;
 
         let new_task = TaskControlBlock {
-            pid: self.pid.clone(),
+            process: Arc::downgrade(self),
             tid: Arc::new(tid_alloc()),
             kernel_stack: kernel_stack,
             inner: MPSafeCell::new(TaskControlBlockInner {
@@ -271,7 +270,6 @@ impl ProcessControlBlock {
 
         let task_inner = new_task.inner_exclusive_access();
         *task_inner.get_trap_cx() = trap_cx;
-        
         
     }
 
@@ -339,7 +337,7 @@ impl ProcessControlBlock {
         });
 
         let new_task = TaskControlBlock {
-            pid: pid_handle.clone(),
+            process: Arc::downgrade(&proc_control_block),
             tid: tid_handle.clone(),
             kernel_stack: kernel_stack,
             inner: MPSafeCell::new(TaskControlBlockInner {

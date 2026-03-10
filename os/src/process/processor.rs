@@ -52,9 +52,9 @@ impl Processor {
 
 // 对数组本身不套锁，因为初始化后不会修改数组内容
 lazy_static! {
-    pub static ref PROCESSORS: Arc<[MPSafeCell<Processor>; CPU_CORES]> = {
-      let mut arr: [MPSafeCell<Processor>; CPU_CORES] = unsafe { core::mem::zeroed() };
-        for i in 0..CPU_CORES {
+    pub static ref PROCESSORS: Arc<[MPSafeCell<Processor>; CPU_CORE_NUM]> = {
+      let mut arr: [MPSafeCell<Processor>; CPU_CORE_NUM] = unsafe { core::mem::zeroed() };
+        for i in 0..CPU_CORE_NUM {
             arr[i] = MPSafeCell::new(Processor::new());
         }
         Arc::new(arr)
