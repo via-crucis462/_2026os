@@ -15,6 +15,7 @@ use alloc::{
 };
 #[allow(unused)]
 use crate::arch::config::*;
+use super::*;
 
 
 
@@ -23,8 +24,10 @@ use crate::arch::config::*;
 /// Directly save the contents that will not change during running
 pub struct TaskControlBlock {
     // Immutable
-    /// 线程所在进程的PID
-    pub pid: Arc<IdHandle>,
+    /// 线程所属进程
+    /// 让线程拥有对进程的弱引用，便于调用进程的方法
+    /// 不能用arc否则循环引用
+    pub process: Weak<ProcessControlBlock>,
 
     /// 线程id
     pub tid: Arc<IdHandle>,
@@ -41,7 +44,16 @@ impl TaskControlBlock {
     pub fn inner_exclusive_access(&self) -> spin::MutexGuard<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }
-
+    pub fn getpid(&self) -> usize {
+        if let Some(process) = self.process.upgrade() {
+            process.pid.0
+        } else {
+            0
+        }
+    }
+    pub fn gettid(&self) -> usize {
+        self.tid.0
+    }
 }
 
 pub struct TaskControlBlockInner {

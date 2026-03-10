@@ -1,6 +1,6 @@
-use crate::{sync::MPSafeCell, task::processor::{self, PROCESSOR}};
-
-use super::{TaskControlBlock};
+use crate::sync::MPSafeCell;
+use super::*;
+use super::manager::{tid2task, TaskManager};
 use lazy_static::*;
 use alloc::{
     vec::Vec,
@@ -57,14 +57,14 @@ impl TaskPool {
     }
     // 获取一个线程的引用
     pub fn get_task(&mut self, tid: usize) -> Option<Arc<TaskControlBlock>> {
-        self.inner.iter().find(|task| {
-            task.tid.0 == tid
-        }).cloned()
+        tid2task(tid)
     }
     // 拿出一个线程
     pub fn take_task(&mut self, tid: usize) -> Option<Arc<TaskControlBlock>> {
-        if let Some(pos) = self.inner.iter().position(|task| task.tid.0 == tid) {
-            Some(self.inner.remove(pos))
+        if let Some(task) = tid2task(tid) {
+            // 从池中移除
+            self.inner.retain(|t| t.gettid() != tid);
+            Some(task)
         } else {
             None
         }
@@ -79,7 +79,7 @@ impl TaskPool {
     }
 }
 
-pub fn add_task_to_pool(task: Arc<TaskControlBlock>) {
+pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
     SCHEDULER.exclusive_access().get_pool().add_task(task);
 }
 

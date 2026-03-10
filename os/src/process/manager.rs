@@ -8,6 +8,7 @@ use crate::sync::MPSafeCell;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use lazy_static::*;
+use crate::arch::config::CPU_CORE_NUM;
 
 pub struct TaskManager {
     ready_queue: VecDeque<Arc<TaskControlBlock>>,
@@ -33,38 +34,48 @@ impl TaskManager {
 
 lazy_static! {
     /// TASK_MANAGER instance through lazy_static!
-    pub static ref TASK_MANAGER: MPSafeCell<TaskManager> =
-        MPSafeCell::new(TaskManager::new());
+    pub static ref TASK_MANAGERS: [MPSafeCell<TaskManager>; CPU_CORE_NUM] ={
+        let mut arr: [MPSafeCell<TaskManager>; CPU_CORE_NUM] = unsafe { core::mem::zeroed() };
+        for i in 0..CPU_CORE_NUM {
+            arr[i] = MPSafeCell::new(TaskManager::new());
+        }
+        arr
+    };
     /// PID2PCB instance (map of pid to pcb)
-    pub static ref PID2TCB: MPSafeCell<BTreeMap<usize, Arc<TaskControlBlock>>> =
+    pub static ref TID2TCB: MPSafeCell<BTreeMap<usize, Arc<TaskControlBlock>>> =
         MPSafeCell::new(BTreeMap::new());
+}
+
+pub fn get_current_task_manager() -> &'static MPSafeCell<TaskManager> {
+    let hart_id = riscv::register::mhartid::read();
+    &TASK_MANAGERS[hart_id]
 }
 
 /// Add process to ready queue
 pub fn add_task(task: Arc<TaskControlBlock>) {
 	debug!("[kernel] TaskManager::add_task: pid={}", task.getpid());
-    PID2TCB
+    TID2TCB
         .exclusive_access()
         .insert(task.getpid(), Arc::clone(&task));
-    TASK_MANAGER.exclusive_access().add(task);
+    get_current_task_manager().exclusive_access().add(task);
 }
 
 /// Take a process out of the ready queue
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
 	//trace!("kernel: TaskManager::fetch_task");
-    TASK_MANAGER.exclusive_access().fetch()
+    get_current_task_manager().exclusive_access().fetch()
 }
 
-/// Get process by pid
-pub fn pid2task(pid: usize) -> Option<Arc<TaskControlBlock>> {
-    let map = PID2TCB.exclusive_access();
-    map.get(&pid).map(Arc::clone)
+/// Get process by tid
+pub fn tid2task(tid: usize) -> Option<Arc<TaskControlBlock>> {
+    let map = TID2TCB.exclusive_access();
+    map.get(&tid).map(Arc::clone)
 }
 
-/// Remove item(pid, _some_pcb) from PDI2PCB map (called by exit_current_and_run_next)
-pub fn remove_from_pid2task(pid: usize) {
-    let mut map = PID2TCB.exclusive_access();
-    if map.remove(&pid).is_none() {
-        panic!("cannot find pid {} in pid2task!", pid);
+/// Remove item(tid, _some_pcb) from TID2TCB map (called by exit_current_and_run_next)
+pub fn remove_from_tid2task(tid: usize) {
+    let mut map = TID2TCB.exclusive_access();
+    if map.remove(&tid).is_none() {
+        panic!("cannot find tid {} in tid2task!", tid);
     }
 }
