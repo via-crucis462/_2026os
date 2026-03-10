@@ -3,5 +3,6 @@ mod process;
 mod schedule;
 pub mod id;
 
+pub use schedule::*;
 pub use id::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, IdHandle};
 pub use task::*;

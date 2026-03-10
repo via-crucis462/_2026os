@@ -8,11 +8,15 @@ use super::__switch;
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 use crate::sync::MPSafeCell;
-use crate::arch::trap::TrapContext;
+use crate::arch::{
+    trap::TrapContext,
+    config::*,
+};
 use alloc::sync::Arc;
 use lazy_static::*;
 
 /// Processor management structure
+/// 控制单个核心的运行
 pub struct Processor {
     ///The task currently executing on the current processor
     current: Option<Arc<TaskControlBlock>>,
@@ -46,18 +50,33 @@ impl Processor {
     }
 }
 
+// 对数组本身不套锁，因为初始化后不会修改数组内容
 lazy_static! {
-    pub static ref PROCESSOR: MPSafeCell<Processor> = MPSafeCell::new(Processor::new());
+    pub static ref PROCESSORS: Arc<[MPSafeCell<Processor>; CPU_CORES]> = {
+      let mut arr: [MPSafeCell<Processor>; CPU_CORES] = unsafe { core::mem::zeroed() };
+        for i in 0..CPU_CORES {
+            arr[i] = MPSafeCell::new(Processor::new());
+        }
+        Arc::new(arr)
+    };
+}
+
+// 获取并锁住当前处理器
+pub fn current_processor() -> spin::MutexGuard<'static, Processor> {
+    #[cfg(target_arch = "riscv64")]
+    let hart_id = riscv::register::mhartid::read();
+    PROCESSORS[hart_id].exclusive_access()
 }
 
 ///The main part of process execution and scheduling
 ///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
+/// 待修改
 pub fn run_tasks() {
     //let mut counter: usize = 0;
     loop {
         //counter += 1;
         //println!("run_tasks counter: {}", counter);
-        let mut processor = PROCESSOR.exclusive_access();
+        let mut processor = current_processor();
         if let Some(task) = fetch_task() {
             //info!("[kernel] run_tasks: fetched pid={}", task.pid.0);
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
@@ -71,6 +90,7 @@ pub fn run_tasks() {
             // release coming task TCB manually
             processor.current = Some(task);
             // release processor manually
+            // 释放锁
             drop(processor);
             unsafe {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
@@ -83,12 +103,12 @@ pub fn run_tasks() {
 
 /// Get current task through take, leaving a None in its place
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
-    PROCESSOR.exclusive_access().take_current()
+    current_processor().take_current()
 }
 
 /// Get a copy of the current task
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
-    PROCESSOR.exclusive_access().current()
+    current_processor().current()
 }
 
 /// Get the current user token(addr of page table)
@@ -112,7 +132,7 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 
 /// Return to idle control flow for new scheduling
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
-    let mut processor = PROCESSOR.exclusive_access();
+    let mut processor = current_processor();
     let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
     drop(processor);
     unsafe {

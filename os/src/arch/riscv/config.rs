@@ -1,6 +1,7 @@
 //! Constants in the kernel
 
 #[allow(unused)]
+pub const CPU_CORES: usize = 4;
 
 /// user app's stack size
 pub const USER_STACK_SIZE: usize = 4096 * 2;

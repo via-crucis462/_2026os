@@ -102,6 +102,10 @@ pub fn current_trap_cx_user_va() -> usize {
     TRAP_CONTEXT_BASE - current_tid()
 }
 
+pub fn trap_cx_va_by_tid(tid: usize) -> usize {
+    TRAP_CONTEXT_BASE - tid
+}
+
 #[no_mangle]
 /// return to user space
 pub fn trap_return() -> ! {

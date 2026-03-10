@@ -2,8 +2,10 @@
 use super::task::*;
 use task::*;
 use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, IdHandle, SignalActions, SignalFlags, TaskContext};
+use super::schedule::*;
+
 use crate::{
-    arch::trap::{TrapContext, trap_handler, current_trap_cx_user_va},
+    arch::trap::{TrapContext, trap_handler, current_trap_cx_user_va, trap_cx_va_by_tid},
     fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout},
     mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, translated_refmut},
     sync::MPSafeCell,
@@ -32,7 +34,7 @@ impl ProcessControlBlock {
     pub fn inner_exclusive_access(&self) -> spin::MutexGuard<'_, ProcessControlBlockInner> {
         self.inner.exclusive_access()
     }
-    pub fn new(elf_data: &[u8]) -> Self {
+    pub fn new(elf_data: &[u8]) -> Arc<Self> {
         println!("[kernel] TaskControlBlock::new: start creating a new process");
         let (memory_set, user_sp, entry_point, _phdr, _phnum, _phent)
             = MemorySet::from_elf(elf_data);
@@ -122,7 +124,7 @@ impl ProcessControlBlock {
         debug!("TaskControlBlock::new: finished creating a new process");
         proc_control_block.inner.exclusive_access().tasks.push(Arc::new(task_control_block));
         // 返回PCB
-        proc_control_block
+        Arc::new(proc_control_block)
     }
 
         /// Create a new process
@@ -275,14 +277,16 @@ impl ProcessControlBlock {
 
     /// Fork from parent to child
     /// 已编辑，添加了stack参数 
-    pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>) -> Arc<Self> {
+    pub fn fork(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, sp: Option<usize>) -> Arc<Self> {
         // ---- hold parent PCB lock
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
         let memory_set = MemorySet::from_existed_user(&parent_inner.memory_set);
+        let pid_handle = Arc::new(pid_alloc());
+        let tid_handle = Arc::new(tid_alloc());
         #[cfg(target_arch = "riscv64")]
         let trap_cx_ppn = memory_set
-            .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
+            .translate(VirtAddr::from(trap_cx_va_by_tid(tid_handle.0)).into())
             .unwrap()
             .ppn();
         #[cfg(target_arch = "riscv64")]
@@ -292,9 +296,9 @@ impl ProcessControlBlock {
             trap_cx_addr
         };
         // alloc a pid and a kernel stack in kernel space
-        let pid_handle = pid_alloc();
-        let tid_handle = tid_alloc();
+        
         let kernel_stack = kstack_alloc();
+
         #[cfg(target_arch = "loongarch64")]
         let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
         #[cfg(target_arch = "riscv64")]
@@ -314,53 +318,65 @@ impl ProcessControlBlock {
             }
         }
         let proc_control_block = Arc::new(ProcessControlBlock {
-            pid: pid_handle,
-            kernel_stack,
+            pid: pid_handle.clone(),
             inner: MPSafeCell::new(ProcessControlBlockInner {
-                pname: String::from("{parent_inner.pname}-{pid_handle.0}"),
-                trap_cx_addr,
+                pname: parent_inner.pname.clone(),
                 base_size: parent_inner.base_size,
-                task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                task_status: TaskStatus::Ready,
                 memory_set,
                 parent: Some(Arc::downgrade(self)),
                 children: Vec::new(),
-                exit_code: 0,
-                fd_table: new_fd_table,
-                signals: SignalFlags::empty(),
-                // inherit the signal_mask and signal_action
-                signal_mask: parent_inner.signal_mask,
-                handling_sig: -1,
-                signal_actions: parent_inner.signal_actions.clone(),
-                killed: false,
-                frozen: false,
-                trap_ctx_backup: None,
-                heap_bottom: sp.unwrap_or(parent_inner.heap_bottom),
+                heap_bottom: parent_inner.heap_bottom,
                 program_brk: parent_inner.program_brk,
+                fd_table: new_fd_table,
                 cwd: parent_inner.cwd.clone(),
                 uid: parent_inner.uid,
                 gid: parent_inner.gid,
                 euid: parent_inner.euid,
                 egid: parent_inner.egid,
-                clear_child_tid: 0,
-            }),
+                clear_child_tid: parent_inner.clear_child_tid,
+                tasks: Vec::new(),
+            })
         });
-        // add child
-        parent_inner.children.push(task_control_block.clone());
+
+        let new_task = TaskControlBlock {
+            pid: pid_handle.clone(),
+            tid: tid_handle.clone(),
+            kernel_stack: kernel_stack,
+            inner: MPSafeCell::new(TaskControlBlockInner {
+                trap_cx_addr,
+                task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                task_status: TaskStatus::Ready,
+                signal_mask: caller_task.inner_exclusive_access().signal_mask,
+                handling_sig: caller_task.inner_exclusive_access().handling_sig,
+                signal_actions: caller_task.inner_exclusive_access().signal_actions.clone(),
+                killed: false,
+                frozen: false,
+                trap_ctx_backup: None,
+                exit_code: 0,
+                signals: caller_task.inner_exclusive_access().signals,
+            }),
+        };
         // modify kernel_sp in trap_cx
         // **** access child PCB exclusively
-        let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
+        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
         #[cfg(target_arch = "loongarch64")]
         {
             *trap_cx = parent_trap_cx;
         }
         #[cfg(target_arch = "riscv64")]{
-            *trap_cx = *parent_inner.get_trap_cx();
+            *trap_cx = *caller_task.inner_exclusive_access().get_trap_cx();
             trap_cx.kernel_sp = kernel_stack_top;
         }
         if let Some(sp) = sp {
             trap_cx.set_sp(sp);
         }
+        let new_task_arc = Arc::new(new_task);
+        // 将任务加入全局任务池, 暂未实现
+        add_task_into_pool(new_task_arc.clone());
+        // 把任务加入进程的线程列表
+        proc_control_block.inner.exclusive_access().tasks.push(new_task_arc.clone());
+        // add child
+        parent_inner.children.push(proc_control_block.clone());
         // return
         proc_control_block
         // **** release child PCB
