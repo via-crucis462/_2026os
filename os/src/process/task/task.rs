@@ -1,5 +1,5 @@
 //! Types related to task management & Functions for completely changing TCB
-
+#![allow(unused)]
 use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, IdHandle, SignalActions, SignalFlags, TaskContext};
 use crate::{
     arch::trap::{TrapContext, trap_handler},
@@ -17,12 +17,6 @@ use alloc::{
 use crate::arch::config::*;
 
 
-const AT_PHDR: usize = 3;
-const AT_PHENT: usize = 4;
-const AT_PHNUM: usize = 5;
-const AT_PAGESZ: usize = 6;
-const AT_ENTRY: usize = 9;
-const AT_RANDOM: usize = 25;
 
 /// Task control block structure
 ///
@@ -30,16 +24,16 @@ const AT_RANDOM: usize = 25;
 pub struct TaskControlBlock {
     // Immutable
     /// 线程所在进程的PID
-    pub pid: IdHandle,
+    pub pid: Arc<IdHandle>,
 
     /// 线程id
-    pub tid: IdHandle,
+    pub tid: Arc<IdHandle>,
 
     /// Kernel stack corresponding to PID
     pub kernel_stack: KernelStack,
 
     /// Mutable
-    inner: MPSafeCell<TaskControlBlockInner>,
+    pub inner: MPSafeCell<TaskControlBlockInner>,
 }
 
 impl TaskControlBlock {
@@ -47,20 +41,10 @@ impl TaskControlBlock {
     pub fn inner_exclusive_access(&self) -> spin::MutexGuard<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }
-    /// Get the address of app's page table
-    pub fn get_user_token(&self) -> usize {
-        let inner = self.inner_exclusive_access();
-        inner.memory_set.token()
-    }
-    pub fn get_asid(&self) -> usize {
-        let inner = self.inner_exclusive_access();
-        inner.memory_set.asid()
-    }
+
 }
 
 pub struct TaskControlBlockInner {
-    /// 进程名
-    pub pname: String,
 
     /// 此处改为直接保存地址
     pub trap_cx_addr: usize,
@@ -68,11 +52,11 @@ pub struct TaskControlBlockInner {
     /// Save task context
     pub task_cx: TaskContext,
 
+    /// Maintain the execution status of the current process
+    pub task_status: TaskStatus,
+
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
-
-     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
-    
     pub signals: SignalFlags,
     pub signal_mask: SignalFlags,
     // the signal which is being handling
@@ -87,7 +71,16 @@ pub struct TaskControlBlockInner {
 }
 
 impl TaskControlBlockInner {
-    
+    pub fn get_trap_cx(&self) -> &'static mut TrapContext {
+        PhysAddr(self.trap_cx_addr).get_mut()
+    }
+    fn get_status(&self) -> TaskStatus {
+        self.task_status
+    }
+    pub fn is_zombie(&self) -> bool {
+        self.get_status() == TaskStatus::Zombie
+    }
+
 }
 
 impl TaskControlBlock {
