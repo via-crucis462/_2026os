@@ -469,7 +469,7 @@ impl TaskControlBlock {
             return Ok(self.inner_exclusive_access().program_brk);
         }
         // 超范围panic
-        let size: i32 = i32::try_from(addr).unwrap() - self.inner_exclusive_access().program_brk as i32;
+        let size: isize = addr as isize - self.inner_exclusive_access().program_brk as isize;
         let mut inner = self.inner_exclusive_access();
         let heap_bottom = inner.heap_bottom;
         let _old_break = inner.program_brk;
