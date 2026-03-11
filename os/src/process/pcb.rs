@@ -30,11 +30,16 @@ pub struct ProcessControlBlock {
 }
 
 impl ProcessControlBlock {
+    /// 获取进程块的独占访问权限
     pub fn inner_exclusive_access(&self) -> spin::MutexGuard<'_, ProcessControlBlockInner> {
         self.inner.exclusive_access()
     }
-    // 用于创建初始化进程
-    pub fn new(elf_data: &[u8]) -> Arc<Self> {
+    /// 用于创建初始化进程
+    /// Create a new process
+    /// 为la64修改
+    /// At present, it is only used for the creation of initproc
+    /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
+    pub fn new(elf_data: &[u8]) -> (Arc<Self>, Arc<TaskControlBlock>) {
         println!("[kernel] TaskControlBlock::new: start creating a new process");
         let (memory_set, user_sp, entry_point, _phdr, _phnum, _phent)
             = MemorySet::from_elf(elf_data);
@@ -109,8 +114,7 @@ impl ProcessControlBlock {
 
             })
         });
-        // 直接把初始线程加入核心0的任务队列，不放入全局任务池
-        add_task(task_control_block.clone());
+        
         // prepare TrapContext in user space
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
         // 发现问题：这样解引用写入会炸
@@ -123,15 +127,14 @@ impl ProcessControlBlock {
             trap_handler as *const () as usize,
         );
         debug!("TaskControlBlock::new: finished creating a new process");
-        proc_control_block.inner.exclusive_access().tasks.push(task_control_block);
-        // 返回PCB
-        proc_control_block
+        
+        proc_control_block.inner.exclusive_access().tasks.push(task_control_block.clone());
+
+        // 返回PCB和主线程
+        (proc_control_block, task_control_block)
     }
 
-        /// Create a new process
-    /// 为la64修改
-    /// At present, it is only used for the creation of initproc
-    
+        
 
     /// Load a new elf to replace the original application address space and 
     /// 待修改
@@ -277,7 +280,8 @@ impl ProcessControlBlock {
 
     /// Fork from parent to child
     /// 已编辑，添加了stack参数 
-    pub fn fork(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, sp: Option<usize>) -> Arc<Self> {
+    /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
+    pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>, caller_task: Arc<TaskControlBlock>) -> (Arc<Self>, Arc<TaskControlBlock>) {
         // ---- hold parent PCB lock
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
@@ -370,14 +374,12 @@ impl ProcessControlBlock {
         if let Some(sp) = sp {
             trap_cx.set_sp(sp);
         }
-        // 将任务加入全局任务池
-        add_task_into_pool(new_task.clone());
         // 把任务加入进程的线程列表
-        proc_control_block.inner.exclusive_access().tasks.push(new_task);
+        proc_control_block.inner.exclusive_access().tasks.push(new_task.clone());
         // add child
         parent_inner.children.push(proc_control_block.clone());
         // return
-        proc_control_block
+        (proc_control_block, new_task)
         // **** release child PCB
         // ---- release parent PCB
     }

@@ -75,7 +75,7 @@ pub fn suspend_current_and_run_next() {
 pub const IDLE_PID: usize = 0;
 
 /// Exit the current 'Running' task and run the next task in task list.
-/// 需要修改
+/// 初步修改，逻辑待检查
 pub fn exit_current_and_run_next(exit_code: i32) {
     // take from Processor
     let task = take_current_task().unwrap();
@@ -92,32 +92,34 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // remove from tid2task
     remove_from_tid2task(task.gettid());
     // **** access current TCB exclusively
-    let mut inner = task.inner_exclusive_access();
+    let mut task_inner: spin::MutexGuard<'_, TaskControlBlockInner> = task.inner_exclusive_access();
+    let proc = task.process();
+    let mut proc_inner = proc.inner_exclusive_access();
     // Change status to Zombie
-    inner.task_status = TaskStatus::Zombie;
+    task_inner.task_status = TaskStatus::Zombie;
     // Record exit code
-    inner.exit_code = exit_code;
+    task_inner.exit_code = exit_code;
     // do not move to its parent but under initproc
 
     // ++++++ access initproc TCB exclusively
     {
         let mut initproc_inner = INITPROC.inner_exclusive_access();
-        for child in inner.children.iter() {
+        for child in proc_inner.children.iter() {
             child.inner_exclusive_access().parent = Some(Arc::downgrade(&INITPROC));
             initproc_inner.children.push(child.clone());
         }
     }
     // ++++++ release parent PCB
 
-    inner.children.clear();
+    proc_inner.children.clear();
     // deallocate user space
-    inner.memory_set.recycle_data_pages();
+    proc_inner.memory_set.recycle_data_pages();
     // drop file descriptors
-    inner.fd_table.clear();
-    drop(inner);
+    proc_inner.fd_table.clear();
+    drop(task_inner);
     // **** release current PCB
     // drop task manually to maintain rc correctly
-    drop(task);
+    drop(task);// proc 也会随之drop
     // we do not have to save task context
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
@@ -128,18 +130,17 @@ lazy_static! {
     ///
     /// the name "initproc" may be changed to any other app name like "usertests",
     /// but we have user_shell, so we don't need to change it.
-    pub static ref INITPROC: Arc<ProcessControlBlock> = {
+    pub static ref INITTASK: Arc<TaskControlBlock> = {
         let inode = open_file(ROOT_DENTRY.clone(),"ch7b_initproc", OpenFlags::RDONLY).unwrap();
         let v = inode.read_all();
-        ProcessControlBlock::new(v.as_slice())
+        ProcessControlBlock::new(v.as_slice()).1
     };
 }
 
 ///Add init process to the manager
 pub fn add_initproc() {
-    add_task(INITPROC.clone());
+    add_task(INITTASK.clone());
     info!("add_initproc: pid={}", INITPROC.getpid());
-
 }
 
 /// Check if the current task has any signal to handle
