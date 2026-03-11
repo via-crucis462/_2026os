@@ -9,7 +9,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
    
     let token = current_user_token();
     let task = current_task().unwrap();
-    let inner = task.inner_exclusive_access();
+    let inner = task.process().inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
         return -1;
     }
@@ -64,7 +64,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     trace!("kernel:pid[{}] sys_read", current_task().unwrap().pid.0);
     let token = current_user_token();
     let task = current_task().unwrap();
-    let inner = task.inner_exclusive_access();
+    let inner = task.process().inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -96,7 +96,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
     } else if dirfd == AT_FDCWD {
         task.inner_exclusive_access().cwd.clone()
     } else {
-        let inner = task.inner_exclusive_access();
+        let inner = task.process().inner_exclusive_access();
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
             return -1;
         }
@@ -153,7 +153,7 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> i
     } else if dirfd == AT_FDCWD {
         task.inner_exclusive_access().cwd.clone()
     } else {
-        let inner = task.inner_exclusive_access();
+        let inner = task.process().inner_exclusive_access();
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
             return -1;
         }
@@ -225,7 +225,7 @@ pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
 pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
-    let inner = task.inner_exclusive_access();
+    let inner = task.process().inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -251,7 +251,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
             return -2; 
         }
 
-        let inner = task.inner_exclusive_access();
+        let inner = task.process().inner_exclusive_access();
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
             return -9; 
         }
@@ -271,7 +271,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
     } else if dirfd == AT_FDCWD {
         task.inner_exclusive_access().cwd.clone()
     } else {
-        let inner = task.inner_exclusive_access();
+        let inner = task.process().inner_exclusive_access();
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
             return -1;
         }
@@ -376,7 +376,7 @@ pub fn sys_unlinkat(path: *const u8) -> isize {
 pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
-    let inner = task.inner_exclusive_access();
+    let inner = task.process().inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -396,7 +396,7 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
 pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
-    let inner = task.inner_exclusive_access();
+    let inner = task.process().inner_exclusive_access();
     let path = inner.cwd.get_full_path();
     drop(inner);
 
@@ -427,7 +427,7 @@ pub fn sys_chdir(path: *const u8) -> isize {
     let task = current_task().unwrap();
     let cwd = task.inner_exclusive_access().cwd.clone();
     let current_path = {
-        let inner = task.inner_exclusive_access();
+        let inner = task.process().inner_exclusive_access();
         inner.cwd.get_full_path()
     };
 
@@ -493,7 +493,7 @@ pub fn sys_fstatat(_dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
 pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
-    let inner = task.inner_exclusive_access();
+    let inner = task.process().inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return -1;
     }

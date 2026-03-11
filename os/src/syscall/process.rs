@@ -75,7 +75,7 @@ pub fn sys_gettid() -> isize {
 }
 pub fn sys_getuid() -> isize {
     let task = current_task().unwrap();
-    let inner = task.inner_exclusive_access();
+    let inner = task.process().inner_exclusive_access();
     inner.uid as isize
 }
 // 假装获取成功，返回 PGID 为 0
@@ -91,20 +91,20 @@ pub fn sys_setpgid(_pid: usize, _pgid: usize) -> isize {
 
 pub fn sys_getgid() -> isize {
     let task = current_task().unwrap();
-    let inner = task.inner_exclusive_access();
+    let inner = task.process().inner_exclusive_access();
     inner.gid as isize
 }
 
 pub fn sys_geteuid() -> isize {
     let task = current_task().unwrap();
-    let inner = task.inner_exclusive_access();
+    let inner = task.process().inner_exclusive_access();
     inner.euid as isize
 }
 
 
 pub fn sys_getegid() -> isize {
     let task = current_task().unwrap();
-    let inner = task.inner_exclusive_access();
+    let inner = task.process().inner_exclusive_access();
     inner.egid as isize
 }
 pub fn sys_setuid(uid: u32) -> isize {
@@ -223,7 +223,7 @@ pub fn sys_getpid() -> isize {
 }
 pub fn sys_getppid() -> isize {
     let task = current_task().unwrap();
-    let inner = task.inner_exclusive_access();
+    let inner = task.process().inner_exclusive_access();
     match inner.parent.as_ref().and_then(|p| p.upgrade()) {
         Some(parent) => parent.getpid() as isize,
         None => 0, 
@@ -463,7 +463,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
     if !mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) && fd >= 0 {
         let task = current_task().unwrap();
         let token = current_user_token();
-        let inner = task.inner_exclusive_access();
+        let inner = task.process().inner_exclusive_access();
         
         if (fd as usize) < inner.fd_table.len() {
             if let Some(file) = &inner.fd_table[fd as usize] {

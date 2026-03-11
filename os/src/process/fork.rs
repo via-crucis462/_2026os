@@ -9,9 +9,10 @@ pub fn do_clone(func: usize, stack: usize, _flags: usize) -> isize {
     // 调试信息
     trace!("[K] do_clone: func={:#x}, stack={:#x}, flags={:#x}", func, stack, _flags);
     let current_task = current_task().unwrap();
-    let new_task = current_task.fork(
+    let current_proc = current_task.process();
+    let new_task = current_proc.fork(
         if stack != 0 { Some(stack) } 
-        else { None }
+        else { None }, current_task.clone()
     );
     let new_pid = new_task.pid.0;
     let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
