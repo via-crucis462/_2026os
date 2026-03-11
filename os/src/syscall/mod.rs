@@ -111,7 +111,7 @@ const SYSCALL_ACCESSAT: usize = 48;
 mod fs;
 mod process;
 mod prctl;
-
+mod errno;
 use fs::*;
 use process::*;
 use prctl::*;

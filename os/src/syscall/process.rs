@@ -1,10 +1,12 @@
 //! Process management syscalls
 
+// 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
 
 pub use crate::{
     arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, fs::*, mm::{UserBuffer, mmap, translated_byte_buffer, translated_ref, translated_refmut, translated_str}, task::{
         MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_token, exit_current_and_run_next, fork::*, pid2task, suspend_current_and_run_next
-    }
+    },
+    syscall::errno::Errno
 };
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 
@@ -456,7 +458,10 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
     // 1. 分配并映射虚存及其对应的物理页
     let ret = match mmap::do_mmap(start, len, mmap_prot) {
         Ok(addr) => addr,
-        Err(_) => return -1,
+        Err(_) => {
+            println!("[kernel] sys_mmap: do_mmap failed for start={:#x}, len={:#x}, prot={:?}, flags={:?}", start, len, mmap_prot, mmap_flags);
+            return Errno::ENOMEM.as_isize(); // 内存不足
+        }
     };
 
     // 2. 如果是文件映射（非匿名映射）且 FD 合法，读取内容
