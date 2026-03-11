@@ -504,6 +504,7 @@ impl TaskControlBlock {
     ) -> Result<usize, i32> {
         let mut inner = self.inner_exclusive_access();
         inner.memory_set.mmap(addr, length, prot)
+
     }
     /// 处理munmap
     pub fn munmap(&self, addr: usize, length: usize) -> Result<(), i32> {
