@@ -33,6 +33,7 @@ impl ProcessControlBlock {
     pub fn inner_exclusive_access(&self) -> spin::MutexGuard<'_, ProcessControlBlockInner> {
         self.inner.exclusive_access()
     }
+    // 用于创建初始化进程
     pub fn new(elf_data: &[u8]) -> Arc<Self> {
         println!("[kernel] TaskControlBlock::new: start creating a new process");
         let (memory_set, user_sp, entry_point, _phdr, _phnum, _phent)
@@ -89,7 +90,7 @@ impl ProcessControlBlock {
             })
         });
         // 为pcb创建主线程
-        let task_control_block = TaskControlBlock{
+        let task_control_block = Arc::new(TaskControlBlock{
             process: Arc::downgrade(&proc_control_block),
             tid: tid_handle.clone(),
             kernel_stack,
@@ -107,8 +108,9 @@ impl ProcessControlBlock {
                 signals: SignalFlags::empty(),
 
             })
-        };
-
+        });
+        // 直接把初始线程加入核心0的任务队列，不放入全局任务池
+        add_task(task_control_block.clone());
         // prepare TrapContext in user space
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
         // 发现问题：这样解引用写入会炸
@@ -121,7 +123,7 @@ impl ProcessControlBlock {
             trap_handler as *const () as usize,
         );
         debug!("TaskControlBlock::new: finished creating a new process");
-        proc_control_block.inner.exclusive_access().tasks.push(Arc::new(task_control_block));
+        proc_control_block.inner.exclusive_access().tasks.push(task_control_block);
         // 返回PCB
         proc_control_block
     }
@@ -336,7 +338,7 @@ impl ProcessControlBlock {
             })
         });
 
-        let new_task = TaskControlBlock {
+        let new_task = Arc::new(TaskControlBlock {
             process: Arc::downgrade(&proc_control_block),
             tid: tid_handle.clone(),
             kernel_stack: kernel_stack,
@@ -353,7 +355,7 @@ impl ProcessControlBlock {
                 exit_code: 0,
                 signals: caller_task.inner_exclusive_access().signals,
             }),
-        };
+        });
         // modify kernel_sp in trap_cx
         // **** access child PCB exclusively
         let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
@@ -368,11 +370,10 @@ impl ProcessControlBlock {
         if let Some(sp) = sp {
             trap_cx.set_sp(sp);
         }
-        let new_task_arc = Arc::new(new_task);
-        // 将任务加入全局任务池, 暂未实现
-        add_task_into_pool(new_task_arc.clone());
+        // 将任务加入全局任务池
+        add_task_into_pool(new_task.clone());
         // 把任务加入进程的线程列表
-        proc_control_block.inner.exclusive_access().tasks.push(new_task_arc.clone());
+        proc_control_block.inner.exclusive_access().tasks.push(new_task);
         // add child
         parent_inner.children.push(proc_control_block.clone());
         // return
