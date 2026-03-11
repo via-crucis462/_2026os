@@ -52,6 +52,15 @@ pub struct MemorySet {
 }
 
 impl MemorySet {
+    #[cfg(target_arch = "loongarch64")]
+    fn flush_tlb_after_mapping_change() {
+        unsafe {
+            // 映射关系发生变化后，失效陈旧 TLB 项。
+            asm!("invtlb 0, $r0, $r0");
+            asm!("dbar 0");
+        }
+    }
+
     /// Create a new empty `MemorySet`.
     pub fn new_bare() -> Self {
         Self {
@@ -412,6 +421,8 @@ impl MemorySet {
             .find(|area| area.vpn_range.get_start() == start.floor())
         {
             area.shrink_to(&mut self.page_table, new_end.ceil());
+            #[cfg(target_arch = "loongarch64")]
+            Self::flush_tlb_after_mapping_change();
             true
         } else {
             false
@@ -427,6 +438,8 @@ impl MemorySet {
             .find(|area| area.vpn_range.get_start() == start.floor())
         {
             area.append_to(&mut self.page_table, new_end.ceil());
+            #[cfg(target_arch = "loongarch64")]
+            Self::flush_tlb_after_mapping_change();
             true
         } else {
             false
@@ -500,6 +513,9 @@ impl MemorySet {
         VirtAddr::from(start_va + length),
             permission,
         );
+
+        #[cfg(target_arch = "loongarch64")]
+        Self::flush_tlb_after_mapping_change();
 
         Ok(start_va)
         
@@ -623,6 +639,8 @@ impl MemorySet {
             |area| area.vpn_range.get_start() < area.vpn_range.get_end()||
             area.vpn_range.get_start() <= brk_end.into()//brk之前的全部保留
             );
+        #[cfg(target_arch = "loongarch64")]
+        Self::flush_tlb_after_mapping_change();
         Ok(())
     }
     // brk的实现（通过调整brk区域大小实现）
