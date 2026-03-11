@@ -6,6 +6,7 @@ use super::{StepByOne, VPNRange};
 use super::id::*;
 #[allow(unused)]
 use crate::arch::config::*;
+//use crate::arch::mm;
 use crate::mm::mmap;
 use crate::sync::MPSafeCell;
 use alloc::collections::BTreeMap;
@@ -450,25 +451,32 @@ impl MemorySet {
         &mut self,
         addr: usize,
         length: usize,
-        prot: mmap::MMapProt
+        prot: mmap::MMapProt,
+        mmap_flags: mmap::MMapFlags
     ) -> Result<usize, i32> {
         let mut start_va = addr;
         if start_va == 0 {
             if let Some(new_addr) = self.find_free_area(length) {
                 start_va = new_addr;
             } else {
-                println!("[kernel] mmap failed: no suitable free area found for length {:#x}", length);
+                //println!("[kernel] mmap failed: no suitable free area found for length {:#x}", length);
                 return Err(-1);
             }
         }
         else {
                     // 最少分配一页
-                let length = (length + PAGE_SIZE) & !(PAGE_SIZE - 1);
-
+                let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
                 // 检查冲突
                 if self.has_conflict(start_va, length) {
-                    println!("[kernel] mmap failed: address range [{:#x}, {:#x}) conflicts with existing mappings", start_va, start_va + length);
-                    return Err(-1);
+                    if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED) {
+                        if let Ok(_ret) = self.munmap(start_va, length) {
+                            // Handle the result if needed
+                            //println!("[kernel] mmap: MAP_FIXED flag set, unmapped conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
+                        }else {
+                            //println!("[kernel] mmap: MAP_FIXED flag set, but failed to unmap conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
+                            return Err(-1);
+                        }
+                    }
                 }
             }
             // 设置权限
@@ -485,7 +493,7 @@ impl MemorySet {
         if prot != mmap::MMapProt::PROT_NONE {
             permission |= MapPermission::U;
         }
-
+        //println!("[kernel] mmap: mapping area [{:#x}, {:#x}) with permissions {:?}", start_va, start_va + length, permission);
         // 映射区域
         self.insert_file_area(
         VirtAddr::from(start_va),
@@ -499,7 +507,7 @@ impl MemorySet {
 
     /// 在当前地址空间中寻找一个长度为 length 的空闲连续区域
     pub fn find_free_area(&self, length: usize) -> Option<usize> {
-        println!("[kernel] find_free_area: finding free area for length {:#x}", length);
+        //println!("[kernel] find_free_area: finding free area for length {:#x}", length);
         // 将长度向上对齐到页
         let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         
@@ -512,12 +520,12 @@ impl MemorySet {
         let mut sorted_areas: Vec<_> = self.areas.iter().collect();
         sorted_areas.sort_by_key(|a| a.vpn_range.get_start());
         
-        for area in sorted_areas.iter() {
-            println!(
+        for _area in sorted_areas.iter() {
+            /*println!(
                 "[kernel] find_free_area: existing area [{:#x}, {:#x})",
                 area.vpn_range.get_start().0 * PAGE_SIZE,
                 area.vpn_range.get_end().0 * PAGE_SIZE
-            );
+            );*/
         }
         
         for area in sorted_areas {

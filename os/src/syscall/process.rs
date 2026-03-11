@@ -456,17 +456,17 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
     let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
     
     // 1. 分配并映射虚存及其对应的物理页
-    let ret = match mmap::do_mmap(start, len, mmap_prot) {
+    let ret = match mmap::do_mmap(start, len, mmap_prot , mmap_flags) {
         Ok(addr) => addr,
         Err(_) => {
-            println!("[kernel] sys_mmap: do_mmap failed for start={:#x}, len={:#x}, prot={:?}, flags={:?}", start, len, mmap_prot, mmap_flags);
+            //println!("[kernel] sys_mmap: do_mmap failed for start={:#x}, len={:#x}, prot={:?}, flags={:?}", start, len, mmap_prot, mmap_flags);
             return Errno::ENOMEM.as_isize(); // 内存不足
         }
     };
 
     // 2. 如果是文件映射（非匿名映射）且 FD 合法，读取内容
     if mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) && fd >= 0 {
-        println!("[kernel] sys_mmap: file mapping requested for fd={}, start={:#x}, len={:#x}, prot={:?}, flags={:?}", fd, start, len, mmap_prot, mmap_flags);
+        //println!("[kernel] sys_mmap: file mapping requested for fd={}, start={:#x}, len={:#x}, prot={:?}, flags={:?}", fd, start, len, mmap_prot, mmap_flags);
         let task = current_task().unwrap();
         let token = current_user_token();
         let inner = task.inner_exclusive_access();
@@ -486,7 +486,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
             }
         }
     }
-    println!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
+    //println!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
     ret as isize
 }
 
@@ -506,7 +506,7 @@ pub fn sys_brk(addr: usize) -> isize {
     if let Ok(res) = mmap::do_brk(addr){
         res as isize
     } else {
-        -1
+        current_task().unwrap().inner_exclusive_access().program_brk as isize
     }
 }
 
