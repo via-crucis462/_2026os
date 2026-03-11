@@ -85,6 +85,8 @@ pub struct TaskControlBlockInner {
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
+    pub fd_cloexec: Vec<bool>,
+    pub fd_status: Vec<usize>,
     pub signals: SignalFlags,
     pub signal_mask: SignalFlags,
     // the signal which is being handling
@@ -130,9 +132,13 @@ impl TaskControlBlockInner {
     }
     pub fn alloc_fd(&mut self) -> usize {
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
+            self.fd_cloexec[fd] = false;
+            self.fd_status[fd] = 0;
             fd
         } else {
             self.fd_table.push(None);
+            self.fd_cloexec.push(false);
+            self.fd_status.push(0);
             self.fd_table.len() - 1
         }
     }
@@ -197,6 +203,8 @@ impl TaskControlBlock {
                     // 2 -> stderr
                     Some(Arc::new(Stdout)),
                 ],
+                fd_cloexec: vec![false, false, false],
+                fd_status: vec![0, 0, 0],
                 signals: SignalFlags::empty(),
                 signal_mask: SignalFlags::empty(),
                 handling_sig: -1,
@@ -318,6 +326,16 @@ impl TaskControlBlock {
 
         // 7. 更新 TCB 内部信息
         let mut inner = self.inner_exclusive_access();
+
+        // exec 时关闭带 FD_CLOEXEC 标记的描述符。
+        for fd in 0..inner.fd_table.len() {
+            if inner.fd_cloexec.get(fd).copied().unwrap_or(false) {
+                inner.fd_table[fd] = None;
+                inner.fd_cloexec[fd] = false;
+                inner.fd_status[fd] = 0;
+            }
+        }
+
         inner.memory_set = memory_set;
         #[cfg(target_arch = "riscv64")]
         {
@@ -386,6 +404,8 @@ impl TaskControlBlock {
                 new_fd_table.push(None);
             }
         }
+        let new_fd_cloexec = parent_inner.fd_cloexec.clone();
+        let new_fd_status = parent_inner.fd_status.clone();
         let task_control_block = Arc::new(TaskControlBlock {
             pid: pid_handle,
             // 父进程名加子进程pid
@@ -401,6 +421,8 @@ impl TaskControlBlock {
                 children: Vec::new(),
                 exit_code: 0,
                 fd_table: new_fd_table,
+                fd_cloexec: new_fd_cloexec,
+                fd_status: new_fd_status,
                 signals: SignalFlags::empty(),
                 // inherit the signal_mask and signal_action
                 signal_mask: parent_inner.signal_mask,
@@ -469,7 +491,7 @@ impl TaskControlBlock {
             return Ok(self.inner_exclusive_access().program_brk);
         }
         // 超范围panic
-        let size: i32 = i32::try_from(addr).unwrap() - self.inner_exclusive_access().program_brk as i32;
+        let size: isize = addr as isize - self.inner_exclusive_access().program_brk as isize;
         let mut inner = self.inner_exclusive_access();
         let heap_bottom = inner.heap_bottom;
         let _old_break = inner.program_brk;
@@ -500,10 +522,11 @@ impl TaskControlBlock {
         &self,
         addr: usize,
         length: usize,
-        prot: mmap::MMapProt
+        prot: mmap::MMapProt,
+        flags: mmap::MMapFlags
     ) -> Result<usize, i32> {
         let mut inner = self.inner_exclusive_access();
-        inner.memory_set.mmap(addr, length, prot)
+        inner.memory_set.mmap(addr, length, prot, flags)
     }
     /// 处理munmap
     pub fn munmap(&self, addr: usize, length: usize) -> Result<(), i32> {
