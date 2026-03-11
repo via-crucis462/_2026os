@@ -85,11 +85,10 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
 const AT_FDCWD: isize = -100;
 
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isize {
-    println!("[Trace] sys_open(path={:?}, flags={:#x})", path, flags);
     let task = current_task().unwrap();
     let token = current_user_token();
     let path_str = translated_str(token, path);
-    debug!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
+    println!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
