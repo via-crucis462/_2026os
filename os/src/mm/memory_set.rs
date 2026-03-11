@@ -452,54 +452,54 @@ impl MemorySet {
         length: usize,
         prot: mmap::MMapProt
     ) -> Result<usize, i32> {
-        let start_va = addr;
+        let mut start_va = addr;
         if start_va == 0 {
             if let Some(new_addr) = self.find_free_area(length) {
-                return Ok(new_addr)
+                start_va = new_addr;
             } else {
                 println!("[kernel] mmap failed: no suitable free area found for length {:#x}", length);
                 return Err(-1);
             }
         }
         else {
-                // 最少分配一页
-            let length = (length + PAGE_SIZE) & !(PAGE_SIZE - 1);
+                    // 最少分配一页
+                let length = (length + PAGE_SIZE) & !(PAGE_SIZE - 1);
 
-            // 检查冲突
-            if self.has_conflict(start_va, length) {
-                println!("[kernel] mmap failed: address range [{:#x}, {:#x}) conflicts with existing mappings", start_va, start_va + length);
-                return Err(-1);
+                // 检查冲突
+                if self.has_conflict(start_va, length) {
+                    println!("[kernel] mmap failed: address range [{:#x}, {:#x}) conflicts with existing mappings", start_va, start_va + length);
+                    return Err(-1);
+                }
             }
-
             // 设置权限
-            let mut permission = MapPermission::empty();
-            if prot.contains(mmap::MMapProt::PROT_READ) {
-                permission |= MapPermission::R;
-            }
-            if prot.contains(mmap::MMapProt::PROT_WRITE) {
-                permission |= MapPermission::W;
-            }
-            if prot.contains(mmap::MMapProt::PROT_EXEC) {
-                permission |= MapPermission::X;
-            }
-            if prot != mmap::MMapProt::PROT_NONE {
-                permission |= MapPermission::U;
-            }
-
-            // 映射区域
-            self.insert_file_area(
-                VirtAddr::from(start_va),
-                VirtAddr::from(start_va + length),
-                permission,
-            );
-
-            Ok(start_va)
+        let mut permission = MapPermission::empty();
+        if prot.contains(mmap::MMapProt::PROT_READ) {
+            permission |= MapPermission::R;
         }
+        if prot.contains(mmap::MMapProt::PROT_WRITE) {
+            permission |= MapPermission::W;
+        }
+        if prot.contains(mmap::MMapProt::PROT_EXEC) {
+            permission |= MapPermission::X;
+        }
+        if prot != mmap::MMapProt::PROT_NONE {
+            permission |= MapPermission::U;
+        }
+
+        // 映射区域
+        self.insert_file_area(
+        VirtAddr::from(start_va),
+        VirtAddr::from(start_va + length),
+            permission,
+        );
+
+        Ok(start_va)
         
     }
 
     /// 在当前地址空间中寻找一个长度为 length 的空闲连续区域
     pub fn find_free_area(&self, length: usize) -> Option<usize> {
+        println!("[kernel] find_free_area: finding free area for length {:#x}", length);
         // 将长度向上对齐到页
         let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         
@@ -511,6 +511,14 @@ impl MemorySet {
         // 获取按起始虚拟页号排序后的区域列表
         let mut sorted_areas: Vec<_> = self.areas.iter().collect();
         sorted_areas.sort_by_key(|a| a.vpn_range.get_start());
+        
+        for area in sorted_areas.iter() {
+            println!(
+                "[kernel] find_free_area: existing area [{:#x}, {:#x})",
+                area.vpn_range.get_start().0 * PAGE_SIZE,
+                area.vpn_range.get_end().0 * PAGE_SIZE
+            );
+        }
         
         for area in sorted_areas {
             // 获取当前已映射区域的起始字节地址
