@@ -240,7 +240,7 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     }
 }
 
-pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut Statx) -> isize {
+pub fn sys_statx(dirfd: isize, path: *const u8,  flags: u32, mask: u32,st: *mut Statx) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
     let path_str = translated_str(token, path);
