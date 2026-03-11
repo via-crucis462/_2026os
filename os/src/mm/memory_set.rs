@@ -605,6 +605,10 @@ impl MemorySet {
                     let right_ft = mid_ft.split_off(&end_vpn);
                     // 中间部分解除映射
                     drop(mid_ft);
+                    // 从页表中清除
+                    for vpn in VPNRange::new(start_vpn, end_vpn) {
+                        area.unmap_one(&mut self.page_table, vpn);
+                    }
                     // 新建右边部分
                     new_area = Some(MapArea::new(
                         VirtAddr::from(end),
@@ -622,7 +626,7 @@ impl MemorySet {
                     area.resize(end_vpn, area.vpn_range.get_end());
                 } else if inc_right {
                     // 删右边部分
-                    area.shrink_to(&mut self.page_table, end_vpn);
+                    area.shrink_to(&mut self.page_table, start_vpn);
                 }
 
             }
