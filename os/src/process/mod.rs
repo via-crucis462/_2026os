@@ -140,7 +140,7 @@ lazy_static! {
 ///Add init process to the manager
 pub fn add_initproc() {
     add_task(INITTASK.clone());
-    info!("add_initproc: pid={}", INITPROC.getpid());
+    info!("add_initproc: pid={}", INITTASK.getpid());
 }
 
 /// Check if the current task has any signal to handle
