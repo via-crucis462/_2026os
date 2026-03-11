@@ -9,7 +9,7 @@ use crate::syscall::translated_ref;
 
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
-   
+
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
@@ -18,7 +18,6 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     }
 
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
-    
     //获取文件名（需确保 File trait 实现了 get_dentry）
     let _filename = if let Some(dentry) = file.get_dentry() {
         dentry.name.clone()
@@ -88,7 +87,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
 const AT_FDCWD: isize = -100;
 
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isize {
-    println!("[Trace] sys_open(path={:?}, flags={:#x})", path, flags);
+    //println!("[Trace] sys_open(path={:?}, flags={:#x})", path, flags);
     let task = current_task().unwrap();
     let token = current_user_token();
     let path_str = translated_str(token, path);
@@ -114,8 +113,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
         }
     };
 
-    let open_flags = OpenFlags::from_bits(flags).unwrap_or(OpenFlags::empty());
-
+    let open_flags = OpenFlags::from_bits_truncate(flags);
     if let Some(inode) = open_file(start_dentry, path_str.as_str(), open_flags) {
         if open_flags.should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
             trace!("VFS: sys_openat failed - '{}' is not a directory", path_str);
@@ -213,14 +211,17 @@ pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+
         return -1;
     }
+
     if fd == new_fd {
         return new_fd as isize;
     }
     while new_fd >= inner.fd_table.len() {
         inner.fd_table.push(None);
     }
+
     inner.fd_table[new_fd] = Some(Arc::clone(inner.fd_table[fd].as_ref().unwrap()));
     new_fd as isize
 }
@@ -396,9 +397,19 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
 
     -1
 }
-pub fn sys_utimensat(_dirfd: i32, _path_ptr: usize, _times_ptr: usize, _flags: usize) -> isize {
+pub fn sys_utimensat(_dirfd: i32, path_ptr: usize, _times_ptr: usize, _flags: usize) -> isize {
+    let task = current_task().unwrap();
+    let token = task.inner_exclusive_access().memory_set.token();
+    let path_str = translated_str(token, path_ptr as *const u8);
 
-    0
+    let cwd = task.inner_exclusive_access().cwd.clone();
+    
+
+    if cwd.find_tree(&path_str, true).is_some() {
+        return 0; 
+    } else {
+        return -2; 
+    }
 }
 pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     let task = current_task().unwrap();
