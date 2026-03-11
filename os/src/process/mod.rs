@@ -19,7 +19,7 @@ pub use id::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, IdHandle};
 pub use task::*;
 pub use pcb::*;
 
-
+use manager::*;
 
 
 
@@ -89,8 +89,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         panic!("All applications completed!");
     }
 
-    // remove from pid2task
-    remove_from_pid2task(task.getpid());
+    // remove from tid2task
+    remove_from_tid2task(task.gettid());
     // **** access current TCB exclusively
     let mut inner = task.inner_exclusive_access();
     // Change status to Zombie

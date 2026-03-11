@@ -44,12 +44,11 @@ impl TaskControlBlock {
     pub fn inner_exclusive_access(&self) -> spin::MutexGuard<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }
+    pub fn parent(&self) -> Arc<ProcessControlBlock> {
+        self.process.upgrade().unwrap()
+    }
     pub fn getpid(&self) -> usize {
-        if let Some(process) = self.process.upgrade() {
-            process.pid.0
-        } else {
-            0
-        }
+        self.parent().pid.0
     }
     pub fn gettid(&self) -> usize {
         self.tid.0

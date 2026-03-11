@@ -1,6 +1,6 @@
 use crate::sync::MPSafeCell;
 use super::*;
-use super::manager::{tid2task, TaskManager};
+use super::manager::*;
 use lazy_static::*;
 use alloc::{
     vec::Vec,
@@ -22,9 +22,8 @@ impl Scheduler {
         &mut self.task_pool
     }
     pub fn auto_get_task(&mut self) -> Vec<Arc<TaskControlBlock>> {
-        let mut total_num = 0;
+        let mut total_num = core::cmp::max(get_task_count(), 1);
         let mut list = Vec::new();
-        get_task_count();
         while let Some(task) = self.task_pool.take_a_task() {
             list.push(task);
             total_num -= 1;
@@ -33,7 +32,6 @@ impl Scheduler {
             }
         }
         list
-        
     }
     
 }
@@ -83,7 +81,11 @@ pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
     SCHEDULER.exclusive_access().get_pool().add_task(task);
 }
 
-pub fn ask_for_task() -> Vec<Arc<TaskControlBlock>> {
-    let list = Vec::new();
+pub fn ask_for_tasks() -> Vec<Arc<TaskControlBlock>> {
+    let list = SCHEDULER.exclusive_access().auto_get_task();
     list
+}
+
+pub fn get_task_count() -> usize {
+    SCHEDULER.exclusive_access().get_pool().count() + task_count_in_mng()
 }
