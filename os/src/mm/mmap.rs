@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 use bitflags::*;
-use crate::task::processor::PROCESSOR;
+use crate::task::processor::*;
 
 // mmap 权限标志
 bitflags! {
@@ -26,18 +26,18 @@ bitflags! {
 
 /// 修改断点
 pub fn do_brk(addr: usize) -> Result<usize, i32> {
-    let task = PROCESSOR.exclusive_access().current().unwrap();
+    let task = current_processor().current().unwrap();
     task.change_program_brk(addr)
 }
 
 /// 处理mmap系统调用的分配部分
 pub fn do_mmap(addr: usize, length: usize, prot: MMapProt) -> Result<usize, i32> {
-    let task = PROCESSOR.exclusive_access().current().unwrap();
+    let task = current_processor().current().unwrap();
     task.mmap(addr, length, prot)
 }
 
 pub fn do_munmap(addr: usize, length: usize) -> Result<(), i32> {
-    let task = PROCESSOR.exclusive_access().current().unwrap();
+    let task = current_processor().current().unwrap();
     task.munmap(addr, length)
 }
 // 尽管文件映射在syscall中实现，但此处设置一个shared区域
