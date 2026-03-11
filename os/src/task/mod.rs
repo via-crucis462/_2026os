@@ -21,7 +21,6 @@ mod switch;
 pub mod fork;
 #[allow(clippy::module_inception)]
 mod task;
-
 use crate::fs::ROOT_DENTRY;
 use crate::fs::{open_file, OpenFlags};
 use alloc::sync::Arc;
@@ -30,7 +29,7 @@ use lazy_static::*;
 use manager::fetch_task;
 use manager::remove_from_pid2task;
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
+pub use task::{TaskControlBlock, TaskStatus, TaskControlBlockInner};
 
 pub use action::{SignalAction, SignalActions};
 pub use manager::{add_task, pid2task};
@@ -101,6 +100,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     inner.memory_set.recycle_data_pages();
     // drop file descriptors
     inner.fd_table.clear();
+    inner.fd_cloexec.clear();
+    inner.fd_status.clear();
     drop(inner);
     // **** release current PCB
     // drop task manually to maintain rc correctly

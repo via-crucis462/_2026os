@@ -21,6 +21,7 @@ bitflags! {
         const MAP_SHARED    = 1 << 0;
         const MAP_PRIVATE   = 1 << 1;
         const MAP_ANONYMOUS = 1 << 2;
+        const MAP_FIXED     = 1 << 4;
     }
 }
 
@@ -31,9 +32,12 @@ pub fn do_brk(addr: usize) -> Result<usize, i32> {
 }
 
 /// 处理mmap系统调用的分配部分
-pub fn do_mmap(addr: usize, length: usize, prot: MMapProt) -> Result<usize, i32> {
+pub fn do_mmap(addr: usize, length: usize, prot: MMapProt, flags: MMapFlags) -> Result<usize, i32> {
+    //println!("do_mmap: addr = {:#x}, length = {}, prot = {:?}", addr, length, prot);
     let task = PROCESSOR.exclusive_access().current().unwrap();
-    task.mmap(addr, length, prot)
+    let ax = task.mmap(addr, length, prot, flags);
+    //println!("do_mmap: result = {:#x?}", ax);
+    ax
 }
 
 pub fn do_munmap(addr: usize, length: usize) -> Result<(), i32> {

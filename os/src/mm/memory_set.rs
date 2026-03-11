@@ -6,6 +6,7 @@ use super::{StepByOne, VPNRange};
 use super::id::*;
 #[allow(unused)]
 use crate::arch::config::*;
+//use crate::arch::mm;
 use crate::mm::mmap;
 use crate::sync::MPSafeCell;
 use alloc::collections::BTreeMap;
@@ -51,6 +52,15 @@ pub struct MemorySet {
 }
 
 impl MemorySet {
+    #[cfg(target_arch = "loongarch64")]
+    fn flush_tlb_after_mapping_change() {
+        unsafe {
+            // 映射关系发生变化后，失效陈旧 TLB 项。
+            asm!("invtlb 0, $r0, $r0");
+            asm!("dbar 0");
+        }
+    }
+
     /// Create a new empty `MemorySet`.
     pub fn new_bare() -> Self {
         Self {
@@ -411,6 +421,8 @@ impl MemorySet {
             .find(|area| area.vpn_range.get_start() == start.floor())
         {
             area.shrink_to(&mut self.page_table, new_end.ceil());
+            #[cfg(target_arch = "loongarch64")]
+            Self::flush_tlb_after_mapping_change();
             true
         } else {
             false
@@ -426,6 +438,8 @@ impl MemorySet {
             .find(|area| area.vpn_range.get_start() == start.floor())
         {
             area.append_to(&mut self.page_table, new_end.ceil());
+            #[cfg(target_arch = "loongarch64")]
+            Self::flush_tlb_after_mapping_change();
             true
         } else {
             false
@@ -450,25 +464,35 @@ impl MemorySet {
         &mut self,
         addr: usize,
         length: usize,
-        prot: mmap::MMapProt
+        prot: mmap::MMapProt,
+        mmap_flags: mmap::MMapFlags
     ) -> Result<usize, i32> {
         let mut start_va = addr;
         if start_va == 0 {
             if let Some(new_addr) = self.find_free_area(length) {
                 start_va = new_addr;
             } else {
+                //println!("[kernel] mmap failed: no suitable free area found for length {:#x}", length);
                 return Err(-1);
             }
         }
-        // 最少分配一页
-        let length = (length + PAGE_SIZE) & !(PAGE_SIZE - 1);
-
-        // 检查冲突
-        if self.has_conflict(start_va, length) {
-            return Err(-1);
-        }
-
-        // 设置权限
+        else {
+                    // 最少分配一页
+                let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+                // 检查冲突
+                if self.has_conflict(start_va, length) {
+                    if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED) {
+                        if let Ok(_ret) = self.munmap(start_va, length) {
+                            // Handle the result if needed
+                            //println!("[kernel] mmap: MAP_FIXED flag set, unmapped conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
+                        }else {
+                            //println!("[kernel] mmap: MAP_FIXED flag set, but failed to unmap conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
+                            return Err(-1);
+                        }
+                    }
+                }
+            }
+            // 设置权限
         let mut permission = MapPermission::empty();
         if prot.contains(mmap::MMapProt::PROT_READ) {
             permission |= MapPermission::R;
@@ -482,37 +506,62 @@ impl MemorySet {
         if prot != mmap::MMapProt::PROT_NONE {
             permission |= MapPermission::U;
         }
-
+        //println!("[kernel] mmap: mapping area [{:#x}, {:#x}) with permissions {:?}", start_va, start_va + length, permission);
         // 映射区域
         self.insert_file_area(
-            VirtAddr::from(start_va),
-            VirtAddr::from(start_va + length),
+        VirtAddr::from(start_va),
+        VirtAddr::from(start_va + length),
             permission,
         );
 
+        #[cfg(target_arch = "loongarch64")]
+        Self::flush_tlb_after_mapping_change();
+
         Ok(start_va)
+        
     }
 
+    /// 在当前地址空间中寻找一个长度为 length 的空闲连续区域
     pub fn find_free_area(&self, length: usize) -> Option<usize> {
-        // 从用户空间的 0x4000_0000 开始往上找
-        let mut current_addr = 0x4000_0000;
+        //println!("[kernel] find_free_area: finding free area for length {:#x}", length);
+        // 将长度向上对齐到页
+        let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         
+        // 搜索起点：LoongArch 推荐的用户基址 0x1_2000_0000
+        let mut current_addr: usize = USER_APP_BASE;
+        // 搜索终点：用户虚拟空间上限 (39位宽下为 512GB)
+        let limit_addr: usize = USER_APP_MAX_SIZE; 
         
+        // 获取按起始虚拟页号排序后的区域列表
         let mut sorted_areas: Vec<_> = self.areas.iter().collect();
         sorted_areas.sort_by_key(|a| a.vpn_range.get_start());
         
+        for _area in sorted_areas.iter() {
+            /*println!(
+                "[kernel] find_free_area: existing area [{:#x}, {:#x})",
+                area.vpn_range.get_start().0 * PAGE_SIZE,
+                area.vpn_range.get_end().0 * PAGE_SIZE
+            );*/
+        }
+        
         for area in sorted_areas {
-            let area_start: usize = area.vpn_range.get_start().into();
+            // 获取当前已映射区域的起始字节地址
+            let area_start: usize = area.vpn_range.get_start().0 * PAGE_SIZE;
+
+            // 如果当前探测点到该区域起始点之间的“空隙”足够容纳目标长度
             if current_addr + length <= area_start {
                 return Some(current_addr);
             }
-            let area_end: usize = area.vpn_range.get_end().into();
+            
+            // 否则，将探测点更新为当前区域的结束地址
+            let area_end: usize = area.vpn_range.get_end().0 * PAGE_SIZE;
             if area_end > current_addr {
                 current_addr = area_end;
             }
         }
         
-        if current_addr + length < 0x8000_0000 {
+        // 检查最后一段已映射区域之后到上限之前是否有空间
+        if current_addr + length <= limit_addr {
             Some(current_addr)
         } else {
             None
@@ -590,6 +639,8 @@ impl MemorySet {
             |area| area.vpn_range.get_start() < area.vpn_range.get_end()||
             area.vpn_range.get_start() <= brk_end.into()//brk之前的全部保留
             );
+        #[cfg(target_arch = "loongarch64")]
+        Self::flush_tlb_after_mapping_change();
         Ok(())
     }
     // brk的实现（通过调整brk区域大小实现）
