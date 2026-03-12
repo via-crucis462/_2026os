@@ -53,6 +53,8 @@ use core::arch::global_asm;
 #[allow(unused)]
 use crate::arch::la;
 
+use lazy_static::*;
+use crate::sync::MPSafeCell;
 
 #[cfg(target_arch = "riscv64")]
 global_asm!(include_str!("arch/riscv/entry.asm"));
@@ -71,6 +73,13 @@ fn clear_bss() {
             .fill(0);
     }
 }
+
+// 记录启动核是否已经完成初始化，用于动态判断是否是主核（启动核）
+lazy_static! {
+    pub static ref MAIN_HART_INITED: MPSafeCell<bool> = MPSafeCell::new(false);
+}
+
+
 extern "C" {
     fn _start();
 }
@@ -81,13 +90,19 @@ extern "C" {
 /// 主核的入口
 #[allow(unused)]
 pub fn rust_main(hart_id: usize) -> ! {
-    if hart_id == 0 {
+    if !*MAIN_HART_INITED.exclusive_access() {
         clear_bss();
         logging::init();
-        for i in 1..CPU_CORE_NUM {
+        info!("[kernel] Hello, world!");
+        let mut main_hart_inited = MAIN_HART_INITED.exclusive_access();
+        *main_hart_inited = true;
+        for i in 0..hart_id  {
             start_hart(i, _start as *const() as usize, 0);
         }
-        info!("[kernel] Hello, world!");
+        for i in hart_id..CPU_CORE_NUM {
+            start_hart(i, _start as *const() as usize, 0);
+        }
+        drop(main_hart_inited);
         loop{
             unsafe {
                 asm!("wfi");
@@ -103,8 +118,12 @@ pub fn rust_main(hart_id: usize) -> ! {
         task::run_tasks();
         panic!("Unreachable in rust_main!");
     } else {
+        let mut main_hart_inited = MAIN_HART_INITED.exclusive_access();
+        *main_hart_inited = true;
         info!("[kernel] Hello from hart {}!", hart_id);
-        loop {
+        // 输出完才释放
+        drop(main_hart_inited);
+        loop{
             unsafe {
                 asm!("wfi");
             }
