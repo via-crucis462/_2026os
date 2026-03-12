@@ -57,7 +57,7 @@ impl VirtIOBlock {
         let blk = VirtIOBlk::new(transport).expect("Failed to initialize VirtIOBlk");
         Self { inner: MPSafeCell::new(blk) }
     }
-    pub unsafe fn visit(&self) -> RefMut<'_,VirtIOBlk<VirtioHal, PciTransport>> {
+    pub unsafe fn visit(&self) -> spin::MutexGuard<'_, VirtIOBlk<VirtioHal, PciTransport>> {
         self.inner.exclusive_access()
     }
 }
