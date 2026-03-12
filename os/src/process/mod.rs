@@ -28,7 +28,7 @@ pub mod processor;
 
 mod switch;
 /// fork相关实现
-pub mod fork;
+pub mod clone;
 #[allow(clippy::module_inception)]
 
 
@@ -46,7 +46,7 @@ pub use action::{SignalAction, SignalActions};
 pub use manager::{add_task, tid2task};
 
 pub use processor::{
-    current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
+    current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task, current_tid
 };
 pub use signal::{SignalFlags, MAX_SIG};
 
@@ -102,10 +102,12 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // do not move to its parent but under initproc
 
     // ++++++ access initproc TCB exclusively
+    // 
     {
-        let mut initproc_inner = INITPROC.inner_exclusive_access();
+        let initproc = INITTASK.process();
+        let mut initproc_inner = initproc.inner_exclusive_access();
         for child in proc_inner.children.iter() {
-            child.inner_exclusive_access().parent = Some(Arc::downgrade(&INITPROC));
+            child.inner_exclusive_access().parent = Some(Arc::downgrade(&initproc));
             initproc_inner.children.push(child.clone());
         }
     }
@@ -194,8 +196,9 @@ fn call_kernel_signal_handler(signal: SignalFlags) {
 fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
     let task = current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
-
-    let handler = task_inner.signal_actions.table[sig].handler;
+    let proc = task.process();
+    let proc_inner = proc.inner_exclusive_access();
+    let handler = proc_inner.signal_actions.table[sig].handler;
     if handler != 0 {
         // user handler
 
@@ -219,10 +222,13 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
 }
 
 /// Check if the current task has any signal to handle
+/// 仅部分修改
 fn check_pending_signals() {
     for sig in 0..(MAX_SIG + 1) {
         let task = current_task().unwrap();
+        let proc = task.process();
         let task_inner = task.inner_exclusive_access();
+        let proc_inner = proc.inner_exclusive_access();
         let signal = SignalFlags::from_bits(1 << sig).unwrap();
         if task_inner.signals.contains(signal) && (!task_inner.signal_mask.contains(signal)) {
             let mut masked = true;
@@ -231,7 +237,7 @@ fn check_pending_signals() {
                 masked = false;
             } else {
                 let handling_sig = handling_sig as *const () as usize;
-                if !task_inner.signal_actions.table[handling_sig]
+                if !proc_inner.signal_actions.table[handling_sig]
                     .mask
                     .contains(signal)
                 {

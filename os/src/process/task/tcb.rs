@@ -72,13 +72,14 @@ pub struct TaskControlBlockInner {
     pub signal_mask: SignalFlags,
     // the signal which is being handling
     pub handling_sig: isize,
-    // Signal actions
-    pub signal_actions: SignalActions,
+    
     // if the task is killed
     pub killed: bool,
     // if the task is frozen by a signal
     pub frozen: bool,
     pub trap_ctx_backup: Option<TrapContext>,
+
+    pub clear_child_tid: usize,// 线程清理指针
 }
 
 impl TaskControlBlockInner {

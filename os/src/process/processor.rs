@@ -111,6 +111,10 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
     current_processor().current()
 }
 
+pub fn current_tid() -> usize {
+    current_task().unwrap().gettid()
+}
+
 /// Get the current user token(addr of page table)
 pub fn current_user_token() -> usize {
     let task = current_task().unwrap();

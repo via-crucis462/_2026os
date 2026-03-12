@@ -5,11 +5,62 @@
 
 use super::TaskControlBlock;
 use super::schedule::*;
+use super::pcb::*;
 use crate::sync::MPSafeCell;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use lazy_static::*;
 use crate::arch::config::CPU_CORE_NUM;
+
+
+lazy_static!{
+    pub static ref PROCESS_MANAGER: MPSafeCell<ProcessManager> = MPSafeCell::new(ProcessManager{
+        process_pool: BTreeMap::new(),
+    });
+}
+
+pub struct ProcessManager{
+    // 进程池
+    process_pool: BTreeMap<usize, Arc<ProcessControlBlock>>,
+}
+
+impl ProcessManager{
+    pub fn add_process(&mut self, process: Arc<ProcessControlBlock>){
+        self.process_pool.insert(process.getpid(), process);
+    }
+
+    pub fn get_process(&self, pid: usize) -> Option<Arc<ProcessControlBlock>>{
+        self.process_pool.get(&pid).map(Arc::clone)
+    }
+
+    pub fn remove_process(&mut self, pid: usize){
+        if self.process_pool.remove(&pid).is_none(){
+            panic!("cannot find pid {} in process pool!", pid);
+        }
+    }
+}
+
+
+pub fn add_process(process: Arc<ProcessControlBlock>){
+    PROCESS_MANAGER.exclusive_access().add_process(process);
+}
+
+pub fn get_process(pid: usize) -> Option<Arc<ProcessControlBlock>>{
+    PROCESS_MANAGER.exclusive_access().get_process(pid)
+}
+
+pub fn remove_process(pid: usize){
+    PROCESS_MANAGER.exclusive_access().remove_process(pid);
+}
+
+pub fn pop_process(pid: usize) -> Option<Arc<ProcessControlBlock>>{
+    let mut manager = PROCESS_MANAGER.exclusive_access();
+    let process = manager.get_process(pid);
+    if process.is_some(){
+        manager.remove_process(pid);
+    }
+    process
+}
 
 pub struct TaskManager {
     ready_queue: VecDeque<Arc<TaskControlBlock>>,
@@ -36,11 +87,7 @@ impl TaskManager {
 lazy_static! {
     /// TASK_MANAGER instance through lazy_static!
     pub static ref TASK_MANAGERS: [MPSafeCell<TaskManager>; CPU_CORE_NUM] ={
-        let mut arr: [MPSafeCell<TaskManager>; CPU_CORE_NUM] = unsafe { core::mem::zeroed() };
-        for i in 0..CPU_CORE_NUM {
-            arr[i] = MPSafeCell::new(TaskManager::new());
-        }
-        arr
+        core::array::from_fn(|_| MPSafeCell::new(TaskManager::new()))
     };
     /// PID2PCB instance (map of pid to pcb)
     pub static ref TID2TCB: MPSafeCell<BTreeMap<usize, Arc<TaskControlBlock>>> =

@@ -17,7 +17,7 @@ use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 use crate::syscall::syscall;
 use crate::task::{
     check_signals_error_of_current, current_add_signal, current_trap_cx, current_user_token,
-    exit_current_and_run_next, handle_signals, suspend_current_and_run_next, SignalFlags,
+    exit_current_and_run_next, handle_signals, suspend_current_and_run_next, SignalFlags, current_tid, current_task
 };
 use crate::arch::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
@@ -81,7 +81,7 @@ pub fn trap_handler() -> ! {
             println!("[kernel] Stval:  {:#x} (Bad Address)", stval);
             error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, bad instruction = {:#x}",
                 scause.cause(),
-                crate::task::current_task().unwrap().pid.0,
+                current_task().unwrap().process().pid.0,
                 stval,
                 current_trap_cx().get_rt(),
             );

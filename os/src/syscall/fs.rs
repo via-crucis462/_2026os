@@ -9,7 +9,8 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
    
     let token = current_user_token();
     let task = current_task().unwrap();
-    let inner = task.process().inner_exclusive_access();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
         return -1;
     }
@@ -60,11 +61,11 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
 }
 
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
-
-    trace!("kernel:pid[{}] sys_read", current_task().unwrap().pid.0);
+    trace!("kernel:pid[{}] sys_read", current_task().unwrap().process().pid.0);
     let token = current_user_token();
     let task = current_task().unwrap();
-    let inner = task.process().inner_exclusive_access();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -87,6 +88,7 @@ const AT_FDCWD: isize = -100;
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isize {
     println!("[Trace] sys_open(path={:?}, flags={:#x})", path, flags);
     let task = current_task().unwrap();
+    let proc = task.process();
     let token = current_user_token();
     let path_str = translated_str(token, path);
     debug!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
@@ -94,9 +96,9 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {
-        task.inner_exclusive_access().cwd.clone()
+        proc.inner_exclusive_access().cwd.clone()
     } else {
-        let inner = task.process().inner_exclusive_access();
+        let inner = proc.inner_exclusive_access();
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
             return -1;
         }
@@ -118,7 +120,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
             trace!("VFS: sys_openat failed - '{}' is not a directory", path_str);
             return -1;
         }
-        let mut inner = task.inner_exclusive_access();
+        let mut inner = proc.inner_exclusive_access();
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(inode);
         fd as isize
@@ -129,9 +131,10 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
 }
 
 pub fn sys_close(fd: usize) -> isize {
-	trace!("kernel:pid[{}] sys_close", current_task().unwrap().pid.0);
+	trace!("kernel:pid[{}] sys_close", current_task().unwrap().process().pid.0);
     let task = current_task().unwrap();
-    let mut inner = task.inner_exclusive_access();
+    let proc = task.process();
+    let mut inner = proc.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -144,6 +147,7 @@ pub fn sys_close(fd: usize) -> isize {
 
 pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> isize {
     let task = current_task().unwrap();
+    let proc = task.process();
     let token = current_user_token();
     let path_str = translated_str(token, path);
     debug!("[kernel] sys_accessat: dirfd={}, path={}, mode={}", dirfd, path_str, _mode);
@@ -151,9 +155,9 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> i
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {
-        task.inner_exclusive_access().cwd.clone()
+        proc.inner_exclusive_access().cwd.clone()
     } else {
-        let inner = task.process().inner_exclusive_access();
+        let inner = proc.inner_exclusive_access();
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
             return -1;
         }
@@ -176,10 +180,11 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> i
 }
 
 pub fn sys_pipe(pipe: *mut u32) -> isize {
-	println!("kernel:pid[{}] sys_pipe", current_task().unwrap().pid.0);
+	println!("kernel:pid[{}] sys_pipe", current_task().unwrap().process().pid.0);
     let task = current_task().unwrap();
+    let proc = task.process();
     let token = current_user_token();
-    let mut inner = task.inner_exclusive_access();
+    let mut inner = proc.inner_exclusive_access();
     let (pipe_read, pipe_write) = make_pipe();
     let read_fd = inner.alloc_fd();
     inner.fd_table[read_fd] = Some(pipe_read);
@@ -191,9 +196,10 @@ pub fn sys_pipe(pipe: *mut u32) -> isize {
 }
 
 pub fn sys_dup(fd: usize) -> isize {
-	trace!("kernel:pid[{}] sys_dup", current_task().unwrap().pid.0);
+	trace!("kernel:pid[{}] sys_dup", current_task().unwrap().process().pid.0);
     let task = current_task().unwrap();
-    let mut inner = task.inner_exclusive_access();
+    let proc = task.process();
+    let mut inner = proc.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -206,9 +212,10 @@ pub fn sys_dup(fd: usize) -> isize {
 }
 
 pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
-    trace!("kernel:pid[{}] sys_dup2", current_task().unwrap().pid.0);
+    trace!("kernel:pid[{}] sys_dup2", current_task().unwrap().process().pid.0);
     let task = current_task().unwrap();
-    let mut inner = task.inner_exclusive_access();
+    let proc = task.process();
+    let mut inner = proc.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
         return -1;
     }
@@ -225,7 +232,8 @@ pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
 pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
-    let inner = task.process().inner_exclusive_access();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -243,6 +251,7 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
 pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut Statx) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
+    let proc = task.process();
     let path_str = translated_str(token, path);
     println!("[kernel] sys_statx: dirfd={}, path={}, mask={:#x}, flags={:#x}", dirfd, path_str, mask, flags);
     const AT_EMPTY_PATH: u32 = 0x1000;
@@ -251,7 +260,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
             return -2; 
         }
 
-        let inner = task.process().inner_exclusive_access();
+        let inner = proc.inner_exclusive_access();
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
             return -9; 
         }
@@ -269,9 +278,9 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {
-        task.inner_exclusive_access().cwd.clone()
+        proc.inner_exclusive_access().cwd.clone()
     } else {
-        let inner = task.process().inner_exclusive_access();
+        let inner = proc.inner_exclusive_access();
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
             return -1;
         }
@@ -310,7 +319,7 @@ pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
     }
 }
 pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_linkat NOT IMPLEMENTED", current_task().unwrap().pid.0);
+    trace!("kernel:pid[{}] sys_linkat NOT IMPLEMENTED", current_task().unwrap().process().pid.0);
     -38
 }
 pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usize) -> isize {
@@ -323,7 +332,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
     if cmd == 0 || cmd == 1030 {
    
         let task = current_task().unwrap();
-        let mut inner = task.inner_exclusive_access();
+        let proc = task.process();
+        let mut inner = proc.inner_exclusive_access();
 
         if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
             return -1; 
@@ -355,13 +365,14 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
 pub fn sys_unlinkat(path: *const u8) -> isize {
     let token = current_user_token();
     let path_str = translated_str(token, path);
-    trace!("kernel:pid[{}] sys_unlinkat path={}", current_task().unwrap().pid.0, path_str);
+    trace!("kernel:pid[{}] sys_unlinkat path={}", current_task().unwrap().process().pid.0, path_str);
     
     let parent_path_str = parent_path(&path_str);
     let name = file_name(&path_str);
     
     let task = current_task().unwrap();
-    let cwd = task.inner_exclusive_access().cwd.clone();
+    let proc = task.process();
+    let cwd = proc.inner_exclusive_access().cwd.clone();
     
     if let Some(parent_dentry) = cwd.find_tree(&parent_path_str, true) {
         if let Some(_inode_id) = parent_dentry.inode.delete_dir_entry(&name) {
@@ -376,7 +387,8 @@ pub fn sys_unlinkat(path: *const u8) -> isize {
 pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
-    let inner = task.process().inner_exclusive_access();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -396,7 +408,8 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
 pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
-    let inner = task.process().inner_exclusive_access();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
     let path = inner.cwd.get_full_path();
     drop(inner);
 
@@ -425,9 +438,10 @@ pub fn sys_chdir(path: *const u8) -> isize {
     debug!("[kernel] sys_chdir: path={}", path_str);
     
     let task = current_task().unwrap();
-    let cwd = task.inner_exclusive_access().cwd.clone();
+    let proc = task.process();
+    let cwd = proc.inner_exclusive_access().cwd.clone();
     let current_path = {
-        let inner = task.process().inner_exclusive_access();
+        let inner = proc.inner_exclusive_access();
         inner.cwd.get_full_path()
     };
 
@@ -444,7 +458,7 @@ pub fn sys_chdir(path: *const u8) -> isize {
     };
 
     if let Some(inode) = open_file(cwd, full_path.as_str(), OpenFlags::DIRECTORY) {
-        let mut inner = task.inner_exclusive_access();
+        let mut inner = proc.inner_exclusive_access();
         inner.cwd = inode.get_dentry();
         0
     } else {
@@ -493,7 +507,8 @@ pub fn sys_fstatat(_dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
 pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
-    let inner = task.process().inner_exclusive_access();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return -1;
     }
