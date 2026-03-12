@@ -2,9 +2,17 @@
 
 
 pub use crate::{
-    arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, fs::*, mm::{UserBuffer, mmap, translated_byte_buffer, translated_ref, translated_refmut, translated_str}, task::{
-        MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_token, exit_current_and_run_next, fork::*, pid2task, suspend_current_and_run_next
+    arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, 
+    fs::*, 
+    mm::{UserBuffer, mmap, translated_byte_buffer, translated_ref, translated_refmut, translated_str}, 
+    process::{
+        task::{
+            MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_token, exit_current_and_run_next, suspend_current_and_run_next
+        },
+        clone::*,
+        manager::*
     }
+
 };
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 
@@ -59,7 +67,9 @@ pub struct UtsName {
 }
 
 pub fn sys_exit(exit_code: i32) -> ! {
-    trace!("kernel:pid[{}] sys_exit",current_task().unwrap().pid.0);
+    let task = current_task().unwrap();
+    let process = task.process();
+    trace!("kernel:pid[{}] sys_exit", process.pid.0);
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
@@ -75,7 +85,8 @@ pub fn sys_gettid() -> isize {
 }
 pub fn sys_getuid() -> isize {
     let task = current_task().unwrap();
-    let inner = task.process().inner_exclusive_access();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
     inner.uid as isize
 }
 // 假装获取成功，返回 PGID 为 0
@@ -91,46 +102,52 @@ pub fn sys_setpgid(_pid: usize, _pgid: usize) -> isize {
 
 pub fn sys_getgid() -> isize {
     let task = current_task().unwrap();
-    let inner = task.process().inner_exclusive_access();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
     inner.gid as isize
 }
 
 pub fn sys_geteuid() -> isize {
     let task = current_task().unwrap();
-    let inner = task.process().inner_exclusive_access();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
     inner.euid as isize
 }
 
 
 pub fn sys_getegid() -> isize {
     let task = current_task().unwrap();
-    let inner = task.process().inner_exclusive_access();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
     inner.egid as isize
 }
 pub fn sys_setuid(uid: u32) -> isize {
     let task = current_task().unwrap();
-    let mut inner = task.inner_exclusive_access();
-    inner.uid = uid;
-    inner.euid = uid;
+    let proc = task.process();
+    let mut proc_inner = proc.inner_exclusive_access();
+    proc_inner.uid = uid;
+    proc_inner.euid = uid;
     0 
 }
 
 
 pub fn sys_setgid(gid: u32) -> isize {
     let task = current_task().unwrap();
-    let mut inner = task.inner_exclusive_access();
-    
-    inner.gid = gid;
-    inner.egid = gid;
+    let proc = task.process();
+    let mut proc_inner = proc.inner_exclusive_access();
+
+    proc_inner.gid = gid;
+    proc_inner.egid = gid;
     0 
 }
 
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
     let task = current_task().unwrap();
+    let proc = task.process();
     let mut inner = task.inner_exclusive_access();
     
     inner.clear_child_tid = tidptr;
-    task.pid.0 as isize 
+    proc.pid.0 as isize 
 }
 // 假装获取会话 ID 成功，返回 0
 pub fn sys_getsid(_pid: usize) -> isize { 
@@ -218,12 +235,15 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     }
 }
 pub fn sys_getpid() -> isize {
-	trace!("kernel: sys_getpid pid:{}", current_task().unwrap().pid.0);
-    current_task().unwrap().pid.0 as isize
+	let task = current_task().unwrap();
+    let process = task.process();
+	trace!("kernel: sys_getpid pid:{}", process.pid.0);
+    process.pid.0 as isize
 }
 pub fn sys_getppid() -> isize {
     let task = current_task().unwrap();
-    let inner = task.process().inner_exclusive_access();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
     match inner.parent.as_ref().and_then(|p| p.upgrade()) {
         Some(parent) => parent.getpid() as isize,
         None => 0, 
@@ -262,35 +282,50 @@ pub fn sys_uname(uts: *mut UtsName) -> isize {
 }
 
 pub fn _sys_fork() -> isize {
-	trace!("kernel:pid[{}] sys_fork", current_task().unwrap().pid.0);
-    let current_task = current_task().unwrap();
-    let new_task = current_task.fork(None);//此处添加了一个 None 参数
-    let new_pid = new_task.pid.0;
+	let current_task = current_task().unwrap();
+    let current_process = current_task.process();
+	trace!("kernel:pid[{}] sys_fork", current_process.pid.0);
+    let proc = current_task.process();
+    let (new_proc, new_task) = proc.fork(None, current_task);//此处添加了一个 None 参数
+    let new_pid = new_proc.pid.0;
     // modify trap context of new_task, because it returns immediately after switching
     let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
     // we do not have to move to next instruction since we have done it before
     // for child process, fork returns 0
     trap_cx.set_a0(0);
     // add new task to scheduler
+    add_process(new_proc);
     add_task(new_task);
     new_pid as isize
 }
 
-// 部分实现，暂未通过测例
+
+// 在当前进程中克隆出一个线程
+pub const CLONE_THREAD: usize = 0x00010000;
+
+// 部分实现
 pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
-    trace!("kernel:pid[{}] sys_clone", current_task().unwrap().pid.0);
+    trace!("kernel:pid[{}] sys_clone", current_task().unwrap().process().pid.0);
     if func == 0 && stack == 0 && flags == 0 {
         // 不含参数，直接调用旧的 fork 实现
         return _sys_fork();
     }
-    // 含参数的版本
-    do_clone(func, stack, flags)
+    match flags {
+        CLONE_THREAD => {
+            // 线程克隆
+            do_clone_thread(func, stack)
+        }
+        _ => {
+            // 默认按照进程克隆处理
+            do_fork(func, stack, flags)
+        }
+    }
 }
 
 pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
-    let cwd = task.inner_exclusive_access().cwd.clone();
+    let cwd = task.process().inner_exclusive_access().cwd.clone();
     drop(task);
     let path = translated_str(token, path);
     debug!("[kernel] sys_exec: path={}, args_ptr={:#x}", path, args as *const () as usize);
@@ -331,7 +366,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         let task = current_task().unwrap();
         let argc = args_vec.len();
         trace!("[kernel] sys_exec: before task.exec");
-        task.exec(all_data.as_slice(), args_vec);
+        task.process().exec(all_data.as_slice(), args_vec);
         trace!("[kernel] sys_exec: after task.exec");
         // return argc because cx.x[10] will be covered with it later
         argc as isize
@@ -345,38 +380,38 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, _options: usize) -> isize {
     let task = current_task().unwrap();
-    
+    let proc = task.process();
     // 开启一个死循环，直到找到僵尸才 return
     loop {
-        let mut inner = task.inner_exclusive_access();
+        let mut proc_inner = proc.inner_exclusive_access();
         
         // 1. 检查是否存在符合要求的子进程
-        if !inner.children.iter().any(|p| pid == -1 || pid as *const () as usize == p.getpid()) {
+        if !proc_inner.children.iter().any(|p| pid == -1 || pid as *const () as usize == p.getpid()) {
             return -1; // 一个孩子都没有，直接返回错误
         }
     
         // 2. 尝试找一个“已经死掉”的僵尸孩子
-        let pair = inner.children.iter().enumerate().find(|(_, p)| {
+        let pair = proc_inner.children.iter().enumerate().find(|(_, p)| {
             p.inner_exclusive_access().is_zombie() && (pid == -1 || pid as *const () as usize == p.getpid())
         });
     
         if let Some((idx, _)) = pair {
             // --- A. 找到了僵尸！收尸成功 ---
-            let child = inner.children.remove(idx);
+            let child = proc_inner.children.remove(idx);
             assert_eq!(Arc::strong_count(&child), 1);
             let found_pid = child.getpid();
             let exit_code = child.inner_exclusive_access().exit_code;
             
             // 左移 8 位（这里还是要保留的！）
             let status = (exit_code & 0xff) << 8;
-            *translated_refmut(inner.memory_set.token(), exit_code_ptr) = status;
+            *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
             
             return found_pid as isize; // 成功返回
         } else {
             // --- B. 孩子还活着 ---
             
             // 释放锁
-            drop(inner); 
+            drop(proc_inner); 
             
             // 暂停当前进程，让出 CPU 给孩子跑
             suspend_current_and_run_next();
@@ -388,15 +423,17 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, _options: usize) -> isize 
 }
 
 pub fn sys_kill(pid: usize, signum: i32) -> isize {
-	trace!("kernel:pid[{}] sys_kill", current_task().unwrap().pid.0);
-    if let Some(task) = pid2task(pid) {
+    let current = current_task().unwrap();
+    let process = current.process();
+    trace!("kernel:pid[{}] sys_kill", process.pid.0);
+    if let Some(proc) = get_process(pid) {
         if let Some(flag) = SignalFlags::from_bits(1 << signum) {
             // insert the signal if legal
-            let mut task_ref = task.inner_exclusive_access();
-            if task_ref.signals.contains(flag) {
+            let mut inner = proc.inner_exclusive_access();
+            if inner.signals.contains(flag) {
                 return -1;
             }
-            task_ref.signals.insert(flag);
+            inner.signals.insert(flag);
             0
         } else {
             -1
@@ -462,8 +499,9 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
     // 2. 如果是文件映射（非匿名映射）且 FD 合法，读取内容
     if !mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) && fd >= 0 {
         let task = current_task().unwrap();
+        let proc = task.process();
         let token = current_user_token();
-        let inner = task.process().inner_exclusive_access();
+        let inner = proc.inner_exclusive_access();
         
         if (fd as usize) < inner.fd_table.len() {
             if let Some(file) = &inner.fd_table[fd as usize] {
@@ -485,7 +523,9 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
 
 /// YOUR JOB: Implement munmap.
 pub fn sys_munmap(start: usize, len: usize) -> isize {
-    trace!("kernel:pid[{}] sys_munmap NOT COMPLITED", current_task().unwrap().pid.0);
+    let task = current_task().unwrap();
+    let process = task.process();
+    trace!("kernel:pid[{}] sys_munmap NOT COMPLITED", process.pid.0);
     if let Ok(_) = mmap::do_munmap(start,len) {
         0
     } else {
@@ -495,7 +535,9 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
 
 /// change data segment size
 pub fn sys_brk(addr: usize) -> isize {
-    trace!("kernel:pid[{}] sys_brk", current_task().unwrap().pid.0);
+    let task = current_task().unwrap();
+    let process = task.process();
+    trace!("kernel:pid[{}] sys_brk", process.pid.0);
     if let Ok(res) = mmap::do_brk(addr){
         res as isize
     } else {
@@ -506,18 +548,24 @@ pub fn sys_brk(addr: usize) -> isize {
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
 pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_spawn NOT IMPLEMENTED", current_task().unwrap().pid.0);
+    let task = current_task().unwrap();
+    let process = task.process();
+    trace!("kernel:pid[{}] sys_spawn NOT IMPLEMENTED", process.pid.0);
     -1
 }
 
 // YOUR JOB: Set task priority.
 pub fn sys_set_priority(_prio: isize) -> isize {
-    trace!("kernel:pid[{}] sys_set_priority NOT IMPLEMENTED", current_task().unwrap().pid.0);
+    let task = current_task().unwrap();
+    let process = task.process();
+    trace!("kernel:pid[{}] sys_set_priority NOT IMPLEMENTED", process.pid.0);
     -1
 }
 
 pub fn sys_sigprocmask(mask: u32) -> isize {
-    trace!("kernel:pid[{}] sys_sigprocmask", current_task().unwrap().pid.0);
+    let task = current_task().unwrap();
+    let process = task.process();
+    trace!("kernel:pid[{}] sys_sigprocmask", process.pid.0);
     if let Some(task) = current_task() {
         let mut inner = task.inner_exclusive_access();
         let old_mask = inner.signal_mask;
@@ -533,7 +581,9 @@ pub fn sys_sigprocmask(mask: u32) -> isize {
 }
 
 pub fn sys_sigreturn() -> isize {
-    trace!("kernel:pid[{}] sys_sigreturn", current_task().unwrap().pid.0);
+    let task = current_task().unwrap();
+    let process = task.process();
+    trace!("kernel:pid[{}] sys_sigreturn", process.pid.0);
     if let Some(task) = current_task() {
         let mut inner = task.inner_exclusive_access();
         inner.handling_sig = -1;
@@ -566,10 +616,11 @@ pub fn sys_sigaction(
     action: *const SignalAction,
     old_action: *mut SignalAction,
 ) -> isize {
-    trace!("kernel:pid[{}] sys_sigaction", current_task().unwrap().pid.0);
-    let token = current_user_token();
     let task = current_task().unwrap();
-    let mut inner = task.inner_exclusive_access();
+    let proc = task.process();
+    trace!("kernel:pid[{}] sys_sigaction", proc.pid.0);
+    let token = current_user_token();
+    let mut inner = proc.inner_exclusive_access();
     if signum as *const () as usize > MAX_SIG {
         return -1;
     }
@@ -623,13 +674,17 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> isize {
 }
 
 pub fn sys_robust_list() -> isize {
-    trace!("kernel:pid[{}] sys_robust_list NOT IMPLEMENTED", current_task().unwrap().pid.0);
+    let task = current_task().unwrap();
+    let process = task.process();
+    trace!("kernel:pid[{}] sys_robust_list NOT IMPLEMENTED", process.pid.0);
     // 目前还没有实现多线程（每个任务是独立的内存空间)，不需要管理锁，伪实现不会导致死锁
     0
 }
 
 pub fn sys_resq() -> isize {
-    trace!("kernel:pid[{}] sys_resq NOT IMPLEMENTED", current_task().unwrap().pid.0);
+    let task = current_task().unwrap();
+    let process = task.process();
+    trace!("kernel:pid[{}] sys_resq NOT IMPLEMENTED", process.pid.0);
     // 未实现多线程，这里伪实现
     0
 }

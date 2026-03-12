@@ -1,4 +1,6 @@
 #![allow(unused)]
+use crate::process;
+
 use super::process::*;
 
 // 进程名
@@ -41,7 +43,7 @@ const EINVAL: isize = 22;
 
 pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
     // todo：实现真正的多用户，权限机制和多线程
-    trace!("kernel:pid[{}] sys_prctl option={}", current_task().unwrap().pid.0, option);
+    trace!("kernel:pid[{}] sys_prctl option={}", current_task().unwrap().process().pid.0, option);
     match option {
         PR_SETNAME => {
             // 将buff的内容写进pname字段
@@ -61,15 +63,17 @@ pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5:
                 }
             }
             let task = current_task().unwrap();
-            let mut inner = task.inner_exclusive_access();
-            inner.pname = name_bytes;
+            let process = task.process();
+            let mut proc_inner = process.inner_exclusive_access();
+            proc_inner.pname = name_bytes;
             0
         },
         PR_GETNAME => {
             // 与set相反
             let mut buff = translated_byte_buffer(current_user_token(), _arg2 as *const u8, 16);
             let task = current_task().unwrap();
-            let inner = task.process().inner_exclusive_access();
+            let process = task.process();
+            let inner = process.inner_exclusive_access();
             let name = inner.pname.as_bytes();
             let len = inner.pname.len().min(15);
             let mut i = 0;

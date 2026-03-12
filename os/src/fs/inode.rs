@@ -205,7 +205,7 @@ pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
     let start = if path.starts_with('/') {
         ROOT_DENTRY.clone()
     } else {
-        current_task().unwrap().inner_exclusive_access().cwd.clone()
+        current_task().unwrap().process().inner_exclusive_access().cwd.clone()
     };
     // 从起点开始检查目标路径是否已存在
     if start.find_tree(path, true).is_some() {

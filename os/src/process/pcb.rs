@@ -1,3 +1,5 @@
+//！ TODO：需要仔细核对并修改exec和fork的实现
+
 #![allow(unused)]
 use super::*;
 use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, IdHandle, SignalActions, SignalFlags, TaskContext};
@@ -86,11 +88,14 @@ impl ProcessControlBlock {
                 // 初始化 fd_table，预先放入 stdin 和 stdout
                 fd_table: vec![Some(Arc::new(Stdin)), Some(Arc::new(Stdout))],
                 cwd: ROOT_DENTRY.clone(),
+                signals: SignalFlags::empty(),
+                signal_actions: SignalActions::default(),
+                exit_code: 0,
                 uid: 0,
                 gid: 0,
                 euid: 0,
                 egid: 0,
-                clear_child_tid: 0,
+                alive_task_count: 0,
                 tasks: Vec::new(),
             })
         });
@@ -105,12 +110,12 @@ impl ProcessControlBlock {
                 task_status: TaskStatus::Ready,
                 signal_mask: SignalFlags::empty(),
                 handling_sig: -1,
-                signal_actions: SignalActions::default(),
                 killed: false,
                 frozen: false,
                 trap_ctx_backup: None,
                 exit_code: 0,
                 signals: SignalFlags::empty(),
+                clear_child_tid: 0,
 
             })
         });
@@ -264,12 +269,12 @@ impl ProcessControlBlock {
                 task_status: TaskStatus::Ready,
                 signal_mask: SignalFlags::empty(),
                 handling_sig: -1,
-                signal_actions: SignalActions::default(),
                 killed: false,
                 frozen: false,
                 trap_ctx_backup: None,
                 exit_code: 0,
                 signals: SignalFlags::empty(),
+                clear_child_tid: 0,
             }),
         };
 
@@ -333,12 +338,15 @@ impl ProcessControlBlock {
                 program_brk: parent_inner.program_brk,
                 fd_table: new_fd_table,
                 cwd: parent_inner.cwd.clone(),
+                signals: parent_inner.signals,
+                signal_actions: parent_inner.signal_actions.clone(),
+                exit_code: 0,
                 uid: parent_inner.uid,
                 gid: parent_inner.gid,
                 euid: parent_inner.euid,
                 egid: parent_inner.egid,
-                clear_child_tid: parent_inner.clear_child_tid,
                 tasks: Vec::new(),
+                alive_task_count: parent_inner.alive_task_count,
             })
         });
 
@@ -352,12 +360,12 @@ impl ProcessControlBlock {
                 task_status: TaskStatus::Ready,
                 signal_mask: caller_task.inner_exclusive_access().signal_mask,
                 handling_sig: caller_task.inner_exclusive_access().handling_sig,
-                signal_actions: caller_task.inner_exclusive_access().signal_actions.clone(),
                 killed: false,
                 frozen: false,
                 trap_ctx_backup: None,
                 exit_code: 0,
                 signals: caller_task.inner_exclusive_access().signals,
+                clear_child_tid: caller_task.inner_exclusive_access().clear_child_tid,
             }),
         });
         // modify kernel_sp in trap_cx
@@ -481,12 +489,22 @@ pub struct ProcessControlBlockInner {
 
     pub cwd: Arc<Dentry>, // 当前工作目录
 
+    // 进程收到的信号
+    pub signals: SignalFlags,
+
+    // Signal actions
+    pub signal_actions: SignalActions,
+
+    pub exit_code: i32, // 进程退出码，默认为0，只有当进程状态为Zombie时才有意义
+
     pub uid: u32,  // 真实用户 ID
     pub gid: u32,  // 真实组 ID
     pub euid: u32, // 有效用户 ID (Effective)
     pub egid: u32, // 有效组 ID (Effective)
-    pub clear_child_tid: usize,// 线程清理指针
-    pub tasks: Vec<Arc<TaskControlBlock>>,
+    
+    pub tasks: Vec<Arc<TaskControlBlock>>, 
+    // 存活进程数，等于0相当于僵尸进程
+    pub alive_task_count: usize,
 }
 
 impl ProcessControlBlockInner {
@@ -503,6 +521,9 @@ impl ProcessControlBlockInner {
             self.fd_table.push(None);
             self.fd_table.len() - 1
         }
+    }
+    pub fn is_zombie(&self) -> bool {
+        self.alive_task_count == 0
     }
 }
 
