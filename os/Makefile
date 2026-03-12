@@ -6,7 +6,7 @@ KERNEL_BIN := $(KERNEL_ELF).bin
 FS ?= EXT4
 ARCH ?= riscv64
 # Log level: ERROR, WARN, INFO, DEBUG, TRACE, OFF
-LOG ?= OFF
+LOG ?= INFO
 # BOARD
 BOARD := qemu
 SBI ?= rustsbi
@@ -66,6 +66,7 @@ run-inner:
 	@rm -f kernel_output.log
 	@qemu-system-riscv64 \
 		-machine virt \
+		-smp 4 \
 		-nographic \
 		-bios $(BOOTLOADER) \
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
