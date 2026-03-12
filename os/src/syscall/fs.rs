@@ -206,6 +206,22 @@ pub fn sys_dup(fd: usize) -> isize {
     new_fd as isize
 }
 
+pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> isize {
+    // println!("[DEBUG VFS] sys_lseek: fd={}, offset={}, whence={}", fd, offset, whence);
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    
+    // 1. 检查 fd 是否越界或为空
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return -9; // EBADF (Bad file descriptor)
+    }
+    
+    // 2. 拿出文件对象
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    
+    // 3. 调用文件对象底层的 lseek 方法（管道、标准输入输出会默认拒绝，普通文件会真正移动指针）
+    file.lseek(offset, whence)
+}
 pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
     trace!("kernel:pid[{}] sys_dup2", current_task().unwrap().pid.0);
     let task = current_task().unwrap();
