@@ -126,7 +126,68 @@ pub fn sys_setgid(gid: u32) -> isize {
     inner.egid = gid;
     0 
 }
+#[repr(C)]
+pub struct PollFd {
+    pub fd: i32,     // 监视的文件描述符
+    pub events: i16, // 事件
+    pub revents: i16,// 内核返回的实际发生的事件
+}
 
+const POLLIN: i16 = 0x001;
+const POLLOUT: i16 = 0x004;
+const POLLERR: i16 = 0x008;
+
+pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, _tmo_p: usize, _sigmask: usize) -> isize {
+    let task = current_task().unwrap();
+    let token = task.inner_exclusive_access().memory_set.token();
+    let inner = task.inner_exclusive_access();
+    
+   
+    if ufds_ptr == 0 || nfds == 0 {
+        return 0; 
+    }
+
+    let mut ready_count = 0;
+
+    // 遍历用户传进来的 pollfd 数组
+    for i in 0..nfds {
+        // 根据虚拟地址算出真实物理地址，并拿到可变引用
+        let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
+        let pollfd = translated_refmut(token, pollfd_ptr);
+        
+        let fd = pollfd.fd;
+        pollfd.revents = 0; // 先清空返回状态
+
+        // 负数的 fd 按照 POSIX 标准被忽略
+        if fd < 0 {
+            continue;
+        }
+
+        let fd_usize = fd as usize;
+        
+        // 检查 fd 是否合法
+        if fd_usize >= inner.fd_table.len() || inner.fd_table[fd_usize].is_none() {
+            pollfd.revents = POLLERR; // 报错：坏的描述符
+            ready_count += 1;
+        } else {
+            let file = inner.fd_table[fd_usize].as_ref().unwrap();
+            // 没做复杂的阻塞等待，直接查看文件状态并标记
+            if (pollfd.events & POLLIN) != 0 && file.readable() {
+                pollfd.revents |= POLLIN;
+            }
+            if (pollfd.events & POLLOUT) != 0 && file.writable() {
+                pollfd.revents |= POLLOUT;
+            }
+            
+            if pollfd.revents != 0 {
+                ready_count += 1;
+            }
+        }
+    }
+
+    // 返回有多少个 FD 已经准备好了
+    ready_count as isize
+}
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
@@ -206,7 +267,6 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             if argp != 0 {
                 let user_winsize = translated_refmut(token, argp as *mut Winsize);
                 *user_winsize = winsize;
-                println!("[DEBUG ioctl] TIOCGWINSZ handled, setting 24x80");
                 0 // 成功返回 0
             } else {
                 -14 // EFAULT
@@ -218,6 +278,45 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             -25 // ENOTTY
         }
     }
+}
+pub fn sys_renameat2(
+    _olddirfd: i32, oldpath_ptr: usize,
+    _newdirfd: i32, newpath_ptr: usize, _flags: usize
+) -> isize {
+    let task = current_task().unwrap();
+    let token = task.inner_exclusive_access().memory_set.token();
+
+    let old_path = translated_str(token, oldpath_ptr as *const u8);
+    let new_path = translated_str(token, newpath_ptr as *const u8);
+    
+    // 假设你有解析父目录和文件名的辅助函数
+    let old_parent_path = parent_path(&old_path);
+    let old_name = file_name(&old_path);
+    let new_parent_path = parent_path(&new_path);
+    let new_name = file_name(&new_path);
+
+    let cwd = task.inner_exclusive_access().cwd.clone();
+
+    // 找到新老父目录的内存 Dentry
+    if let (Some(old_parent), Some(new_parent)) = (
+        cwd.find_tree(&old_parent_path, true),
+        cwd.find_tree(&new_parent_path, true)
+    ) {
+       
+        let moved_dentry_opt = {
+            let mut old_children = old_parent.children.lock(); // 加锁
+            old_children.remove(&old_name)
+        }; 
+
+        if let Some(moved_dentry) = moved_dentry_opt {
+           
+            let mut new_children = new_parent.children.lock();
+            new_children.insert(new_name.to_string(), moved_dentry);
+            return 0;
+        }
+    }
+    
+    -1
 }
 pub fn sys_getpid() -> isize {
 	trace!("kernel: sys_getpid pid:{}", current_task().unwrap().pid.0);
@@ -289,6 +388,59 @@ pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
     do_clone(func, stack, flags)
 }
 
+pub fn sys_syslog(_type_: usize, _buf: usize, _len: usize) -> isize {
+    0
+}
+#[repr(C)]
+#[derive(Debug)]
+pub struct Sysinfo {
+    pub uptime: isize,      // 启动到现在经过的秒数
+    pub loads: [usize; 3],  // 1, 5, 15 分钟的平均负载
+    pub totalram: usize,    // 总的可用内存大小
+    pub freeram: usize,     // 还剩多少可用内存
+    pub sharedram: usize,   // 共享内存大小
+    pub bufferram: usize,   // 缓冲区大小
+    pub totalswap: usize,   // 交换空间总大小
+    pub freeswap: usize,    // 交换空间剩余大小
+    pub procs: u16,         // 当前进程数
+    pub pad: u16,           // 结构体对齐填充
+    pub totalhigh: usize,   // 高端内存大小
+    pub freehigh: usize,    // 高端内存剩余大小
+    pub mem_unit: u32,      // 内存单位（比如 1 表示以 byte 为单位计算）
+    pub _pad: u32,          // 补齐到 112 字节
+}
+
+pub fn sys_sysinfo(sysinfo_ptr: usize) -> isize {
+    if sysinfo_ptr == 0 {
+        return -1;
+    }
+
+    let task = current_task().unwrap();
+    let token = task.inner_exclusive_access().memory_set.token();
+    
+    // 把用户态的指针“捞”进内核，变成我们可以直接修改的引用
+    // (这招你在 sys_ppoll 里已经用得很熟练了！)
+    let sysinfo = translated_refmut(token, sysinfo_ptr as *mut Sysinfo);
+
+    // 🌟 强行塞入硬核的假数据糊弄 Busybox！
+    sysinfo.uptime = 1000;              // 假装我们已经开机了 1000 秒
+    sysinfo.loads = [0, 0, 0];          // 系统空闲，毫无压力
+    sysinfo.totalram = 128 * 1024 * 1024; // 告诉它我们有 128 MB 的豪华大内存
+    sysinfo.freeram = 64 * 1024 * 1024;   // 告诉它还剩一半 (64 MB) 可以尽情用
+    sysinfo.sharedram = 0;
+    sysinfo.bufferram = 0;
+    sysinfo.totalswap = 0;              // 没有交换分区
+    sysinfo.freeswap = 0;
+    sysinfo.procs = 2;                  // 假装有 2 个进程在跑
+    sysinfo.pad = 0;
+    sysinfo.totalhigh = 0;
+    sysinfo.freehigh = 0;
+    sysinfo.mem_unit = 1;               // 上面填的数字全都是以 1 byte 为单位的
+    sysinfo._pad = 0;
+
+    // 返回 0 表示获取成功！
+    0
+}
 pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();

@@ -2,8 +2,11 @@
 use crate::fs::{make_pipe, OpenFlags, Stat,Statx, open_file, make_dir, parent_path, file_name};
 use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
 use crate::task::{current_task, current_user_token};
+use alloc::vec;
 use alloc::sync::Arc;
 use alloc::string::ToString;
+use crate::syscall::translated_ref;
+
 
 const F_DUPFD: usize = 0;
 const F_GETFD: usize = 1;
@@ -26,7 +29,7 @@ fn ensure_fd_slots(inner: &mut crate::task::TaskControlBlockInner, target_len: u
 }
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
-   
+
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
@@ -35,7 +38,6 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     }
 
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
-    
     //获取文件名（需确保 File trait 实现了 get_dentry）
     let _filename = if let Some(dentry) = file.get_dentry() {
         dentry.name.clone()
@@ -130,8 +132,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
         }
     };
 
-    let open_flags = OpenFlags::from_bits(flags).unwrap_or(OpenFlags::empty());
-
+    let open_flags = OpenFlags::from_bits_truncate(flags);
     if let Some(inode) = open_file(start_dentry, path_str.as_str(), open_flags) {
         if open_flags.should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
             trace!("VFS: sys_openat failed - '{}' is not a directory", path_str);
@@ -235,13 +236,31 @@ pub fn sys_dup(fd: usize) -> isize {
     new_fd as isize
 }
 
+pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> isize {
+    // println!("[DEBUG VFS] sys_lseek: fd={}, offset={}, whence={}", fd, offset, whence);
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    
+    // 1. 检查 fd 是否越界或为空
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return -9; // EBADF (Bad file descriptor)
+    }
+    
+    // 2. 拿出文件对象
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    
+    // 3. 调用文件对象底层的 lseek 方法（管道、标准输入输出会默认拒绝，普通文件会真正移动指针）
+    file.lseek(offset, whence)
+}
 pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
     trace!("kernel:pid[{}] sys_dup2", current_task().unwrap().pid.0);
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+
         return -1;
     }
+
     if fd == new_fd {
         return new_fd as isize;
     }
@@ -270,8 +289,50 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
         -1
     }
 }
+#[repr(C)]
+pub struct IoVec {
+    pub base: usize, // 这块碎片的起始地址
+    pub len: usize,  // 这块碎片的长度
+}
 
-pub fn sys_statx(dirfd: isize, path: *const u8,  flags: u32, mask: u32,st: *mut Statx) -> isize {
+pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    
+
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return -1;
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+
+    let token = inner.memory_set.token();
+    
+
+    drop(inner);
+    
+    let mut total_written = 0;
+
+    for i in 0..iovcnt {
+
+        let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
+
+        let iovec: &IoVec = translated_ref(token, iov_addr as *const IoVec);
+        
+        if iovec.len == 0 {
+            continue; 
+        }
+        let user_buffer = UserBuffer {
+            buffers: translated_byte_buffer(token, iovec.base as *const u8, iovec.len),
+        };
+
+
+        let written = file.write(user_buffer);
+        total_written += written;
+    }
+
+    total_written as isize
+}
+pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut Statx) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
     let path_str = translated_str(token, path);
@@ -393,7 +454,67 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
         _ => -1,
     }
 }
+pub fn sys_utimensat(_dirfd: i32, path_ptr: usize, _times_ptr: usize, _flags: usize) -> isize {
+    let task = current_task().unwrap();
+    let token = task.inner_exclusive_access().memory_set.token();
+    let path_str = translated_str(token, path_ptr as *const u8);
+
+    let cwd = task.inner_exclusive_access().cwd.clone();
+    
+
+    if cwd.find_tree(&path_str, true).is_some() {
+        return 0; 
+    } else {
+        return -2; 
+    }
+}
+pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    
+    // 1. 检查文件描述符
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return -1; // EBADF
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    let token = inner.memory_set.token();
+    
+
+    drop(inner);
+    
+    let mut total_read = 0;
+
+    // 2. 遍历用户传进来的 iovec 数组
+    for i in 0..iovcnt {
+        let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
+        
+        // 读取 iovec 结构体本身
+        let iovec: &IoVec = crate::mm::translated_ref(token, iov_addr as *const IoVec);
+        
+        if iovec.len == 0 {
+            continue;
+        }
+
+        // 3. 把这块用户态内存转化为物理内存切片数组
+        // 这里需要写入用户内存，所以 translated_byte_buffer 返回的 &'static mut [u8] 正好合适
+        let user_buffer = crate::mm::UserBuffer {
+            buffers: crate::mm::translated_byte_buffer(token, iovec.base as *const u8, iovec.len),
+        };
+
+        // 4. 调用通用的 read 接口！
+        let read_bytes = file.read(user_buffer);
+        total_read += read_bytes;
+
+        // 如果这次读到的数据比提供的缓冲区小，说明文件已经读到底了，直接结束
+        if read_bytes < iovec.len {
+            break;
+        }
+    }
+
+    total_read as isize
+}
 /// YOUR JOB: Implement unlinkat.
+
 pub fn sys_unlinkat(path: *const u8) -> isize {
     let token = current_user_token();
     let path_str = translated_str(token, path);
@@ -434,7 +555,70 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
         -1
     }
 }
+pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usize) -> isize {
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    
+    // 1. 检查越界并拿到文件对象 (这俩都是 Arc<dyn File>)
+    if out_fd >= inner.fd_table.len() || in_fd >= inner.fd_table.len() {
+        return -1;
+    }
+    let out_file = match &inner.fd_table[out_fd] {
+        Some(file) => file.clone(),
+        None => return -1,
+    };
+    let in_file = match &inner.fd_table[in_fd] {
+        Some(file) => file.clone(),
+        None => return -1,
+    };
+    
+    drop(inner); // 必须解锁！
 
+    // 2. 准备内核中转站
+    let mut buffer = [0u8; 4096];
+    let mut total_transferred = 0;
+
+    while total_transferred < count {
+        let remain = count - total_transferred;
+        let read_len = remain.min(buffer.len());
+
+        // 🌟 核心魔法：捏造一个假的 UserBuffer，骗过通用的 read 函数
+        let read_slice = unsafe {
+            core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), read_len)
+        };
+        let user_buf = UserBuffer { buffers: vec![read_slice] };
+
+        // 直接调用多态的 read！无论是啥文件都能读！
+        let read_bytes = in_file.read(user_buf);
+        if read_bytes == 0 {
+            break; // 读到底了
+        }
+
+        let mut written_so_far = 0;
+        while written_so_far < read_bytes {
+            let write_len = read_bytes - written_so_far;
+            
+            // 🌟 再捏造一个 UserBuffer，骗过通用的 write 函数
+            let write_slice = unsafe {
+                core::slice::from_raw_parts_mut(
+                    buffer.as_mut_ptr().add(written_so_far), 
+                    write_len
+                )
+            };
+            let w_user_buf = UserBuffer { buffers: vec![write_slice] };
+
+            let write_bytes = out_file.write(w_user_buf);
+            if write_bytes == 0 {
+                if total_transferred == 0 { return -1; } else { break; }
+            }
+            written_so_far += write_bytes;
+        }
+
+        total_transferred += written_so_far;
+    }
+
+    total_transferred as isize
+}
 pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
