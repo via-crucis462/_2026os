@@ -2,9 +2,10 @@
 // 参考https://godones.github.io/rCoreloongArch/app.html
 mod context;
 use crate::syscall::syscall;
+use crate::mm::VirtAddr;
 use crate::task::processor::current_user_asid;
 use crate::task::{
-    check_signals_error_of_current, current_add_signal, current_trap_cx, current_user_token,
+    check_signals_error_of_current, current_add_signal, current_task, current_trap_cx, current_user_token,
     exit_current_and_run_next, handle_signals, suspend_current_and_run_next, SignalFlags,
 };
 
@@ -165,6 +166,42 @@ pub fn trap_handler() -> ! {
                 suspend_current_and_run_next();
             }
             _ => {
+                let ecode = (estat >> 16) & 0x3f;
+                if let Some(task) = current_task() {
+                    let inner = task.inner_exclusive_access();
+                    let vpn = VirtAddr::from(badv).floor();
+                    match inner.memory_set.translate(vpn) {
+                        Some(pte) => {
+                            println!(
+                                "[kernel] user_fault_pte: badaddr={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
+                                badv,
+                                vpn.0,
+                                pte.bits,
+                                pte.is_valid(),
+                                pte.readable(),
+                                pte.writable(),
+                                pte.executable(),
+                            );
+                        }
+                        None => {
+                            println!(
+                                "[kernel] user_fault_pte: badaddr={:#x}, vpn={:#x}, pte=<none>",
+                                badv,
+                                vpn.0,
+                            );
+                        }
+                    }
+                }
+                println!(
+                    "[kernel] user_fault: pid={}, cause={:?}, ecode={:#x}, pc={:#x}, badaddr={:#x}, estat={:#x}, badi={:#x}",
+                    crate::task::current_task().unwrap().pid.0,
+                    cause,
+                    ecode,
+                    era,
+                    badv,
+                    estat,
+                    badi
+                );
                 error!("[kernel] trap_handler: {:?} in PID {}, estat={:#x}, era={:#x}, badv={:#x},badi={:#x}",
                     cause,
                     crate::task::current_task().unwrap().pid.0,

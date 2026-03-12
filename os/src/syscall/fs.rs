@@ -8,6 +8,26 @@ use alloc::string::ToString;
 use crate::syscall::translated_ref;
 
 
+const F_DUPFD: usize = 0;
+const F_GETFD: usize = 1;
+const F_SETFD: usize = 2;
+const F_GETFL: usize = 3;
+const F_SETFL: usize = 4;
+const F_DUPFD_CLOEXEC: usize = 1030;
+
+const FD_CLOEXEC: usize = 1;
+const O_ACCMODE: usize = 0o3;
+const O_WRONLY: usize = 0o1;
+const O_CLOEXEC: u32 = 0o2000000;
+
+fn ensure_fd_slots(inner: &mut crate::task::TaskControlBlockInner, target_len: usize) {
+    while inner.fd_table.len() < target_len {
+        inner.fd_table.push(None);
+        inner.fd_cloexec.push(false);
+        inner.fd_status.push(0);
+    }
+}
+
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
 
     let token = current_user_token();
@@ -87,11 +107,10 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
 const AT_FDCWD: isize = -100;
 
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isize {
-    //println!("[Trace] sys_open(path={:?}, flags={:#x})", path, flags);
     let task = current_task().unwrap();
     let token = current_user_token();
     let path_str = translated_str(token, path);
-    debug!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
+    println!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
@@ -122,6 +141,8 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
         let mut inner = task.inner_exclusive_access();
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(inode);
+        inner.fd_cloexec[fd] = (flags & O_CLOEXEC) != 0;
+        inner.fd_status[fd] = flags as usize;
         fd as isize
     } else {
         trace!("VFS: File '{}' not found", path_str);
@@ -140,6 +161,8 @@ pub fn sys_close(fd: usize) -> isize {
         return -1;
     }
     inner.fd_table[fd].take();
+    inner.fd_cloexec[fd] = false;
+    inner.fd_status[fd] = 0;
     0
 }
 
@@ -184,8 +207,12 @@ pub fn sys_pipe(pipe: *mut u32) -> isize {
     let (pipe_read, pipe_write) = make_pipe();
     let read_fd = inner.alloc_fd();
     inner.fd_table[read_fd] = Some(pipe_read);
+    inner.fd_cloexec[read_fd] = false;
+    inner.fd_status[read_fd] = 0;
     let write_fd = inner.alloc_fd();
     inner.fd_table[write_fd] = Some(pipe_write);
+    inner.fd_cloexec[write_fd] = false;
+    inner.fd_status[write_fd] = O_WRONLY;
     *translated_refmut(token, pipe) = read_fd as u32;
     *translated_refmut(token, unsafe { pipe.add(1) }) = write_fd as u32;
     0
@@ -202,7 +229,10 @@ pub fn sys_dup(fd: usize) -> isize {
         return -1;
     }
     let new_fd = inner.alloc_fd();
-    inner.fd_table[new_fd] = Some(Arc::clone(inner.fd_table[fd].as_ref().unwrap()));
+    let file = Arc::clone(inner.fd_table[fd].as_ref().unwrap());
+    inner.fd_table[new_fd] = Some(file);
+    inner.fd_cloexec[new_fd] = false;
+    inner.fd_status[new_fd] = inner.fd_status[fd];
     new_fd as isize
 }
 
@@ -234,11 +264,11 @@ pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
     if fd == new_fd {
         return new_fd as isize;
     }
-    while new_fd >= inner.fd_table.len() {
-        inner.fd_table.push(None);
-    }
-
-    inner.fd_table[new_fd] = Some(Arc::clone(inner.fd_table[fd].as_ref().unwrap()));
+    ensure_fd_slots(&mut inner, new_fd + 1);
+    let file = Arc::clone(inner.fd_table[fd].as_ref().unwrap());
+    inner.fd_table[new_fd] = Some(file);
+    inner.fd_cloexec[new_fd] = false;
+    inner.fd_status[new_fd] = inner.fd_status[fd];
     new_fd as isize
 }
 
@@ -381,37 +411,48 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
 }
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
 
-    if cmd == 0 || cmd == 1030 {
-   
-        let task = current_task().unwrap();
-        let mut inner = task.inner_exclusive_access();
-
-        if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-            return -1; 
-        }
-
-        let mut new_fd = arg;
-        
-        while new_fd < inner.fd_table.len() {
-            if inner.fd_table[new_fd].is_none() {
-                break; // 找到了一个空口袋，跳出循环！
-            }
-            new_fd += 1;
-        }
-
-        if new_fd >= inner.fd_table.len() {
-            while inner.fd_table.len() <= new_fd {
-                inner.fd_table.push(None);
-            }
-        }
-
-        inner.fd_table[new_fd] = Some(Arc::clone(inner.fd_table[fd].as_ref().unwrap()));
-
-        return new_fd as isize;
+    let fd_valid = fd < inner.fd_table.len() && inner.fd_table[fd].is_some();
+    if !fd_valid && cmd != F_DUPFD && cmd != F_DUPFD_CLOEXEC {
+        return -1;
     }
 
-    -1
+    match cmd {
+        F_DUPFD | F_DUPFD_CLOEXEC => {
+            if !fd_valid {
+                return -1;
+            }
+            let mut new_fd = arg;
+            while new_fd < inner.fd_table.len() {
+                if inner.fd_table[new_fd].is_none() {
+                    break;
+                }
+                new_fd += 1;
+            }
+            ensure_fd_slots(&mut inner, new_fd + 1);
+            let file = Arc::clone(inner.fd_table[fd].as_ref().unwrap());
+            inner.fd_table[new_fd] = Some(file);
+            inner.fd_status[new_fd] = inner.fd_status[fd];
+            inner.fd_cloexec[new_fd] = cmd == F_DUPFD_CLOEXEC;
+            new_fd as isize
+        }
+        F_GETFD => {
+            if inner.fd_cloexec[fd] { FD_CLOEXEC as isize } else { 0 }
+        }
+        F_SETFD => {
+            inner.fd_cloexec[fd] = (arg & FD_CLOEXEC) != 0;
+            0
+        }
+        F_GETFL => inner.fd_status[fd] as isize,
+        F_SETFL => {
+            let old = inner.fd_status[fd];
+            inner.fd_status[fd] = (old & O_ACCMODE) | (arg & !O_ACCMODE);
+            0
+        }
+        _ => -1,
+    }
 }
 pub fn sys_utimensat(_dirfd: i32, path_ptr: usize, _times_ptr: usize, _flags: usize) -> isize {
     let task = current_task().unwrap();
