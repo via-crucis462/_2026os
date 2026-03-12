@@ -43,6 +43,8 @@ pub mod sync;
 pub mod syscall;
 pub mod process;
 
+pub use arch::config::*;
+
 pub use process::task;
 #[allow(unused)]
 use crate::arch::sbi::*;
@@ -69,24 +71,52 @@ fn clear_bss() {
             .fill(0);
     }
 }
-
+extern "C" {
+    fn _start();
+}
 
 #[cfg(target_arch = "riscv64")]
 #[no_mangle]
 /// the rust entry-point of os
-pub fn rust_main() -> ! {
-    clear_bss();
-    logging::init();
-    info!("[kernel] Hello, world!");
-    mm::init();
-    mm::remap_test();
-    arch::trap::init();
-    arch::trap::enable_timer_interrupt();
-    arch::timer::set_next_trigger();
-    fs::list_apps();
-    task::add_initproc();
-    task::run_tasks();
-    panic!("Unreachable in rust_main!");
+/// 主核的入口
+#[allow(unused)]
+pub fn rust_main(hart_id: usize) -> ! {
+    if hart_id == 0 {
+        clear_bss();
+        logging::init();
+        for i in 1..CPU_CORE_NUM {
+            start_hart(i, _start as *const() as usize, 0);
+        }
+        info!("[kernel] Hello, world!");
+        loop{
+            unsafe {
+                asm!("wfi");
+            }
+        }
+        mm::init();
+        mm::remap_test();
+        arch::trap::init();
+        arch::trap::enable_timer_interrupt();
+        arch::timer::set_next_trigger();
+        fs::list_apps();
+        task::add_initproc();
+        task::run_tasks();
+        panic!("Unreachable in rust_main!");
+    } else {
+        info!("[kernel] Hello from hart {}!", hart_id);
+        loop {
+            unsafe {
+                asm!("wfi");
+            }
+        }
+    }
+    
+}
+
+#[allow(unused)]
+pub fn others_main() {
+    loop{}
+
 }
 
 // la的main需重写

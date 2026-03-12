@@ -19,6 +19,8 @@ lazy_static!{
     });
 }
 
+// 全局进程管理器/列表，掌握所有进程的生命周期
+// 用B树+arc指针实现，应该能很快地遍历/删除等
 pub struct ProcessManager{
     // 进程池
     process_pool: BTreeMap<usize, Arc<ProcessControlBlock>>,

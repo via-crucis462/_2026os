@@ -135,7 +135,10 @@ lazy_static! {
     pub static ref INITTASK: Arc<TaskControlBlock> = {
         let inode = open_file(ROOT_DENTRY.clone(),"ch7b_initproc", OpenFlags::RDONLY).unwrap();
         let v = inode.read_all();
-        ProcessControlBlock::new(v.as_slice()).1
+        let (proc, task) =  ProcessControlBlock::new(v.as_slice());
+        // 将 initproc 加入全局进程列表
+        add_process(proc);
+        task
     };
 }
 
