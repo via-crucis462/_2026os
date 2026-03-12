@@ -1,3 +1,6 @@
+//! sbi会自动把hartid放在a0寄存器中
+//! 另外，新规范中，sbi在机器启动时会先只启动一个核，需要内核用sbicall启动其余的核
+//! 具体需查询规范手册
     .section .text.entry
     .globl _start
 _start:
