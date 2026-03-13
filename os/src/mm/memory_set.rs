@@ -6,6 +6,7 @@ use super::{StepByOne, VPNRange};
 use super::id::*;
 #[allow(unused)]
 use crate::arch::config::*;
+use crate::arch::trap::current_trap_cx_user_va;
 use crate::mm::mmap;
 use crate::sync::MPSafeCell;
 use alloc::collections::BTreeMap;
@@ -324,9 +325,11 @@ impl MemorySet {
             user_stack_top,
         );
         memory_set.brk_index = memory_set.areas.len() - 1;// 此时brk在最后一个区域
-        debug!("MemorySet::from_elf: mapped all areas");
         // map TrapContext
         // la64下不需要映射
+        /*
+        #[cfg(target_arch = "riscv64")]
+        debug!("MemorySet::from_elf: mapping TrapContext");
         #[cfg(target_arch = "riscv64")]
         memory_set.push(
             MapArea::new(
@@ -337,7 +340,8 @@ impl MemorySet {
             ),
             None,
             TRAP_CONTEXT_BASE,
-        );
+        ); */
+        debug!("MemorySet::from_elf: mapped all areas");
         (
             memory_set,
             user_stack_top,
@@ -355,7 +359,7 @@ impl MemorySet {
         memory_set.map_trampoline();
         // copy data sections/trap_context/user_stack
         for area in user_space.areas.iter() {
-            let new_area: MapArea = MapArea::from_another(area);
+            let mut new_area: MapArea = MapArea::from_another(area);
             let start_va: VirtAddr = new_area.vpn_range.get_start().into();
             memory_set.push(new_area, None, start_va.0);
             // copy data from another space
