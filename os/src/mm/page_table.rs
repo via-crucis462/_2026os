@@ -149,6 +149,9 @@ impl PageTable {
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.find_pte(vpn).map(|pte| *pte)
     }
+    pub fn translate_create(&mut self, vpn: VirtPageNum) -> Option<PageTableEntry> {
+        self.find_pte_create(vpn).map(|pte| *pte)
+    }
     /// get the physical address from the virtual address
     pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
         self.find_pte(va.clone().floor()).map(|pte| {

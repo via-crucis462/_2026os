@@ -287,7 +287,6 @@ impl MemorySet {
                     Some(&elf.input[ph.offset() as *const () as usize..(ph.offset() + ph.file_size()) as *const () as usize]),
                     ph.virtual_addr() as usize + OFFSET_FOR_USER_APP,
                 );
-
                 // 如果该 LOAD 段包含了程序头表，则记录其虚拟地址
                 if ph.offset() <= elf_header.pt2.ph_offset() && 
                    elf_header.pt2.ph_offset() < ph.offset() + ph.file_size() {
@@ -356,9 +355,9 @@ impl MemorySet {
         memory_set.map_trampoline();
         // copy data sections/trap_context/user_stack
         for area in user_space.areas.iter() {
-            let new_area = MapArea::from_another(area);
-            let start_va: usize = new_area.vpn_range.get_start().into();
-            memory_set.push(new_area, None, start_va << 12);
+            let new_area: MapArea = MapArea::from_another(area);
+            let start_va: VirtAddr = new_area.vpn_range.get_start().into();
+            memory_set.push(new_area, None, start_va.0);
             // copy data from another space
             for vpn in area.vpn_range {
                 let src_ppn = user_space.translate(vpn).unwrap().ppn();
@@ -368,6 +367,7 @@ impl MemorySet {
                     .copy_from_slice(src_ppn.get_bytes_array());
             }
         }
+
         // 复制brk_index
         memory_set.brk_index = user_space.brk_index;
         memory_set
@@ -396,7 +396,9 @@ impl MemorySet {
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.page_table.translate(vpn)
     }
-
+    pub fn translate_create(&mut self, vpn: VirtPageNum) -> Option<PageTableEntry> {
+        self.page_table.translate_create(vpn)
+    }
     /// Remove all `MapArea`
     pub fn recycle_data_pages(&mut self) {
         self.areas.clear();

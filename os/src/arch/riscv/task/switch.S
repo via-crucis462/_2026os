@@ -15,6 +15,7 @@ __switch:
     # save kernel stack of current task
     sd sp, 8(a0)
     # save ra & s0~s11 of current execution
+    // 这里ra内容是调用__switch函数的下一条指令地址，也就是run_task的循环末
     sd ra, 0(a0)
     .set n, 0
     .rept 12

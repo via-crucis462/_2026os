@@ -54,6 +54,7 @@ pub use signal::{SignalFlags, MAX_SIG};
 
 /// Make current task suspended and switch to the next task
 pub fn suspend_current_and_run_next() {
+    debug!("[kernel] suspend_current_and_run_next");
     // There must be an application running.
     let task = take_current_task().unwrap();
 
@@ -100,7 +101,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // Record exit code
     task_inner.exit_code = exit_code;
     // do not move to its parent but under initproc
-
+    proc_inner.alive_task_count -= 1;
     // ++++++ access initproc TCB exclusively
     // 
     {
