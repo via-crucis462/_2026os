@@ -110,7 +110,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
     let task = current_task().unwrap();
     let token = current_user_token();
     let path_str = translated_str(token, path);
-    println!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
+    //println!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
