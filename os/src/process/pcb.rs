@@ -8,7 +8,8 @@ use schedule::*;
 use crate::{
     arch::trap::{TrapContext, trap_handler, current_trap_cx_user_va, trap_cx_va_by_tid},
     fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout},
-    mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, translated_refmut},
+    mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, 
+        translated_refmut, MapArea, MapPermission, MapType},
     sync::MPSafeCell,
 };
 use alloc::{
@@ -286,18 +287,28 @@ impl ProcessControlBlock {
     /// Fork from parent to child
     /// 已编辑，添加了stack参数 
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
-    pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>, caller_task: Arc<TaskControlBlock>) -> (Arc<Self>, Arc<TaskControlBlock>) {
+    pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>, caller_task: Arc<TaskControlBlock>)-> (Arc<Self>, Arc<TaskControlBlock>) {
         // ---- hold parent PCB lock
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
-        let memory_set = MemorySet::from_existed_user(&parent_inner.memory_set);
+        let mut memory_set = MemorySet::from_existed_user(&parent_inner.memory_set);
+    
         let pid_handle = Arc::new(pid_alloc());
         let tid_handle = Arc::new(tid_alloc());
+        let trap_cx_addr = VirtAddr::from(trap_cx_va_by_tid(tid_handle.0));
+        memory_set.push(
+            MapArea::new(trap_cx_addr.into(), VirtAddr::from(trap_cx_addr.0 + PAGE_SIZE),
+                MapType::Framed, MapPermission::R | MapPermission::W),
+            None,
+            trap_cx_addr.0,
+        );
+        println!("fork: translated trap_cx_addr = {:#x}", trap_cx_addr.0);
         #[cfg(target_arch = "riscv64")]
         let trap_cx_ppn = memory_set
-            .translate(VirtAddr::from(trap_cx_va_by_tid(tid_handle.0)).into())
+            .translate_create(trap_cx_addr.into())
             .unwrap()
             .ppn();
+        println!("fork: translated trap_cx_ppn = {:#x}", trap_cx_ppn.0);
         #[cfg(target_arch = "riscv64")]
         let trap_cx_addr = {
             let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
@@ -349,7 +360,7 @@ impl ProcessControlBlock {
                 alive_task_count: parent_inner.alive_task_count,
             })
         });
-
+        let caller_inner = caller_task.inner_exclusive_access();
         let new_task = Arc::new(TaskControlBlock {
             process: Arc::downgrade(&proc_control_block),
             tid: tid_handle.clone(),
@@ -358,16 +369,17 @@ impl ProcessControlBlock {
                 trap_cx_addr,
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
-                signal_mask: caller_task.inner_exclusive_access().signal_mask,
-                handling_sig: caller_task.inner_exclusive_access().handling_sig,
+                signal_mask: caller_inner.signal_mask,
+                handling_sig: caller_inner.handling_sig,
                 killed: false,
                 frozen: false,
                 trap_ctx_backup: None,
                 exit_code: 0,
-                signals: caller_task.inner_exclusive_access().signals,
-                clear_child_tid: caller_task.inner_exclusive_access().clear_child_tid,
+                signals: caller_inner.signals,
+                clear_child_tid: caller_inner.clear_child_tid,
             }),
         });
+        println!("fork: created new task with tid {}", new_task.gettid());
         // modify kernel_sp in trap_cx
         // **** access child PCB exclusively
         let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
@@ -375,8 +387,9 @@ impl ProcessControlBlock {
         {
             *trap_cx = parent_trap_cx;
         }
+        println!("fork: copied trap context from parent");
         #[cfg(target_arch = "riscv64")]{
-            *trap_cx = *caller_task.inner_exclusive_access().get_trap_cx();
+            *trap_cx = *caller_inner.get_trap_cx();
             trap_cx.kernel_sp = kernel_stack_top;
         }
         if let Some(sp) = sp {

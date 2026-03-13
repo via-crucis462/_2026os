@@ -1,5 +1,5 @@
 // 全局线程调度器
-use crate::sync::MPSafeCell;
+use crate::{process, sync::MPSafeCell};
 use super::*;
 use super::manager::*;
 use lazy_static::*;
@@ -83,6 +83,9 @@ impl TaskPool {
 
 pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
     debug!("[kernel] Scheduler::add_task_into_pool: pid={}", task.getpid());
+    let process = task.process();
+    let mut process_inner = process.inner_exclusive_access();
+    process_inner.alive_task_count += 1;
     let mut scheduler = SCHEDULER.exclusive_access();
     scheduler.get_pool().add_task(task);
     drop(scheduler);

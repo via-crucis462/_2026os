@@ -13,6 +13,7 @@
 //! to [`syscall()`].
 mod context;
 
+use crate::PAGE_SIZE;
 use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 use crate::syscall::syscall;
 use crate::task::{
@@ -54,6 +55,7 @@ pub fn enable_timer_interrupt() {
 /// trap handler
 #[no_mangle]
 pub fn trap_handler() -> ! {
+    info!("[kernel] trap_handler: a trap from user space");
     set_kernel_trap_entry();
     let scause = scause::read();
     let stval = stval::read();
@@ -103,7 +105,7 @@ pub fn current_trap_cx_user_va() -> usize {
 }
 
 pub fn trap_cx_va_by_tid(tid: usize) -> usize {
-    TRAP_CONTEXT_BASE - tid
+    TRAP_CONTEXT_BASE - tid * PAGE_SIZE
 }
 
 #[no_mangle]

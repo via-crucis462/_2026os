@@ -26,6 +26,7 @@ pub fn do_fork(_func: usize, stack: usize, _flags: usize) -> isize {
     // add new task to scheduler
     add_process(new_proc);
     add_task(new_task);
+    println!("forked process: {}", new_pid);
     new_pid as isize
 }
 
