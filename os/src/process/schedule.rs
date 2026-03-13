@@ -20,10 +20,11 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn get_pool(&mut self) -> &mut TaskPool {
+        debug!("[kernel] Scheduler::get_pool");
         &mut self.task_pool
     }
     pub fn auto_get_task(&mut self) -> Vec<Arc<TaskControlBlock>> {
-        let mut total_num = core::cmp::max(get_task_count(), 1);
+        let mut total_num = core::cmp::max(self.get_task_count(), 1);
         let mut list = Vec::new();
         while let Some(task) = self.task_pool.take_a_task() {
             list.push(task);
@@ -34,7 +35,9 @@ impl Scheduler {
         }
         list
     }
-    
+    pub fn get_task_count(&self) -> usize {
+        self.task_pool.count() + task_count_in_mng()
+    }
 }
 
 
@@ -80,12 +83,18 @@ impl TaskPool {
 
 pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
     debug!("[kernel] Scheduler::add_task_into_pool: pid={}", task.getpid());
-    SCHEDULER.exclusive_access().get_pool().add_task(task);
-    debug!("add into poll finised");
+    let mut scheduler = SCHEDULER.exclusive_access();
+    scheduler.get_pool().add_task(task);
+    drop(scheduler);
+    debug!("add into pool finised");
 }
 
 pub fn ask_for_tasks() -> Vec<Arc<TaskControlBlock>> {
-    let list = SCHEDULER.exclusive_access().auto_get_task();
+    debug!("[kernel] Scheduler::ask_for_tasks");
+    let mut scheduler = SCHEDULER.exclusive_access();
+    let list = scheduler.auto_get_task();
+    drop(scheduler);
+    debug!("[kernel] Scheduler::ask_for_tasks: got {} tasks", list.len());
     list
 }
 

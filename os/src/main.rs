@@ -22,7 +22,7 @@
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
-
+#![allow(unused)]
 #[macro_use]
 extern crate bitflags;
 #[macro_use]
@@ -107,12 +107,12 @@ pub fn rust_main(hart_id: usize) -> ! {
 fn main_init(hart_id: usize) {
     mm::init();
     mm::remap_test();
-    init_other_hart(hart_id);
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger();
     fs::list_apps();
     task::add_initproc();
+    //init_other_hart(hart_id);
     task::run_tasks();
 }
 
