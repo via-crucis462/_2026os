@@ -79,7 +79,9 @@ impl TaskPool {
 }
 
 pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
+    debug!("[kernel] Scheduler::add_task_into_pool: pid={}", task.getpid());
     SCHEDULER.exclusive_access().get_pool().add_task(task);
+    debug!("add into poll finised");
 }
 
 pub fn ask_for_tasks() -> Vec<Arc<TaskControlBlock>> {

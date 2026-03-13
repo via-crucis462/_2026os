@@ -7,6 +7,8 @@
 use super::__switch;
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
+#[cfg(target_arch = "riscv64")]
+use crate::get_hart_id;
 use crate::sync::MPSafeCell;
 use crate::arch::{
     trap::TrapContext,
@@ -64,7 +66,7 @@ lazy_static! {
 // 获取并锁住当前处理器
 pub fn current_processor() -> spin::MutexGuard<'static, Processor> {
     #[cfg(target_arch = "riscv64")]
-    let hart_id = riscv::register::mhartid::read();
+    let hart_id = get_hart_id();
     PROCESSORS[hart_id].exclusive_access()
 }
 
@@ -78,7 +80,7 @@ pub fn run_tasks() {
         //println!("run_tasks counter: {}", counter);
         let mut processor = current_processor();
         if let Some(task) = fetch_task() {
-            //info!("[kernel] run_tasks: fetched pid={}", task.pid.0);
+            info!("[kernel] run_tasks: fetched tid={}", task.tid.0);
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // access coming task TCB exclusively
             let mut task_inner = task.inner_exclusive_access();

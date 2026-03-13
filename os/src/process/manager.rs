@@ -7,10 +7,12 @@ use super::TaskControlBlock;
 use super::schedule::*;
 use super::pcb::*;
 use crate::sync::MPSafeCell;
+use crate::arch::config::CPU_CORE_NUM;
+use crate::get_hart_id;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use lazy_static::*;
-use crate::arch::config::CPU_CORE_NUM;
+
 
 
 lazy_static!{
@@ -97,7 +99,7 @@ lazy_static! {
 }
 
 pub fn get_current_task_manager() -> &'static MPSafeCell<TaskManager> {
-    let hart_id = riscv::register::mhartid::read();
+    let hart_id = get_hart_id();
     &TASK_MANAGERS[hart_id]
 }
 
@@ -122,7 +124,17 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
 /// Take a process out of the ready queue
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
 	//trace!("kernel: TaskManager::fetch_task");
-    get_current_task_manager().exclusive_access().fetch()
+    let fetched =get_current_task_manager().exclusive_access().fetch();
+    match &fetched {
+        Some(_) => fetched,
+        None => {
+            let list = ask_for_tasks();
+            for task in list {
+                add_task(task);
+            }
+            get_current_task_manager().exclusive_access().fetch()
+        }
+    }
 }
 
 /// Get process by tid

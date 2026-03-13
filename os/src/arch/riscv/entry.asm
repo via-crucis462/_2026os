@@ -4,6 +4,7 @@
     .section .text.entry
     .globl _start
 _start:
+    mv tp, a0 // 将hartid存入tp
     slli t0, a0, 16 //等效于*65536
     la sp, boot_stack_top
     sub sp, sp, t0 //为每个核分配4KB*16的栈空间

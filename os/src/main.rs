@@ -61,6 +61,13 @@ global_asm!(include_str!("arch/riscv/entry.asm"));
 #[cfg(target_arch = "loongarch64")]
 global_asm!(include_str!("arch/la/entry.asm"));
 
+
+// 记录启动核是否已经完成初始化，用于动态判断是否是主核（启动核）
+lazy_static! {
+    pub static ref MAIN_HART_INITED: MPSafeCell<bool> = MPSafeCell::new(false);
+}
+
+
 /// clear BSS segment
 /// 两种架构应该是统一的
 fn clear_bss() {
@@ -74,11 +81,6 @@ fn clear_bss() {
     }
 }
 
-// 记录启动核是否已经完成初始化，用于动态判断是否是主核（启动核）
-lazy_static! {
-    pub static ref MAIN_HART_INITED: MPSafeCell<bool> = MPSafeCell::new(false);
-}
-
 
 extern "C" {
     fn _start();
@@ -87,55 +89,62 @@ extern "C" {
 #[cfg(target_arch = "riscv64")]
 #[no_mangle]
 /// the rust entry-point of os
-/// 主核的入口
-#[allow(unused)]
 pub fn rust_main(hart_id: usize) -> ! {
     if !*MAIN_HART_INITED.exclusive_access() {
         clear_bss();
         logging::init();
         info!("[kernel] Hello, world!");
-        let mut main_hart_inited = MAIN_HART_INITED.exclusive_access();
-        *main_hart_inited = true;
-        for i in 0..hart_id  {
-            start_hart(i, _start as *const() as usize, 0);
-        }
-        for i in hart_id..CPU_CORE_NUM {
-            start_hart(i, _start as *const() as usize, 0);
-        }
-        drop(main_hart_inited);
-        loop{
-            unsafe {
-                asm!("wfi");
-            }
-        }
-        mm::init();
-        mm::remap_test();
-        arch::trap::init();
-        arch::trap::enable_timer_interrupt();
-        arch::timer::set_next_trigger();
-        fs::list_apps();
-        task::add_initproc();
-        task::run_tasks();
+        main_init(hart_id);
         panic!("Unreachable in rust_main!");
     } else {
-        let mut main_hart_inited = MAIN_HART_INITED.exclusive_access();
-        *main_hart_inited = true;
         info!("[kernel] Hello from hart {}!", hart_id);
-        // 输出完才释放
-        drop(main_hart_inited);
-        loop{
-            unsafe {
-                asm!("wfi");
-            }
-        }
+        other_init();
+        panic!("Unreachable in rust_main!");
     }
     
 }
 
-#[allow(unused)]
-pub fn others_main() {
-    loop{}
+fn main_init(hart_id: usize) {
+    mm::init();
+    mm::remap_test();
+    init_other_hart(hart_id);
+    arch::trap::init();
+    arch::trap::enable_timer_interrupt();
+    arch::timer::set_next_trigger();
+    fs::list_apps();
+    task::add_initproc();
+    task::run_tasks();
+}
 
+fn init_other_hart(hart_id: usize) {
+    let mut main_hart_inited = MAIN_HART_INITED.exclusive_access();
+    *main_hart_inited = true;
+    for i in 0..hart_id  {
+        start_hart(i, _start as *const() as usize, 0);
+    }
+    for i in hart_id..CPU_CORE_NUM {
+        start_hart(i, _start as *const() as usize, 0);
+    }
+    drop(main_hart_inited);
+}
+
+fn other_init() {
+    arch::trap::init();
+    arch::trap::enable_timer_interrupt();
+    arch::timer::set_next_trigger();
+    task::run_tasks();
+}
+
+/// 获取当前核心的hart id
+pub fn get_hart_id() -> usize {
+    let hart_id: usize;
+    unsafe {
+         asm!(
+            "mv {}, tp",
+            out(reg) hart_id
+        );
+    }
+    hart_id
 }
 
 // la的main需重写
