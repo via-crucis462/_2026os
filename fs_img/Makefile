@@ -13,10 +13,18 @@ run_ext4:
 		exit 1; \
 	fi
 	@mkdir -p $(SRC_DIR)/bin
+	@ln -f $(SRC_DIR)/busybox $(SRC_DIR)/bin/ls
+	@ln -f $(SRC_DIR)/busybox $(SRC_DIR)/bin/du
+	@ln -f $(SRC_DIR)/busybox $(SRC_DIR)/bin/mkdir
+	@ln -f $(SRC_DIR)/busybox $(SRC_DIR)/bin/rmdir
+	@ln -f $(SRC_DIR)/busybox $(SRC_DIR)/bin/find
+	@ln -f $(SRC_DIR)/busybox $(SRC_DIR)/bin/kill
+	@ln -f $(SRC_DIR)/busybox $(SRC_DIR)/bin/sh
 	@mkdir -p $(SRC_DIR)/sbin
 	@mkdir -p $(SRC_DIR)/usr/bin
 	@mkdir -p $(SRC_DIR)/usr/sbin
 	@mkdir -p $(SRC_DIR)/etc
+
 	@DIR_SIZE_KB=$$(du -sk "$(SRC_DIR)" | cut -f1); \
 	 echo "Source directory size: $${DIR_SIZE_KB} KB"; \
 	 IMG_SIZE_MB=$$(( $${DIR_SIZE_KB} * 120 / 100 / 1024 + 5 )); \
