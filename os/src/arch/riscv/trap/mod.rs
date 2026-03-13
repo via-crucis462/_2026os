@@ -101,21 +101,20 @@ pub fn trap_handler() -> ! {
     trap_return();
 }
 
-pub fn current_trap_cx_user_va() -> VirtAddr {
-    (current_task().unwrap().kernel_stack.get_top() - KERNEL_STACK_SIZE).into()
+// 注意：不用VirtAddr包装，因为sv39要求高位符号扩展
+pub fn current_trap_cx_user_va() -> usize {
+    current_task().unwrap().kernel_stack.get_top() - KERNEL_STACK_SIZE
 }
 
-pub fn trap_cx_va_by_tid(tid: usize) -> VirtAddr {
-    VirtAddr::from(TRAP_CONTEXT_BASE - tid * (KERNEL_STACK_SIZE + PAGE_SIZE))
+pub fn trap_cx_va_by_tid(tid: usize) -> usize {
+    TRAP_CONTEXT_BASE - tid * (KERNEL_STACK_SIZE + PAGE_SIZE)
 }
 
 #[no_mangle]
 /// return to user space
 pub fn trap_return() -> ! {
-    info!("[kernel] trap_return: to user mode");
     set_user_trap_entry();
-    let trap_cx_ptr = current_trap_cx_user_va().0;
-    println!("[kernel] trap_return: trap_cx_ptr = {:#x}", trap_cx_ptr);
+    let trap_cx_ptr = current_trap_cx_user_va();
     let user_satp = current_user_token();
     // println!("[kernel] trap_return: to user mode");
     extern "C" {
@@ -123,7 +122,7 @@ pub fn trap_return() -> ! {
         fn __restore();
     }
     let restore_va = __restore as *const () as usize - __alltraps as *const () as usize + TRAMPOLINE;
-    // trace!("[kernel] trap_return: ..before return");
+    trace!("[kernel] trap_return: ..before return");
     unsafe {
         asm!(
             "fence.i",
