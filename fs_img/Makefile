@@ -20,6 +20,7 @@ run_ext4:
 	@ln -f $(SRC_DIR)/busybox $(SRC_DIR)/bin/find
 	@ln -f $(SRC_DIR)/busybox $(SRC_DIR)/bin/kill
 	@ln -f $(SRC_DIR)/busybox $(SRC_DIR)/bin/sh
+	@ln -f $(SRC_DIR)/busybox $(SRC_DIR)/bin/sleep
 	@mkdir -p $(SRC_DIR)/sbin
 	@mkdir -p $(SRC_DIR)/usr/bin
 	@mkdir -p $(SRC_DIR)/usr/sbin
