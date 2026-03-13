@@ -144,7 +144,8 @@ lazy_static! {
 
 ///Add init process to the manager
 pub fn add_initproc() {
-    add_task(INITTASK.clone());
+    add_task_into_pool(INITTASK.clone());
+    println!("[kernel] add_initproc: pid={}", INITTASK.getpid());
     info!("add_initproc: pid={}", INITTASK.getpid());
 }
 

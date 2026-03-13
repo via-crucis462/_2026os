@@ -3,6 +3,12 @@ use super::File;
 use crate::mm::UserBuffer;
 use crate::arch::sbi::console_getchar;
 use crate::task::suspend_current_and_run_next;
+use lazy_static::*;
+use crate::sync::MPSafeCell;
+
+lazy_static! {
+    pub static ref STDOUT_LOCK: MPSafeCell<()> = MPSafeCell::new(());
+}
 
 /// stdin file for getting chars from console
 pub struct Stdin;
@@ -84,9 +90,11 @@ impl File for Stdout {
         panic!("Cannot read from stdout!");
     }
     fn write(&self, user_buf: UserBuffer) -> usize {
+        let _lock = STDOUT_LOCK.exclusive_access();
         for buffer in user_buf.buffers.iter() {
             print!("{}", core::str::from_utf8(*buffer).unwrap());
         }
+        drop(_lock);
         user_buf.len()
     }
     fn read_at(&self, _offset: usize, buf: UserBuffer) -> usize {
