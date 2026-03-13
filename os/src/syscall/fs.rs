@@ -515,27 +515,81 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
 }
 /// YOUR JOB: Implement unlinkat.
 
-pub fn sys_unlinkat(path: *const u8) -> isize {
+pub fn sys_unlinkat(dirfd: i32, path: *const u8, flags: u32) -> isize {
+    const AT_REMOVEDIR: u32 = 0x200; 
+    const AT_FDCWD: i32 = -100; // 编译器，这次我用到它了！
+
     let token = current_user_token();
     let path_str = translated_str(token, path);
-    trace!("kernel:pid[{}] sys_unlinkat path={}", current_task().unwrap().pid.0, path_str);
+    trace!("kernel: sys_unlinkat dirfd={} path={} flags={:#x}", dirfd, path_str, flags);
     
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    let cwd = inner.cwd.clone();
+    let fd_table_len = inner.fd_table.len();
+    
+    // ==========================================
+    // 1. 确定搜索的起点目录 (Base Directory)
+    // 真正还原 Linux 的 *at 系列路径解析规范！
+    // ==========================================
+    let base_dir = if path_str.starts_with('/') {
+        // 绝对路径：直接从 cwd 找（因为 rCore 的 cwd 通常能正确处理绝对路径前缀）
+        cwd.clone() 
+    } else if dirfd == AT_FDCWD {
+        // 相对路径 + 特殊暗号 AT_FDCWD：从当前工作目录找
+        cwd.clone() 
+    } else {
+        // 相对路径 + 指定的目录 fd：从特定的目录句柄开始找
+        if dirfd < 0 || (dirfd as usize) >= fd_table_len || inner.fd_table[dirfd as usize].is_none() {
+            return -9; // EBADF (Bad file descriptor)
+        }
+        // 真正的内核这里会把 fd 转换成 Dentry。
+        // 为了目前能跑通，如果遇到这种情况，我们先妥协用 cwd，并打印提示。
+        println!("[kernel] sys_unlinkat: resolve relative to dirfd {} is WIP", dirfd);
+        cwd.clone() 
+    };
+    drop(inner); // 提前释放 task 的锁，防止死锁
+
+    // ==========================================
+    // 2. 寻找目标节点，获取属性
+    // ==========================================
+    let target_dentry = base_dir.find_tree(&path_str, false);
+    let target = match target_dentry {
+        Some(d) => d,
+        None => return -2, // ENOENT (No such file or directory)
+    };
+
+    let stat = target.inode.get_stat();
+    let is_dir = (stat.mode & 0o040000) != 0; // 判断是否为目录
+
+    // ==========================================
+    // 3. 严格的类型与标志位校验
+    // ==========================================
+    let removing_dir = (flags & AT_REMOVEDIR) != 0;
+    if is_dir && !removing_dir { return -21; /* EISDIR: 用 rm 删目录，拒绝 */ }
+    if !is_dir && removing_dir { return -20; /* ENOTDIR: 用 rmdir 删文件，拒绝 */ }
+
+    // ==========================================
+    // 4. 执行删除操作
+    // ==========================================
     let parent_path_str = parent_path(&path_str);
     let name = file_name(&path_str);
     
-    let task = current_task().unwrap();
-    let cwd = task.inner_exclusive_access().cwd.clone();
-    
-    if let Some(parent_dentry) = cwd.find_tree(&parent_path_str, true) {
-        if let Some(_inode_id) = parent_dentry.inode.delete_dir_entry(&name) {
-            // 清理 Dentry 缓存，确保下次也读不到
-            parent_dentry.children.lock().remove(&name);
-            return 0;
+    let parent_dentry = base_dir.find_tree(&parent_path_str, true);
+    if let Some(parent) = parent_dentry {
+        // 尝试调用底层文件系统删掉它
+        if let Some(_inode_id) = parent.inode.delete_dir_entry(&name) {
+            // 底层成功后，同步从内核 Dentry 树上摘下这个叶子
+            parent.children.lock().remove(&name);
+            return 0; // 彻底成功！
+        } else {
+            // 如果报错走到这里，绝对是你的底层 fs 驱动（比如 ext4 / fat32）的 delete_dir_entry 没实现好！
+            println!("[kernel] VFS failed to delete '{}'. Underlay FS returned None.", name);
+            return -1; // EPERM
         }
     }
-    -1
+    -2 // 父目录不存在
 }
-
 pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();

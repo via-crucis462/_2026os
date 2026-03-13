@@ -132,7 +132,7 @@ use crate::{fs::Stat, task::SignalAction};
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     /*if syscall_id != 64 && syscall_id != 63 {
-        println!("[Syscall Trace] ID: {}, args: {:#x?}", syscall_id, args);
+        println!("[Syscall Trace] ID: {}", syscall_id);
     }*/
     //println!("[kernel] syscall: id={}, args={:?}", syscall_id, args);
     match syscall_id {
@@ -143,7 +143,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_ACCESSAT => sys_accessat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut u32),
         SYSCALL_LINKAT => sys_linkat(args[1] as *const u8, args[3] as *const u8),
-        SYSCALL_UNLINKAT => sys_unlinkat(args[1] as *const u8),
+        SYSCALL_UNLINKAT => sys_unlinkat(args[0] as i32, args[1] as *const u8, args[2] as u32),
         SYSCALL_READ => sys_read(args[0], args[1] as *const u8, args[2]),
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_LSEEK=> sys_lseek(args[0], args[1] as isize, args[2] as i32),
