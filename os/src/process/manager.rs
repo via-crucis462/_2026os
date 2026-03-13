@@ -132,7 +132,7 @@ pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
             for task in list {
                 add_task(task);
             }
-            get_current_task_manager().exclusive_access().fetch()
+            fetch_task()
         }
     }
 }
