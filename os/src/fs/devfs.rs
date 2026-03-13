@@ -96,7 +96,29 @@ impl VfsInode for ZeroInode {
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
+pub struct RtcInode;
 
+impl VfsInode for RtcInode {
+    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn get_size(&self) -> usize { 0 }
+    fn get_stat(&self) -> Stat {
+        Stat {
+            dev: 0, ino: 903,
+            mode: 0o020666, // 字符设备
+            nlink: 1,
+            uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
+            ctime_sec: 0, ctime_nsec: 0, __unused: [0;1],
+        }
+    }
+    fn get_statx(&self) -> Statx { unimplemented!() }
+    fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
+    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
+    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
+}
 
 // 4. 执行挂载
 
@@ -109,10 +131,12 @@ pub fn mount_devfs() {
 
     // 在根目录下挂载 dev
     let dev_dentry = ROOT_DENTRY.insert(String::from("dev"), dev_dir);
-    
+    let rtc_inode = Arc::new(RtcInode);
+    dev_dentry.insert(String::from("rtc"), rtc_inode.clone());
     // 在 dev 目录下挂载 null 和 zero
     dev_dentry.insert(String::from("null"), null_inode);
     dev_dentry.insert(String::from("zero"), zero_inode);
     
     println!("[VFS] /dev/null and /dev/zero mounted successfully!");
 }
+

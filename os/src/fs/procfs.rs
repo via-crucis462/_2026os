@@ -93,7 +93,37 @@ impl VfsInode for MemInfoInode {
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
 
+pub struct MountsInode;
 
+impl VfsInode for MountsInode {
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        if offset > 0 { return 0; }
+        // 伪造的标准 Linux 挂载信息表
+        let mounts_str = "rootfs / rootfs rw 0 0\nproc /proc proc rw 0 0\ndevtmpfs /dev devtmpfs rw 0 0\n";
+        let bytes = mounts_str.as_bytes();
+        let len = bytes.len().min(buf.len());
+        buf[..len].copy_from_slice(&bytes[..len]);
+        len
+    }
+
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn get_size(&self) -> usize { 0 }
+    fn get_stat(&self) -> Stat {
+        Stat {
+            dev: 0, ino: 997, mode: 0o100444, nlink: 1, // 普通文件只读
+            uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
+            ctime_sec: 0, ctime_nsec: 0, __unused: [0;1],
+        }
+    }
+    // 把底下那堆 unimplemented 或 None 补齐 (跟 MemInfoInode 一样)
+    fn get_statx(&self) -> Statx { unimplemented!() }
+    fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
+    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
+    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
+}
 pub fn mount_procfs() {
     println!("[VFS] Mounting pseudo-filesystem: /proc");
 
@@ -105,6 +135,8 @@ pub fn mount_procfs() {
     
 
     proc_dentry.insert(String::from("meminfo"), meminfo);
+    proc_dentry.insert(String::from("mounts"), Arc::new(MountsInode));
     
     println!("[VFS] /proc/meminfo mounted successfully!");
 }
+
