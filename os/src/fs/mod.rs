@@ -5,7 +5,10 @@ mod pipe;
 mod stdio;
 mod dir_entry;
 mod file_tree;
-
+mod procfs;
+mod devfs;
+pub use devfs::mount_devfs;
+pub use procfs::mount_procfs;
 pub use dir_entry::DirEntry;
 pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
 pub use file_tree::{Dentry};
