@@ -232,7 +232,7 @@ pub fn sys_clock_gettime(_clock_id: usize, tp: *mut TimeSpec) -> isize {
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     const TCGETS: usize = 0x5401;
     const TIOCGWINSZ: usize = 0x5413;
-    const RTC_RD_TIME: usize = 0x80247009; // 真实的 RTC 读取指令号
+    const RTC_RD_TIME: usize = 0xffffffff80247009; // 真实的 RTC 读取指令号
 
     let task = current_task().unwrap();
     let fd_table = task.inner_exclusive_access().fd_table.clone();
@@ -256,7 +256,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             termios.c_cc[2] = 127; termios.c_cc[4] = 4;
             if argp != 0 {
                 *translated_refmut(token, argp as *mut Termios) = termios;
-                0
+                -25
             } else { -14 }
         }
         TIOCGWINSZ => {
@@ -264,7 +264,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             let winsize = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
             if argp != 0 {
                 *translated_refmut(token, argp as *mut Winsize) = winsize;
-                0
+                -25
             } else { -14 }
         }
         RTC_RD_TIME => {
@@ -292,7 +292,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             }
         }
         _ => {
-            println!("[kernel] sys_ioctl unsupported request {:#x} for fd {}", request, fd);
+          
             -25 // ENOTTY
         }
     }
