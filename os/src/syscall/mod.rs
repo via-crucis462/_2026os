@@ -20,6 +20,7 @@ const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_UNLINKAT: usize = 35;
 /// linkat syscall
 const SYSCALL_LINKAT: usize = 37;
+const SYSCALL_STATFS: usize = 43;
 /// openat syscall
 const SYSCALL_OPENAT: usize = 56;
 /// close syscall
@@ -175,7 +176,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETSID => sys_getsid(args[0]),
         SYSCALL_SETSID => sys_setsid(),
         SYSCALL_GETTID => sys_gettid(),
-        
+        SYSCALL_STATFS=> sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
         SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
         SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
         SYSCALL_SYSLOG => sys_syslog(args[0], args[1], args[2]),

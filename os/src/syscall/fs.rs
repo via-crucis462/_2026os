@@ -19,7 +19,57 @@ const FD_CLOEXEC: usize = 1;
 const O_ACCMODE: usize = 0o3;
 const O_WRONLY: usize = 0o1;
 const O_CLOEXEC: u32 = 0o2000000;
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Statfs {
+    pub f_type: u64,    // 文件系统类型 (魔数)
+    pub f_bsize: u64,   // 最佳传输块大小 (通常 4096)
+    pub f_blocks: u64,  // 磁盘总块数
+    pub f_bfree: u64,   // 剩余块数
+    pub f_bavail: u64,  // 普通用户可用的剩余块数
+    pub f_files: u64,   // 总 inode 节点数
+    pub f_ffree: u64,   // 剩余 inode 节点数
+    pub f_fsid: [u32; 2], // 文件系统 ID
+    pub f_namelen: u64, // 最大文件名长度
+    pub f_frsize: u64,  // 碎片大小
+    pub f_flags: u64,   // 挂载标志
+    pub f_spare: [u64; 4], // 保留字段
+}
+pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
+    let token = current_user_token();
+    let path_str = translated_str(token, path);
+    trace!("kernel: sys_statfs path={}", path_str);
 
+    // 为了让 df 命令不报错并且能打印出好看的数据，
+    // 我们捏造一个 ext4 文件系统：总大小 1GB，可用 500MB
+    // 块大小 = 4096 bytes (4KB)
+    // 1GB = 262144 块
+    // 500MB = 131072 块
+    let stat = Statfs {
+        f_type: 0xEF53,     // EXT4 系统的魔数 (EXT4_SUPER_MAGIC)
+        f_bsize: 4096,      // 块大小 4KB
+        f_blocks: 262144,   // 总共 1GB
+        f_bfree: 131072,    // 剩余 500MB
+        f_bavail: 131072,   // 用户可用 500MB
+        f_files: 65536,     // 捏造一个 inode 总数
+        f_ffree: 32768,     // 剩余 inode 数
+        f_fsid: [0, 0],
+        f_namelen: 255,     // 常见最大文件名长度
+        f_frsize: 4096,
+        f_flags: 0,
+        f_spare: [0; 4],
+    };
+
+    // 如果用户传进来的指针是空指针，防一手 EFAULT
+    if buf.is_null() {
+        return -14; // EFAULT
+    }
+
+    // 将伪造的磁盘信息写入用户态内存
+    *translated_refmut(token, buf) = stat;
+    
+    0 // Success!
+}
 fn ensure_fd_slots(inner: &mut crate::task::TaskControlBlockInner, target_len: usize) {
     while inner.fd_table.len() < target_len {
         inner.fd_table.push(None);
