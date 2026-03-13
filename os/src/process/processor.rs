@@ -88,10 +88,8 @@ pub fn run_tasks() {
             task_inner.task_status = TaskStatus::Running;
             // release coming task_inner manually
             drop(task_inner);
-            println!("[kernel] run_tasks: switching to pid={}", task.tid.0);
             // release coming task TCB manually
             processor.current = Some(task);
-            println!("1");
             // release processor manually
             // 释放锁
             drop(processor);
@@ -139,6 +137,7 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 
 /// Return to idle control flow for new scheduling
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
+    info!("[kernel] schedule: returning to idle control flow");
     let mut processor = current_processor();
     let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
     drop(processor);

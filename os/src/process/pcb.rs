@@ -18,7 +18,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use crate::arch::config::*;
+use crate::arch::{config::*, trap};
 
 const AT_PHDR: usize = 3;
 const AT_PHENT: usize = 4;
@@ -44,27 +44,38 @@ impl ProcessControlBlock {
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
     pub fn new(elf_data: &[u8]) -> (Arc<Self>, Arc<TaskControlBlock>) {
         println!("[kernel] TaskControlBlock::new: start creating a new process");
-        let (memory_set, user_sp, entry_point, _phdr, _phnum, _phent)
+        let (mut memory_set, user_sp, entry_point, _phdr, _phnum, _phent)
             = MemorySet::from_elf(elf_data);
         debug!(
             "TaskControlBlock::new: entry_point={:#x}, user_sp={:#x}",
             entry_point, user_sp
         );
-        #[cfg(target_arch = "riscv64")]
-        let trap_cx_addr = {
-            let trap_cx_ppn = memory_set
-            .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
-            .unwrap()
-            .ppn();
-            let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
-            trap_cx_pa.into()
-        };
+        
         // alloc a pid and a kernel stack in kernel space
         // 注意：push_on_top已经被修改，请及时改回！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
         let pid_handle = Arc::new(pid_alloc());
         let tid_handle = Arc::new(tid_alloc());
         let kernel_stack = kstack_alloc();
 
+        let trap_cx_va: VirtAddr = (kernel_stack.get_top() - KERNEL_STACK_SIZE).into();
+        println!("TaskControlBlock::new: calculated trap_cx_va = {:#x}", trap_cx_va.0);
+        memory_set.push(
+            MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
+                MapType::Framed, MapPermission::R | MapPermission::W),
+            None,
+            trap_cx_va.0,
+        );
+
+        #[cfg(target_arch = "riscv64")]
+        let trap_cx_addr = {
+            let trap_cx_ppn = memory_set
+                .translate(trap_cx_va.into())
+                .unwrap()
+                .ppn();
+            let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
+            trap_cx_pa.into()
+        };
+        println!("TaskControlBlock::new: translated trap_cx_addr = {:#x}", trap_cx_addr);
         #[cfg(target_arch = "loongarch64")]
         let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
 
@@ -151,17 +162,7 @@ impl ProcessControlBlock {
             "[kernel] task::exec: entry_point={:#x}, user_sp={:#x}",
             entry_point, user_sp
         );
-        #[cfg(target_arch = "riscv64")]
-        let trap_cx_ppn = memory_set
-            .translate(VirtAddr::from(current_trap_cx_user_va()).into())
-            .unwrap()
-            .ppn();
-        #[cfg(target_arch = "riscv64")]
-        let trap_cx_addr = {
-            let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
-            let trap_cx_addr = trap_cx_pa.0;
-            trap_cx_addr
-        };
+        
         let memory_top = user_sp;
 
         // --- 开始构造符合 ABI 标准的用户栈 ---
@@ -239,6 +240,16 @@ impl ProcessControlBlock {
 
         let kernel_stack = kstack_alloc();
         
+        let trap_cx_va: VirtAddr = (kernel_stack.get_top() - PAGE_SIZE).into();
+        let trap_cx_ppn = inner.memory_set.translate(trap_cx_va.into()).unwrap().ppn();
+
+        #[cfg(target_arch = "riscv64")]
+        let trap_cx_addr = {
+            let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
+            let trap_cx_addr = trap_cx_pa.0;
+            trap_cx_addr
+        };
+        
         #[cfg(target_arch = "riscv64")]
         let kernel_stack_top = kernel_stack.get_top();
         #[cfg(target_arch = "loongarch64")]
@@ -293,19 +304,21 @@ impl ProcessControlBlock {
         // copy user space(include trap context)
         let mut memory_set = MemorySet::from_existed_user(&parent_inner.memory_set);
     
+        // alloc a pid and a kernel stack in kernel space
         let pid_handle = Arc::new(pid_alloc());
         let tid_handle = Arc::new(tid_alloc());
-        let trap_cx_addr = VirtAddr::from(trap_cx_va_by_tid(tid_handle.0));
+        let kernel_stack = kstack_alloc();
+
+        let trap_cx_va: VirtAddr = (kernel_stack.get_top() - PAGE_SIZE).into();
         memory_set.push(
-            MapArea::new(trap_cx_addr.into(), VirtAddr::from(trap_cx_addr.0 + PAGE_SIZE),
+            MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + PAGE_SIZE),
                 MapType::Framed, MapPermission::R | MapPermission::W),
             None,
-            trap_cx_addr.0,
+            trap_cx_va.0,
         );
-        println!("fork: translated trap_cx_addr = {:#x}", trap_cx_addr.0);
         #[cfg(target_arch = "riscv64")]
         let trap_cx_ppn = memory_set
-            .translate_create(trap_cx_addr.into())
+            .translate(trap_cx_va.into())
             .unwrap()
             .ppn();
         println!("fork: translated trap_cx_ppn = {:#x}", trap_cx_ppn.0);
@@ -315,9 +328,7 @@ impl ProcessControlBlock {
             let trap_cx_addr: usize = trap_cx_pa.into();
             trap_cx_addr
         };
-        // alloc a pid and a kernel stack in kernel space
         
-        let kernel_stack = kstack_alloc();
 
         #[cfg(target_arch = "loongarch64")]
         let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;

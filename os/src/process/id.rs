@@ -78,6 +78,7 @@ pub fn kernel_stack_position(app_id: usize) -> (usize, usize) {
     (bottom, top)
 }
 #[cfg(target_arch = "riscv64")]
+// 内核空间地址
 pub fn kernel_stack_position(app_id: usize) -> (usize, usize) {
     let top = TRAMPOLINE - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE);
     let bottom = top - KERNEL_STACK_SIZE;
@@ -91,6 +92,7 @@ pub struct KernelStack(pub usize);
 pub fn kstack_alloc() -> KernelStack {
     let kstack_id = KSTACK_ALLOCATOR.exclusive_access().alloc();
     let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
+    debug!("kstack_alloc: allocated kernel stack {} with bottom {:#x} and top {:#x}", kstack_id, kstack_bottom, kstack_top);
     KERNEL_SPACE.exclusive_access().insert_framed_area(
         kstack_bottom.into(),
         kstack_top.into(),
