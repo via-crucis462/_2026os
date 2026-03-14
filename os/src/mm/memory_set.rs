@@ -123,7 +123,7 @@ impl MemorySet {
     fn map_trampoline(&mut self) {
         info!("mapping trampoline");
         self.page_table.map(
-            VirtAddr::from(TRAMPOLINE).into(),// 高位0xf...被截断
+            VirtAddr::from(TRAMPOLINE).into(),
             PhysAddr::from(strampoline as *const () as usize).into(),// 高位0x9...被截断
             PTEFlags::R | PTEFlags::X,
         );
