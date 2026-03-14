@@ -342,9 +342,13 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         }
     }
     trace!("[kernel] sys_exec: before open_file");
+    let mut on_main_hart = false;
     if let Some(mut app_inode) = open_file(cwd.clone(), path.as_str(), OpenFlags::RDONLY) {
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
-
+        // initproc和shell在主核上运行
+        if app_inode.get_dentry().name.contains("shell") || app_inode.get_dentry().name.contains("init") {
+            on_main_hart = true;
+        }
         if app_inode.get_dentry().name.ends_with(".sh") {
             let mut new_args:Vec<String> = Vec::new();
             new_args.push("busybox".to_string());
@@ -365,7 +369,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         let task = current_task().unwrap();
         let argc = args_vec.len();
         trace!("[kernel] sys_exec: before task.exec");
-        task.process().exec(task, all_data.as_slice(), args_vec);
+        task.process().exec(task, all_data.as_slice(), args_vec, on_main_hart);
         trace!("[kernel] sys_exec: after task.exec");
         // return argc because cx.x[10] will be covered with it later
         argc as isize

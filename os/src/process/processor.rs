@@ -9,11 +9,13 @@ use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 #[cfg(target_arch = "riscv64")]
 use crate::get_hart_id;
+use crate::MAIN_HART_ID;
 use crate::sync::MPSafeCell;
 use crate::arch::{
     trap::TrapContext,
     config::*,
 };
+use crate::task::add_task_into_pool;
 use alloc::sync::Arc;
 use lazy_static::*;
 
@@ -70,17 +72,24 @@ pub fn current_processor() -> spin::MutexGuard<'static, Processor> {
     PROCESSORS[hart_id].exclusive_access()
 }
 
+use core::arch::asm;
 ///The main part of process execution and scheduling
 ///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
-/// 待修改
 pub fn run_tasks() {
     //let mut counter: usize = 0;
     loop {
+        let hart_id = get_hart_id();
         //counter += 1;
         //println!("run_tasks counter: {}", counter);
         let mut processor = current_processor();
         if let Some(task) = fetch_task() {
+            if (task.process().inner_exclusive_access().on_main_hart &&
+                hart_id != *MAIN_HART_ID.exclusive_access()) {
+                add_task_into_pool(task);
+                continue;
+            } 
             info!("[kernel] run_tasks: fetched tid={} of pid={}", task.tid.0, task.getpid());
+            warn!("I'm hart {}, running a task.", hart_id);
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // access coming task TCB exclusively
             let mut task_inner = task.inner_exclusive_access();
@@ -93,11 +102,16 @@ pub fn run_tasks() {
             // release processor manually
             // 释放锁
             drop(processor);
+
             unsafe {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
         } else {
-            warn!("no tasks available in run_tasks");
+            warn!("no tasks available in core {}", hart_id);
+            loop{}
+            unsafe{
+                asm!("wfi");
+            }
         }
     }
 }
