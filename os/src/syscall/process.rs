@@ -309,7 +309,7 @@ pub fn sys_renameat2(
     let old_path = translated_str(token, oldpath_ptr as *const u8);
     let new_path = translated_str(token, newpath_ptr as *const u8);
     
-    // 假设你有解析父目录和文件名的辅助函数
+    // 解析父目录和文件名
     let old_parent_path = parent_path(&old_path);
     let old_name = file_name(&old_path);
     let new_parent_path = parent_path(&new_path);
@@ -322,17 +322,27 @@ pub fn sys_renameat2(
         cwd.find_tree(&old_parent_path, true),
         cwd.find_tree(&new_parent_path, true)
     ) {
-       
+        // 先从前台 VFS 树上把旧节点摘下来
         let moved_dentry_opt = {
-            let mut old_children = old_parent.children.lock(); // 加锁
+            let mut old_children = old_parent.children.lock(); 
             old_children.remove(&old_name)
         }; 
 
         if let Some(moved_dentry) = moved_dentry_opt {
-           
-            let mut new_children = new_parent.children.lock();
-            new_children.insert(new_name.to_string(), moved_dentry);
-            return 0;
+            
+            // 🚨 核心修复：先让底层磁盘执行改名，并严格检查返回值！
+            let disk_success = old_parent.inode.rename_dir_entry(&old_name, &new_name);
+            
+            if disk_success {
+                // 底层成功了，再把节点以新名字挂到 VFS 树上
+                let mut new_children = new_parent.children.lock();
+                new_children.insert(new_name.to_string(), moved_dentry);
+                return 0; // 彻底成功！
+            } else {
+                let mut old_children = old_parent.children.lock();
+                old_children.insert(old_name.to_string(), moved_dentry);
+                return -1; // 诚实地向用户态返回错误
+            }
         }
     }
     
