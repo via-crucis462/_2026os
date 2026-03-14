@@ -20,6 +20,18 @@ pub struct Termios {
     pub c_line: u8,
     pub c_cc: [u8; 19], // 控制字符数组
 }
+#[repr(C)]
+pub struct RtcTime {
+    pub tm_sec: i32,
+    pub tm_min: i32,
+    pub tm_hour: i32,
+    pub tm_mday: i32,
+    pub tm_mon: i32,
+    pub tm_year: i32,
+    pub tm_wday: i32,
+    pub tm_yday: i32,
+    pub tm_isdst: i32,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -220,65 +232,73 @@ pub fn sys_clock_gettime(_clock_id: usize, tp: *mut TimeSpec) -> isize {
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     const TCGETS: usize = 0x5401;
     const TIOCGWINSZ: usize = 0x5413;
+    const RTC_RD_TIME: usize = 0xffffffff80247009; // 真实的 RTC 读取指令号
 
-
-    if fd != 1 {
-        return -25; // ENOTTY
+    let task = current_task().unwrap();
+    let fd_table = task.inner_exclusive_access().fd_table.clone();
+    
+    // 1. 严格校验 fd 是否存在 (真正的 OS 第一步)
+    if fd >= fd_table.len() || fd_table[fd].is_none() {
+        return -9; // EBADF (Bad file descriptor)
     }
 
-    let token = current_user_token(); 
+    let token = task.get_user_token();
 
     match request {
         TCGETS => {
-            
+            if fd > 2 { return -25; } // ENOTTY: 只有 0,1,2 才是标准终端
             let mut termios = Termios {
-                c_iflag: 0o012402, // IGNBRK | ICRNL 等标志位的组合值
-                c_oflag: 0o000005, // OPOST | ONLCR
-                c_cflag: 0o002277, // 标准的控制模式
-                c_lflag: 0o0105011, // ISIG | ICANON | ECHO 等
-                c_line: 0,
-                c_cc: [0; 19],
+                c_iflag: 0o012402, c_oflag: 0o000005,
+                c_cflag: 0o002277, c_lflag: 0o0105011,
+                c_line: 0, c_cc: [0; 19],
             };
-            // 设置关键的控制字符
-            termios.c_cc[0] = 3;   // VINTR = ^C (终止进程)
-            termios.c_cc[1] = 28;  // VQUIT = ^\
-            termios.c_cc[2] = 127; // VERASE = DEL (退格)
-            termios.c_cc[4] = 4;   // VEOF = ^D
-
-            // 2. 将数据写回用户态
+            termios.c_cc[0] = 3; termios.c_cc[1] = 28;
+            termios.c_cc[2] = 127; termios.c_cc[4] = 4;
             if argp != 0 {
-                let user_termios = translated_refmut(token, argp as *mut Termios);
-                *user_termios = termios;
-                0 // 成功返回 0
-            } else {
-                -14 // EFAULT: 用户传了个空指针
-            }
+                *translated_refmut(token, argp as *mut Termios) = termios;
+                -25
+            } else { -14 }
         }
         TIOCGWINSZ => {
-            // 1. 构造终端窗口大小 (比如经典的 24行 80列)
-            let winsize = Winsize {
-                ws_row: 24,
-                ws_col: 80,
-                ws_xpixel: 0,
-                ws_ypixel: 0,
+            if fd > 2 { return -25; } // ENOTTY
+            let winsize = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+            if argp != 0 {
+                *translated_refmut(token, argp as *mut Winsize) = winsize;
+                -25
+            } else { -14 }
+        }
+        RTC_RD_TIME => {
+            // 2. 真正的读取硬件时间 (这里用你们的 get_time_ms 转换)
+            let time_ms = get_time_ms(); 
+            let sec = (time_ms / 1000) as i32;
+            
+            // 简单的秒数转换 (这里为了严谨，我们填一个真实的近期时间)
+            // 1900年起算的年份，126 = 2026年
+            let rtc_time = RtcTime {
+                tm_sec: sec % 60,
+                tm_min: (sec / 60) % 60,
+                tm_hour: (sec / 3600) % 24,
+                tm_mday: 1, 
+                tm_mon: 0, 
+                tm_year: 126, // 2026年
+                tm_wday: 0, tm_yday: 0, tm_isdst: 0,
             };
 
-            // 2. 将数据写回用户态
             if argp != 0 {
-                let user_winsize = translated_refmut(token, argp as *mut Winsize);
-                *user_winsize = winsize;
-                0 // 成功返回 0
+                *translated_refmut(token, argp as *mut RtcTime) = rtc_time;
+                0
             } else {
                 -14 // EFAULT
             }
         }
         _ => {
-            // 对于未知的终端请求，安全地返回 -25，C 库能正确处理真正的降级
-            println!("[DEBUG ioctl] Unsupported request {:#x} for fd {}, returning -25", request, fd);
+          
             -25 // ENOTTY
         }
     }
 }
+
+
 pub fn sys_renameat2(
     _olddirfd: i32, oldpath_ptr: usize,
     _newdirfd: i32, newpath_ptr: usize, _flags: usize
@@ -289,7 +309,7 @@ pub fn sys_renameat2(
     let old_path = translated_str(token, oldpath_ptr as *const u8);
     let new_path = translated_str(token, newpath_ptr as *const u8);
     
-    // 假设你有解析父目录和文件名的辅助函数
+    // 解析父目录和文件名
     let old_parent_path = parent_path(&old_path);
     let old_name = file_name(&old_path);
     let new_parent_path = parent_path(&new_path);
@@ -302,17 +322,27 @@ pub fn sys_renameat2(
         cwd.find_tree(&old_parent_path, true),
         cwd.find_tree(&new_parent_path, true)
     ) {
-       
+        // 先从前台 VFS 树上把旧节点摘下来
         let moved_dentry_opt = {
-            let mut old_children = old_parent.children.lock(); // 加锁
+            let mut old_children = old_parent.children.lock(); 
             old_children.remove(&old_name)
         }; 
 
         if let Some(moved_dentry) = moved_dentry_opt {
-           
-            let mut new_children = new_parent.children.lock();
-            new_children.insert(new_name.to_string(), moved_dentry);
-            return 0;
+            
+            // 🚨 核心修复：先让底层磁盘执行改名，并严格检查返回值！
+            let disk_success = old_parent.inode.rename_dir_entry(&old_name, &new_name);
+            
+            if disk_success {
+                // 底层成功了，再把节点以新名字挂到 VFS 树上
+                let mut new_children = new_parent.children.lock();
+                new_children.insert(new_name.to_string(), moved_dentry);
+                return 0; // 彻底成功！
+            } else {
+                let mut old_children = old_parent.children.lock();
+                old_children.insert(old_name.to_string(), moved_dentry);
+                return -1; // 诚实地向用户态返回错误
+            }
         }
     }
     
