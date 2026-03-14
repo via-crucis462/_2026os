@@ -80,7 +80,7 @@ pub fn run_tasks() {
         //println!("run_tasks counter: {}", counter);
         let mut processor = current_processor();
         if let Some(task) = fetch_task() {
-            info!("[kernel] run_tasks: fetched tid={}", task.tid.0);
+            info!("[kernel] run_tasks: fetched tid={} of pid={}", task.tid.0, task.getpid());
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // access coming task TCB exclusively
             let mut task_inner = task.inner_exclusive_access();

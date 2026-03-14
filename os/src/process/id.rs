@@ -52,22 +52,30 @@ lazy_static! {
 }
 
 /// Abstract structure of PID
-pub struct IdHandle(pub usize);
+pub struct PidHandle(pub usize);
+pub struct TidHandle(pub usize);
 
-impl Drop for IdHandle {
+impl Drop for PidHandle {
     fn drop(&mut self) {
         //println!("drop pid {}", self.0);
         PID_ALLOCATOR.exclusive_access().dealloc(self.0);
     }
 }
 
-/// Allocate a new PID
-pub fn pid_alloc() -> IdHandle {
-    IdHandle(PID_ALLOCATOR.exclusive_access().alloc())
+impl Drop for TidHandle {
+    fn drop(&mut self) {
+        //println!("drop tid {}", self.0);
+        TID_ALLOCATOR.exclusive_access().dealloc(self.0);
+    }
 }
 
-pub fn tid_alloc() -> IdHandle {
-    IdHandle(TID_ALLOCATOR.exclusive_access().alloc())
+/// Allocate a new PID
+pub fn pid_alloc() -> PidHandle {
+    PidHandle(PID_ALLOCATOR.exclusive_access().alloc())
+}
+
+pub fn tid_alloc() -> TidHandle {
+    TidHandle(TID_ALLOCATOR.exclusive_access().alloc())
 }
 
 /// Return (bottom, top) of a kernel stack in kernel space.

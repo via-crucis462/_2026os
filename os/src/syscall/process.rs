@@ -14,6 +14,7 @@ pub use crate::{
     }
 
 };
+use alloc::task;
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 
 #[repr(C)]
@@ -67,9 +68,7 @@ pub struct UtsName {
 }
 
 pub fn sys_exit(exit_code: i32) -> ! {
-    let task = current_task().unwrap();
-    let process = task.process();
-    trace!("kernel:pid[{}] sys_exit", process.pid.0);
+    trace!("kernel:pid[{}] sys_exit", current_task().unwrap().process().pid.0);
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
@@ -398,15 +397,14 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, _options: usize) -> isize 
         if let Some((idx, _)) = pair {
             // --- A. 找到了僵尸！收尸成功 ---
             let child = proc_inner.children.remove(idx);
-            assert_eq!(Arc::strong_count(&child), 1);
-            let found_pid = child.getpid();
+            let pid = child.getpid();
             let exit_code = child.inner_exclusive_access().exit_code;
-            
+            assert_eq!(Arc::strong_count(&child), 1);
             // 左移 8 位（这里还是要保留的！）
             let status = (exit_code & 0xff) << 8;
             *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
             
-            return found_pid as isize; // 成功返回
+            return pid as isize; // 成功返回
         } else {
             // --- B. 孩子还活着 ---
             

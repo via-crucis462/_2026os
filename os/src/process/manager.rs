@@ -93,7 +93,7 @@ lazy_static! {
     pub static ref TASK_MANAGERS: [MPSafeCell<TaskManager>; CPU_CORE_NUM] ={
         core::array::from_fn(|_| MPSafeCell::new(TaskManager::new()))
     };
-    /// PID2PCB instance (map of pid to pcb)
+    /// TID2TCB instance (map of tid to pcb)
     pub static ref TID2TCB: MPSafeCell<BTreeMap<usize, Arc<TaskControlBlock>>> =
         MPSafeCell::new(BTreeMap::new());
 }

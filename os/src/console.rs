@@ -37,7 +37,6 @@ macro_rules! print {
 
 /// Println! to the host console using the format string and arguments.
 #[macro_export]
-
 macro_rules! println {
     ($fmt: literal $(, $($arg: tt)+)?) => {
         #[allow(unreachable_code)]

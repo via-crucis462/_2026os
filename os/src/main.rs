@@ -132,6 +132,11 @@ fn other_init() {
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger();
+    loop{
+        unsafe {
+            asm!("wfi");
+        }
+    }
     task::run_tasks();
 }
 

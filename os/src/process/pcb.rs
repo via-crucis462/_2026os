@@ -1,7 +1,7 @@
 //！ TODO：需要仔细核对并修改exec和fork的实现
 
 use super::*;
-use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, IdHandle, SignalActions, SignalFlags, TaskContext};
+use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, TidHandle, SignalActions, SignalFlags, TaskContext};
 use schedule::*;
 
 use crate::{
@@ -27,7 +27,7 @@ const AT_ENTRY: usize = 9;
 const AT_RANDOM: usize = 25;
 
 pub struct ProcessControlBlock {
-    pub pid: Arc<IdHandle>,
+    pub pid: Arc<PidHandle>,
     pub inner: MPSafeCell<ProcessControlBlockInner>,
 }
 
@@ -522,7 +522,7 @@ impl ProcessControlBlockInner {
         }
     }
     pub fn is_zombie(&self) -> bool {
-        self.alive_task_count == 0
+        self.alive_task_count <= 0
     }
 }
 
