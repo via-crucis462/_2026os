@@ -67,7 +67,7 @@ pub fn suspend_current_and_run_next() {
     // ---- release current PCB
 
     // push back to ready queue.
-    add_task(task);
+    add_task_in_current_hart(task);
     // jump to scheduling cycle
     schedule(task_cx_ptr);
 }
@@ -153,7 +153,7 @@ lazy_static! {
 
 ///Add init process to the manager
 pub fn add_initproc() {
-    add_task_into_pool(INITTASK.clone());
+    add_task(INITTASK.clone());
     info!("add_initproc: pid={}", INITTASK.getpid());
 }
 

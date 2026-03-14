@@ -89,6 +89,7 @@ impl ProcessControlBlock {
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),// 注意：实际上只克隆了指针
             inner: MPSafeCell::new(ProcessControlBlockInner {
+                on_main_hart: true, // initproc和shell默认在主核运行
                 pname: String::from("initproc"),
                 base_size: user_sp,
                 memory_set,
@@ -154,7 +155,7 @@ impl ProcessControlBlock {
 
     /// Load a new elf to replace the original application address space and 
     /// 待修改
-    pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8], args: Vec<String>) {
+    pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8], args: Vec<String>, on_main_hart: bool) {
         // 生成新地址空间
         let (mut memory_set, mut user_sp, entry_point, phdr_addr, phnum, phent) = MemorySet::from_elf(elf_data);
         debug!(
@@ -218,6 +219,7 @@ impl ProcessControlBlock {
         let mut proc_inner = self.inner_exclusive_access();
         proc_inner.heap_bottom = memory_top;
         proc_inner.program_brk = memory_top;
+        proc_inner.on_main_hart = on_main_hart;
         // 内核栈无须改变（fork时已经分配了新的）但需要重新映射
         let kernel_stack = &caller_task.kernel_stack;
         let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(kernel_stack).into();
@@ -327,6 +329,7 @@ impl ProcessControlBlock {
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
             inner: MPSafeCell::new(ProcessControlBlockInner {
+                on_main_hart: false, // fork出的子进程默认不在
                 pname: parent_inner.pname.clone(),
                 base_size: parent_inner.base_size,
                 memory_set,
@@ -355,7 +358,7 @@ impl ProcessControlBlock {
             inner: MPSafeCell::new(TaskControlBlockInner {
                 trap_cx_addr,
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                task_status: TaskStatus::Ready,
+                task_status: TaskStatus::UnInit,
                 signal_mask: caller_inner.signal_mask,
                 handling_sig: caller_inner.handling_sig,
                 killed: false,
@@ -463,6 +466,9 @@ impl ProcessControlBlock {
 }
 
 pub struct ProcessControlBlockInner {
+    // 进程是否在主核运行，initproc和shell默认在主核运行
+    pub on_main_hart: bool,
+
     pub pname: String,
 
     /// Application data can only appear in areas
