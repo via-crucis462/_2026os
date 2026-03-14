@@ -18,8 +18,7 @@ use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 use crate::mm::VirtAddr;
 use crate::syscall::syscall;
 use crate::task::{
-    check_signals_error_of_current, current_add_signal, current_trap_cx, current_user_token,
-    exit_current_and_run_next, handle_signals, suspend_current_and_run_next, SignalFlags, current_tid, current_task
+    KernelStack, SignalFlags, check_signals_error_of_current, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token, exit_current_and_run_next, handle_signals, suspend_current_and_run_next
 };
 use crate::arch::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
@@ -107,7 +106,12 @@ pub fn current_trap_cx_user_va() -> usize {
 }
 
 pub fn trap_cx_va_by_tid(tid: usize) -> usize {
-    TRAP_CONTEXT_BASE - tid * (KERNEL_STACK_SIZE + PAGE_SIZE)
+    TRAMPOLINE - tid * (KERNEL_STACK_SIZE + PAGE_SIZE) - KERNEL_STACK_SIZE
+}
+
+pub fn trap_cx_va_by_kernel_stack(kernel_stack: &KernelStack) -> usize {
+    let kernel_stack_top = kernel_stack.get_top();
+    kernel_stack_top - KERNEL_STACK_SIZE
 }
 
 #[no_mangle]

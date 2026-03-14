@@ -112,7 +112,7 @@ fn main_init(hart_id: usize) {
     arch::timer::set_next_trigger();
     fs::list_apps();
     task::add_initproc();
-    //init_other_hart(hart_id);
+    init_other_hart(hart_id);
     task::run_tasks();
 }
 

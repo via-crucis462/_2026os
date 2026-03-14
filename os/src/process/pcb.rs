@@ -1,12 +1,11 @@
 //！ TODO：需要仔细核对并修改exec和fork的实现
 
-#![allow(unused)]
 use super::*;
 use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, IdHandle, SignalActions, SignalFlags, TaskContext};
 use schedule::*;
 
 use crate::{
-    arch::trap::{TrapContext, trap_handler, current_trap_cx_user_va, trap_cx_va_by_tid},
+    arch::trap::{TrapContext, trap_handler, trap_cx_va_by_kernel_stack},
     fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout},
     mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, 
         translated_refmut, MapArea, MapPermission, MapType},
@@ -57,8 +56,8 @@ impl ProcessControlBlock {
         let tid_handle = Arc::new(tid_alloc());
         let kernel_stack = kstack_alloc();
 
-        let trap_cx_va: VirtAddr = (kernel_stack.get_top() - KERNEL_STACK_SIZE).into();
-        println!("TaskControlBlock::new: calculated trap_cx_va = {:#x}", trap_cx_va.0);
+        let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(&kernel_stack).into();
+        info!("TaskControlBlock::new: calculated trap_cx_va = {:#x}", trap_cx_va.0);
         memory_set.push(
             MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
                 MapType::Framed, MapPermission::R | MapPermission::W),
@@ -75,7 +74,7 @@ impl ProcessControlBlock {
             let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
             trap_cx_pa.into()
         };
-        println!("TaskControlBlock::new: translated trap_cx_addr = {:#x}", trap_cx_addr);
+        info!("TaskControlBlock::new: translated trap_cx_addr = {:#x}", trap_cx_addr);
         #[cfg(target_arch = "loongarch64")]
         let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
 
@@ -155,19 +154,15 @@ impl ProcessControlBlock {
 
     /// Load a new elf to replace the original application address space and 
     /// 待修改
-    pub fn exec(self: &Arc<ProcessControlBlock>, elf_data: &[u8], args: Vec<String>) {
-        // 1. 加载 ELF 文件生成新的地址空间
-        let (memory_set, mut user_sp, entry_point, phdr_addr, phnum, phent) = MemorySet::from_elf(elf_data);
+    pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8], args: Vec<String>) {
+        // 生成新地址空间
+        let (mut memory_set, mut user_sp, entry_point, phdr_addr, phnum, phent) = MemorySet::from_elf(elf_data);
         debug!(
             "[kernel] task::exec: entry_point={:#x}, user_sp={:#x}",
             entry_point, user_sp
         );
-        
         let memory_top = user_sp;
-
-        // --- 开始构造符合 ABI 标准的用户栈 ---
-        
-        // 2. 首先压入具体的字符串内容（高地址）
+        // 压入具体的字符串内容（高地址）
         let mut argv_ptrs: Vec<usize> = Vec::new();
         for arg in args.iter() {
             user_sp -= arg.len() + 1; // +1 是为了结尾的 '\0'
@@ -179,18 +174,15 @@ impl ProcessControlBlock {
             *translated_refmut(memory_set.token(), p as *mut u8) = 0; // 写入结尾 0
             argv_ptrs.push(user_sp);
         }
-
         // 随机字符串 (AT_RANDOM 使用) 16 字节
         user_sp -= 16;
         let random_at = user_sp;
         for i in 0..16 {
             *translated_refmut(memory_set.token(), (user_sp + i) as *mut u8) = 0x23; // 任意填充
         }
-
-        // 3. 对齐栈指针到 8 字节
+        // 对齐栈指针
         user_sp -= user_sp % core::mem::size_of::<usize>();
-
-        // --- 构造 AUX Vector ---
+        // 构造 AUX Vector
         let mut auxv = Vec::new();
         auxv.push((AT_PHDR, phdr_addr));
         auxv.push((AT_PHENT, phent));
@@ -199,7 +191,6 @@ impl ProcessControlBlock {
         auxv.push((AT_ENTRY, entry_point));
         auxv.push((AT_RANDOM, random_at));
         auxv.push((0, 0)); // AT_NULL
-
         // 压入 AUXV
         for (id, val) in auxv.iter().rev() {
             user_sp -= core::mem::size_of::<usize>();
@@ -207,56 +198,55 @@ impl ProcessControlBlock {
             user_sp -= core::mem::size_of::<usize>();
             *translated_refmut(memory_set.token(), user_sp as *mut usize) = *id;
         }
-
-        // 4. 压入 envp 数组：目前只压入一个 NULL (0)
+        // 压入 envp 数组：目前只压入一个 NULL (0)
         user_sp -= core::mem::size_of::<usize>();
         *translated_refmut(memory_set.token(), user_sp as *mut usize) = 0;
-
-        // 5. 压入 argv 数组：先压入一个 NULL (0) 作为结尾
+        // 压入 argv 数组：先压入一个 NULL (0) 作为结尾
         user_sp -= core::mem::size_of::<usize>();
         *translated_refmut(memory_set.token(), user_sp as *mut usize) = 0;
-
         // 逆序压入 argv 的指针
         for arg_ptr in argv_ptrs.iter().rev() {
             user_sp -= core::mem::size_of::<usize>();
             *translated_refmut(memory_set.token(), user_sp as *mut usize) = *arg_ptr;
         }
-
         // 此时 user_sp 即为 argv[0] 的地址
         let argv_base = user_sp;
-
-        // 6. 最后压入 argc
+        // 压入 argc
         user_sp -= core::mem::size_of::<usize>();
         *translated_refmut(memory_set.token(), user_sp as *mut usize) = args.len();
-
-        // --- 压栈结束，此时 user_sp 指向 argc ---
-
-        // 7. 更新 PCB 内部信息
-        let mut inner = self.inner_exclusive_access();
-        inner.memory_set = memory_set;
-    
-        inner.heap_bottom = memory_top;
-        inner.program_brk = memory_top;
-
-        let kernel_stack = kstack_alloc();
-        
-        let trap_cx_va: VirtAddr = (kernel_stack.get_top() - PAGE_SIZE).into();
-        let trap_cx_ppn = inner.memory_set.translate(trap_cx_va.into()).unwrap().ppn();
-
-        #[cfg(target_arch = "riscv64")]
-        let trap_cx_addr = {
-            let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
-            let trap_cx_addr = trap_cx_pa.0;
-            trap_cx_addr
+        // 更新 PCB 内部信息
+        let mut proc_inner = self.inner_exclusive_access();
+        proc_inner.heap_bottom = memory_top;
+        proc_inner.program_brk = memory_top;
+        // 内核栈无须改变（fork时已经分配了新的）但需要重新映射
+        let kernel_stack = &caller_task.kernel_stack;
+        let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(kernel_stack).into();
+        memory_set.push(
+            MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
+                MapType::Framed, MapPermission::R | MapPermission::W),
+            None,
+            trap_cx_va.0,
+        );
+        // 重新获取一次trap_cx_addr，因为原内存空间将被销毁
+        let trap_cx_addr: usize = {
+            #[cfg(target_arch = "riscv64")]
+            {
+                let trap_cx_ppn = memory_set
+                    .translate(trap_cx_va.into())
+                    .unwrap()
+                    .ppn();
+                let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
+                trap_cx_pa.into()
+            }
         };
-        
-        #[cfg(target_arch = "riscv64")]
-        let kernel_stack_top = kernel_stack.get_top();
-        #[cfg(target_arch = "loongarch64")]
-        let kernel_stack_top = inner.trap_cx_addr;
+        proc_inner.memory_set = memory_set;
 
-        
-        // 8. 设置初始异常上下文 (TrapContext)
+        #[cfg(target_arch = "riscv64")]
+        let kernel_stack_top = caller_task.kernel_stack.get_top();
+        #[cfg(target_arch = "loongarch64")]
+        let kernel_stack_top = task_inner.trap_cx_addr;
+
+        // 修改trap上下文
         let mut trap_cx = TrapContext::app_init_context(
             entry_point,
             user_sp, // 让用户程序一进来 sp 就指向 argc
@@ -268,30 +258,16 @@ impl ProcessControlBlock {
         // 虽然 crt.S 会用 sp 覆盖 a0，但我们还是按照惯例填好 a0 和 a1
         trap_cx.set_a0(args.len());
         trap_cx.set_a1(argv_base);
-        
-        //*inner.get_trap_cx() = trap_cx;
 
-        let new_task = TaskControlBlock {
-            process: Arc::downgrade(self),
-            tid: Arc::new(tid_alloc()),
-            kernel_stack: kernel_stack,
-            inner: MPSafeCell::new(TaskControlBlockInner {
-                trap_cx_addr,
-                task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                task_status: TaskStatus::Ready,
-                signal_mask: SignalFlags::empty(),
-                handling_sig: -1,
-                killed: false,
-                frozen: false,
-                trap_ctx_backup: None,
-                exit_code: 0,
-                signals: SignalFlags::empty(),
-                clear_child_tid: 0,
-            }),
-        };
-
-        let task_inner = new_task.inner_exclusive_access();
+        // 更新tcb信息
+        let mut task_inner = caller_task.inner_exclusive_access();
+        task_inner.trap_cx_addr = trap_cx_addr;
         *task_inner.get_trap_cx() = trap_cx;
+
+        // 删除其他线程（如果有）
+        proc_inner.tasks.retain(|t| Arc::ptr_eq(t, &caller_task));
+        proc_inner.alive_task_count = 1;
+
         
     }
 
@@ -309,9 +285,9 @@ impl ProcessControlBlock {
         let tid_handle = Arc::new(tid_alloc());
         let kernel_stack = kstack_alloc();
 
-        let trap_cx_va: VirtAddr = (kernel_stack.get_top() - PAGE_SIZE).into();
+        let trap_cx_va: VirtAddr = (kernel_stack.get_top() - KERNEL_STACK_SIZE).into();
         memory_set.push(
-            MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + PAGE_SIZE),
+            MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
                 MapType::Framed, MapPermission::R | MapPermission::W),
             None,
             trap_cx_va.0,
@@ -321,7 +297,7 @@ impl ProcessControlBlock {
             .translate(trap_cx_va.into())
             .unwrap()
             .ppn();
-        println!("fork: translated trap_cx_ppn = {:#x}", trap_cx_ppn.0);
+        info!("fork: translated trap_cx_ppn = {:#x}", trap_cx_ppn.0);
         #[cfg(target_arch = "riscv64")]
         let trap_cx_addr = {
             let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
@@ -390,7 +366,7 @@ impl ProcessControlBlock {
                 clear_child_tid: caller_inner.clear_child_tid,
             }),
         });
-        println!("fork: created new task with tid {}", new_task.gettid());
+        info!("fork: created new task with tid {}", new_task.gettid());
         // modify kernel_sp in trap_cx
         // **** access child PCB exclusively
         let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
@@ -398,7 +374,6 @@ impl ProcessControlBlock {
         {
             *trap_cx = parent_trap_cx;
         }
-        println!("fork: copied trap context from parent");
         #[cfg(target_arch = "riscv64")]{
             *trap_cx = *caller_inner.get_trap_cx();
             trap_cx.kernel_sp = kernel_stack_top;
