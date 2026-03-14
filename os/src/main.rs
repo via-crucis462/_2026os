@@ -122,7 +122,7 @@ fn init_other_hart(hart_id: usize) {
     for i in 0..hart_id  {
         start_hart(i, _start as *const() as usize, 0);
     }
-    for i in hart_id..CPU_CORE_NUM {
+    for i in hart_id+1..CPU_CORE_NUM {
         start_hart(i, _start as *const() as usize, 0);
     }
     drop(main_hart_inited);
