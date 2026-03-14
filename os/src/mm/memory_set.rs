@@ -327,7 +327,8 @@ impl MemorySet {
         memory_set.brk_index = memory_set.areas.len() - 1;// 此时brk在最后一个区域
         // map TrapContext
         // la64下不需要映射
-        /*
+        // 对于riscv，需要在创建进程时再映射
+        /* 
         #[cfg(target_arch = "riscv64")]
         debug!("MemorySet::from_elf: mapping TrapContext");
         #[cfg(target_arch = "riscv64")]

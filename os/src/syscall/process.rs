@@ -284,7 +284,7 @@ pub fn sys_uname(uts: *mut UtsName) -> isize {
 pub fn _sys_fork() -> isize {
 	let current_task = current_task().unwrap();
     let current_process = current_task.process();
-	trace!("kernel:pid[{}] sys_fork", current_process.pid.0);
+	trace!("kernel:pid[{}] old_sys_fork", current_process.pid.0);
     let proc = current_task.process();
     let (new_proc, new_task) = proc.fork(None, current_task);//此处添加了一个 None 参数
     let new_pid = new_proc.pid.0;
@@ -366,7 +366,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         let task = current_task().unwrap();
         let argc = args_vec.len();
         trace!("[kernel] sys_exec: before task.exec");
-        task.process().exec(all_data.as_slice(), args_vec);
+        task.process().exec(task, all_data.as_slice(), args_vec);
         trace!("[kernel] sys_exec: after task.exec");
         // return argc because cx.x[10] will be covered with it later
         argc as isize
