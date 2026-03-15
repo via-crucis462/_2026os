@@ -77,21 +77,22 @@ use core::arch::asm;
 ///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
 pub fn run_tasks() {
     //let mut counter: usize = 0;
+    
     loop {
-        let hart_id = get_hart_id();
         //counter += 1;
         //println!("run_tasks counter: {}", counter);
-        
+        let hart_id = get_hart_id();
         if let Some(task) = fetch_task() {
             let mut processor = current_processor();
+            
             if (task.process().inner_exclusive_access().on_main_hart &&
                 hart_id != *MAIN_HART_ID.exclusive_access()) {
+                error!("[kernel] run_tasks: task pid={} is on main hart, but current hart is {}, put it back into pool", task.getpid(), hart_id);
                 add_task_into_pool(task);
                 drop(processor);
                 continue;
             } 
-            //info!("[kernel] run_tasks: fetched tid={} of pid={}", task.tid.0, task.getpid());
-            warn!("I'm hart {}, running a task.", hart_id);
+            warn!("[kernel] hart {}, run_tasks: fetched tid={} of pid={}", hart_id, task.tid.0, task.getpid());
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // access coming task TCB exclusively
             let mut task_inner = task.inner_exclusive_access();
@@ -103,17 +104,18 @@ pub fn run_tasks() {
             processor.current = Some(task);
             // release processor manually
             // 释放锁
+            
             drop(processor);
 
             unsafe {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
         } else {
-            warn!("no tasks available in core {}", hart_id);
-            crate::arch::timer::set_next_trigger();
-            unsafe{
+            /*crate::arch::timer::set_next_trigger();
+            unsafe {
                 asm!("wfi");
-            }
+            }*/
+            warn!("no tasks available in hart {}", hart_id);
         }
     }
 }

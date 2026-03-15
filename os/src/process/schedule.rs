@@ -95,9 +95,7 @@ pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
 
 pub fn ask_for_tasks() -> Vec<Arc<TaskControlBlock>> {
     //debug!("[kernel] Scheduler::ask_for_tasks");
-    let mut scheduler = SCHEDULER.exclusive_access();
-    let list = scheduler.auto_get_task();
-    drop(scheduler);
+    let list = SCHEDULER.exclusive_access().auto_get_task();
     //debug!("[kernel] Scheduler::ask_for_tasks: got {} tasks", list.len());
     list
 }

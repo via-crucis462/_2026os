@@ -112,11 +112,11 @@ fn main_init(hart_id: usize) {
     mm::init();
     mm::remap_test();
     arch::trap::init();
-    arch::trap::enable_timer_interrupt();
-    arch::timer::set_next_trigger();
     fs::list_apps();
     task::add_initproc();
     init_other_hart(hart_id);
+    arch::trap::enable_timer_interrupt();
+    arch::timer::set_next_trigger();
     task::run_tasks();
 }
 
@@ -134,15 +134,17 @@ fn init_other_hart(hart_id: usize) {
 }
 
 fn other_init() {
-    // 等待主核把shell跑起来，不然可能卡死
-    // 拍脑袋想到的神秘代码，抽象但能跑
-    for i in 0..999999usize {
-        unsafe {
-            asm!("nop");
-        } 
+    // 当前多核仍有问题，先把其他核关了
+    unsafe {
+         asm!(
+            "wfi",
+        );
     }
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
+    arch::timer::set_next_trigger();
+
+    
     task::run_tasks();
 }
 

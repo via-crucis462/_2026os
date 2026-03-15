@@ -1,6 +1,6 @@
 //! Types related to task management & Functions for completely changing TCB
 #![allow(unused)]
-use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, TidHandle, SignalActions, SignalFlags, TaskContext};
+use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, TIdHandle, SignalActions, SignalFlags, TaskContext};
 use crate::{
     arch::trap::{TrapContext, trap_handler},
     fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout},
@@ -30,7 +30,7 @@ pub struct TaskControlBlock {
     pub process: Weak<ProcessControlBlock>,
 
     /// 线程id
-    pub tid: Arc<TidHandle>,
+    pub tid: Arc<TIdHandle>,
 
     /// Kernel stack corresponding to PID
     pub kernel_stack: KernelStack,
