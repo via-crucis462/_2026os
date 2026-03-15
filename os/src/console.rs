@@ -20,11 +20,11 @@ impl Write for Stdout {
     }
 }
 
-use riscv::register::*;
-
 pub fn print(args: fmt::Arguments) {
+    let _lock = CONSOLE_LOCK.exclusive_access();
     // 这行会把fmt全部输出完
     Stdout.write_fmt(args).unwrap();
+    drop(_lock);
 }
 
 /// Print! to the host console using the format string and arguments.
