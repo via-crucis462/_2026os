@@ -347,7 +347,7 @@ impl ProcessControlBlock {
                 euid: parent_inner.euid,
                 egid: parent_inner.egid,
                 tasks: Vec::new(),
-                alive_task_count: parent_inner.alive_task_count,
+                alive_task_count: 0,
             })
         });
         let caller_inner = caller_task.inner_exclusive_access();
@@ -358,7 +358,7 @@ impl ProcessControlBlock {
             inner: MPSafeCell::new(TaskControlBlockInner {
                 trap_cx_addr,
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                task_status: TaskStatus::UnInit,
+                task_status: TaskStatus::Ready,
                 signal_mask: caller_inner.signal_mask,
                 handling_sig: caller_inner.handling_sig,
                 killed: false,

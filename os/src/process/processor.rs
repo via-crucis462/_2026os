@@ -15,7 +15,7 @@ use crate::arch::{
     trap::TrapContext,
     config::*,
 };
-use crate::task::add_task_into_pool;
+use crate::task::{add_task_into_pool, manager};
 use alloc::sync::Arc;
 use lazy_static::*;
 
@@ -81,14 +81,16 @@ pub fn run_tasks() {
         let hart_id = get_hart_id();
         //counter += 1;
         //println!("run_tasks counter: {}", counter);
-        let mut processor = current_processor();
+        
         if let Some(task) = fetch_task() {
+            let mut processor = current_processor();
             if (task.process().inner_exclusive_access().on_main_hart &&
                 hart_id != *MAIN_HART_ID.exclusive_access()) {
                 add_task_into_pool(task);
+                drop(processor);
                 continue;
             } 
-            info!("[kernel] run_tasks: fetched tid={} of pid={}", task.tid.0, task.getpid());
+            //info!("[kernel] run_tasks: fetched tid={} of pid={}", task.tid.0, task.getpid());
             warn!("I'm hart {}, running a task.", hart_id);
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // access coming task TCB exclusively
@@ -108,7 +110,7 @@ pub fn run_tasks() {
             }
         } else {
             warn!("no tasks available in core {}", hart_id);
-            loop{}
+            crate::arch::timer::set_next_trigger();
             unsafe{
                 asm!("wfi");
             }
@@ -151,7 +153,7 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 
 /// Return to idle control flow for new scheduling
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
-    info!("[kernel] schedule: returning to idle control flow");
+    //info!("[kernel] schedule: returning to idle control flow");
     let mut processor = current_processor();
     let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
     drop(processor);
