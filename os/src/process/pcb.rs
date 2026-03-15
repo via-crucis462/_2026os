@@ -1,7 +1,7 @@
 //！ TODO：需要仔细核对并修改exec和fork的实现
 
 use super::*;
-use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, TidHandle, SignalActions, SignalFlags, TaskContext};
+use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
 use schedule::*;
 
 use crate::{
