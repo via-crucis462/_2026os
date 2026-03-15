@@ -114,9 +114,9 @@ fn main_init(hart_id: usize) {
     arch::trap::init();
     fs::list_apps();
     task::add_initproc();
-    init_other_hart(hart_id);
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger();
+    init_other_hart(hart_id);
     task::run_tasks();
 }
 
@@ -133,13 +133,16 @@ fn init_other_hart(hart_id: usize) {
     drop(main_hart_inited);
 }
 
+use mm::KERNEL_SPACE;
 fn other_init() {
     // 当前多核仍有问题，先把其他核关了
+    /*
     unsafe {
          asm!(
             "wfi",
         );
-    }
+    } */
+    KERNEL_SPACE.exclusive_access().activate();
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger();

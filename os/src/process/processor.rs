@@ -90,6 +90,11 @@ pub fn run_tasks() {
                 error!("[kernel] run_tasks: task pid={} is on main hart, but current hart is {}, put it back into pool", task.getpid(), hart_id);
                 add_task_into_pool(task);
                 drop(processor);
+                
+                crate::arch::timer::set_next_trigger();
+                unsafe {
+                    asm!("wfi");
+                }
                 continue;
             } 
             warn!("[kernel] hart {}, run_tasks: fetched tid={} of pid={}", hart_id, task.tid.0, task.getpid());
@@ -111,10 +116,10 @@ pub fn run_tasks() {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
         } else {
-            /*crate::arch::timer::set_next_trigger();
+            crate::arch::timer::set_next_trigger();
             unsafe {
                 asm!("wfi");
-            }*/
+            }
             warn!("no tasks available in hart {}", hart_id);
         }
     }
