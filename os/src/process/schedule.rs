@@ -19,6 +19,10 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    pub fn add_task(&mut self, task: Arc<TaskControlBlock>) {
+        //debug!("[kernel] Scheduler::add_task: pid={}, tid={}", task.getpid(), task.gettid());
+        self.task_pool.add_task(task);
+    }
     pub fn get_pool(&mut self) -> &mut TaskPool {
         debug!("[kernel] Scheduler::get_pool");
         &mut self.task_pool
@@ -83,9 +87,6 @@ impl TaskPool {
 
 pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
     debug!("[kernel] Scheduler::add_task_into_pool: pid={}", task.getpid());
-    let process = task.process();
-    let mut process_inner = process.inner_exclusive_access();
-    process_inner.alive_task_count += 1;
     let mut scheduler = SCHEDULER.exclusive_access();
     scheduler.get_pool().add_task(task);
     drop(scheduler);
@@ -93,11 +94,9 @@ pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
 }
 
 pub fn ask_for_tasks() -> Vec<Arc<TaskControlBlock>> {
-    debug!("[kernel] Scheduler::ask_for_tasks");
-    let mut scheduler = SCHEDULER.exclusive_access();
-    let list = scheduler.auto_get_task();
-    drop(scheduler);
-    debug!("[kernel] Scheduler::ask_for_tasks: got {} tasks", list.len());
+    //debug!("[kernel] Scheduler::ask_for_tasks");
+    let list = SCHEDULER.exclusive_access().auto_get_task();
+    //debug!("[kernel] Scheduler::ask_for_tasks: got {} tasks", list.len());
     list
 }
 

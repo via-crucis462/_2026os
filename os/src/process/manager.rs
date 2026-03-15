@@ -6,6 +6,7 @@
 use super::TaskControlBlock;
 use super::schedule::*;
 use super::pcb::*;
+use crate::MAIN_HART_ID;
 use crate::sync::MPSafeCell;
 use crate::arch::config::CPU_CORE_NUM;
 use crate::get_hart_id;
@@ -86,6 +87,9 @@ impl TaskManager {
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
         self.ready_queue.pop_front()
     }
+    pub fn task_count(&self) -> usize {
+        self.ready_queue.len()
+    }
 }
 
 lazy_static! {
@@ -93,7 +97,7 @@ lazy_static! {
     pub static ref TASK_MANAGERS: [MPSafeCell<TaskManager>; CPU_CORE_NUM] ={
         core::array::from_fn(|_| MPSafeCell::new(TaskManager::new()))
     };
-    /// PID2PCB instance (map of pid to pcb)
+    /// TID2TCB instance (map of tid to pcb)
     pub static ref TID2TCB: MPSafeCell<BTreeMap<usize, Arc<TaskControlBlock>>> =
         MPSafeCell::new(BTreeMap::new());
 }
@@ -106,33 +110,49 @@ pub fn get_current_task_manager() -> &'static MPSafeCell<TaskManager> {
 /// 向全局池索取任务并加入当前处理器的就绪队列
 pub fn current_add_tasks() {
     let mut manager = get_current_task_manager().exclusive_access();
-    let tasks = ask_for_tasks();
-    for task in tasks {
-        manager.add(task);
+    if false {
+    }else {
+        let tasks = ask_for_tasks();
+        for task in tasks {
+            manager.add(task);
+        }
     }
+    drop(manager);
+    
 }
 
 /// Add process to ready queue
 pub fn add_task(task: Arc<TaskControlBlock>) {
-	debug!("[kernel] TaskManager::add_task: pid={}", task.getpid());
+    debug!("[kernel] TaskManager::add_task: pid={}", task.getpid());
     TID2TCB
         .exclusive_access()
-        .insert(task.getpid(), Arc::clone(&task));
-    get_current_task_manager().exclusive_access().add(task);
+        .insert(task.gettid(), Arc::clone(&task));
+    let process = task.process();
+    let mut process_inner = process.inner_exclusive_access();
+    process_inner.alive_task_count += 1;
+    add_task_into_pool(task);
+}
+
+pub fn add_task_in_current_hart(task: Arc<TaskControlBlock>) {
+    //debug!("[kernel] TaskManager::add_task_in_current_hart: pid={}", task.getpid());
+    let mut manager = get_current_task_manager().exclusive_access();
+    manager.add(task);
 }
 
 /// Take a process out of the ready queue
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
 	//trace!("kernel: TaskManager::fetch_task");
-    let fetched =get_current_task_manager().exclusive_access().fetch();
-    match &fetched {
-        Some(_) => fetched,
-        None => {
-            let list = ask_for_tasks();
-            for task in list {
-                add_task(task);
-            }
-            fetch_task()
+    current_add_tasks();
+    get_current_task_manager().exclusive_access().fetch()
+}
+
+pub fn cores_fetch_task() {
+    for i in 0..CPU_CORE_NUM {
+        debug!("core {} is fetching tasks", i);
+        let mut manager = TASK_MANAGERS[i].exclusive_access();
+        let list = ask_for_tasks();
+        for task in list {
+            manager.add(task);
         }
     }
 }

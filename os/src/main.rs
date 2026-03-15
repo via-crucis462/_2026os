@@ -67,6 +67,10 @@ lazy_static! {
     pub static ref MAIN_HART_INITED: MPSafeCell<bool> = MPSafeCell::new(false);
 }
 
+lazy_static! {
+    pub static ref MAIN_HART_ID: MPSafeCell<usize> = MPSafeCell::new(0);
+}
+
 
 /// clear BSS segment
 /// 两种架构应该是统一的
@@ -108,17 +112,18 @@ fn main_init(hart_id: usize) {
     mm::init();
     mm::remap_test();
     arch::trap::init();
-    arch::trap::enable_timer_interrupt();
-    arch::timer::set_next_trigger();
     fs::list_apps();
     task::add_initproc();
     init_other_hart(hart_id);
+    arch::trap::enable_timer_interrupt();
+    arch::timer::set_next_trigger();
     task::run_tasks();
 }
 
 fn init_other_hart(hart_id: usize) {
     let mut main_hart_inited = MAIN_HART_INITED.exclusive_access();
     *main_hart_inited = true;
+    *MAIN_HART_ID.exclusive_access() = hart_id;
     for i in 0..hart_id  {
         start_hart(i, _start as *const() as usize, 0);
     }
@@ -129,9 +134,17 @@ fn init_other_hart(hart_id: usize) {
 }
 
 fn other_init() {
+    // 当前多核仍有问题，先把其他核关了
+    unsafe {
+         asm!(
+            "wfi",
+        );
+    }
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger();
+
+    
     task::run_tasks();
 }
 
