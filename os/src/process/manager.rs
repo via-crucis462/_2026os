@@ -110,15 +110,14 @@ pub fn get_current_task_manager() -> &'static MPSafeCell<TaskManager> {
 /// 向全局池索取任务并加入当前处理器的就绪队列
 pub fn current_add_tasks() {
     let mut manager = get_current_task_manager().exclusive_access();
-    if false {
+    if manager.task_count() > 3 {
+        ()
     }else {
         let tasks = ask_for_tasks();
         for task in tasks {
             manager.add(task);
         }
     }
-    drop(manager);
-    
 }
 
 /// Add process to ready queue
