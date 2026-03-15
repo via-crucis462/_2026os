@@ -1,4 +1,5 @@
 //! 多核安全数据管理器
+use riscv::register::sstatus;
 use spin::{Mutex, MutexGuard};
 
 /// Wrap a static data structure inside it so that we are
