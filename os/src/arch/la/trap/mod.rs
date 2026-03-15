@@ -133,10 +133,6 @@ pub fn trap_handler() -> ! {
     //3_0000_0000_0000_0000=>取指操作页无效例外
     //println!("[kernel] trap_handler: ESTAT={:#x}, ERA={:#x}, BADV={:#x}, BADI={:#x}", estat, era, badv, badi);
 
-    
-
-
-
     let cause = if ((estat >> 11) & 1)  != 0 {
         Cause::TimeInterrupt
     } else if ((estat >> 16) & 0x3fff) == 0xb {

@@ -9,11 +9,13 @@ use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 #[cfg(target_arch = "riscv64")]
 use crate::get_hart_id;
+use crate::MAIN_HART_ID;
 use crate::sync::MPSafeCell;
 use crate::arch::{
     trap::TrapContext,
     config::*,
 };
+use crate::task::{add_task_into_pool, manager};
 use alloc::sync::Arc;
 use lazy_static::*;
 
@@ -70,17 +72,27 @@ pub fn current_processor() -> spin::MutexGuard<'static, Processor> {
     PROCESSORS[hart_id].exclusive_access()
 }
 
+use core::arch::asm;
 ///The main part of process execution and scheduling
 ///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
-/// 待修改
 pub fn run_tasks() {
     //let mut counter: usize = 0;
+    
     loop {
         //counter += 1;
         //println!("run_tasks counter: {}", counter);
-        let mut processor = current_processor();
+        let hart_id = get_hart_id();
         if let Some(task) = fetch_task() {
-            info!("[kernel] run_tasks: fetched tid={}", task.tid.0);
+            let mut processor = current_processor();
+            
+            if (task.process().inner_exclusive_access().on_main_hart &&
+                hart_id != *MAIN_HART_ID.exclusive_access()) {
+                error!("[kernel] run_tasks: task pid={} is on main hart, but current hart is {}, put it back into pool", task.getpid(), hart_id);
+                add_task_into_pool(task);
+                drop(processor);
+                continue;
+            } 
+            warn!("[kernel] hart {}, run_tasks: fetched tid={} of pid={}", hart_id, task.tid.0, task.getpid());
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // access coming task TCB exclusively
             let mut task_inner = task.inner_exclusive_access();
@@ -92,12 +104,18 @@ pub fn run_tasks() {
             processor.current = Some(task);
             // release processor manually
             // 释放锁
+            
             drop(processor);
+
             unsafe {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
         } else {
-            warn!("no tasks available in run_tasks");
+            /*crate::arch::timer::set_next_trigger();
+            unsafe {
+                asm!("wfi");
+            }*/
+            warn!("no tasks available in hart {}", hart_id);
         }
     }
 }
@@ -137,7 +155,7 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 
 /// Return to idle control flow for new scheduling
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
-    info!("[kernel] schedule: returning to idle control flow");
+    //info!("[kernel] schedule: returning to idle control flow");
     let mut processor = current_processor();
     let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
     drop(processor);

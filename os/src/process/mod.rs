@@ -15,7 +15,7 @@ pub mod id;
 pub mod manager;
 
 pub use schedule::*;
-pub use id::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, IdHandle};
+pub use id::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle};
 pub use task::*;
 pub use pcb::*;
 
@@ -54,7 +54,7 @@ pub use signal::{SignalFlags, MAX_SIG};
 
 /// Make current task suspended and switch to the next task
 pub fn suspend_current_and_run_next() {
-    debug!("[kernel] suspend_current_and_run_next");
+    //debug!("[kernel] suspend_current_and_run_next");
     // There must be an application running.
     let task = take_current_task().unwrap();
 
@@ -67,7 +67,7 @@ pub fn suspend_current_and_run_next() {
     // ---- release current PCB
 
     // push back to ready queue.
-    add_task(task);
+    add_task_in_current_hart(task);
     // jump to scheduling cycle
     schedule(task_cx_ptr);
 }
@@ -78,6 +78,7 @@ pub const IDLE_PID: usize = 0;
 /// Exit the current 'Running' task and run the next task in task list.
 /// 初步修改，逻辑待检查
 pub fn exit_current_and_run_next(exit_code: i32) {
+    println!("called exit_current_and_run_next with exit_code {}", exit_code);
     // take from Processor
     let task = take_current_task().unwrap();
 
@@ -103,24 +104,31 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // do not move to its parent but under initproc
     proc_inner.alive_task_count -= 1;
     // ++++++ access initproc TCB exclusively
-    // 
-    {
+    // ++++++ release parent PCB
+    if proc_inner.is_zombie() {
+        println!(
+            "[kernel] pid={} exit with exit_code {}",
+            pid, exit_code
+        );
         let initproc = INITTASK.process();
         let mut initproc_inner = initproc.inner_exclusive_access();
         for child in proc_inner.children.iter() {
             child.inner_exclusive_access().parent = Some(Arc::downgrade(&initproc));
             initproc_inner.children.push(child.clone());
         }
+        drop(initproc_inner);
+        // recycle resources of the process
+        proc_inner.children.clear();
+        // deallocate user space
+        proc_inner.memory_set.recycle_data_pages();
+        // drop file descriptors
+        proc_inner.fd_table.clear();
+        remove_process(pid);
     }
-    // ++++++ release parent PCB
-
-    proc_inner.children.clear();
-    // deallocate user space
-    proc_inner.memory_set.recycle_data_pages();
-    // drop file descriptors
-    proc_inner.fd_table.clear();
-    drop(task_inner);
     // **** release current PCB
+    drop(proc_inner);
+    drop(proc);
+    drop(task_inner);
     // drop task manually to maintain rc correctly
     drop(task);// proc 也会随之drop
     // we do not have to save task context
@@ -145,7 +153,7 @@ lazy_static! {
 
 ///Add init process to the manager
 pub fn add_initproc() {
-    add_task_into_pool(INITTASK.clone());
+    add_task(INITTASK.clone());
     info!("add_initproc: pid={}", INITTASK.getpid());
 }
 
