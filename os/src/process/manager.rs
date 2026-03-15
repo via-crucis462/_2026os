@@ -87,6 +87,9 @@ impl TaskManager {
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
         self.ready_queue.pop_front()
     }
+    pub fn task_count(&self) -> usize {
+        self.ready_queue.len()+1
+    }
 }
 
 lazy_static! {
@@ -126,7 +129,7 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
 }
 
 pub fn add_task_in_current_hart(task: Arc<TaskControlBlock>) {
-    debug!("[kernel] TaskManager::add_task_in_current_hart: pid={}", task.getpid());
+    //debug!("[kernel] TaskManager::add_task_in_current_hart: pid={}", task.getpid());
     let mut manager = get_current_task_manager().exclusive_access();
     manager.add(task);
 }

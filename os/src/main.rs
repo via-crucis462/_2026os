@@ -136,14 +136,13 @@ fn init_other_hart(hart_id: usize) {
 fn other_init() {
     // 等待主核把shell跑起来，不然可能卡死
     // 拍脑袋想到的神秘代码，抽象但能跑
-    for i in 0..9999999usize {
+    for i in 0..999999usize {
         unsafe {
             asm!("nop");
-        }
+        } 
     }
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
-    arch::timer::set_next_trigger();
     task::run_tasks();
 }
 
