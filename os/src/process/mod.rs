@@ -16,10 +16,12 @@ pub mod manager;
 
 pub use schedule::*;
 pub use id::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle};
+use spin::{Mutex, MutexGuard};
 pub use task::*;
 pub use pcb::*;
 
 use manager::*;
+use crate::sync::*;
 
 
 
@@ -72,6 +74,28 @@ pub fn suspend_current_and_run_next() {
     schedule(task_cx_ptr);
 }
 
+// 让被阻塞的线程睡眠，加入等待队列
+pub fn current_task_to_sleep(mut wait_queue: MutexGuard<WaitQueue>) {
+    let task = take_current_task().unwrap();
+    let mut task_inner = task.inner_exclusive_access();
+    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
+    task_inner.task_status = TaskStatus::Blocked;
+    drop(task_inner);
+    // push back to wait queue.
+    wait_queue.push_back(task);
+    drop(wait_queue);
+    // 将current_task上下文保存后切换到idle线程
+    schedule(task_cx_ptr);
+}
+
+// 从等待队列中唤醒一个线程到全局池
+pub fn wake_up_one(mut wait_queue: MutexGuard<WaitQueue>) {
+    if let Some(task) = wait_queue.pop_front() {
+        add_task_into_pool(task);
+    }
+    drop(wait_queue);
+}
+
 /// pid of usertests app in make run TEST=1
 pub const IDLE_PID: usize = 0;
 
@@ -94,7 +118,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // remove from tid2task
     remove_from_tid2task(task.gettid());
     // **** access current TCB exclusively
-    let mut task_inner: spin::MutexGuard<'_, TaskControlBlockInner> = task.inner_exclusive_access();
+    let mut task_inner: MPSafeGuard<'_, TaskControlBlockInner> = task.inner_exclusive_access();
     let proc = task.process();
     let mut proc_inner = proc.inner_exclusive_access();
     // Change status to Zombie

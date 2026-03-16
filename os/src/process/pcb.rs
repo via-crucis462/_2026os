@@ -33,7 +33,7 @@ pub struct ProcessControlBlock {
 
 impl ProcessControlBlock {
     /// 获取进程块的独占访问权限
-    pub fn inner_exclusive_access(&self) -> spin::MutexGuard<'_, ProcessControlBlockInner> {
+    pub fn inner_exclusive_access(&self) -> MPSafeGuard<'_, ProcessControlBlockInner> {
         self.inner.exclusive_access()
     }
     /// 用于创建初始化进程
