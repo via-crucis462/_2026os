@@ -41,7 +41,7 @@ pub struct TaskControlBlock {
 
 impl TaskControlBlock {
     /// Get the mutable reference of the inner TCB
-    pub fn inner_exclusive_access(&self) -> spin::MutexGuard<'_, TaskControlBlockInner> {
+    pub fn inner_exclusive_access(&self) -> MPSafeGuard<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }
     pub fn process(&self) -> Arc<ProcessControlBlock> {
@@ -108,6 +108,8 @@ pub enum TaskStatus {
     Ready,
     /// running
     Running,
+    /// 被阻塞（目前是被锁阻塞）
+    Blocked,
     /// exited
     Zombie,
 }

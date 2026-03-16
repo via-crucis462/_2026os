@@ -53,8 +53,9 @@ use core::arch::global_asm;
 #[allow(unused)]
 use crate::arch::la;
 
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::*;
-use crate::sync::MPSafeCell;
+use spin::Mutex;
 
 #[cfg(target_arch = "riscv64")]
 global_asm!(include_str!("arch/riscv/entry.asm"));
@@ -62,14 +63,11 @@ global_asm!(include_str!("arch/riscv/entry.asm"));
 global_asm!(include_str!("arch/la/entry.asm"));
 
 
-// 记录启动核是否已经完成初始化，用于动态判断是否是主核（启动核）
-lazy_static! {
-    pub static ref MAIN_HART_INITED: MPSafeCell<bool> = MPSafeCell::new(false);
-}
+#[link_section = ".data"]
+pub static MAIN_HART_INITED: AtomicBool = AtomicBool::new(false);
 
-lazy_static! {
-    pub static ref MAIN_HART_ID: MPSafeCell<usize> = MPSafeCell::new(0);
-}
+#[link_section = ".data"]
+pub static MAIN_HART_ID: AtomicUsize = AtomicUsize::new(0);
 
 
 /// clear BSS segment
@@ -94,7 +92,14 @@ extern "C" {
 #[no_mangle]
 /// the rust entry-point of os
 pub fn rust_main(hart_id: usize) -> ! {
-    if !*MAIN_HART_INITED.exclusive_access() {
+    let is_main_hart = MAIN_HART_INITED.compare_exchange(
+        false, 
+        true, 
+        Ordering::Acquire, 
+        Ordering::Relaxed
+    ).is_ok();
+
+    if is_main_hart {
         clear_bss();
         logging::init();
         info!("[kernel] Hello, world!");
@@ -121,16 +126,18 @@ fn main_init(hart_id: usize) {
 }
 
 fn init_other_hart(hart_id: usize) {
-    let mut main_hart_inited = MAIN_HART_INITED.exclusive_access();
-    *main_hart_inited = true;
-    *MAIN_HART_ID.exclusive_access() = hart_id;
+    /*unsafe {
+         asm!(
+            "wfi",
+        );
+    }*/
+    MAIN_HART_ID.store(hart_id, Ordering::Release);
     for i in 0..hart_id  {
         start_hart(i, _start as *const() as usize, 0);
     }
     for i in hart_id+1..CPU_CORE_NUM {
         start_hart(i, _start as *const() as usize, 0);
     }
-    drop(main_hart_inited);
 }
 
 use mm::KERNEL_SPACE;

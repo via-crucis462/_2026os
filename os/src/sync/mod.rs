@@ -3,5 +3,5 @@
 mod mp;
 mod semaphore;
 
-pub use mp::MPSafeCell;
-pub use semaphore::Semaphore;
+pub use mp::{MPSafeCell, MPSafeGuard};
+pub use semaphore::*;
