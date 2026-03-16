@@ -1,5 +1,7 @@
 //! Synchronization and interior mutability primitives
 
-mod up;
+mod mp;
+mod semaphore;
 
-pub use up::MPSafeCell;
+pub use mp::MPSafeCell;
+pub use semaphore::Semaphore;
