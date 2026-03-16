@@ -84,7 +84,6 @@ pub fn run_tasks() {
         let hart_id = get_hart_id();
         if let Some(task) = fetch_task() {
             let mut processor = current_processor();
-            
             if (task.process().inner_exclusive_access().on_main_hart &&
                 hart_id != MAIN_HART_ID.load(Ordering::Acquire)) {
                 error!("[kernel] run_tasks: task pid={} is on main hart, but current hart is {}, put it back into pool", task.getpid(), hart_id);

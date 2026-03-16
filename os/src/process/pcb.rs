@@ -339,7 +339,7 @@ impl ProcessControlBlock {
                 program_brk: parent_inner.program_brk,
                 fd_table: new_fd_table,
                 cwd: parent_inner.cwd.clone(),
-                signals: parent_inner.signals,
+                signals: SignalFlags::empty(),
                 signal_actions: parent_inner.signal_actions.clone(),
                 exit_code: 0,
                 uid: parent_inner.uid,
@@ -347,7 +347,7 @@ impl ProcessControlBlock {
                 euid: parent_inner.euid,
                 egid: parent_inner.egid,
                 tasks: Vec::new(),
-                alive_task_count: 0,
+                alive_task_count: 1,
             })
         });
         let caller_inner = caller_task.inner_exclusive_access();
@@ -365,8 +365,8 @@ impl ProcessControlBlock {
                 frozen: false,
                 trap_ctx_backup: None,
                 exit_code: 0,
-                signals: caller_inner.signals,
-                clear_child_tid: caller_inner.clear_child_tid,
+                signals: SignalFlags::empty(),
+                clear_child_tid: 0,
             }),
         });
         info!("fork: created new task with tid {}", new_task.gettid());
@@ -509,7 +509,7 @@ pub struct ProcessControlBlockInner {
     
     pub tasks: Vec<Arc<TaskControlBlock>>, 
     // 存活进程数，等于0相当于僵尸进程
-    pub alive_task_count: usize,
+    pub alive_task_count: isize,
 }
 
 impl ProcessControlBlockInner {
