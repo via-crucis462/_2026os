@@ -128,7 +128,6 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
         .insert(task.gettid(), Arc::clone(&task));
     let process = task.process();
     let mut process_inner = process.inner_exclusive_access();
-    process_inner.alive_task_count += 1;
     add_task_into_pool(task);
 }
 

@@ -17,6 +17,8 @@ pub struct TrapContext {
     pub kernel_sp: usize,
     /// Virtual address of trap handler entry point in kernel
     pub trap_handler: usize,
+
+    pub hart_id: usize, // 保存当前线程所在核的id
 }
 
 
@@ -71,6 +73,7 @@ impl TrapContext {
                 kernel_satp,
                 kernel_sp,
                 trap_handler,
+                hart_id: 0,// 在__restore时由tp写入，trap时恢复到tp
             };
             cx.set_sp(sp);
             cx
