@@ -283,6 +283,8 @@ fn check_pending_signals() {
             if !masked {
                 drop(task_inner);
                 drop(task);
+                drop(proc_inner);
+                drop(proc);
                 if signal == SignalFlags::SIGKILL
                     || signal == SignalFlags::SIGSTOP
                     || signal == SignalFlags::SIGCONT
