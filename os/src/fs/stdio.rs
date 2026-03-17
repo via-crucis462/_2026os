@@ -90,11 +90,11 @@ impl File for Stdout {
         panic!("Cannot read from stdout!");
     }
     fn write(&self, user_buf: UserBuffer) -> usize {
-        let _lock = STDOUT_LOCK.exclusive_access();
+        //let _lock = STDOUT_LOCK.exclusive_access();
         for buffer in user_buf.buffers.iter() {
             print!("{}", core::str::from_utf8(*buffer).unwrap());
         }
-        drop(_lock);
+        //drop(_lock);
         user_buf.len()
     }
     fn read_at(&self, _offset: usize, buf: UserBuffer) -> usize {

@@ -424,18 +424,28 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, _options: usize) -> isize 
     }
 }
 
-pub fn sys_kill(pid: usize, signum: i32) -> isize {
+pub fn sys_kill(pid: isize, signum: i32) -> isize {
     let current = current_task().unwrap();
     let process = current.process();
     trace!("kernel:pid[{}] sys_kill", process.pid.0);
-    if let Some(proc) = get_process(pid) {
+    drop(process);
+    drop(current);
+    if let Some(proc) = get_process(pid as usize) {
         if let Some(flag) = SignalFlags::from_bits(1 << signum) {
             // insert the signal if legal
             let mut inner = proc.inner_exclusive_access();
             if inner.signals.contains(flag) {
-                return -1;
+                return 0;
             }
             inner.signals.insert(flag);
+            for task in inner.tasks.iter() {
+                let mut task_inner = task.inner_exclusive_access();
+                if !task_inner.signal_mask.contains(flag) {
+                    task_inner.signals.insert(flag);
+                    drop(task_inner);
+                    break;
+                }
+            }
             0
         } else {
             -1
@@ -568,6 +578,8 @@ pub fn sys_sigprocmask(mask: u32) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
     trace!("kernel:pid[{}] sys_sigprocmask", process.pid.0);
+    drop(process);
+    drop(task);
     if let Some(task) = current_task() {
         let mut inner = task.inner_exclusive_access();
         let old_mask = inner.signal_mask;
@@ -586,6 +598,8 @@ pub fn sys_sigreturn() -> isize {
     let task = current_task().unwrap();
     let process = task.process();
     trace!("kernel:pid[{}] sys_sigreturn", process.pid.0);
+    drop(process);
+    drop(task);
     if let Some(task) = current_task() {
         let mut inner = task.inner_exclusive_access();
         inner.handling_sig = -1;
@@ -602,10 +616,7 @@ pub fn sys_sigreturn() -> isize {
 }
 
 fn check_sigaction_error(signal: SignalFlags, action: usize, old_action: usize) -> bool {
-    if action == 0
-        || old_action == 0
-        || signal == SignalFlags::SIGKILL
-        || signal == SignalFlags::SIGSTOP
+    if signal == SignalFlags::SIGKILL || signal == SignalFlags::SIGSTOP
     {
         true
     } else {
@@ -621,8 +632,8 @@ pub fn sys_sigaction(
     let task = current_task().unwrap();
     let proc = task.process();
     trace!("kernel:pid[{}] sys_sigaction", proc.pid.0);
-    let token = current_user_token();
     let mut inner = proc.inner_exclusive_access();
+    let token = inner.memory_set.token();
     if signum as *const () as usize > MAX_SIG {
         return -1;
     }

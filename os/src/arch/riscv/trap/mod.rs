@@ -13,7 +13,7 @@
 //! to [`syscall()`].
 mod context;
 
-use crate::{KERNEL_STACK_SIZE, PAGE_SIZE};
+use crate::{KERNEL_STACK_SIZE, PAGE_SIZE, get_hart_id};
 use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 use crate::mm::VirtAddr;
 use crate::syscall::syscall;
