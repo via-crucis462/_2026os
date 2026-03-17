@@ -1,5 +1,5 @@
 // 全局线程调度器
-use crate::{process, sync::MPSafeCell};
+use crate::{CPU_CORE_NUM, arch::sbi::sbi_wakeup_harts, process, sync::MPSafeCell};
 use super::*;
 use super::manager::*;
 use lazy_static::*;
@@ -28,7 +28,7 @@ impl Scheduler {
         &mut self.task_pool
     }
     pub fn auto_get_task(&mut self) -> Vec<Arc<TaskControlBlock>> {
-        let mut total_num = core::cmp::max(self.get_task_count(), 1);
+        let mut total_num = core::cmp::max(self.get_task_count() / CPU_CORE_NUM, 1);
         let mut list = Vec::new();
         while let Some(task) = self.task_pool.take_a_task() {
             list.push(task);
@@ -90,6 +90,7 @@ pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
     let mut scheduler = SCHEDULER.exclusive_access();
     scheduler.get_pool().add_task(task);
     drop(scheduler);
+    sbi_wakeup_harts(0b1111);
     debug!("add into pool finised");
 }
 

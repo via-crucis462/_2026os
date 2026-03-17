@@ -10,7 +10,7 @@ use super::{TaskContext, TaskControlBlock};
 #[cfg(target_arch = "riscv64")]
 use crate::get_hart_id;
 use crate::MAIN_HART_ID;
-use crate::sync::MPSafeCell;
+use crate::sync::*;
 use crate::arch::{
     trap::TrapContext,
     config::*,
@@ -55,24 +55,24 @@ impl Processor {
 }
 
 // 对数组本身不套锁，因为初始化后不会修改数组内容
+
 lazy_static! {
     pub static ref PROCESSORS: Arc<[MPSafeCell<Processor>; CPU_CORE_NUM]> = {
-      let mut arr: [MPSafeCell<Processor>; CPU_CORE_NUM] = unsafe { core::mem::zeroed() };
-        for i in 0..CPU_CORE_NUM {
-            arr[i] = MPSafeCell::new(Processor::new());
-        }
+        // 数组宏，给每个元素调用一次函数取返回值
+        let arr = core::array::from_fn(|_| MPSafeCell::new(Processor::new()));
         Arc::new(arr)
     };
 }
 
 // 获取并锁住当前处理器
-pub fn current_processor() -> spin::MutexGuard<'static, Processor> {
+pub fn current_processor() -> MPSafeGuard<'static, Processor> {
     #[cfg(target_arch = "riscv64")]
     let hart_id = get_hart_id();
     PROCESSORS[hart_id].exclusive_access()
 }
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 ///The main part of process execution and scheduling
 ///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
 pub fn run_tasks() {
@@ -84,9 +84,8 @@ pub fn run_tasks() {
         let hart_id = get_hart_id();
         if let Some(task) = fetch_task() {
             let mut processor = current_processor();
-            
             if (task.process().inner_exclusive_access().on_main_hart &&
-                hart_id != *MAIN_HART_ID.exclusive_access()) {
+                hart_id != MAIN_HART_ID.load(Ordering::Acquire)) {
                 error!("[kernel] run_tasks: task pid={} is on main hart, but current hart is {}, put it back into pool", task.getpid(), hart_id);
                 add_task_into_pool(task);
                 drop(processor);
@@ -97,7 +96,7 @@ pub fn run_tasks() {
                 }
                 continue;
             } 
-            warn!("[kernel] hart {}, run_tasks: fetched tid={} of pid={}", hart_id, task.tid.0, task.getpid());
+            //warn!("[kernel] hart {}, run_tasks: fetched tid={} of pid={}", hart_id, task.tid.0, task.getpid());
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // access coming task TCB exclusively
             let mut task_inner = task.inner_exclusive_access();
@@ -159,6 +158,7 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 }
 
 /// Return to idle control flow for new scheduling
+/// 将参数线程切换到就绪队列，并切换到idle线程的控制流
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     //info!("[kernel] schedule: returning to idle control flow");
     let mut processor = current_processor();

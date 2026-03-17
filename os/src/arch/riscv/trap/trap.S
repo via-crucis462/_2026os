@@ -14,6 +14,7 @@ __alltraps:
     csrrw sp, sscratch, sp
     # now sp->*TrapContext in user space, sscratch->user stack
     # save other general purpose registers
+    ld x4, 37*8(sp) // 线程指针不是保存而是恢复
     sd x1, 1*8(sp)
     # skip sp(x2), we will save it later
     sd x3, 3*8(sp)
@@ -60,11 +61,14 @@ __restore:
     # restore general purpose registers except x0/sp/tp
     ld x1, 1*8(sp)
     ld x3, 3*8(sp)
+    
     .set n, 5
     .rept 27
         LOAD_GP %n
         .set n, n+1
     .endr
+    
+    sd x4, 37*8(sp) // 线程指针不是恢复而是保存
     # back to user stack
     ld sp, 2*8(sp)
     sret
