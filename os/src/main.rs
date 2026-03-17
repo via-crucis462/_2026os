@@ -142,13 +142,13 @@ fn init_other_hart(hart_id: usize) {
 
 use mm::KERNEL_SPACE;
 fn other_init() {
-    // 当前多核仍有问题，先把其他核关了
-    
+    // 调试用，先把其他核关了
+    /*
     unsafe {
          asm!(
             "wfi",
         );
-    } 
+    } */
     KERNEL_SPACE.exclusive_access().activate();
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
