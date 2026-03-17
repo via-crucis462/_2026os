@@ -179,7 +179,7 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> i
     }
 }
 
-pub fn sys_pipe(pipe: *mut u32) -> isize {
+pub fn sys_pipe(pipe: *mut usize) -> isize {
 	println!("kernel:pid[{}] sys_pipe", current_task().unwrap().process().pid.0);
     let task = current_task().unwrap();
     let proc = task.process();
@@ -190,8 +190,8 @@ pub fn sys_pipe(pipe: *mut u32) -> isize {
     inner.fd_table[read_fd] = Some(pipe_read);
     let write_fd = inner.alloc_fd();
     inner.fd_table[write_fd] = Some(pipe_write);
-    *translated_refmut(token, pipe) = read_fd as u32;
-    *translated_refmut(token, unsafe { pipe.add(1) }) = write_fd as u32;
+    *translated_refmut(token, pipe) = read_fd as usize;
+    *translated_refmut(token, unsafe { pipe.add(1) }) = write_fd as usize;
     0
 }
 

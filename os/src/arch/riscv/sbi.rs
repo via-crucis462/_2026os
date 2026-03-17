@@ -19,6 +19,9 @@ const SBI_IPI_SEND: usize = 0x735049;// sPI
 // HSM (Hart State Management) 扩展 ID, "HSM"
 const SBI_HSM: usize = 0x48534D;
 
+const SBI_EXT_IPI: usize = 0x735049;
+const SBI_IPI_SEND_IPI: usize = 0;
+
 struct SBICaller{}
 
 impl SBICaller {
@@ -77,4 +80,15 @@ pub fn send_ipi(mask: usize) {
 
 pub fn start_hart(hart_id: usize, start_addr: usize, opaque: usize) {
     sbi_call(SBI_HSM, hart_id, start_addr, opaque);
+}
+
+pub fn sbi_wakeup_hart(hart_id: usize) {
+    let hart_mask = 1usize << hart_id;
+    let hart_mask_base = 0;
+    sbi_call(SBI_EXT_IPI, SBI_IPI_SEND_IPI, hart_mask, hart_mask_base);
+}
+
+pub fn sbi_wakeup_harts(hart_mask: usize) {
+    let hart_mask_base = 0;
+    sbi_call(SBI_EXT_IPI, SBI_IPI_SEND_IPI, hart_mask, hart_mask_base);
 }
