@@ -13,12 +13,12 @@
 __alltraps:
     csrrw sp, sscratch, sp
     # now sp->*TrapContext in user space, sscratch->user stack
-    # save other general purpose registers
-    ld x4, 37*8(sp) // 线程指针不是保存而是恢复
     sd x1, 1*8(sp)
-    # skip sp(x2), we will save it later
+    # x2是栈指针，要等数据都压入栈再最后压
     sd x3, 3*8(sp)
-    # skip tp(x4), application does not use it
+    sd x4, 4*8(sp)
+    # load kernel tp(hart id) from TrapContext extension field
+    ld x4, 37*8(sp)
     # save x5~x31
     .set n, 5
     .rept 27
@@ -58,7 +58,10 @@ __restore:
     ld t1, 33*8(sp)
     csrw sstatus, t0
     csrw sepc, t1
-    # restore general purpose registers except x0/sp/tp
+    # save kernel tp(hart id) for next trap entry before restoring user tp
+    sd x4, 37*8(sp)
+    ld x4, 4*8(sp)
+    # restore general purpose registers except x0/sp
     ld x1, 1*8(sp)
     ld x3, 3*8(sp)
     
@@ -68,7 +71,6 @@ __restore:
         .set n, n+1
     .endr
     
-    sd x4, 37*8(sp) // 线程指针不是恢复而是保存
     # back to user stack
     ld sp, 2*8(sp)
     sret
