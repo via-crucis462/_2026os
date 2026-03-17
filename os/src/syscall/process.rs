@@ -438,7 +438,14 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
                 return 0;
             }
             inner.signals.insert(flag);
-            //exit_current_and_run_next(0);
+            for task in inner.tasks.iter() {
+                let mut task_inner = task.inner_exclusive_access();
+                if !task_inner.signal_mask.contains(flag) {
+                    task_inner.signals.insert(flag);
+                    drop(task_inner);
+                    break;
+                }
+            }
             0
         } else {
             -1
@@ -609,10 +616,7 @@ pub fn sys_sigreturn() -> isize {
 }
 
 fn check_sigaction_error(signal: SignalFlags, action: usize, old_action: usize) -> bool {
-    if action == 0
-        || old_action == 0
-        || signal == SignalFlags::SIGKILL
-        || signal == SignalFlags::SIGSTOP
+    if signal == SignalFlags::SIGKILL || signal == SignalFlags::SIGSTOP
     {
         true
     } else {
