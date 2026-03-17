@@ -615,7 +615,7 @@ pub fn sys_sigreturn() -> isize {
     }
 }
 
-fn check_sigaction_error(signal: SignalFlags, action: usize, old_action: usize) -> bool {
+fn check_sigaction_error(signal: SignalFlags) -> bool {
     if signal == SignalFlags::SIGKILL || signal == SignalFlags::SIGSTOP
     {
         true
@@ -638,11 +638,17 @@ pub fn sys_sigaction(
         return -1;
     }
     if let Some(flag) = SignalFlags::from_bits(1 << signum) {
-        if check_sigaction_error(flag, action as *const () as usize, old_action as *const () as usize) {
+        if check_sigaction_error(flag) {
             return -1;
         }
+    if !old_action.is_null() {
         let prev_action = inner.signal_actions.table[signum as *const () as usize];
         *translated_refmut(token, old_action) = prev_action;
+    }
+    if action.is_null() {
+        println!("action is null");
+        return 0;
+    }
         inner.signal_actions.table[signum as *const () as usize] = *translated_ref(token, action);
         0
     } else {
