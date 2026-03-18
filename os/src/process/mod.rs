@@ -68,8 +68,14 @@ pub fn suspend_current_and_run_next() {
     drop(task_inner);
     // ---- release current PCB
 
-    // push back to ready queue.
-    add_task_in_current_hart(task);
+    // Keep main-hart-affined tasks on the current hart queue to avoid cross-hart
+    // ping-pong; other tasks can be rebalanced via the global pool.
+    let on_main_hart = task.process().inner_exclusive_access().on_main_hart;
+    if on_main_hart {
+        add_task_in_current_hart(task);
+    } else {
+        add_task_into_pool(task);
+    }
     // jump to scheduling cycle
     schedule(task_cx_ptr);
 }
@@ -127,6 +133,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     task_inner.exit_code = exit_code;
     // do not move to its parent but under initproc
     proc_inner.alive_task_count -= 1;
+    let parent_to_wake = proc_inner.parent.as_ref().and_then(|p| p.upgrade());
+    let wake_parent = proc_inner.is_zombie();
     // ++++++ access initproc TCB exclusively
     // ++++++ release parent PCB
     if proc_inner.is_zombie() {
@@ -148,6 +156,11 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         // drop file descriptors
         proc_inner.fd_table.clear();
         remove_process(pid);
+    }
+    if wake_parent {
+        if let Some(parent) = parent_to_wake {
+            wake_up_one(parent.wait_queue.lock());
+        }
     }
     // **** release current PCB
     drop(proc_inner);

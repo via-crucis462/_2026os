@@ -47,6 +47,10 @@ pub struct WaitQueue {
 }
 
 impl WaitQueue {
+    pub fn new() -> Self {
+        Self { queue: VecDeque::new() }
+    }
+
     pub fn push_back(&mut self, task: Arc<TaskControlBlock>) {
         self.queue.push_back(task);
     }

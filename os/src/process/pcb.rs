@@ -9,7 +9,7 @@ use crate::{
     fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout},
     mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, 
         translated_refmut, MapArea, MapPermission, MapType},
-    sync::MPSafeCell,
+    sync::{MPSafeCell, WaitQueue},
 };
 use alloc::{
     string::String,
@@ -18,6 +18,7 @@ use alloc::{
     vec::Vec,
 };
 use crate::arch::{config::*, trap};
+use spin::Mutex;
 
 const AT_PHDR: usize = 3;
 const AT_PHENT: usize = 4;
@@ -28,6 +29,7 @@ const AT_RANDOM: usize = 25;
 
 pub struct ProcessControlBlock {
     pub pid: Arc<PidHandle>,
+    pub wait_queue: Mutex<WaitQueue>,
     pub inner: MPSafeCell<ProcessControlBlockInner>,
 }
 
@@ -88,6 +90,7 @@ impl ProcessControlBlock {
         // 进程控制块
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),// 注意：实际上只克隆了指针
+            wait_queue: Mutex::new(WaitQueue::new()),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: true, // initproc和shell默认在主核运行
                 pname: String::from("initproc"),
@@ -328,6 +331,7 @@ impl ProcessControlBlock {
         }
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
+            wait_queue: Mutex::new(WaitQueue::new()),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: false, // fork出的子进程默认不在
                 pname: parent_inner.pname.clone(),

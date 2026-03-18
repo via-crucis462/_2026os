@@ -411,15 +411,9 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, _options: usize) -> isize 
             return pid as isize; // 成功返回
         } else {
             // --- B. 孩子还活着 ---
-            
-            // 释放锁
-            drop(proc_inner); 
-            
-            // 暂停当前进程，让出 CPU 给孩子跑
-            suspend_current_and_run_next();
-            
-            // 【关键点】：这里不再返回 -2，而是继续 loop！
-            // 醒来后再次进入循环，重新检查 children 列表
+            // 释放进程锁并阻塞当前任务，等待子进程退出时被唤醒。
+            drop(proc_inner);
+            crate::process::current_task_to_sleep(proc.wait_queue.lock());
         }
     }
 }
