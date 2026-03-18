@@ -110,7 +110,7 @@ pub const IDLE_PID: usize = 0;
 /// 2026.3.18,当前实现中，exit_current_and_run_next会将当前进程的子进程移交给initproc，
 /// 即子进程不会直接去世，而是仍会执行完剩余的代码，直到自己也调用exit_current_and_run_next退出。
 pub fn exit_current_and_run_next(exit_code: i32) {
-    println!("called exit_current_and_run_next with exit_code {}", exit_code);
+    //println!("called exit_current_and_run_next with exit_code {}", exit_code);
     // take from Processor
     let task = take_current_task().unwrap();
 
