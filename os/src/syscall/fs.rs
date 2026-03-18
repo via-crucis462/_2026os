@@ -190,8 +190,10 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     inner.fd_table[read_fd] = Some(pipe_read);
     let write_fd = inner.alloc_fd();
     inner.fd_table[write_fd] = Some(pipe_write);
-    *translated_refmut(token, pipe) = read_fd as usize;
-    *translated_refmut(token, unsafe { pipe.add(1) }) = write_fd as usize;
+    // User ABI for pipe is int pipefd[2], i.e. two 32-bit entries.
+    let pipe_u32 = pipe as *mut u32;
+    *translated_refmut(token, pipe_u32) = read_fd as u32;
+    *translated_refmut(token, unsafe { pipe_u32.add(1) }) = write_fd as u32;
     0
 }
 

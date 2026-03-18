@@ -511,6 +511,7 @@ pub struct ProcessControlBlockInner {
     pub euid: u32, // 有效用户 ID (Effective)
     pub egid: u32, // 有效组 ID (Effective)
     
+    // 进程下的线程数
     pub tasks: Vec<Arc<TaskControlBlock>>, 
     // 存活进程数，等于0相当于僵尸进程
     pub alive_task_count: isize,

@@ -407,7 +407,10 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, _options: usize) -> isize 
             assert_eq!(Arc::strong_count(&child), 1);
             // 左移 8 位（这里还是要保留的！）
             let status = (exit_code & 0xff) << 8;
-            *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
+            // wait(NULL) is valid: userspace may pass a null status pointer.
+            if exit_code_ptr as usize != 0 {
+                *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
+            }
             
             return pid as isize; // 成功返回
         } else {
