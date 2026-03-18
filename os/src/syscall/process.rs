@@ -1,6 +1,7 @@
 //! Process management syscalls
 
 
+use crate::get_hart_id;
 pub use crate::{
     arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, 
     fs::*, 
@@ -327,7 +328,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let cwd = task.process().inner_exclusive_access().cwd.clone();
     drop(task);
     let path = translated_str(token, path);
-    debug!("[kernel] sys_exec: path={}, args_ptr={:#x}", path, args as *const () as usize);
+    println!("[kernel] sys_exec called with path={}, args={:#x}, current_hart_id={}", path, args as usize, get_hart_id());
     let mut args_vec: Vec<String> = Vec::new();
     loop {
         let arg_str_ptr = *translated_ref(token, args);
