@@ -1,6 +1,6 @@
 //! Process management syscalls
-
-// 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
+//! 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
+//! 内存管理也暂时放在此处
 
 pub use crate::{
     arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, fs::*, mm::{UserBuffer, mmap, translated_byte_buffer, translated_ref, translated_refmut, translated_str}, task::{
@@ -9,6 +9,8 @@ pub use crate::{
     syscall::errno::Errno
 };
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
+
+use super::errno::Errno::*;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -83,10 +85,12 @@ pub fn sys_yield() -> isize {
     suspend_current_and_run_next();
     0
 }
+
 pub fn sys_gettid() -> isize {
     // 目前线程ID和进程ID是一样的
     sys_getpid()
 }
+
 pub fn sys_getuid() -> isize {
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
@@ -102,7 +106,6 @@ pub fn sys_setpgid(_pid: usize, _pgid: usize) -> isize {
     0 
 }
 
-
 pub fn sys_getgid() -> isize {
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
@@ -114,7 +117,6 @@ pub fn sys_geteuid() -> isize {
     let inner = task.inner_exclusive_access();
     inner.euid as isize
 }
-
 
 pub fn sys_getegid() -> isize {
     let task = current_task().unwrap();
@@ -129,7 +131,6 @@ pub fn sys_setuid(uid: u32) -> isize {
     0 
 }
 
-
 pub fn sys_setgid(gid: u32) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
@@ -138,6 +139,7 @@ pub fn sys_setgid(gid: u32) -> isize {
     inner.egid = gid;
     0 
 }
+
 #[repr(C)]
 pub struct PollFd {
     pub fd: i32,     // 监视的文件描述符
@@ -153,28 +155,21 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, _tmo_p: usize, _sigmask: usize) -
     let task = current_task().unwrap();
     let token = task.inner_exclusive_access().memory_set.token();
     let inner = task.inner_exclusive_access();
-    
-   
     if ufds_ptr == 0 || nfds == 0 {
         return 0; 
     }
-
     let mut ready_count = 0;
-
     // 遍历用户传进来的 pollfd 数组
     for i in 0..nfds {
         // 根据虚拟地址算出真实物理地址，并拿到可变引用
         let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
         let pollfd = translated_refmut(token, pollfd_ptr);
-        
         let fd = pollfd.fd;
         pollfd.revents = 0; // 先清空返回状态
-
         // 负数的 fd 按照 POSIX 标准被忽略
         if fd < 0 {
             continue;
         }
-
         let fd_usize = fd as usize;
         
         // 检查 fd 是否合法
@@ -190,20 +185,17 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, _tmo_p: usize, _sigmask: usize) -
             if (pollfd.events & POLLOUT) != 0 && file.writable() {
                 pollfd.revents |= POLLOUT;
             }
-            
             if pollfd.revents != 0 {
                 ready_count += 1;
             }
         }
     }
-
     // 返回有多少个 FD 已经准备好了
     ready_count as isize
 }
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
-    
     inner.clear_child_tid = tidptr;
     task.pid.0 as isize 
 }
@@ -211,7 +203,6 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
 pub fn sys_getsid(_pid: usize) -> isize { 
     0 
 }
-
 // 假装创建新会话成功，返回新的 SID (这里用 0 代替)
 pub fn sys_setsid() -> isize { 
     0 
@@ -229,24 +220,21 @@ pub fn sys_clock_gettime(_clock_id: usize, tp: *mut TimeSpec) -> isize {
     time_spec.tv_nsec = nsec;
     0
 }
-pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
-    const TCGETS: usize = 0x5401;
-    const TIOCGWINSZ: usize = 0x5413;
-    const RTC_RD_TIME: usize = 0xffffffff80247009; // 真实的 RTC 读取指令号
+const TCGETS: usize = 0x5401;
+const TIOCGWINSZ: usize = 0x5413;
+const RTC_RD_TIME: usize = 0xffffffff80247009; // 真实的 RTC 读取指令号
 
+pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     let task = current_task().unwrap();
     let fd_table = task.inner_exclusive_access().fd_table.clone();
-    
-    // 1. 严格校验 fd 是否存在 (真正的 OS 第一步)
+    // fd合法性检查
     if fd >= fd_table.len() || fd_table[fd].is_none() {
-        return -9; // EBADF (Bad file descriptor)
+        return EBADF.as_isize();
     }
-
     let token = task.get_user_token();
-
     match request {
         TCGETS => {
-            if fd > 2 { return -25; } // ENOTTY: 只有 0,1,2 才是标准终端
+            if fd > 2 { return ENOTTY.as_isize(); }
             let mut termios = Termios {
                 c_iflag: 0o012402, c_oflag: 0o000005,
                 c_cflag: 0o002277, c_lflag: 0o0105011,
@@ -256,44 +244,40 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             termios.c_cc[2] = 127; termios.c_cc[4] = 4;
             if argp != 0 {
                 *translated_refmut(token, argp as *mut Termios) = termios;
-                -25
-            } else { -14 }
+                ENOTTY.as_isize()
+            } else { EFAULT.as_isize() }
         }
         TIOCGWINSZ => {
-            if fd > 2 { return -25; } // ENOTTY
+            if fd > 2 { return ENOTTY.as_isize(); } // ENOTTY
             let winsize = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
             if argp != 0 {
                 *translated_refmut(token, argp as *mut Winsize) = winsize;
-                -25
-            } else { -14 }
+                ENOTTY.as_isize()
+            } else { EFAULT.as_isize() }
         }
         RTC_RD_TIME => {
-            // 2. 真正的读取硬件时间 (这里用你们的 get_time_ms 转换)
+            // 获取硬件时间并写给用户
             let time_ms = get_time_ms(); 
             let sec = (time_ms / 1000) as i32;
-            
-            // 简单的秒数转换 (这里为了严谨，我们填一个真实的近期时间)
-            // 1900年起算的年份，126 = 2026年
             let rtc_time = RtcTime {
                 tm_sec: sec % 60,
                 tm_min: (sec / 60) % 60,
                 tm_hour: (sec / 3600) % 24,
                 tm_mday: 1, 
                 tm_mon: 0, 
-                tm_year: 126, // 2026年
+                tm_year: 126,
                 tm_wday: 0, tm_yday: 0, tm_isdst: 0,
             };
-
             if argp != 0 {
                 *translated_refmut(token, argp as *mut RtcTime) = rtc_time;
                 0
             } else {
-                -14 // EFAULT
+                EFAULT.as_isize() // 指针错误
             }
         }
         _ => {
           
-            -25 // ENOTTY
+            ENOTTY.as_isize()
         }
     }
 }
@@ -329,19 +313,18 @@ pub fn sys_renameat2(
         }; 
 
         if let Some(moved_dentry) = moved_dentry_opt {
-            
-            // 🚨 核心修复：先让底层磁盘执行改名，并严格检查返回值！
+            // 先改名
             let disk_success = old_parent.inode.rename_dir_entry(&old_name, &new_name);
-            
             if disk_success {
                 // 底层成功了，再把节点以新名字挂到 VFS 树上
                 let mut new_children = new_parent.children.lock();
                 new_children.insert(new_name.to_string(), moved_dentry);
-                return 0; // 彻底成功！
+                return 0;
             } else {
+                // 不成功，挂回去
                 let mut old_children = old_parent.children.lock();
                 old_children.insert(old_name.to_string(), moved_dentry);
-                return -1; // 诚实地向用户态返回错误
+                return EIO.as_isize();
             }
         }
     }
@@ -437,40 +420,36 @@ pub struct Sysinfo {
     pub totalhigh: usize,   // 高端内存大小
     pub freehigh: usize,    // 高端内存剩余大小
     pub mem_unit: u32,      // 内存单位（比如 1 表示以 byte 为单位计算）
-    pub _pad: u32,          // 补齐到 112 字节
+    pub _pad: u32,          // 补齐到 112 字节 
 }
 
 pub fn sys_sysinfo(sysinfo_ptr: usize) -> isize {
     if sysinfo_ptr == 0 {
-        return -1;
+        return -EFAULT.as_isize();
     }
-
     let task = current_task().unwrap();
     let token = task.inner_exclusive_access().memory_set.token();
-    
-    // 把用户态的指针“捞”进内核，变成我们可以直接修改的引用
-    // (这招你在 sys_ppoll 里已经用得很熟练了！)
     let sysinfo = translated_refmut(token, sysinfo_ptr as *mut Sysinfo);
-
-    // 🌟 强行塞入硬核的假数据糊弄 Busybox！
-    sysinfo.uptime = 1000;              // 假装我们已经开机了 1000 秒
-    sysinfo.loads = [0, 0, 0];          // 系统空闲，毫无压力
-    sysinfo.totalram = 128 * 1024 * 1024; // 告诉它我们有 128 MB 的豪华大内存
-    sysinfo.freeram = 64 * 1024 * 1024;   // 告诉它还剩一半 (64 MB) 可以尽情用
+    // 临时用硬编码系统信息
+    sysinfo.uptime = 1000;              
+    sysinfo.loads = [0, 0, 0];          
+    sysinfo.totalram = 128 * 1024 * 1024;
+    sysinfo.freeram = 64 * 1024 * 1024;  
     sysinfo.sharedram = 0;
     sysinfo.bufferram = 0;
-    sysinfo.totalswap = 0;              // 没有交换分区
+    sysinfo.totalswap = 0;
     sysinfo.freeswap = 0;
-    sysinfo.procs = 2;                  // 假装有 2 个进程在跑
+    sysinfo.procs = 2;
     sysinfo.pad = 0;
     sysinfo.totalhigh = 0;
     sysinfo.freehigh = 0;
-    sysinfo.mem_unit = 1;               // 上面填的数字全都是以 1 byte 为单位的
+    sysinfo.mem_unit = 1; // 内存单元长度（byte）
     sysinfo._pad = 0;
 
     // 返回 0 表示获取成功！
     0
 }
+
 pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
@@ -507,7 +486,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
                 app_inode = busybox_inode;
             } else {
                 warn!("[kernel] sys_exec: open busybox failed");
-                return -1;
+                return ENOENT.as_isize();
             }
         }
 
@@ -521,7 +500,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         argc as isize
     } else {
         warn!("[kernel] sys_exec: open_file failed");
-        -1
+        ENOENT.as_isize()
     }
 }
 
@@ -529,44 +508,31 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, _options: usize) -> isize {
     let task = current_task().unwrap();
-    
-    // 开启一个死循环，直到找到僵尸才 return
+    // 不断尝试寻找死去的子进程
     loop {
         let mut inner = task.inner_exclusive_access();
-        
-        // 1. 检查是否存在符合要求的子进程
         if !inner.children.iter().any(|p| pid == -1 || pid as *const () as usize == p.getpid()) {
-            return -1; // 一个孩子都没有，直接返回错误
+            return ECHILD.as_isize(); // 没有子进程
         }
-    
-        // 2. 尝试找一个“已经死掉”的僵尸孩子
+        // 尝试寻找
         let pair = inner.children.iter().enumerate().find(|(_, p)| {
             p.inner_exclusive_access().is_zombie() && (pid == -1 || pid as *const () as usize == p.getpid())
         });
     
         if let Some((idx, _)) = pair {
-            // --- A. 找到了僵尸！收尸成功 ---
             let child = inner.children.remove(idx);
             assert_eq!(Arc::strong_count(&child), 1);
             let found_pid = child.getpid();
             let exit_code = child.inner_exclusive_access().exit_code;
-            
-            // 左移 8 位（这里还是要保留的！）
-            let status = (exit_code & 0xff) << 8;
+            let status = (exit_code & 0xff) << 8;// 左移8位
             *translated_refmut(inner.memory_set.token(), exit_code_ptr) = status;
-            
-            return found_pid as isize; // 成功返回
+            return found_pid as isize;
         } else {
-            // --- B. 孩子还活着 ---
-            
-            // 释放锁
+            // 手动释放因为后续会跳出
             drop(inner); 
-            
-            // 暂停当前进程，让出 CPU 给孩子跑
+            // 让出cpu
             suspend_current_and_run_next();
-            
-            // 【关键点】：这里不再返回 -2，而是继续 loop！
-            // 醒来后再次进入循环，重新检查 children 列表
+            // 重新切换回当前taskcx时会回到这里
         }
     }
 }
@@ -583,10 +549,10 @@ pub fn sys_kill(pid: usize, signum: i32) -> isize {
             task_ref.signals.insert(flag);
             0
         } else {
-            -1
+            EINVAL.as_isize() // 信号不合法
         }
     } else {
-        -1
+        ESRCH.as_isize() // 进程不存在
     }
 }
 
@@ -595,49 +561,41 @@ pub fn sys_kill(pid: usize, signum: i32) -> isize {
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     let total_us = get_time_us();
-
-    // 2. 进行数学运算，拆分成 秒 和 微秒
     let sec = total_us / 1_000_000;
     let usec = total_us % 1_000_000;
-
-    // 3. 获取用户空间的 token，准备写内存
+    // 写入用户传入的结构体
     let token = current_user_token();
-
-    // 4. 写入用户传进来的结构体
-    // C标准中，如果指针是 NULL (0)，则表示不需要获取该值，直接忽略即可
-    // 但为了过测例，ts 一般都是有效的
     if ts as *const () as usize != 0 {
-        // 将用户态的虚拟地址 ts 转换为内核能访问的引用
         let time_val = translated_refmut(token, ts);
-        
-        // 填入数据
         time_val.sec = sec;
         time_val.usec = usec;
+    } else {
+        return EFAULT.as_isize();
     }
-
-    // 5. 成功返回 0 (注意之前你返回的是 -1)
     0
 }
 pub fn sys_nanosleep(req: *const TimeSpec, _rem: *mut TimeSpec) -> isize {
-    // 1. 获取当前时间 (毫秒)
     let start = get_time_ms();
+    // 写入用户传入的结构体
     let token = current_user_token();
     let len = *translated_ref(token, req); 
+
     let duration_ms = len.tv_sec * 1000 + len.tv_nsec / 1_000_000;
     while get_time_ms() < start + duration_ms {
-        suspend_current_and_run_next();
+        suspend_current_and_run_next();// 切换任务除非时间到
     }
     0
 }
 pub fn sys_mprotect(_start: usize, _len: usize, _prot: usize) -> isize {
     0
 }
+
 /// YOUR JOB: Implement mmap.
 pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: usize) -> isize {
     let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
     let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
-    
-    // 1. 分配并映射虚存及其对应的物理页
+
+    // 分配内存并映射
     let ret = match mmap::do_mmap(start, len, mmap_prot , mmap_flags) {
         Ok(addr) => addr,
         Err(_) => {
@@ -646,7 +604,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
         }
     };
 
-    // 2. 如果是文件映射（非匿名映射）且 FD 合法，读取内容
+    // 如果是文件映射（非匿名映射）且 FD 合法，读取内容
     if mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) && fd >= 0 {
         //println!("[kernel] sys_mmap: file mapping requested for fd={}, start={:#x}, len={:#x}, prot={:?}, flags={:?}", fd, start, len, mmap_prot, mmap_flags);
         let task = current_task().unwrap();
@@ -657,11 +615,10 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
             if let Some(file) = &inner.fd_table[fd as usize] {
                 if file.readable() {
                     let file = file.clone();
-                    drop(inner); // 必须释放锁，因为 file.read 涉及磁盘 IO 可能阻塞
-                    
+                    // 释放锁避免阻塞
+                    drop(inner);
                     // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
                     let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
-                    
                     // 使用 read_at 确保不受 FD 当前 offset 影响，并使用系统调用传入的 _off
                     file.read_at(_off, user_buf);
                 }
@@ -678,7 +635,7 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
     if let Ok(_) = mmap::do_munmap(start,len) {
         0
     } else {
-        -1
+        EINVAL.as_isize() // 目标地址不合法
     }
 }
 
@@ -696,13 +653,13 @@ pub fn sys_brk(addr: usize) -> isize {
 /// HINT: fork + exec =/= spawn
 pub fn sys_spawn(_path: *const u8) -> isize {
     trace!("kernel:pid[{}] sys_spawn NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    ENOTTY.as_isize() // 不支持的操作
 }
 
 // YOUR JOB: Set task priority.
 pub fn sys_set_priority(_prio: isize) -> isize {
     trace!("kernel:pid[{}] sys_set_priority NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    ENOTTY.as_isize() // 不支持的操作
 }
 
 pub fn sys_sigprocmask(mask: u32) -> isize {
@@ -714,10 +671,10 @@ pub fn sys_sigprocmask(mask: u32) -> isize {
             inner.signal_mask = flag;
             old_mask.bits() as isize
         } else {
-            -1
+            EINVAL.as_isize() // 信号掩码不合法
         }
     } else {
-        -1
+        ESRCH.as_isize() // 没有当前任务
     }
 }
 
@@ -734,7 +691,7 @@ pub fn sys_sigreturn() -> isize {
         // back to the original execution of the application.
         trap_ctx.get_a0() as isize
     } else {
-        -1
+        ESRCH.as_isize() // 没有当前任务
     }
 }
 
@@ -760,43 +717,32 @@ pub fn sys_sigaction(
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     if signum as *const () as usize > MAX_SIG {
-        return -1;
+        return EINVAL.as_isize(); // 信号不合法
     }
     if let Some(flag) = SignalFlags::from_bits(1 << signum) {
         if check_sigaction_error(flag, action as *const () as usize, old_action as *const () as usize) {
-            return -1;
+            return EINVAL.as_isize(); // 同上
         }
         let prev_action = inner.signal_actions.table[signum as *const () as usize];
         *translated_refmut(token, old_action) = prev_action;
         inner.signal_actions.table[signum as *const () as usize] = *translated_ref(token, action);
         0
     } else {
-        -1
+        EINVAL.as_isize() // 同上
     }
 }
+
 pub fn sys_times(tms_ptr: *mut usize) -> isize {
-    // 1. 获取当前时间（毫秒）作为返回值
-    // 这对应测例里的 test_ret
-    let current_ms = get_time_ms();
-
-    // 2. 获取用户 token 用来写内存
     let token = current_user_token();
-
-    // 3. 构造要填入的数据
-    // 因为测例不检查具体数值，我们填 0 完全没问题
-    // 等以后你实现了精确的统计，再来填这里
+    // 暂时伪实现，写0
     let tms_val = Tms {
         tms_utime: 0,
         tms_stime: 0,
         tms_cutime: 0,
         tms_cstime: 0,
     };
-
-    // 4. 将数据写入用户传进来的地址
-    // 注意：把 *mut usize 强转为 *mut Tms
     *translated_refmut(token, tms_ptr as *mut Tms) = tms_val;
-
-    // 5. 返回当前时间滴答数 (只要 >= 0，assert就过了)
+    let current_ms = get_time_ms();
     current_ms as isize
 }
 

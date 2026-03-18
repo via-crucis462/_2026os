@@ -141,7 +141,7 @@ impl Dentry {
         }
 
         // 3. 磁盘也没找到，按照要求 panic
-        println!("VFS: File '{}' not found in directory '{}'", name, self.name);
+        error!("VFS: File '{}' not found in directory '{}'", name, self.name);
         None
     }
 
