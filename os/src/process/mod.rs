@@ -107,6 +107,8 @@ pub const IDLE_PID: usize = 0;
 
 /// Exit the current 'Running' task and run the next task in task list.
 /// 初步修改，逻辑待检查
+/// 2026.3.18,当前实现中，exit_current_and_run_next会将当前进程的子进程移交给initproc，
+/// 即子进程不会直接去世，而是仍会执行完剩余的代码，直到自己也调用exit_current_and_run_next退出。
 pub fn exit_current_and_run_next(exit_code: i32) {
     println!("called exit_current_and_run_next with exit_code {}", exit_code);
     // take from Processor
@@ -156,8 +158,6 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         // drop file descriptors
         proc_inner.fd_table.clear();
         remove_process(pid);
-    }
-    if wake_parent {
         if let Some(parent) = parent_to_wake {
             wake_up_one(parent.wait_queue.lock());
         }
