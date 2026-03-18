@@ -199,3 +199,9 @@ pci驱动能跑了
 2. 更改了busybox在img里的位置，现在位于根目录下，因此exec中对于脚本文件的替换寻址也相应修改
 3. 新增了exit_group系统调用，底层调用的是exit
 4. makefile添加日志功能，每次运行后可以在os目录下的kernel_output.log查看报错，防止报错刷屏导致无法看到最上方输出
+
+## 3.18
+### fmx
+1. 调整syscall工作目录的几处问题。
+2. 标准化syscall的返回值，将旧实现的-1和magic number统一改成枚举。
+3. 为la的busybox做好了适配。
