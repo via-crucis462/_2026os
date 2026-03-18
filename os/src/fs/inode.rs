@@ -240,13 +240,13 @@ pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
     };
     // 从起点开始检查目标路径是否已存在
     if start.find_tree(path, true).is_some() {
-        println!("VFS: make_dir - target '{}' already exists", path);
+        info!("VFS: make_dir - target '{}' already exists", path);
         return None; 
     }
     let parent_path = parent_path(path);
     let parent_dentry = start.find_tree(&parent_path, true)?;
     let dir_name = file_name(path);
-    println!("VFS: make_dir - creating directory '{}' in parent '{}'", dir_name, parent_path);
+    info!("VFS: make_dir - creating directory '{}' in parent '{}'", dir_name, parent_path);
     let new_dentry = create_dir_in_dentry(&parent_dentry, dir_name , _mode);
     Some(new_dentry.inode.get_stat().ino as u32)
 }

@@ -232,6 +232,13 @@ pub fn trap_return() -> ! {
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
     let id = current_user_asid();
+
+    unsafe {
+        let mut euen: usize;
+        asm!("csrrd {}, 0x2", out(reg) euen);
+        euen |= 0x1;
+        asm!("csrwr {}, 0x2", in(reg) euen);
+    }
 //  crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
     //info!("trap_return: going to user mode, satp = {:#x}", user_satp);
     extern "C" {

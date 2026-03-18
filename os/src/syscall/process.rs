@@ -10,6 +10,8 @@ pub use crate::{
 };
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 
+use super::errno::Errno::*;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Termios {
@@ -239,14 +241,14 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     
     // 1. 严格校验 fd 是否存在 (真正的 OS 第一步)
     if fd >= fd_table.len() || fd_table[fd].is_none() {
-        return -9; // EBADF (Bad file descriptor)
+        return EBADF.as_isize(); // EBADF (Bad file descriptor)
     }
 
     let token = task.get_user_token();
 
     match request {
         TCGETS => {
-            if fd > 2 { return -25; } // ENOTTY: 只有 0,1,2 才是标准终端
+            if fd > 2 { return ENOTTY.as_isize(); } // ENOTTY: 只有 0,1,2 才是标准终端
             let mut termios = Termios {
                 c_iflag: 0o012402, c_oflag: 0o000005,
                 c_cflag: 0o002277, c_lflag: 0o0105011,
@@ -256,16 +258,16 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             termios.c_cc[2] = 127; termios.c_cc[4] = 4;
             if argp != 0 {
                 *translated_refmut(token, argp as *mut Termios) = termios;
-                -25
-            } else { -14 }
+                ENOTTY.as_isize()
+            } else { EFAULT.as_isize() }
         }
         TIOCGWINSZ => {
-            if fd > 2 { return -25; } // ENOTTY
+            if fd > 2 { return ENOTTY.as_isize(); } // ENOTTY
             let winsize = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
             if argp != 0 {
                 *translated_refmut(token, argp as *mut Winsize) = winsize;
-                -25
-            } else { -14 }
+                ENOTTY.as_isize()
+            } else { EFAULT.as_isize() }
         }
         RTC_RD_TIME => {
             // 2. 真正的读取硬件时间 (这里用你们的 get_time_ms 转换)
@@ -288,12 +290,12 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 *translated_refmut(token, argp as *mut RtcTime) = rtc_time;
                 0
             } else {
-                -14 // EFAULT
+                EFAULT.as_isize() // EFAULT
             }
         }
         _ => {
           
-            -25 // ENOTTY
+            ENOTTY.as_isize()
         }
     }
 }
@@ -329,19 +331,18 @@ pub fn sys_renameat2(
         }; 
 
         if let Some(moved_dentry) = moved_dentry_opt {
-            
-            // 🚨 核心修复：先让底层磁盘执行改名，并严格检查返回值！
+            // 先改名
             let disk_success = old_parent.inode.rename_dir_entry(&old_name, &new_name);
-            
             if disk_success {
                 // 底层成功了，再把节点以新名字挂到 VFS 树上
                 let mut new_children = new_parent.children.lock();
                 new_children.insert(new_name.to_string(), moved_dentry);
-                return 0; // 彻底成功！
+                return 0;
             } else {
+                // 不成功，挂回去
                 let mut old_children = old_parent.children.lock();
                 old_children.insert(old_name.to_string(), moved_dentry);
-                return -1; // 诚实地向用户态返回错误
+                return EIO.as_isize();
             }
         }
     }
@@ -442,7 +443,7 @@ pub struct Sysinfo {
 
 pub fn sys_sysinfo(sysinfo_ptr: usize) -> isize {
     if sysinfo_ptr == 0 {
-        return -1;
+        return -EFAULT.as_isize();
     }
 
     let task = current_task().unwrap();
@@ -507,7 +508,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
                 app_inode = busybox_inode;
             } else {
                 warn!("[kernel] sys_exec: open busybox failed");
-                return -1;
+                return ENOENT.as_isize();
             }
         }
 
@@ -521,7 +522,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         argc as isize
     } else {
         warn!("[kernel] sys_exec: open_file failed");
-        -1
+        ENOENT.as_isize()
     }
 }
 
@@ -536,7 +537,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, _options: usize) -> isize 
         
         // 1. 检查是否存在符合要求的子进程
         if !inner.children.iter().any(|p| pid == -1 || pid as *const () as usize == p.getpid()) {
-            return -1; // 一个孩子都没有，直接返回错误
+            return ECHILD.as_isize(); // 没有子进程了，返回 -1
         }
     
         // 2. 尝试找一个“已经死掉”的僵尸孩子
@@ -583,10 +584,10 @@ pub fn sys_kill(pid: usize, signum: i32) -> isize {
             task_ref.signals.insert(flag);
             0
         } else {
-            -1
+            EINVAL.as_isize() // 信号不合法
         }
     } else {
-        -1
+        ESRCH.as_isize() // 进程不存在
     }
 }
 
@@ -678,7 +679,7 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
     if let Ok(_) = mmap::do_munmap(start,len) {
         0
     } else {
-        -1
+        EINVAL.as_isize() // 希望取消映射的地址范围不合法
     }
 }
 
@@ -696,13 +697,13 @@ pub fn sys_brk(addr: usize) -> isize {
 /// HINT: fork + exec =/= spawn
 pub fn sys_spawn(_path: *const u8) -> isize {
     trace!("kernel:pid[{}] sys_spawn NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    ENOTTY.as_isize() // 不支持的操作
 }
 
 // YOUR JOB: Set task priority.
 pub fn sys_set_priority(_prio: isize) -> isize {
     trace!("kernel:pid[{}] sys_set_priority NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+    ENOTTY.as_isize() // 不支持的操作
 }
 
 pub fn sys_sigprocmask(mask: u32) -> isize {
@@ -714,10 +715,10 @@ pub fn sys_sigprocmask(mask: u32) -> isize {
             inner.signal_mask = flag;
             old_mask.bits() as isize
         } else {
-            -1
+            EINVAL.as_isize() // 信号掩码不合法
         }
     } else {
-        -1
+        ESRCH.as_isize() // 没有当前任务
     }
 }
 
@@ -734,7 +735,7 @@ pub fn sys_sigreturn() -> isize {
         // back to the original execution of the application.
         trap_ctx.get_a0() as isize
     } else {
-        -1
+        ESRCH.as_isize() // 没有当前任务
     }
 }
 
@@ -760,18 +761,18 @@ pub fn sys_sigaction(
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     if signum as *const () as usize > MAX_SIG {
-        return -1;
+        return EINVAL.as_isize(); // 信号不合法
     }
     if let Some(flag) = SignalFlags::from_bits(1 << signum) {
         if check_sigaction_error(flag, action as *const () as usize, old_action as *const () as usize) {
-            return -1;
+            return EINVAL.as_isize(); // 同上
         }
         let prev_action = inner.signal_actions.table[signum as *const () as usize];
         *translated_refmut(token, old_action) = prev_action;
         inner.signal_actions.table[signum as *const () as usize] = *translated_ref(token, action);
         0
     } else {
-        -1
+        EINVAL.as_isize() // 同上
     }
 }
 pub fn sys_times(tms_ptr: *mut usize) -> isize {

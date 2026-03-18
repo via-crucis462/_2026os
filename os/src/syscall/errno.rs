@@ -24,6 +24,7 @@ pub enum Errno {
     EINVAL = 22,    /* Invalid argument */
     ENFILE = 23,    /* File table overflow */
     EMFILE = 24,    /* Too many open files */
+    ENOTTY = 25,    /* Not a typewriter 不支持命令*/
     ENOSPC = 28,    /* No space left on device */
     ESPIPE = 29,    /* Illegal seek */
     EROFS = 30,     /* Read-only file system */
