@@ -1,4 +1,5 @@
 //! File and filesystem-related syscalls
+
 use crate::fs::{make_pipe, OpenFlags, Stat,Statx, open_file, make_dir, parent_path, file_name};
 use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
 use crate::task::{current_task, current_user_token};
@@ -108,12 +109,12 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
 
     
     if fd >= inner.fd_table.len() {
-        return -1;
+        return EBADF.as_isize();
     }
     if let Some(file) = &inner.fd_table[fd] {
         if !file.writable() {
             //warn!("VFS: sys_write failed - fd {} ('{}') is not writable", fd, filename);
-            return -1;
+            return EACCES.as_isize(); // 权限不足
         }
         let file = file.clone();
         // release current task TCB manually to avoid multi-borrow
@@ -128,7 +129,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         ax
     } else {
         //warn!("VFS: sys_write failed - fd {} ('{}') is not open", fd, filename);
-        -1
+        EBADF.as_isize() // 文件描述符无效
     }
 }
 
@@ -139,19 +140,19 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
-        return -1;
+        return EBADF.as_isize();
     }
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
         if !file.readable() {
-            return -1;
+            return EACCES.as_isize(); // 权限不足
         }
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
         trace!("[kernel] sys_read: fd={}, len={}", fd, len);
         file.read(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
     } else {
-        -1
+        EBADF.as_isize() // 文件描述符无效
     }
 }
 
@@ -170,16 +171,16 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
     } else {
         let inner = task.inner_exclusive_access();
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
-            return -1;
+            return EBADF.as_isize();
         }
         if let Some(file) = &inner.fd_table[dirfd as usize] {
             if let Some(dentry) = file.get_dentry() {
                 dentry
             } else {
-                return -1;
+                return EBADF.as_isize();
             }
         } else {
-            return -1;
+            return EBADF.as_isize();
         }
     };
 
@@ -187,7 +188,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
     if let Some(inode) = open_file(start_dentry, path_str.as_str(), open_flags) {
         if open_flags.should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
             trace!("VFS: sys_openat failed - '{}' is not a directory", path_str);
-            return -1;
+            return ENOTDIR.as_isize(); // 目标文件不是目录
         }
         let mut inner = task.inner_exclusive_access();
         let fd = inner.alloc_fd();
@@ -197,7 +198,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
         fd as isize
     } else {
         trace!("VFS: File '{}' not found", path_str);
-        -1
+        ENOENT.as_isize() // 文件不存在
     }
 }
 
@@ -206,10 +207,10 @@ pub fn sys_close(fd: usize) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
-        return -1;
+        return EBADF.as_isize();
     }
     if inner.fd_table[fd].is_none() {
-        return -1;
+        return EBADF.as_isize();
     }
     inner.fd_table[fd].take();
     inner.fd_cloexec[fd] = false;
@@ -230,23 +231,23 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> i
     } else {
         let inner = task.inner_exclusive_access();
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
-            return -1;
+            return EBADF.as_isize();
         }
         if let Some(file) = &inner.fd_table[dirfd as usize] {
             if let Some(dentry) = file.get_dentry() {
                 dentry
             } else {
-                return -1;
+                return EBADF.as_isize();
             }
         } else {
-            return -1;
+            return EBADF.as_isize();
         }
     };
 
     if let Some(_inode) = open_file(start_dentry, path_str.as_str(), OpenFlags::RDONLY) {
         0
     } else {
-        -1
+        ENOENT.as_isize() // 文件不存在
     }
 }
 
@@ -274,10 +275,10 @@ pub fn sys_dup(fd: usize) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
-        return -1;
+        return EBADF.as_isize();
     }
     if inner.fd_table[fd].is_none() {
-        return -1;
+        return EBADF.as_isize();
     }
     let new_fd = inner.alloc_fd();
     let file = Arc::clone(inner.fd_table[fd].as_ref().unwrap());
@@ -294,7 +295,7 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> isize {
     
     // 1. 检查 fd 是否越界或为空
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-        return -9; // EBADF (Bad file descriptor)
+        return EBADF.as_isize();
     }
     
     // 2. 拿出文件对象
@@ -308,8 +309,7 @@ pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-
-        return -1;
+        return EBADF.as_isize();
     }
 
     if fd == new_fd {
@@ -328,7 +328,7 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
-        return -1;
+        return EBADF.as_isize();
     }
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
@@ -337,7 +337,7 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
         *translated_refmut(token, st) = stat;
         0
     } else {
-        -1
+        return EBADF.as_isize();
     }
 }
 #[repr(C)]
@@ -352,7 +352,7 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     
 
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-        return -1;
+        return EBADF.as_isize();
     }
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
 
@@ -391,12 +391,12 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
     const AT_EMPTY_PATH: u32 = 0x1000;
     if path_str.is_empty() {
         if (flags & AT_EMPTY_PATH) == 0 {
-            return -2; 
+            return EINVAL.as_isize(); // 无效参数 
         }
 
         let inner = task.inner_exclusive_access();
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
-            return -9; 
+            return EBADF.as_isize(); 
         }
 
         if let Some(file) = &inner.fd_table[dirfd as usize] {
@@ -406,7 +406,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
                 return 0;
             }
         }
-        return -9; 
+        return EBADF.as_isize();
     }
 
     let start_dentry = if path_str.starts_with('/') {
@@ -416,16 +416,16 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
     } else {
         let inner = task.inner_exclusive_access();
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
-            return -1;
+            return EBADF.as_isize();
         }
         if let Some(file) = &inner.fd_table[dirfd as usize] {
             if let Some(dentry) = file.get_dentry() {
                 dentry
             } else {
-                return -1;
+                return EBADF.as_isize();
             }
         } else {
-            return -1;
+            return EBADF.as_isize();
         }
     };
 
@@ -437,7 +437,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
         *translated_refmut(token, st) = stat;
         0
     } else {
-        -1
+        return ENOENT.as_isize(); // 文件不存在
     }
 }
 
@@ -449,16 +449,15 @@ pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
     if let Some(_) = make_dir(path.as_str(), _mode) {
         0
     } else {
-        -1
+        EACCES.as_isize() // 权限不足或父目录不存在
     }
 }
 pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
     trace!("kernel:pid[{}] sys_linkat NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -38
+    ENOSYS.as_isize()
 }
 pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usize) -> isize {
-
-    -38
+    ENOSYS.as_isize()
 }
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
@@ -467,13 +466,13 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
 
     let fd_valid = fd < inner.fd_table.len() && inner.fd_table[fd].is_some();
     if !fd_valid && cmd != F_DUPFD && cmd != F_DUPFD_CLOEXEC {
-        return -1;
+        return EBADF.as_isize();
     }
 
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
             if !fd_valid {
-                return -1;
+                return EBADF.as_isize();
             }
             let mut new_fd = arg;
             while new_fd < inner.fd_table.len() {
@@ -502,7 +501,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             inner.fd_status[fd] = (old & O_ACCMODE) | (arg & !O_ACCMODE);
             0
         }
-        _ => -1,
+        _ => ENOSYS.as_isize(),
     }
 }
 pub fn sys_utimensat(_dirfd: i32, path_ptr: usize, _times_ptr: usize, _flags: usize) -> isize {
@@ -516,7 +515,7 @@ pub fn sys_utimensat(_dirfd: i32, path_ptr: usize, _times_ptr: usize, _flags: us
     if cwd.find_tree(&path_str, true).is_some() {
         return 0; 
     } else {
-        return -2; 
+        return ENOENT.as_isize();
     }
 }
 pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
@@ -525,7 +524,7 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     
     // 1. 检查文件描述符
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-        return -1; // EBADF
+        return EBADF.as_isize();
     }
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
     let token = inner.memory_set.token();
@@ -592,7 +591,7 @@ pub fn sys_unlinkat(dirfd: i32, path: *const u8, flags: u32) -> isize {
     } else {
         // 相对路径 + 指定的目录 fd：从特定的目录句柄开始找
         if dirfd < 0 || (dirfd as usize) >= fd_table_len || inner.fd_table[dirfd as usize].is_none() {
-            return -9; // EBADF (Bad file descriptor)
+            return EBADF.as_isize();
         }
         // 真正的内核这里会把 fd 转换成 Dentry。
         // 为了目前能跑通，如果遇到这种情况，我们先妥协用 cwd，并打印提示。
@@ -607,7 +606,7 @@ pub fn sys_unlinkat(dirfd: i32, path: *const u8, flags: u32) -> isize {
     let target_dentry = base_dir.find_tree(&path_str, false);
     let target = match target_dentry {
         Some(d) => d,
-        None => return -2, // ENOENT (No such file or directory)
+        None => return ENOENT.as_isize(),
     };
 
     let stat = target.inode.get_stat();
@@ -617,8 +616,8 @@ pub fn sys_unlinkat(dirfd: i32, path: *const u8, flags: u32) -> isize {
     // 3. 严格的类型与标志位校验
     // ==========================================
     let removing_dir = (flags & AT_REMOVEDIR) != 0;
-    if is_dir && !removing_dir { return -21; /* EISDIR: 用 rm 删目录，拒绝 */ }
-    if !is_dir && removing_dir { return -20; /* ENOTDIR: 用 rmdir 删文件，拒绝 */ }
+    if is_dir && !removing_dir { return EISDIR.as_isize(); /* EISDIR: 用 rm 删目录，拒绝 */ }
+    if !is_dir && removing_dir { return ENOTDIR.as_isize(); /* ENOTDIR: 用 rmdir 删文件，拒绝 */ }
 
     // ==========================================
     // 4. 执行删除操作
@@ -636,28 +635,28 @@ pub fn sys_unlinkat(dirfd: i32, path: *const u8, flags: u32) -> isize {
         } else {
             // 如果报错走到这里，绝对是你的底层 fs 驱动（比如 ext4 / fat32）的 delete_dir_entry 没实现好！
             println!("[kernel] VFS failed to delete '{}'. Underlay FS returned None.", name);
-            return -1; // EPERM
+            return EPERM.as_isize();
         }
     }
-    -2 // 父目录不存在
+    ENOENT.as_isize() // 父目录不存在
 }
 pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
-        return -1;
+        return EBADF.as_isize();
     }
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
         drop(inner);
         if !file.readable() {
-            return -1;
+            return EACCES.as_isize(); // 权限不足
         }
         trace!("[kernel] sys_getdents: fd={}, count={}", fd, count);
         file.getdents(translated_byte_buffer(token, dirp, count).remove(0)) as isize
     } else {
-        -1
+        return EBADF.as_isize();
     }
 }
 pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usize) -> isize {
@@ -666,15 +665,15 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usiz
     
     // 1. 检查越界并拿到文件对象 (这俩都是 Arc<dyn File>)
     if out_fd >= inner.fd_table.len() || in_fd >= inner.fd_table.len() {
-        return -1;
+        return EBADF.as_isize();
     }
     let out_file = match &inner.fd_table[out_fd] {
         Some(file) => file.clone(),
-        None => return -1,
+        None => return EBADF.as_isize(),
     };
     let in_file = match &inner.fd_table[in_fd] {
         Some(file) => file.clone(),
-        None => return -1,
+        None => return EBADF.as_isize(),
     };
     
     drop(inner); // 必须解锁！
@@ -714,7 +713,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usiz
 
             let write_bytes = out_file.write(w_user_buf);
             if write_bytes == 0 {
-                if total_transferred == 0 { return -1; } else { break; }
+                if total_transferred == 0 { return EBADF.as_isize(); } else { break; }
             }
             written_so_far += write_bytes;
         }
@@ -733,7 +732,7 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
 
     let path_bytes = path.as_bytes();
     if path_bytes.len() + 1 > size {
-        return -1;
+        return ENAMETOOLONG.as_isize();
     }
     let mut user_buf = UserBuffer::new(translated_byte_buffer(token, buf, size));
     let mut current_offset = 0;
@@ -779,7 +778,7 @@ pub fn sys_chdir(path: *const u8) -> isize {
         inner.cwd = inode.get_dentry();
         0
     } else {
-        -1
+        ENOENT.as_isize() // 目录不存在
     }
 }
 
@@ -830,7 +829,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
     } else {
         // 相对路径 + 指定的目录 fd
         if dirfd < 0 || (dirfd as usize) >= fd_table_len || inner.fd_table[dirfd as usize].is_none() {
-            return -9; // EBADF (Bad file descriptor)
+            return EBADF.as_isize();
         }
         
         // 【架构预留】真实的系统里，这里应该取出对应 FD 的 Dentry。
@@ -860,7 +859,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
         }
         None => {
             // 5. 没找到！坚决不撒谎，老老实实返回错误码
-            -2 // ENOENT (No such file or directory)
+            ENOENT.as_isize() // ENOENT (No such file or directory)
         }
     }
 }
@@ -869,17 +868,17 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isiz
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
-        return -1;
+        return EBADF.as_isize();
     }
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
         drop(inner);
         if !file.readable() {
-            return -1;
+            return EACCES.as_isize();
         }
         trace!("[kernel] sys_pread64: fd={}, count={}, offset={}", fd, count, offset);
         file.pread(offset, UserBuffer::new(translated_byte_buffer(token, buf, count))) as isize
     } else {
-        -1
+        EBADF.as_isize()
     }
 }
