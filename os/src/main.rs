@@ -103,6 +103,8 @@ pub fn rust_main() -> ! {
     arch::trap::init();
     drivers::search_pci();
     fs::list_apps();
+    fs::mount_procfs();
+    fs::mount_devfs();
     task::add_initproc();
     arch::trap::enable_timer_interrupt();
     task::run_tasks();
