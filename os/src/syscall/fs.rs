@@ -7,6 +7,7 @@ use alloc::sync::Arc;
 use alloc::string::ToString;
 use crate::syscall::translated_ref;
 
+use super::errno::Errno::*;
 
 const F_DUPFD: usize = 0;
 const F_GETFD: usize = 1;
@@ -84,7 +85,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-        return -1;
+        return EBADF.as_isize();
     }
 
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
@@ -386,7 +387,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
     let task = current_task().unwrap();
     let token = current_user_token();
     let path_str = translated_str(token, path);
-    println!("[kernel] sys_statx: dirfd={}, path={}, mask={:#x}, flags={:#x}", dirfd, path_str, mask, flags);
+    trace!("[kernel] sys_statx: dirfd={}, path={}, mask={:#x}, flags={:#x}", dirfd, path_str, mask, flags);
     const AT_EMPTY_PATH: u32 = 0x1000;
     if path_str.is_empty() {
         if (flags & AT_EMPTY_PATH) == 0 {
