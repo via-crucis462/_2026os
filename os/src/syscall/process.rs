@@ -220,9 +220,9 @@ pub fn sys_clock_gettime(_clock_id: usize, tp: *mut TimeSpec) -> isize {
     time_spec.tv_nsec = nsec;
     0
 }
-const TCGETS: usize = 0x5401;
-const TIOCGWINSZ: usize = 0x5413;
-const RTC_RD_TIME: usize = 0xffffffff80247009; // 真实的 RTC 读取指令号
+const TCGETS: u32 = 0x5401;
+const TIOCGWINSZ: u32 = 0x5413;
+const RTC_RD_TIME: u32 = 0x80247009; // 真实的 RTC 读取指令号
 
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     let task = current_task().unwrap();
@@ -232,7 +232,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
         return EBADF.as_isize();
     }
     let token = task.get_user_token();
-    match request {
+    match request as u32 {
         TCGETS => {
             if fd > 2 { return ENOTTY.as_isize(); }
             let mut termios = Termios {
