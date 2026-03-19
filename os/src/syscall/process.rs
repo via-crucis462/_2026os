@@ -475,19 +475,39 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
 
         if app_inode.get_dentry().name.ends_with(".sh") {
+            // 兼容不同镜像布局：优先使用脚本同目录的 busybox，其次回退到根目录 /busybox
+            // 获取脚本父目录
+            let script_dir = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+            let busybox = if !script_dir.is_empty() {
+                let mut d = script_dir.to_string();
+                d.push_str("/busybox");
+                d
+            } else {
+                "/busybox".to_string()
+            };
+            
+
+            let mut busybox_inode_opt: Option<Arc<OSInode>> = None;
+            if let Some(inode) = open_file(ROOT_DENTRY.clone(), busybox.as_str(), OpenFlags::RDONLY) {
+                busybox_inode_opt = Some(inode);
+            }
+
+            if busybox_inode_opt.is_none() {
+                warn!("[kernel] sys_exec: open busybox failed for script '{}': tried {:?}", path, busybox);
+                return ENOENT.as_isize();
+            }
+
             let mut new_args:Vec<String> = Vec::new();
             new_args.push("busybox".to_string());
             new_args.push("sh".to_string());
+            if args_vec.is_empty() {
+                new_args.push(path.clone());
+            }
             for arg in args_vec.iter(){
                 new_args.push(arg.clone());
             }
             args_vec = new_args;
-            if let Some(busybox_inode) = open_file(ROOT_DENTRY.clone(), "busybox", OpenFlags::RDONLY) {
-                app_inode = busybox_inode;
-            } else {
-                warn!("[kernel] sys_exec: open busybox failed");
-                return ENOENT.as_isize();
-            }
+            app_inode = busybox_inode_opt.unwrap();
         }
 
         let all_data = app_inode.read_all();

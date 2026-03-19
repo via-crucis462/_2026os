@@ -30,3 +30,5 @@ toolchains/
 *.pdf
 syscall_posix_kernel.md
 kernel-*
+*.img*
+*.log
