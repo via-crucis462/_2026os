@@ -9,6 +9,7 @@ os/kernel_output.log
 os/last-*
 os/Cargo.lock
 os/.gdb_history
+os/target/*
 easy-fs/Cargo.lock
 easy-fs/target/*
 easy-fs-fuse/Cargo.lock
