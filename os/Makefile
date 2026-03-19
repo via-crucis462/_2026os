@@ -45,8 +45,8 @@ build: env $(KERNEL_BIN)
 
 env:
 ifeq ($(OFFLINE),)
-	export RUSTUP_DIST_SERVER="https://mirrors.tuna.tsinghua.edu.cn/rust-static"; \
-	export RUSTUP_UPDATE_ROOT="https://mirrors.tuna.tsinghua.edu.cn/rust-static/rustup"; \
+	export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static; \
+	export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup; \
 	((rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)) && \
 	rustup component add rust-src && \
 	rustup component add llvm-tools-preview
