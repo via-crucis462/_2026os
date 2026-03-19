@@ -45,7 +45,7 @@ pub fn console_getchar() -> usize {
 }
 
 /// use sbi call to shutdown the kernel
-pub fn shutdown() -> ! {
+pub fn shutdown() {
     sbi_call(SBI_SHUTDOWN, 0, 0, 0);
-    panic!("It should shutdown!");
+    println!("It should shutdown!");
 }

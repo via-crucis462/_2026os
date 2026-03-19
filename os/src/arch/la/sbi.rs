@@ -69,10 +69,9 @@ pub fn console_getchar() -> usize {
 
 #[allow(dead_code)]
 #[allow(unreachable_code)]
-pub fn shutdown() -> ! {
-    let shutdown_addr = UNCHACHED_KERNEL_BASE | 0x1fe0_7000;
+pub fn shutdown() {
     unsafe {
-        (shutdown_addr as *mut u32).write_volatile(0x34);
+        // 直接执行idle指令，模拟关机
+    asm!("idle 0");
     }
-    panic!("Should not reach here!");
 }
