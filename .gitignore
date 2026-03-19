@@ -29,3 +29,4 @@ testsuits-for-oskernel
 toolchains/
 *.pdf
 syscall_posix_kernel.md
+kernel-*

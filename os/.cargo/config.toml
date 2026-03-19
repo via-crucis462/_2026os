@@ -1,3 +1,9 @@
+[source.crates-io]
+replace-with = 'tuna'
+
+[source.tuna]
+registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
+
 [build]
 target = "riscv64gc-unknown-none-elf"
 
