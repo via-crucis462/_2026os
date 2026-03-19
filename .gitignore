@@ -22,6 +22,8 @@ os/vendor/
 fs_img/la64*
 fs_img/riscv64*
 fs_img/*.img
+fs_img/la64/*
+fs_img/riscv64/*
 testsuits-for-oskernel
 toolchains/
 *.pdf
