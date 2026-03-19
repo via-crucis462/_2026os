@@ -13,6 +13,8 @@ struct UartSbi {
 
 // qemu la64 uart基址
 const UART_BASE: usize = UNCHACHED_KERNEL_BASE | 0x1fe001e0;
+// ACPI GED寄存器基址，用于电源管理
+const ACPI_GED_BASE: usize = UNCHACHED_KERNEL_BASE | 0x100e001c;
 
 lazy_static! {
     static ref UART_SBI: MPSafeCell<UartSbi> = 
@@ -71,7 +73,9 @@ pub fn console_getchar() -> usize {
 #[allow(unreachable_code)]
 pub fn shutdown() {
     unsafe {
-        // 直接执行idle指令，模拟关机
-    asm!("idle 0");
+        // qemu la64 virt machine ACPI GED powerdown
+        (ACPI_GED_BASE as *mut u8).write_volatile(0x34);
+        
+        asm!("idle 0");
     }
 }
