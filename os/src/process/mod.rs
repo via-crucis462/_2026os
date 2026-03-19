@@ -97,6 +97,9 @@ pub fn current_task_to_sleep(mut wait_queue: MutexGuard<WaitQueue>) {
 // 从等待队列中唤醒一个线程到全局池
 pub fn wake_up_one(mut wait_queue: MutexGuard<WaitQueue>) {
     if let Some(task) = wait_queue.pop_front() {
+        let mut task_inner = task.inner_exclusive_access();
+        task_inner.task_status = TaskStatus::Ready;
+        drop(task_inner);
         add_task_into_pool(task);
     }
     drop(wait_queue);
@@ -140,10 +143,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // ++++++ access initproc TCB exclusively
     // ++++++ release parent PCB
     if proc_inner.is_zombie() {
-        println!(
+        /*println!(
             "[kernel] pid={} exit with exit_code {}",
             pid, exit_code
-        );
+        );*/
         let initproc = INITTASK.process();
         let mut initproc_inner = initproc.inner_exclusive_access();
         for child in proc_inner.children.iter() {
@@ -265,8 +268,26 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
         // put args (a0)
         trap_ctx.set_a0(sig);
     } else {
-        // default action
-        println!("[K] task/call_user_signal_handler: default action: ignore it or kill process");
+        // Default action when user does not install a handler:
+        // 1) always consume the pending signal bit;
+        // 2) ignore known ignore-by-default signals;
+        // 3) terminate for the rest.
+        task_inner.signals.remove(signal);
+        match signal {
+            SignalFlags::SIGCHLD | SignalFlags::SIGURG | SignalFlags::SIGWINCH => {
+                trace!(
+                    "[K] task/call_user_signal_handler: ignore default signal {:?}",
+                    signal
+                );
+            }
+            _ => {
+                task_inner.killed = true;
+                println!(
+                    "[K] task/call_user_signal_handler: default terminate for signal {:?}",
+                    signal
+                );
+            }
+        }
     }
 }
 

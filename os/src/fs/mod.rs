@@ -5,7 +5,10 @@ mod pipe;
 mod stdio;
 mod dir_entry;
 mod file_tree;
-
+mod procfs;
+mod devfs;
+pub use devfs::mount_devfs;
+pub use procfs::mount_procfs;
 pub use dir_entry::DirEntry;
 pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
 pub use file_tree::{Dentry};
@@ -32,6 +35,9 @@ pub trait File: Send + Sync {
     fn getdents(&self, _buf: &mut [u8]) -> isize;
     /// 获取文件的 Dentry
     fn get_dentry(&self) -> Option<Arc<Dentry>> { None }
+    fn lseek(&self, _offset: isize, _whence: i32) -> isize {
+        -29 
+    }
 }
 
 /// The stat of a inode
@@ -122,6 +128,9 @@ pub trait VfsInode: Send + Sync {
     fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
     fn delete_dir_entry(&self, name: &str) -> Option<u32>;
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize;
+    fn rename_dir_entry(&self, _old_name: &str, _new_name: &str) -> bool{
+        false
+    }
 }
 
 bitflags! {

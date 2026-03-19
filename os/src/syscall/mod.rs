@@ -20,6 +20,7 @@ const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_UNLINKAT: usize = 35;
 /// linkat syscall
 const SYSCALL_LINKAT: usize = 37;
+const SYSCALL_STATFS: usize = 43;
 /// openat syscall
 const SYSCALL_OPENAT: usize = 56;
 /// close syscall
@@ -28,20 +29,27 @@ const SYSCALL_CLOSE: usize = 57;
 const SYSCALL_PIPE: usize = 59;
 /// read syscall
 const SYSCALL_READ: usize = 63;
+const SYSCALL_LSEEK: usize = 62;
 /// write syscall
 const SYSCALL_WRITE: usize = 64;
+const SYSCALL_READV: usize = 65;
+const SYSCALL_WRITEV: usize = 66;
 const SYSCALL_PREAD64: usize = 67;
+const SYSCALL_SENDFILE: usize = 71;
+const SYSCALL_PPOLL: usize = 73;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
 /// fstat syscall
 const SYSCALL_FSTAT: usize = 80;
 /// exit syscall
+const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;// RISCV
 const SYSCALL_SLEEP:usize =101;
 /// yield syscall
+const SYSCALL_SYSLOG: usize = 116;
 const SYSCALL_YIELD: usize = 124;
 /// kill syscall
 const SYSCALL_KILL: usize = 129;
@@ -72,6 +80,7 @@ const SYSCALL_GETEUID: usize = 175;
 const SYSCALL_GETGID: usize = 176;
 const SYSCALL_GETEGID: usize = 177;
 const SYSCALL_GETTID: usize = 178;
+const SYSCALL_SYSINFO: usize = 179;
 /// brk syscall
 const SYSCALL_BRK: usize = 214;
 /// munmap syscall
@@ -102,6 +111,7 @@ const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_MOUNT: usize = 40;
 /// umount syscall
 const SYSCALL_UMOUNT: usize = 39;
+const SYSCALL_RENAMEAT2: usize = 276;
 /// random syscall
 const SYSCALL_GETRANDOM: usize = 278;
 /// resq
@@ -111,7 +121,7 @@ const SYSCALL_ACCESSAT: usize = 48;
 mod fs;
 mod process;
 mod prctl;
-
+mod errno;
 use fs::*;
 use process::*;
 use prctl::*;
@@ -122,10 +132,7 @@ use crate::{fs::Stat, task::SignalAction};
 /// handle syscall exception with `syscall_id` and other arguments
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
-    /*if syscall_id != 64 && syscall_id != 63 {
-        println!("[Syscall Trace] ID: {}, args: {:#x?}", syscall_id, args);
-    }*/
-    info!("[kernel] syscall: id={}, args={:?}", syscall_id, args);
+    //println!("[Syscall Trace] ID: {}, args: {:#x?}", syscall_id, args);
     match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
@@ -134,9 +141,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_ACCESSAT => sys_accessat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut usize),
         SYSCALL_LINKAT => sys_linkat(args[1] as *const u8, args[3] as *const u8),
-        SYSCALL_UNLINKAT => sys_unlinkat(args[1] as *const u8),
+        SYSCALL_UNLINKAT => sys_unlinkat(args[0] as isize, args[1] as *const u8, args[2] as usize),
         SYSCALL_READ => sys_read(args[0], args[1] as *const u8, args[2]),
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
+        SYSCALL_LSEEK=> sys_lseek(args[0], args[1] as isize, args[2] as i32),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut Stat),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
         SYSCALL_EXIT_GROUP => sys_exit(args[0] as i32),
@@ -165,6 +173,15 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETSID => sys_getsid(args[0]),
         SYSCALL_SETSID => sys_setsid(),
         SYSCALL_GETTID => sys_gettid(),
+        SYSCALL_STATFS=> sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
+        SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
+        SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
+        SYSCALL_SYSLOG => sys_syslog(args[0], args[1], args[2]),
+        SYSCALL_SYSINFO => sys_sysinfo(args[0]),
+        SYSCALL_RENAMEAT2 => sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], args[4]),
+        SYSCALL_UTIMENSAT => sys_utimensat(args[0] as i32, args[1], args[2], args[3]),
+        SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
+        SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2]),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize),
         SYSCALL_WAIT4 | SYSCALL_WAITPID => sys_wait4(args[0] as isize, args[1] as *mut i32, args[2]),//注意：为了跑通脚本，暂时将waitpid和wait4合并了

@@ -116,6 +116,37 @@ impl File for OSInode {
         let read_len = self.read_at(offset, buf);
         read_len
     }
+    fn lseek(&self, offset: isize, whence: i32) -> isize {
+        const SEEK_SET: i32 = 0; // 从文件开头算起
+        const SEEK_CUR: i32 = 1; // 从当前位置算起
+        const SEEK_END: i32 = 2; // 从文件末尾算起
+
+        let mut inner = self.inner.lock(); 
+        
+        let current_offset = inner.offset as isize;
+
+        // 2. 根据 whence 计算新的偏移量
+        let new_offset = match whence {
+            SEEK_SET => offset,
+            SEEK_CUR => current_offset + offset,
+            SEEK_END => {
+                let file_size = self.inode.get_size() as isize; 
+                file_size + offset
+            },
+            _ => return -22, // EINVAL (Invalid argument) whence 参数不合法
+        };
+
+        // 3. 偏移量不能移动到文件头部之前（不能是负数）
+        if new_offset < 0 {
+            return -22; // EINVAL
+        }
+
+        // 4. 更新 inode 内部的偏移量
+        inner.offset = new_offset as usize;
+        
+        // 5. 成功返回新的偏移量
+        new_offset as isize
+    }
 }
 bitflags! {
     ///  The flags argument to the open() system call is constructed by ORing together zero or more of the following values:

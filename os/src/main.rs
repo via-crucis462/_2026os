@@ -117,6 +117,8 @@ fn main_init(hart_id: usize) {
     mm::init();
     mm::remap_test();
     arch::trap::init();
+    fs::mount_procfs();
+    fs::mount_devfs();
     fs::list_apps();
     task::add_initproc();
     arch::trap::enable_timer_interrupt();
@@ -182,6 +184,8 @@ pub fn rust_main() -> ! {
     // mm::remap_test(); // 内核态取消了页表映射，因此跳过测试
     arch::trap::init();
     drivers::search_pci();
+    fs::mount_procfs();
+    fs::mount_devfs();
     fs::list_apps();
     task::add_initproc();
     arch::trap::enable_timer_interrupt();

@@ -161,6 +161,42 @@ pub fn trap_handler() -> ! {
                 suspend_current_and_run_next();
             }
             _ => {
+                  let ecode = (estat >> 16) & 0x3f;
+                if let Some(task) = current_task() {
+                    let inner = task.inner_exclusive_access();
+                    let vpn = VirtAddr::from(badv).floor();
+                    match inner.memory_set.translate(vpn) {
+                        Some(pte) => {
+                            println!(
+                                "[kernel] user_fault_pte: badaddr={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
+                                badv,
+                                vpn.0,
+                                pte.bits,
+                                pte.is_valid(),
+                                pte.readable(),
+                                pte.writable(),
+                                pte.executable(),
+                            );
+                        }
+                        None => {
+                            println!(
+                                "[kernel] user_fault_pte: badaddr={:#x}, vpn={:#x}, pte=<none>",
+                                badv,
+                                vpn.0,
+                            );
+                        }
+                    }
+                }
+                println!(
+                    "[kernel] user_fault: pid={}, cause={:?}, ecode={:#x}, pc={:#x}, badaddr={:#x}, estat={:#x}, badi={:#x}",
+                    crate::task::current_task().unwrap().pid.0,
+                    cause,
+                    ecode,
+                    era,
+                    badv,
+                    estat,
+                    badi
+                );
                 error!("[kernel] trap_handler: {:?} in PID {}, estat={:#x}, era={:#x}, badv={:#x},badi={:#x}",
                     cause,
                     crate::task::current_task().unwrap().pid.0,
@@ -191,6 +227,13 @@ pub fn trap_return() -> ! {
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
     let id = current_user_asid();
+
+    unsafe {
+        let mut euen: usize;
+        asm!("csrrd {}, 0x2", out(reg) euen);
+        euen |= 0x1;
+        asm!("csrwr {}, 0x2", in(reg) euen);
+    }
 //  crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
     //info!("trap_return: going to user mode, satp = {:#x}", user_satp);
     extern "C" {

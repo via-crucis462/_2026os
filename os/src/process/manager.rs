@@ -4,6 +4,7 @@
 //! Other CPU process monitoring functions are in Processor.
 
 use super::TaskControlBlock;
+use super::TaskStatus;
 use super::schedule::*;
 use super::pcb::*;
 use crate::MAIN_HART_ID;
@@ -81,11 +82,20 @@ impl TaskManager {
     }
     /// Add process back to ready queue
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
+        let tid = task.gettid();
+        if self.ready_queue.iter().any(|t| t.gettid() == tid) {
+            return;
+        }
         self.ready_queue.push_back(task);
     }
     /// Take a process out of the ready queue
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        while let Some(task) = self.ready_queue.pop_front() {
+            if task.inner_exclusive_access().task_status == TaskStatus::Ready {
+                return Some(task);
+            }
+        }
+        None
     }
     pub fn task_count(&self) -> usize {
         self.ready_queue.len()
@@ -109,14 +119,18 @@ pub fn get_current_task_manager() -> &'static MPSafeCell<TaskManager> {
 
 /// 向全局池索取任务并加入当前处理器的就绪队列
 pub fn current_add_tasks() {
+    let need_fetch = {
+        let manager = get_current_task_manager().exclusive_access();
+        manager.task_count() <= 3
+    };
+    if !need_fetch {
+        return;
+    }
+
+    let tasks = ask_for_tasks();
     let mut manager = get_current_task_manager().exclusive_access();
-    if manager.task_count() > 3 {
-        ()
-    }else {
-        let tasks = ask_for_tasks();
-        for task in tasks {
-            manager.add(task);
-        }
+    for task in tasks {
+        manager.add(task);
     }
 }
 

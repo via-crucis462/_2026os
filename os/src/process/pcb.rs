@@ -27,6 +27,31 @@ const AT_PAGESZ: usize = 6;
 const AT_ENTRY: usize = 9;
 const AT_RANDOM: usize = 25;
 
+#[derive(Clone)]
+pub struct FileDescriptor {
+    pub file: Option<Arc<dyn File + Send + Sync>>,
+    pub cloexec: bool,
+    pub status: usize,
+}
+
+impl FileDescriptor {
+    pub fn empty() -> Self {
+        Self {
+            file: None,
+            cloexec: false,
+            status: 0,
+        }
+    }
+
+    pub fn new(file: Arc<dyn File + Send + Sync>, cloexec: bool, status: usize) -> Self {
+        Self {
+            file: Some(file),
+            cloexec,
+            status,
+        }
+    }
+}
+
 pub struct ProcessControlBlock {
     pub pid: Arc<PidHandle>,
     pub wait_queue: Mutex<WaitQueue>,
@@ -101,7 +126,10 @@ impl ProcessControlBlock {
                 heap_bottom: user_sp,
                 program_brk: user_sp,
                 // 初始化 fd_table，预先放入 stdin 和 stdout
-                fd_table: vec![Some(Arc::new(Stdin)), Some(Arc::new(Stdout))],
+                fd_table: vec![
+                    FileDescriptor::new(Arc::new(Stdin), false, 0),
+                    FileDescriptor::new(Arc::new(Stdout), false, 0),
+                ],
                 cwd: ROOT_DENTRY.clone(),
                 signals: SignalFlags::empty(),
                 signal_actions: SignalActions::default(),
@@ -220,9 +248,18 @@ impl ProcessControlBlock {
         *translated_refmut(memory_set.token(), user_sp as *mut usize) = args.len();
         // 更新 PCB 内部信息
         let mut proc_inner = self.inner_exclusive_access();
+        for fd in 0..proc_inner.fd_table.len() {
+            if proc_inner.fd_table[fd].cloexec {
+                proc_inner.clear_fd(fd);
+            }
+        }
+        proc_inner.base_size = memory_top;
         proc_inner.heap_bottom = memory_top;
         proc_inner.program_brk = memory_top;
         proc_inner.on_main_hart = on_main_hart;
+        if let Some(argv0) = args.first() {
+            proc_inner.pname = argv0.clone();
+        }
         // 内核栈无须改变（fork时已经分配了新的）但需要重新映射
         let kernel_stack = &caller_task.kernel_stack;
         let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(kernel_stack).into();
@@ -249,7 +286,7 @@ impl ProcessControlBlock {
         #[cfg(target_arch = "riscv64")]
         let kernel_stack_top = caller_task.kernel_stack.get_top();
         #[cfg(target_arch = "loongarch64")]
-        let kernel_stack_top = task_inner.trap_cx_addr;
+        let kernel_stack_top = trap_cx_addr;
 
         // 修改trap上下文
         let mut trap_cx = TrapContext::app_init_context(
@@ -321,14 +358,7 @@ impl ProcessControlBlock {
         #[cfg(target_arch = "loongarch64")]
         let parent_trap_cx = *parent_inner.get_trap_cx();
         // copy fd table
-        let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
-        for fd in parent_inner.fd_table.iter() {
-            if let Some(file) = fd {
-                new_fd_table.push(Some(file.clone()));
-            } else {
-                new_fd_table.push(None);
-            }
-        }
+        let new_fd_table = parent_inner.fd_table.clone();
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
             wait_queue: Mutex::new(WaitQueue::new()),
@@ -426,7 +456,7 @@ impl ProcessControlBlock {
             return Ok(self.inner_exclusive_access().program_brk);
         }
         // 超范围panic
-        let size: i32 = i32::try_from(addr).unwrap() - self.inner_exclusive_access().program_brk as i32;
+        let size: isize = addr as isize - self.inner_exclusive_access().program_brk as isize;
         let mut inner = self.inner_exclusive_access();
         let heap_bottom = inner.heap_bottom;
         let _old_break = inner.program_brk;
@@ -457,10 +487,11 @@ impl ProcessControlBlock {
         &self,
         addr: usize,
         length: usize,
-        prot: mmap::MMapProt
+        prot: mmap::MMapProt,
+        flags: mmap::MMapFlags
     ) -> Result<usize, i32> {
         let mut inner = self.inner_exclusive_access();
-        inner.memory_set.mmap(addr, length, prot)
+        inner.memory_set.mmap(addr, length, prot, flags)
     }
     /// 处理munmap
     pub fn munmap(&self, addr: usize, length: usize) -> Result<(), i32> {
@@ -494,8 +525,7 @@ pub struct ProcessControlBlockInner {
 
     /// Program break
     pub program_brk: usize,// 注意需要在exec中维护，rcore忽略了这点，运行测例时brk失效，已修复
-    pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
-
+    pub fd_table: Vec<FileDescriptor>,
     pub cwd: Arc<Dentry>, // 当前工作目录
 
     // 进程收到的信号
@@ -525,12 +555,27 @@ impl ProcessControlBlockInner {
         self.memory_set.asid()
     }
     pub fn alloc_fd(&mut self) -> usize {
-        if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
+        if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].file.is_none()) {
+            self.fd_table[fd].cloexec = false;
+            self.fd_table[fd].status = 0;
             fd
         } else {
-            self.fd_table.push(None);
+            self.fd_table.push(FileDescriptor::empty());
             self.fd_table.len() - 1
         }
+    }
+    pub fn clear_fd(&mut self, fd: usize) {
+        self.fd_table[fd] = FileDescriptor::empty();
+    }
+
+    pub fn set_fd(
+        &mut self,
+        fd: usize,
+        file: Arc<dyn File + Send + Sync>,
+        cloexec: bool,
+        status: usize,
+    ) {
+        self.fd_table[fd] = FileDescriptor::new(file, cloexec, status);
     }
     pub fn is_zombie(&self) -> bool {
         self.alive_task_count <= 0

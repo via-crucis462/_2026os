@@ -4,8 +4,7 @@ use super::*;
 use super::manager::*;
 use lazy_static::*;
 use alloc::{
-    vec::Vec,
-    sync::Arc,
+    collections::vec_deque::VecDeque, sync::Arc, vec::Vec
 };
 // 线程调度器
 lazy_static! {
@@ -27,11 +26,13 @@ impl Scheduler {
         debug!("[kernel] Scheduler::get_pool");
         &mut self.task_pool
     }
-    pub fn auto_get_task(&mut self) -> Vec<Arc<TaskControlBlock>> {
-        let mut total_num = core::cmp::max(self.get_task_count() / CPU_CORE_NUM, 1);
-        let mut list = Vec::new();
+    pub fn auto_get_task(&mut self) -> VecDeque<Arc<TaskControlBlock>> {
+        // Do not depend on per-core queue locks here; this function is called
+        // while other scheduling locks may already be held.
+        let mut total_num = self.task_pool.count().saturating_add(1);
+        let mut list = VecDeque::new();
         while let Some(task) = self.task_pool.take_a_task() {
-            list.push(task);
+            list.push_back(task);
             total_num -= 1;
             if total_num == 0 {
                 break;
@@ -40,26 +41,35 @@ impl Scheduler {
         list
     }
     pub fn get_task_count(&self) -> usize {
-        self.task_pool.count() + task_count_in_mng()
+        // Sum lengths of per-core ready queues to reflect current per-core workload
+        let mut sum = 0;
+        for i in 0..CPU_CORE_NUM {
+            sum += TASK_MANAGERS[i].exclusive_access().task_count();
+        }
+        sum
     }
 }
 
 
 pub struct TaskPool {
-    inner: Vec<Arc<TaskControlBlock>>,
+    inner: VecDeque<Arc<TaskControlBlock>>,
 }
 
 impl TaskPool {
     pub fn new() -> Self {
         Self {
-            inner: Vec::new(),
+            inner: VecDeque::new(),
         }
     }
     pub fn count(&self) -> usize {
         self.inner.len()
     }
     pub fn add_task(&mut self, task: Arc<TaskControlBlock>) {
-        self.inner.push(task);
+        let tid = task.gettid();
+        if self.inner.iter().any(|t| t.gettid() == tid) {
+            return;
+        }
+        self.inner.push_back(task);
     }
     // 获取一个线程的引用
     pub fn get_task(&mut self, tid: usize) -> Option<Arc<TaskControlBlock>> {
@@ -77,10 +87,15 @@ impl TaskPool {
     }
     // 随机拿出一个线程
     pub fn take_a_task(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.inner.pop()
+
+        let Some(x) = self.inner.pop_front() else {
+            //println!("[kernel] Scheduler::take_a_task: no task in pool");
+            return None;
+        };
+        Some(x)
     }
     // 获取一份列表（注意会使引用计数+1）
-    pub fn get_task_list(&self) -> Vec<Arc<TaskControlBlock>> {
+    pub fn get_task_list(&self) -> VecDeque<Arc<TaskControlBlock>> {
         self.inner.clone()
     }
 }
@@ -90,11 +105,11 @@ pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
     let mut scheduler = SCHEDULER.exclusive_access();
     scheduler.get_pool().add_task(task);
     drop(scheduler);
-    sbi_wakeup_harts(0b1111);
+    //sbi_wakeup_harts(0b1111);
     debug!("add into pool finised");
 }
 
-pub fn ask_for_tasks() -> Vec<Arc<TaskControlBlock>> {
+pub fn ask_for_tasks() -> VecDeque<Arc<TaskControlBlock>> {
     //debug!("[kernel] Scheduler::ask_for_tasks");
     let list = SCHEDULER.exclusive_access().auto_get_task();
     //debug!("[kernel] Scheduler::ask_for_tasks: got {} tasks", list.len());
@@ -102,5 +117,10 @@ pub fn ask_for_tasks() -> Vec<Arc<TaskControlBlock>> {
 }
 
 pub fn get_task_count() -> usize {
-    SCHEDULER.exclusive_access().get_pool().count() + task_count_in_mng()
+    // Return total length of per-core ready queues.
+    let mut sum = 0usize;
+    for i in 0..CPU_CORE_NUM {
+        sum += TASK_MANAGERS[i].exclusive_access().task_count();
+    }
+    sum
 }

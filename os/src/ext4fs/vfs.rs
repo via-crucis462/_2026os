@@ -1,4 +1,5 @@
 use super::ext4inode::{Ext4Inode,Ext4InodeDisk, EXT4_EXTENTS_FL};
+use crate::ext4fs::BLOCK_SZ;
 use super::ext4_dir_entry::Ext4DirEntry;
 use super::block_cache::get_block_cache;
 use alloc::sync::Arc;
@@ -256,7 +257,7 @@ impl VfsInode for Ext4Inode {
         }
 
         if !last_name.is_empty() {
-             println!("VFS: getdents last entry name: {}", last_name);
+             //println!("VFS: getdents last entry name: {}", last_name);
         }
 
         buf_offset as isize
@@ -302,4 +303,72 @@ impl VfsInode for Ext4Inode {
             ..Default::default()
         }
     }
+    fn rename_dir_entry(&self, old_name: &str, new_name: &str) -> bool {
+    if new_name.len() > old_name.len() {
+        return false; 
+    }
+
+    let mut offset = 0;
+    let block_size = BLOCK_SZ; 
+    let disk_inode = self.fs.get_disk_inode(self.inode_id);
+    let file_size_bytes = disk_inode.size() as usize;
+
+   
+
+    while offset < file_size_bytes {
+        let logical_block = (offset / block_size) as u32;
+        let physical_block = self.find_physical_block(logical_block);
+        if physical_block == 0 { break; }
+
+        let block_cache = get_block_cache(physical_block as usize, self.fs.block_dev.clone());
+        let mut cache = block_cache.lock();
+
+        let found = cache.modify(0, |block: &mut [u8; 4096]| {
+            let mut block_offset = 0;
+            while block_offset < block_size {
+                let dirent_ptr = block.as_mut_ptr().wrapping_add(block_offset) as *mut Ext4DirEntry;
+                let dirent = unsafe { &mut *dirent_ptr };
+
+                let rec_len = dirent.rec_len as usize;
+                if rec_len == 0 { break; } // 防止死循环
+
+                if dirent.inode != 0 {
+              
+                    let _tmp_inode = dirent.inode;
+                    let _tmp_name_len = dirent.name_len;
+  
+                
+                   
+                    
+                    if dirent.name() == old_name {
+                    
+                     
+                        
+                        dirent.name_len = new_name.len() as u8;
+                        let name_bytes = new_name.as_bytes();
+                        
+                        for i in 0..name_bytes.len() {
+                            dirent.name[i] = name_bytes[i];
+                        }
+                        
+                        for i in name_bytes.len()..old_name.len() {
+                            dirent.name[i] = 0; 
+                        }
+                        
+                        return true; 
+                    }
+                }
+                block_offset += rec_len;
+            }
+            false
+        });
+
+        if found {
+            cache.sync();
+            return true;
+        }
+        offset += block_size;
+    }
+    false
+}
 }

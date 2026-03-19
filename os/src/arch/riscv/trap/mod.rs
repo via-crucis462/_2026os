@@ -78,6 +78,13 @@ pub fn trap_handler() -> ! {
             suspend_current_and_run_next();
         }
         _ => {
+             println!(
+                "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
+                crate::task::current_task().unwrap().tid.0,
+                scause.cause(),
+                current_trap_cx().get_rt(),
+                stval
+            );
             println!("[kernel] Trap! Source: User");
             println!("[kernel] Scause: {:?} (Code: {})", scause.cause(), scause.bits());
             println!("[kernel] Stval:  {:#x} (Bad Address)", stval);
@@ -149,9 +156,42 @@ pub fn debug_info() {
 /// Unimplement: traps/interrupts/exceptions from kernel mode
 /// Todo: Chapter 9: I/O device
 pub fn trap_from_kernel() -> ! {
-    use riscv::register::sepc;
-    trace!("stval = {:#x}, sepc = {:#x}", stval::read(), sepc::read());
-    panic!("a trap {:?} from kernel!", scause::read().cause());
+    use riscv::register::{satp, sepc, sstatus};
+    let cause = scause::read().cause();
+    let stval_v = stval::read();
+    let sepc_v = sepc::read();
+    let sstatus_v = sstatus::read().bits();
+    let satp_v = satp::read().bits();
+    let hart_id = crate::get_hart_id();
+
+    println!(
+        "[kernel][panic] trap_from_kernel: hart={}, cause={:?}, sepc={:#x}, stval={:#x}, sstatus={:#x}, satp={:#x}",
+        hart_id,
+        cause,
+        sepc_v,
+        stval_v,
+        sstatus_v,
+        satp_v
+    );
+
+    if let Some(task) = crate::task::current_task() {
+        println!(
+            "[kernel][panic] current task snapshot: pid={}, tid={}, task_ptr={:#x}",
+            task.getpid(),
+            task.gettid(),
+            (&*task) as *const _ as usize
+        );
+    } else {
+        println!("[kernel][panic] no current task on this hart");
+    }
+
+    panic!(
+        "a trap {:?} from kernel! sepc={:#x}, stval={:#x}, hart={}.",
+        cause,
+        sepc_v,
+        stval_v,
+        hart_id
+    );
 }
 
 pub use context::TrapContext;

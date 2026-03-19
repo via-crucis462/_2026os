@@ -12,12 +12,12 @@ pub use crate::{
         },
         clone::*,
         manager::*
-    }
-
+    },
+    syscall::errno::Errno
 };
 use alloc::task;
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
-
+use super::errno::Errno::*;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Termios {
@@ -28,7 +28,18 @@ pub struct Termios {
     pub c_line: u8,
     pub c_cc: [u8; 19], // 控制字符数组
 }
-
+#[repr(C)]
+pub struct RtcTime {
+    pub tm_sec: i32,
+    pub tm_min: i32,
+    pub tm_hour: i32,
+    pub tm_mday: i32,
+    pub tm_mon: i32,
+    pub tm_year: i32,
+    pub tm_wday: i32,
+    pub tm_yday: i32,
+    pub tm_isdst: i32,
+}
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Winsize {
@@ -67,7 +78,60 @@ pub struct UtsName {
     pub machine: [u8; 65],
     pub domainname: [u8; 65],
 }
+#[repr(C)]
+pub struct PollFd {
+    pub fd: i32,     // 监视的文件描述符
+    pub events: i16, // 事件
+    pub revents: i16,// 内核返回的实际发生的事件
+}
 
+const POLLIN: i16 = 0x001;
+const POLLOUT: i16 = 0x004;
+const POLLERR: i16 = 0x008;
+
+pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, _tmo_p: usize, _sigmask: usize) -> isize {
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
+    let token = inner.get_user_token();
+    if ufds_ptr == 0 || nfds == 0 {
+        return 0; 
+    }
+    let mut ready_count = 0;
+    // 遍历用户传进来的 pollfd 数组
+    for i in 0..nfds {
+        // 根据虚拟地址算出真实物理地址，并拿到可变引用
+        let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
+        let pollfd = translated_refmut(token, pollfd_ptr);
+        let fd = pollfd.fd;
+        pollfd.revents = 0; // 先清空返回状态
+        // 负数的 fd 按照 POSIX 标准被忽略
+        if fd < 0 {
+            continue;
+        }
+        let fd_usize = fd as usize;
+        
+        // 检查 fd 是否合法
+        if fd_usize >= inner.fd_table.len() || inner.fd_table[fd_usize].file.is_none() {
+            pollfd.revents = POLLERR; // 报错：坏的描述符
+            ready_count += 1;
+        } else {
+            let file = inner.fd_table[fd_usize].file.as_ref().unwrap();
+            // 没做复杂的阻塞等待，直接查看文件状态并标记
+            if (pollfd.events & POLLIN) != 0 && file.readable() {
+                pollfd.revents |= POLLIN;
+            }
+            if (pollfd.events & POLLOUT) != 0 && file.writable() {
+                pollfd.revents |= POLLOUT;
+            }
+            if pollfd.revents != 0 {
+                ready_count += 1;
+            }
+        }
+    }
+    // 返回有多少个 FD 已经准备好了
+    ready_count as isize
+}
 pub fn sys_exit(exit_code: i32) -> ! {
     trace!("kernel:pid[{}] sys_exit", current_task().unwrap().process().pid.0);
     exit_current_and_run_next(exit_code);
@@ -171,68 +235,115 @@ pub fn sys_clock_gettime(_clock_id: usize, tp: *mut TimeSpec) -> isize {
     time_spec.tv_nsec = nsec;
     0
 }
+const TCGETS: u32 = 0x5401;
+const TIOCGWINSZ: u32 = 0x5413;
+const RTC_RD_TIME: u32 = 0x80247009; // 真实的 RTC 读取指令号
+
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
-    const TCGETS: usize = 0x5401;
-    const TIOCGWINSZ: usize = 0x5413;
-
-
-    if fd != 1 {
-        return -25; // ENOTTY
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let fd_table = proc.inner_exclusive_access().fd_table.clone();
+    // fd合法性检查
+    if fd >= fd_table.len() || fd_table[fd].file.is_none() {
+        return EBADF.as_isize();
     }
-
-    let token = current_user_token(); 
-
-    match request {
+    let token = proc.inner_exclusive_access().get_user_token();
+    match request as u32 {
         TCGETS => {
-            
+            if fd > 2 { return ENOTTY.as_isize(); }
             let mut termios = Termios {
-                c_iflag: 0o012402, // IGNBRK | ICRNL 等标志位的组合值
-                c_oflag: 0o000005, // OPOST | ONLCR
-                c_cflag: 0o002277, // 标准的控制模式
-                c_lflag: 0o0105011, // ISIG | ICANON | ECHO 等
-                c_line: 0,
-                c_cc: [0; 19],
+                c_iflag: 0o012402, c_oflag: 0o000005,
+                c_cflag: 0o002277, c_lflag: 0o0105011,
+                c_line: 0, c_cc: [0; 19],
             };
-            // 设置关键的控制字符
-            termios.c_cc[0] = 3;   // VINTR = ^C (终止进程)
-            termios.c_cc[1] = 28;  // VQUIT = ^\
-            termios.c_cc[2] = 127; // VERASE = DEL (退格)
-            termios.c_cc[4] = 4;   // VEOF = ^D
-
-            // 2. 将数据写回用户态
+            termios.c_cc[0] = 3; termios.c_cc[1] = 28;
+            termios.c_cc[2] = 127; termios.c_cc[4] = 4;
             if argp != 0 {
-                let user_termios = translated_refmut(token, argp as *mut Termios);
-                *user_termios = termios;
-                0 // 成功返回 0
-            } else {
-                -14 // EFAULT: 用户传了个空指针
-            }
+                *translated_refmut(token, argp as *mut Termios) = termios;
+                ENOTTY.as_isize()
+            } else { EFAULT.as_isize() }
         }
         TIOCGWINSZ => {
-            // 1. 构造终端窗口大小 (比如经典的 24行 80列)
-            let winsize = Winsize {
-                ws_row: 24,
-                ws_col: 80,
-                ws_xpixel: 0,
-                ws_ypixel: 0,
-            };
-
-            // 2. 将数据写回用户态
+            if fd > 2 { return ENOTTY.as_isize(); } // ENOTTY
+            let winsize = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
             if argp != 0 {
-                let user_winsize = translated_refmut(token, argp as *mut Winsize);
-                *user_winsize = winsize;
-                println!("[DEBUG ioctl] TIOCGWINSZ handled, setting 24x80");
-                0 // 成功返回 0
+                *translated_refmut(token, argp as *mut Winsize) = winsize;
+                ENOTTY.as_isize()
+            } else { EFAULT.as_isize() }
+        }
+        RTC_RD_TIME => {
+            // 获取硬件时间并写给用户
+            let time_ms = get_time_ms(); 
+            let sec = (time_ms / 1000) as i32;
+            let rtc_time = RtcTime {
+                tm_sec: sec % 60,
+                tm_min: (sec / 60) % 60,
+                tm_hour: (sec / 3600) % 24,
+                tm_mday: 1, 
+                tm_mon: 0, 
+                tm_year: 126,
+                tm_wday: 0, tm_yday: 0, tm_isdst: 0,
+            };
+            if argp != 0 {
+                *translated_refmut(token, argp as *mut RtcTime) = rtc_time;
+                0
             } else {
-                -14 // EFAULT
+                EFAULT.as_isize() // 指针错误
             }
         }
         _ => {
-            // 对于未知的终端请求，安全地返回 -25，C 库能正确处理真正的降级
-            println!("[DEBUG ioctl] Unsupported request {:#x} for fd {}, returning -25", request, fd);
-            -25 // ENOTTY
+          
+            ENOTTY.as_isize()
         }
     }
+}
+pub fn sys_renameat2(
+    _olddirfd: i32, oldpath_ptr: usize,
+    _newdirfd: i32, newpath_ptr: usize, _flags: usize
+) -> isize {
+    let proc = current_task().unwrap().process();
+    let token = proc.inner_exclusive_access().get_user_token();
+
+    let old_path = translated_str(token, oldpath_ptr as *const u8);
+    let new_path = translated_str(token, newpath_ptr as *const u8);
+    
+    // 解析父目录和文件名
+    let old_parent_path = parent_path(&old_path);
+    let old_name = file_name(&old_path);
+    let new_parent_path = parent_path(&new_path);
+    let new_name = file_name(&new_path);
+
+    let cwd = proc.inner_exclusive_access().cwd.clone();
+
+    // 找到新老父目录的内存 Dentry
+    if let (Some(old_parent), Some(new_parent)) = (
+        cwd.find_tree(&old_parent_path, true),
+        cwd.find_tree(&new_parent_path, true)
+    ) {
+        // 先从前台 VFS 树上把旧节点摘下来
+        let moved_dentry_opt = {
+            let mut old_children = old_parent.children.lock(); 
+            old_children.remove(&old_name)
+        }; 
+
+        if let Some(moved_dentry) = moved_dentry_opt {
+            // 先改名
+            let disk_success = old_parent.inode.rename_dir_entry(&old_name, &new_name);
+            if disk_success {
+                // 底层成功了，再把节点以新名字挂到 VFS 树上
+                let mut new_children = new_parent.children.lock();
+                new_children.insert(new_name.to_string(), moved_dentry);
+                return 0;
+            } else {
+                // 不成功，挂回去
+                let mut old_children = old_parent.children.lock();
+                old_children.insert(old_name.to_string(), moved_dentry);
+                return EIO.as_isize();
+            }
+        }
+    }
+    
+    -1
 }
 pub fn sys_getpid() -> isize {
 	let task = current_task().unwrap();
@@ -248,6 +359,53 @@ pub fn sys_getppid() -> isize {
         Some(parent) => parent.getpid() as isize,
         None => 0, 
     }
+}
+pub fn sys_syslog(_type_: usize, _buf: usize, _len: usize) -> isize {
+    0
+}
+#[repr(C)]
+#[derive(Debug)]
+pub struct Sysinfo {
+    pub uptime: isize,      // 启动到现在经过的秒数
+    pub loads: [usize; 3],  // 1, 5, 15 分钟的平均负载
+    pub totalram: usize,    // 总的可用内存大小
+    pub freeram: usize,     // 还剩多少可用内存
+    pub sharedram: usize,   // 共享内存大小
+    pub bufferram: usize,   // 缓冲区大小
+    pub totalswap: usize,   // 交换空间总大小
+    pub freeswap: usize,    // 交换空间剩余大小
+    pub procs: u16,         // 当前进程数
+    pub pad: u16,           // 结构体对齐填充
+    pub totalhigh: usize,   // 高端内存大小
+    pub freehigh: usize,    // 高端内存剩余大小
+    pub mem_unit: u32,      // 内存单位（比如 1 表示以 byte 为单位计算）
+    pub _pad: u32,          // 补齐到 112 字节 
+}
+
+pub fn sys_sysinfo(sysinfo_ptr: usize) -> isize {
+    if sysinfo_ptr == 0 {
+        return -EFAULT.as_isize();
+    }
+    let token = current_task().unwrap().process().inner_exclusive_access().memory_set.token();
+    let sysinfo = translated_refmut(token, sysinfo_ptr as *mut Sysinfo);
+    // 临时用硬编码系统信息
+    sysinfo.uptime = 1000;              
+    sysinfo.loads = [0, 0, 0];          
+    sysinfo.totalram = 128 * 1024 * 1024;
+    sysinfo.freeram = 64 * 1024 * 1024;  
+    sysinfo.sharedram = 0;
+    sysinfo.bufferram = 0;
+    sysinfo.totalswap = 0;
+    sysinfo.freeswap = 0;
+    sysinfo.procs = 2;
+    sysinfo.pad = 0;
+    sysinfo.totalhigh = 0;
+    sysinfo.freehigh = 0;
+    sysinfo.mem_unit = 1; // 内存单元长度（byte）
+    sysinfo._pad = 0;
+
+    // 返回 0 表示获取成功！
+    0
 }
 
 pub fn sys_uname(uts: *mut UtsName) -> isize {
@@ -328,7 +486,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let cwd = task.process().inner_exclusive_access().cwd.clone();
     drop(task);
     let path = translated_str(token, path);
-    println!("[kernel] sys_exec called with path={}, args={:#x}, current_hart_id={}", path, args as usize, get_hart_id());
+    //println!("[kernel] sys_exec called with path={}, args={:#x}, current_hart_id={}", path, args as usize, get_hart_id());
     let mut args_vec: Vec<String> = Vec::new();
     loop {
         let arg_str_ptr = *translated_ref(token, args);
@@ -371,6 +529,21 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         let argc = args_vec.len();
         trace!("[kernel] sys_exec: before task.exec");
         task.process().exec(task, all_data.as_slice(), args_vec, on_main_hart);
+        let task = current_task().unwrap();
+        let task_inner = task.inner_exclusive_access();
+        let trap_cx = task_inner.get_trap_cx();
+        /*println!(
+            "[kernel][exec-debug] done: hart={}, pid={}, tid={}, task_cx.ra={:#x}, task_cx.sp={:#x}, trap.sepc={:#x}, trap.sp={:#x}, trap.ksp={:#x}, trap_addr={:#x}",
+            get_hart_id(),
+            task.getpid(),
+            task.gettid(),
+            task_inner.task_cx.ra,
+            task_inner.task_cx.sp,
+            trap_cx.get_rt(),
+            trap_cx.x[2],
+            trap_cx.kernel_sp,
+            task_inner.trap_cx_addr
+        );*/
         trace!("[kernel] sys_exec: after task.exec");
         // return argc because cx.x[10] will be covered with it later
         argc as isize
@@ -382,9 +555,11 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
 
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
-pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, _options: usize) -> isize {
+pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
+    const WNOHANG: usize = 0x1;
+    let nohang = (options & WNOHANG) != 0;
     // 开启一个死循环，直到找到僵尸才 return
     loop {
         let mut proc_inner = proc.inner_exclusive_access();
@@ -414,6 +589,9 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, _options: usize) -> isize 
             
             return pid as isize; // 成功返回
         } else {
+            if nohang {
+                return 0;
+            }
             // --- B. 孩子还活着 ---
             // 释放进程锁并阻塞当前任务，等待子进程退出时被唤醒。
             drop(proc_inner);
@@ -476,6 +654,8 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
         // 填入数据
         time_val.sec = sec;
         time_val.usec = usec;
+    }else {
+        return EFAULT.as_isize();
     }
 
     // 5. 成功返回 0 (注意之前你返回的是 -1)
@@ -499,37 +679,38 @@ pub fn sys_mprotect(_start: usize, _len: usize, _prot: usize) -> isize {
 pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: usize) -> isize {
     let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
     let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
-    
-    // 1. 分配并映射虚存及其对应的物理页
-    let ret = match mmap::do_mmap(start, len, mmap_prot) {
+
+    // 分配内存并映射
+    let ret = match mmap::do_mmap(start, len, mmap_prot , mmap_flags) {
         Ok(addr) => addr,
-        Err(_) => return -1,
+        Err(_) => {
+            //println!("[kernel] sys_mmap: do_mmap failed for start={:#x}, len={:#x}, prot={:?}, flags={:?}", start, len, mmap_prot, mmap_flags);
+            return Errno::ENOMEM.as_isize(); // 内存不足
+        }
     };
 
-    // 2. 如果是文件映射（非匿名映射）且 FD 合法，读取内容
-    if !mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) && fd >= 0 {
+    // 如果是文件映射（非匿名映射）且 FD 合法，读取内容
+    if mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) && fd >= 0 {
+        //println!("[kernel] sys_mmap: file mapping requested for fd={}, start={:#x}, len={:#x}, prot={:?}, flags={:?}", fd, start, len, mmap_prot, mmap_flags);
         let task = current_task().unwrap();
-        let proc = task.process();
+        let process = task.process();
         let token = current_user_token();
-        let inner = proc.inner_exclusive_access();
-        
-        if (fd as usize) < inner.fd_table.len() {
-            if let Some(file) = &inner.fd_table[fd as usize] {
+        let inner = process.inner_exclusive_access();
+            if let Some(file) = &inner.fd_table[fd as usize].file {
                 if file.readable() {
                     let file = file.clone();
-                    drop(inner); // 必须释放锁，因为 file.read 涉及磁盘 IO 可能阻塞
-                    
+                    // 释放锁避免阻塞
+                    drop(inner);
                     // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
                     let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
-                    
                     // 使用 read_at 确保不受 FD 当前 offset 影响，并使用系统调用传入的 _off
                     file.read_at(_off, user_buf);
                 }
             }
         }
-    }
+    //println!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
     ret as isize
-}
+    }
 
 /// YOUR JOB: Implement munmap.
 pub fn sys_munmap(start: usize, len: usize) -> isize {
@@ -551,7 +732,7 @@ pub fn sys_brk(addr: usize) -> isize {
     if let Ok(res) = mmap::do_brk(addr){
         res as isize
     } else {
-        -1
+        current_task().unwrap().process().inner_exclusive_access().program_brk as isize
     }
 }
 
@@ -676,7 +857,7 @@ pub fn sys_times(tms_ptr: *mut usize) -> isize {
     *translated_refmut(token, tms_ptr as *mut Tms) = tms_val;
 
     // 5. 返回当前时间滴答数 (只要 >= 0，assert就过了)
-    current_ms as isize
+    get_time_ms() as isize
 }
 
 pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> isize {
