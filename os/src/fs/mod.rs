@@ -127,6 +127,10 @@ pub trait VfsInode: Send + Sync {
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
     fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
     fn delete_dir_entry(&self, name: &str) -> Option<u32>;
+    // 用于unlink时调整链接数
+    fn dec_link_count(&self) -> bool {
+        false
+    }
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize;
     fn rename_dir_entry(&self, _old_name: &str, _new_name: &str) -> bool{
         false

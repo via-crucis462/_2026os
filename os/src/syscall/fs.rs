@@ -448,8 +448,71 @@ pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
     ENOSYS.as_isize()
 }
 
+/// 读出符号链接内容（文件本体而非目标）到用户缓冲区，返回实际读出的字节数
 pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usize) -> isize {
-    ENOSYS.as_isize()
+    // 合法性检查
+    if _path.is_null() {
+        return EFAULT.as_isize();
+    }
+    if _len == 0 {
+        return 0;
+    }
+    if _buf.is_null() {
+        return EFAULT.as_isize();
+    }
+    // 路径获取
+    let token = current_user_token();
+    let path_str = translated_str(token, _path);
+    if path_str.is_empty() {
+        return ENOENT.as_isize();
+    }
+    // 获取工作路径并查找
+    let task = current_task().unwrap();
+    let base_dentry = if path_str.starts_with('/') {
+        ROOT_DENTRY.clone()
+    } else if _dirfd == AT_FDCWD {
+        task.inner_exclusive_access().cwd.clone()
+    } else {
+        let inner = task.inner_exclusive_access();
+        if _dirfd < 0 || _dirfd as usize >= inner.fd_table.len() {
+            return EBADF.as_isize();
+        }
+        if let Some(file) = &inner.fd_table[_dirfd as usize] {
+            if let Some(dentry) = file.get_dentry() {
+                dentry
+            } else {
+                return ENOTDIR.as_isize();
+            }
+        } else {
+            return EBADF.as_isize();
+        }
+    };
+    // 查找路径对应的 dentry
+    let link_dentry = match base_dentry.find_tree(&path_str, false) {
+        Some(d) => d,
+        None => return ENOENT.as_isize(),
+    };
+    // 文件类型检查
+    let st = link_dentry.inode.get_stat();
+    let is_symlink = (st.mode & 0o170000) == 0o120000; // 符号链接
+    if !is_symlink {
+        return EINVAL.as_isize();
+    }
+    // 读取符号链接内容
+    let mut target = alloc::vec![0u8; st.size as usize];
+    let read_len = link_dentry.inode.read_at(0, &mut target);
+    let copy_len = core::cmp::min(read_len, _len);
+    let mut user_bufs = translated_byte_buffer(token, _buf, copy_len);
+    let mut copied = 0usize;
+    for seg in user_bufs.iter_mut() {
+        if copied >= copy_len {
+            break;
+        }
+        let take = core::cmp::min(seg.len(), copy_len - copied);
+        seg[..take].copy_from_slice(&target[copied..copied + take]);
+        copied += take;
+    }
+    copied as isize
 }
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
@@ -548,27 +611,68 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
 }
 
 pub const AT_REMOVEDIR: usize = 0x200; 
-/// YOUR JOB: Implement unlinkat.
+// 检查目录是否包含除 "." 和 ".." 以外的条目，存在则返回 true
+fn has_non_dot_entries(dir_inode: &Arc<dyn crate::fs::VfsInode>) -> bool {
+    let mut offset = 0usize;
+    let mut buf = [0u8; 1024];
+    loop {
+        let nread = dir_inode.getdents(&mut offset, &mut buf);
+        if nread <= 0 {
+            return false;
+        }
+        let mut off = 0usize;
+        while off + 19 <= nread as usize {
+            let reclen = u16::from_ne_bytes([buf[off + 16], buf[off + 17]]) as usize;
+            if reclen == 0 || off + reclen > nread as usize {
+                // 目录项损坏直接返回避免误删
+                return true;
+            }
+            let name_end = (off + reclen).min(nread as usize);
+            let name_slice = &buf[off + 19..name_end];
+            let nul_pos = name_slice.iter().position(|&b| b == 0).unwrap_or(name_slice.len());
+            let name = &name_slice[..nul_pos];
+            if name != b"." && name != b".." && !name.is_empty() {
+                return true;
+            }
+            off += reclen;
+        }
+    }
+}
+
+/// 删除链接文件
+/// 调整：修复了不减小目录链接数的错误
 pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
     let token = current_user_token();
     let path_str = translated_str(token, path);
     trace!("kernel: sys_unlinkat dirfd={} path={} flags={:#x}", dirfd, path_str, flags);
 
+    if (flags & !AT_REMOVEDIR) != 0 {
+        return EINVAL.as_isize();
+    }
+    if path_str.is_empty() {
+        return ENOENT.as_isize();
+    }
+
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
 
-    let cwd = inner.cwd.clone();
-    let fd_table_len = inner.fd_table.len();
     let base_dir = if path_str.starts_with('/') {
         ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {
-        cwd.clone() 
+        inner.cwd.clone()
     } else {
-        if dirfd < 0 || (dirfd as usize) >= fd_table_len || inner.fd_table[dirfd as usize].is_none() {
+        if dirfd < 0 || (dirfd as usize) >= inner.fd_table.len() {
             return EBADF.as_isize();
         }
-        println!("[kernel] sys_unlinkat: resolve relative to dirfd {} is WIP", dirfd);
-        cwd.clone() 
+        if let Some(file) = &inner.fd_table[dirfd as usize] {
+            if let Some(dentry) = file.get_dentry() {
+                dentry
+            } else {
+                return ENOTDIR.as_isize();
+            }
+        } else {
+            return EBADF.as_isize();
+        }
     };
 
     drop(inner);
@@ -586,6 +690,18 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
     let removing_dir = (flags & AT_REMOVEDIR) != 0;
     if is_dir && !removing_dir { return EISDIR.as_isize();}
     if !is_dir && removing_dir { return ENOTDIR.as_isize();}
+
+    // rmdir 语义：目录必须为空，且禁止删除 "." 与 ".."
+    if removing_dir {
+        let leaf = file_name(&path_str);
+        if leaf == "." || leaf == ".." {
+            return EINVAL.as_isize();
+        }
+        if has_non_dot_entries(&target.inode) {
+            return ENOTEMPTY.as_isize();
+        }
+    }
+
     // 找到上级目录
     let parent_path_str = parent_path(&path_str);
     let name = file_name(&path_str);
@@ -593,6 +709,10 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
     if let Some(parent) = parent_dentry {
         // 尝试删除
         if let Some(_inode_id) = parent.inode.delete_dir_entry(&name) {
+            if removing_dir {
+                // Removing a subdirectory drops one parent directory link.
+                parent.inode.dec_link_count();
+            }
             parent.children.lock().remove(&name);
             return 0;
         } else {

@@ -181,6 +181,11 @@ impl VfsInode for Ext4Inode {
         self.delete_dir_entry(name)
     }
 
+    fn dec_link_count(&self) -> bool {
+        self.fs.decrease_link_count(self.inode_id);
+        true
+    }
+
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
         if !self.is_dir() {
             return -1;
