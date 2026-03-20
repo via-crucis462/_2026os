@@ -2,12 +2,12 @@
 !.github/*
 !.vscode/settings.json
 .idea
-Cargo.lock
+#Cargo.lock
 target
 os/src/link_app.S
 os/kernel_output.log
 os/last-*
-os/Cargo.lock
+#os/Cargo.lock
 os/.gdb_history
 os/target/*
 easy-fs/Cargo.lock
@@ -19,7 +19,7 @@ pushall.sh
 *.bak
 ci-user/
 user/
-os/vendor/
+# os/vendor/
 fs_img/la64*
 fs_img/riscv64*
 fs_img/*.img
@@ -29,3 +29,6 @@ testsuits-for-oskernel
 toolchains/
 *.pdf
 syscall_posix_kernel.md
+kernel-*
+*.img*
+*.log

@@ -45,8 +45,10 @@ build: env $(KERNEL_BIN)
 
 env:
 ifeq ($(OFFLINE),)
-	(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)
-	rustup component add rust-src
+	export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static; \
+	export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup; \
+	((rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)) && \
+	rustup component add rust-src && \
 	rustup component add llvm-tools-preview
 endif
 
@@ -67,14 +69,14 @@ run-inner:
 	@qemu-system-riscv64 \
 		-machine virt \
 		-nographic \
-		-bios $(BOOTLOADER) \
-		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+		-bios default \
+		-kernel $(KERNEL_ELF) \
 		-drive file=$(FS_IMG),if=none,format=raw,id=x0 \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		| tee kernel_output.log
 
 gdbserver: build
-	@qemu-system-riscv64 -M 128m -machine virt -nographic -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+	@qemu-system-riscv64 -m 128M -machine virt -nographic -bios default -kernel $(KERNEL_ELF) \
 	-drive file=$(FS_IMG),if=none,format=raw,id=x0 \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 	-s -S
@@ -88,6 +90,8 @@ gdbclient:
 
 env-la:
 ifeq ($(OFFLINE),)
+	export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static; \
+	export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup; \
 	(rustup target list | grep "loongarch64-unknown-none (installed)") || rustup target add loongarch64-unknown-none
 	rustup component add rust-src
 	rustup component add llvm-tools-preview
