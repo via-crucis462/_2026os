@@ -244,7 +244,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             termios.c_cc[2] = 127; termios.c_cc[4] = 4;
             if argp != 0 {
                 *translated_refmut(token, argp as *mut Termios) = termios;
-                ENOTTY.as_isize()
+                0 // 成功
             } else { EFAULT.as_isize() }
         }
         TIOCGWINSZ => {
@@ -252,7 +252,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             let winsize = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
             if argp != 0 {
                 *translated_refmut(token, argp as *mut Winsize) = winsize;
-                ENOTTY.as_isize()
+                0 // 成功
             } else { EFAULT.as_isize() }
         }
         RTC_RD_TIME => {
@@ -625,7 +625,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
     };
 
     // 如果是文件映射（非匿名映射）且 FD 合法，读取内容
-    if mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) && fd >= 0 {
+    if !mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) && fd >= 0 { // 先前逻辑反了
         //println!("[kernel] sys_mmap: file mapping requested for fd={}, start={:#x}, len={:#x}, prot={:?}, flags={:?}", fd, start, len, mmap_prot, mmap_flags);
         let task = current_task().unwrap();
         let token = current_user_token();
@@ -682,20 +682,10 @@ pub fn sys_set_priority(_prio: isize) -> isize {
     ENOTTY.as_isize() // 不支持的操作
 }
 
+#[allow(dead_code)]
 pub fn sys_sigprocmask(mask: u32) -> isize {
-    trace!("kernel:pid[{}] sys_sigprocmask", current_task().unwrap().pid.0);
-    if let Some(task) = current_task() {
-        let mut inner = task.inner_exclusive_access();
-        let old_mask = inner.signal_mask;
-        if let Some(flag) = SignalFlags::from_bits(mask) {
-            inner.signal_mask = flag;
-            old_mask.bits() as isize
-        } else {
-            EINVAL.as_isize() // 信号掩码不合法
-        }
-    } else {
-        ESRCH.as_isize() // 没有当前任务
-    }
+    // Backward-compatible wrapper for old call sites.
+    sys_rt_sigprocmask(2, &mask as *const u32, core::ptr::null_mut(), core::mem::size_of::<u32>())
 }
 
 pub fn sys_sigreturn() -> isize {
@@ -715,40 +705,105 @@ pub fn sys_sigreturn() -> isize {
     }
 }
 
-fn check_sigaction_error(signal: SignalFlags, action: usize, old_action: usize) -> bool {
-    if action == 0
-        || old_action == 0
-        || signal == SignalFlags::SIGKILL
-        || signal == SignalFlags::SIGSTOP
-    {
-        true
-    } else {
-        false
-    }
-}
+const SIG_BLOCK: usize = 0;
+const SIG_UNBLOCK: usize = 1;
+const SIG_SETMASK: usize = 2;
 
+#[allow(dead_code)]
 pub fn sys_sigaction(
     signum: i32,
     action: *const SignalAction,
     old_action: *mut SignalAction,
 ) -> isize {
+    sys_rt_sigaction(signum, action, old_action, core::mem::size_of::<u32>())
+}
+
+/// 兼容版
+pub fn sys_rt_sigaction(
+    signum: i32,
+    action: *const SignalAction,
+    old_action: *mut SignalAction,
+    sigsetsize: usize,
+) -> isize {
     trace!("kernel:pid[{}] sys_sigaction", current_task().unwrap().pid.0);
+    if sigsetsize < core::mem::size_of::<u32>() {
+        return EINVAL.as_isize();
+    }
+    if signum <= 0 || signum as usize > MAX_SIG {
+        return EINVAL.as_isize();
+    }
+
     let token = current_user_token();
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
-    if signum as *const () as usize > MAX_SIG {
-        return EINVAL.as_isize(); // 信号不合法
-    }
-    if let Some(flag) = SignalFlags::from_bits(1 << signum) {
-        if check_sigaction_error(flag, action as *const () as usize, old_action as *const () as usize) {
-            return EINVAL.as_isize(); // 同上
+
+    if let Some(flag) = SignalFlags::from_bits(1u32 << signum) {
+        if action.is_null() {
+            // Query-only path.
+            if !old_action.is_null() {
+                let prev_action = inner.signal_actions.table[signum as usize];
+                *translated_refmut(token, old_action) = prev_action;
+            }
+            return 0;
         }
-        let prev_action = inner.signal_actions.table[signum as *const () as usize];
-        *translated_refmut(token, old_action) = prev_action;
-        inner.signal_actions.table[signum as *const () as usize] = *translated_ref(token, action);
+
+        // SIGKILL/SIGSTOP handlers are not changeable.
+        if flag == SignalFlags::SIGKILL || flag == SignalFlags::SIGSTOP {
+            return EINVAL.as_isize();
+        }
+
+        let prev_action = inner.signal_actions.table[signum as usize];
+        if !old_action.is_null() {
+            *translated_refmut(token, old_action) = prev_action;
+        }
+        inner.signal_actions.table[signum as usize] = *translated_ref(token, action);
         0
     } else {
-        EINVAL.as_isize() // 同上
+        EINVAL.as_isize()
+    }
+}
+
+pub fn sys_rt_sigprocmask(how: usize, set: *const u32, old_set: *mut u32, sigsetsize: usize) -> isize {
+    trace!("kernel:pid[{}] sys_sigprocmask", current_task().unwrap().pid.0);
+    if sigsetsize < core::mem::size_of::<u32>() {
+        return EINVAL.as_isize();
+    }
+
+    if let Some(task) = current_task() {
+        let token = current_user_token();
+        let mut inner = task.inner_exclusive_access();
+        let old_mask = inner.signal_mask.bits();
+        if !old_set.is_null() {
+            *translated_refmut(token, old_set) = old_mask;
+        }
+
+        if set.is_null() {
+            return 0;
+        }
+
+        let requested = *translated_ref(token, set);
+        let mut new_mask = inner.signal_mask;
+        let req_flags = SignalFlags::from_bits_truncate(requested);
+        match how {
+            SIG_BLOCK => {
+                new_mask.insert(req_flags);
+            }
+            SIG_UNBLOCK => {
+                new_mask.remove(req_flags);
+            }
+            SIG_SETMASK => {
+                new_mask = req_flags;
+            }
+            _ => return EINVAL.as_isize(),
+        }
+
+        // SIGKILL/SIGSTOP cannot be blocked.
+        new_mask.remove(SignalFlags::SIGKILL);
+        new_mask.remove(SignalFlags::SIGSTOP);
+        inner.signal_mask = new_mask;
+        0
+    } else {
+        ESRCH.as_isize()
     }
 }
 
