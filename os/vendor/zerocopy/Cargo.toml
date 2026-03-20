@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.56.0"
 name = "zerocopy"
-version = "0.8.42"
+version = "0.8.47"
 authors = [
     "Joshua Liebow-Feeser <joshlf@google.com>",
     "Jack Wrenn <jswrenn@amazon.com>",
@@ -101,6 +101,14 @@ name = "ui"
 path = "tests/ui.rs"
 
 [[bench]]
+name = "as_bytes_dynamic_size"
+path = "benches/as_bytes_dynamic_size.rs"
+
+[[bench]]
+name = "as_bytes_static_size"
+path = "benches/as_bytes_static_size.rs"
+
+[[bench]]
 name = "read_from_bytes"
 path = "benches/read_from_bytes.rs"
 
@@ -171,6 +179,46 @@ path = "benches/ref_from_suffix_with_elems_dynamic_padding.rs"
 [[bench]]
 name = "ref_from_suffix_with_elems_dynamic_size"
 path = "benches/ref_from_suffix_with_elems_dynamic_size.rs"
+
+[[bench]]
+name = "split_at_dynamic_padding"
+path = "benches/split_at_dynamic_padding.rs"
+
+[[bench]]
+name = "split_at_dynamic_size"
+path = "benches/split_at_dynamic_size.rs"
+
+[[bench]]
+name = "split_at_unchecked_dynamic_padding"
+path = "benches/split_at_unchecked_dynamic_padding.rs"
+
+[[bench]]
+name = "split_at_unchecked_dynamic_size"
+path = "benches/split_at_unchecked_dynamic_size.rs"
+
+[[bench]]
+name = "split_via_immutable_dynamic_padding"
+path = "benches/split_via_immutable_dynamic_padding.rs"
+
+[[bench]]
+name = "split_via_immutable_dynamic_size"
+path = "benches/split_via_immutable_dynamic_size.rs"
+
+[[bench]]
+name = "split_via_runtime_check_dynamic_padding"
+path = "benches/split_via_runtime_check_dynamic_padding.rs"
+
+[[bench]]
+name = "split_via_runtime_check_dynamic_size"
+path = "benches/split_via_runtime_check_dynamic_size.rs"
+
+[[bench]]
+name = "split_via_unchecked_dynamic_padding"
+path = "benches/split_via_unchecked_dynamic_padding.rs"
+
+[[bench]]
+name = "split_via_unchecked_dynamic_size"
+path = "benches/split_via_unchecked_dynamic_size.rs"
 
 [[bench]]
 name = "transmute"
@@ -268,8 +316,32 @@ path = "benches/try_transmute_ref_dynamic_size.rs"
 name = "try_transmute_ref_static_size"
 path = "benches/try_transmute_ref_static_size.rs"
 
+[[bench]]
+name = "write_to_dynamic_size"
+path = "benches/write_to_dynamic_size.rs"
+
+[[bench]]
+name = "write_to_prefix_dynamic_size"
+path = "benches/write_to_prefix_dynamic_size.rs"
+
+[[bench]]
+name = "write_to_prefix_static_size"
+path = "benches/write_to_prefix_static_size.rs"
+
+[[bench]]
+name = "write_to_static_size"
+path = "benches/write_to_static_size.rs"
+
+[[bench]]
+name = "write_to_suffix_dynamic_size"
+path = "benches/write_to_suffix_dynamic_size.rs"
+
+[[bench]]
+name = "write_to_suffix_static_size"
+path = "benches/write_to_suffix_static_size.rs"
+
 [dependencies.zerocopy-derive]
-version = "=0.8.42"
+version = "=0.8.47"
 optional = true
 
 [dev-dependencies.elain]
@@ -290,7 +362,7 @@ version = "1.0"
 version = "1.1"
 
 [dev-dependencies.zerocopy-derive]
-version = "=0.8.42"
+version = "=0.8.47"
 
 [target."cfg(any())".dependencies.zerocopy-derive]
-version = "=0.8.42"
+version = "=0.8.47"
