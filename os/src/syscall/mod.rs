@@ -153,13 +153,19 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_EXIT_GROUP => sys_exit(args[0] as i32),
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_KILL => sys_kill(args[0], args[1] as i32),
-        SYSCALL_SIGACTION => sys_sigaction(
+        SYSCALL_SIGACTION => sys_rt_sigaction(
             args[0] as i32,
             args[1] as *const SignalAction,
             args[2] as *mut SignalAction,
+            args[3],
         ),
         SYSCALL_SLEEP => sys_nanosleep(args[0] as *const TimeSpec, args[1] as *mut TimeSpec),
-        SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as u32),
+        SYSCALL_SIGPROCMASK => sys_rt_sigprocmask(
+            args[0],
+            args[1] as *const u32,
+            args[2] as *mut u32,
+            args[3],
+        ),
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1]as *mut _),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
@@ -221,6 +227,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RESQ => sys_resq(),
         SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
-        _ =>  panic!("Unsupported syscall_id: {}", syscall_id),
+        _ =>  Errno::ENOSYS.as_isize(),
     }
 }
