@@ -60,6 +60,60 @@ pub struct Ext4Inode {
 pub const EXT4_EXTENTS_FL: u32 = 0x80000;
 
 impl Ext4Inode {
+    const EXT4_FEATURE_RO_COMPAT_METADATA_CSUM: u32 = 0x0400;
+    const EXT4_FEATURE_INCOMPAT_CSUM_SEED: u32 = 0x2000;
+
+    fn crc32c_update(mut crc: u32, data: &[u8]) -> u32 {
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0x82F63B78 & mask);
+            }
+        }
+        crc
+    }
+
+    fn ext4_checksum_seed(&self) -> u32 {
+        let sb = &self.fs.superblock;
+        if (sb.incompat_features & Self::EXT4_FEATURE_INCOMPAT_CSUM_SEED) != 0 {
+            sb.checksum_seed
+        } else {
+            Self::crc32c_update(!0u32, &sb.uuid)
+        }
+    }
+
+    pub(crate) fn update_dir_block_checksum_if_needed(&self, block_buf: &mut [u8]) {
+        if !self.is_dir() {
+            return;
+        }
+        if (self.fs.superblock.ro_compat_features & Self::EXT4_FEATURE_RO_COMPAT_METADATA_CSUM) == 0 {
+            return;
+        }
+        if block_buf.len() < BLOCK_SZ {
+            return;
+        }
+
+        let tail_off = BLOCK_SZ - 12;
+        let rec_len = u16::from_le_bytes([block_buf[tail_off + 4], block_buf[tail_off + 5]]);
+        let reserved_zero2 = block_buf[tail_off + 6];
+        let reserved_ft = block_buf[tail_off + 7];
+        if rec_len != 12 || reserved_zero2 != 0 || reserved_ft != 0xDE {
+            return;
+        }
+
+        // 清零 checksum 字段后重新计算，避免把旧值带入。
+        block_buf[tail_off + 8..tail_off + 12].fill(0);
+
+        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        let mut crc = self.ext4_checksum_seed();
+        crc = Self::crc32c_update(crc, &self.inode_id.to_le_bytes());
+        crc = Self::crc32c_update(crc, &disk_inode.i_generation.to_le_bytes());
+        crc = Self::crc32c_update(crc, &block_buf[..tail_off + 8]);
+
+        block_buf[tail_off + 8..tail_off + 12].copy_from_slice(&crc.to_le_bytes());
+    }
+
     pub fn new(inode_id: u32, disk_inode: &Ext4InodeDisk, fs: Arc<Ext4FS>, parent: Option<u32>) -> Self {
         Self {
             inode_id,
@@ -398,6 +452,8 @@ impl Ext4Inode {
                         core::slice::from_raw_parts(&new_dirent as *const _ as *const u8, 8 + new_dirent.name_len as usize)
                     };
                     buf[new_offset..new_offset + new_dirent_bytes.len()].copy_from_slice(new_dirent_bytes);
+
+                    self.update_dir_block_checksum_if_needed(&mut buf);
                     
                     self.write_at(offset, &buf); 
                     return true;
@@ -437,6 +493,8 @@ impl Ext4Inode {
                         let prev_dirent = unsafe { &mut *(buf[prev_offset..].as_ptr() as *mut Ext4DirEntry) };
                         prev_dirent.rec_len += rec_len as u16;
                     }
+
+                    self.update_dir_block_checksum_if_needed(&mut buf);
                     self.write_at(offset, &buf);
                     
                     // 递减链接数并检查是否需要回收

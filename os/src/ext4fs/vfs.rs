@@ -369,6 +369,9 @@ fn rename_dir_entry(&self, old_name: &str, new_name: &str) -> bool {
         });
 
         if found {
+            cache.modify(0, |block: &mut [u8; 4096]| {
+                self.update_dir_block_checksum_if_needed(block);
+            });
             cache.sync();
             return true;
         }
