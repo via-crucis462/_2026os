@@ -42,7 +42,7 @@ lazy_static! {
 
 /// Add process to ready queue
 pub fn add_task(task: Arc<TaskControlBlock>) {
-	debug!("[kernel] TaskManager::add_task: pid={}", task.getpid());
+	//debug!("[kernel] TaskManager::add_task: pid={}", task.getpid());
     PID2TCB
         .exclusive_access()
         .insert(task.getpid(), Arc::clone(&task));

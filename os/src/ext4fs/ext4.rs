@@ -19,10 +19,12 @@ impl Ext4FS {
         let block_cache1 = get_block_cache(1, block_dev.clone());
         let block_cache1 = block_cache1.lock();
         
+        let desc_size = superblock.desc_size as usize;
+        
         for i in 0..group_num {
-            // 一个 Ext4 组描述符是 32 字节
-            // 从块缓存的第 (i * 32) 个字节开始，读取接下来的 32 字节
-            let group = block_cache1.read((i * 32) as usize, |x: &Ext4GroupDescDisk| {
+            // 块组描述符的大小为32 或 64
+            // 从块缓存的第 i * desc_size 字节开始，读取接下来的 32/64 字节 (Ext4GroupDescDisk 大小)
+            let group = block_cache1.read(i as usize * desc_size, |x: &Ext4GroupDescDisk| {
                 Ext4Group::new(x)
             });
             debug!(

@@ -1,0 +1,13 @@
+Inode: 65537   Type: bad type    Mode:  0000   Flags: 0x0
+Generation: 0    Version: 0x00000000
+User:     0   Group:     0   Size: 0
+File ACL: 0
+Links: 0   Blockcount: 0
+Fragment:  Address: 0    Number: 0    Size: 0
+ctime: 0x00000000 -- Thu Jan  1 08:00:00 1970
+atime: 0x00000000 -- Thu Jan  1 08:00:00 1970
+mtime: 0x00000000 -- Thu Jan  1 08:00:00 1970
+Size of extra inode fields: 0
+Inode checksum: 0x00000000
+BLOCKS:
+

@@ -1,0 +1,14 @@
+Inode: 131073   Type: directory    Mode:  0755   Flags: 0x80000
+Generation: 3898475449    Version: 0x00000000:0000007a
+User:     0   Group:     0   Project:     0   Size: 4096
+File ACL: 0
+Links: 5   Blockcount: 8
+Fragment:  Address: 0    Number: 0    Size: 0
+ ctime: 0x684d9461:760825c8 -- Sat Jun 14 23:25:21 2025
+ atime: 0x684d945f:50a007a8 -- Sat Jun 14 23:25:19 2025
+ mtime: 0x684d9461:760825c8 -- Sat Jun 14 23:25:21 2025
+crtime: 0x684d945f:50a007a8 -- Sat Jun 14 23:25:19 2025
+Size of extra inode fields: 32
+Inode checksum: 0x65809a45
+EXTENTS:
+(0):532512

@@ -67,6 +67,7 @@ impl Dentry {
     /// 递归查找完整路径，例如 "bin/sh" 或 "/bin/sh"
     /// 将self作为起点，不考虑路径是否以'/'开头
     pub fn find_tree(self: &Arc<Self>, path: &str, follow_links: bool) -> Option<Arc<Dentry>> {
+        
         if path == "." || path == "" {
             return Some(self.clone());
         }
@@ -77,6 +78,7 @@ impl Dentry {
         
         let mut current = self.clone();
         let num_segments = segments.len();
+        //println!("Dentry::find_tree: current={}, path={}, follow_links={}", current.name, path, follow_links);
         
         for (i, seg) in segments.into_iter().enumerate() {
             if seg == "." {
@@ -113,6 +115,7 @@ impl Dentry {
                 // 递归查找目标路径（限制深度以防死循环）
                 current = base.find_tree(target_path, true)?;
             } else {
+                //println!("Dentry::find_tree: found segment '{}'", seg);
                 current = next;
             }
         }
@@ -121,7 +124,7 @@ impl Dentry {
 
     /// 查找子节点（单级）：返回的是 Dentry 包装，以便继续向下查找
     pub fn find_child(self: &Arc<Self>, name: &str) -> Option<Arc<Dentry>> {
-        trace!("[kernel] Dentry::find_child: name={}", name);
+        trace!("[kernel] Dentry::find_child: parent={}, name={}", self.name, name);
         let mut children = self.children.lock();
         // 1. 尝试从当前节点的缓存中获取
         if let Some(child) = children.get(name) {
@@ -139,7 +142,6 @@ impl Dentry {
             children.insert(String::from(name), new_child.clone());
             return Some(new_child);
         }
-
         // 3. 磁盘也没找到，按照要求 panic
         error!("VFS: File '{}' not found in directory '{}'", name, self.name);
         None
