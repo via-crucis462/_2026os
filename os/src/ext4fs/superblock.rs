@@ -38,6 +38,7 @@ impl Ext4SuperBlock {
             ro_compat_features: ext4_superblock_disk.s_feature_ro_compat,
             uuid: ext4_superblock_disk.s_uuid,
             checksum_seed: ext4_superblock_disk.s_checksum_seed,
+            // 暂未检查是否正确，但测试发现能跑
             desc_size: if (ext4_superblock_disk.s_feature_incompat & 0x0080) != 0 {
                 ext4_superblock_disk.s_desc_size as u32
             } else {
