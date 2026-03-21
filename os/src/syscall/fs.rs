@@ -373,11 +373,11 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     total_written as isize
 }
 
-pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut Statx) -> isize {
+pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut Statx) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
     let path_str = normalize_leading_dot_path(translated_str(token, path));
-    trace!("[kernel] sys_statx: dirfd={}, path={}, mask={:#x}, flags={:#x}", dirfd, path_str, mask, flags);
+    trace!("[kernel] sys_statx: dirfd={}, path={}, flags={:#x}, mask={:#x}", dirfd, path_str, flags, mask);
     const AT_EMPTY_PATH: u32 = 0x1000;
     if path_str.is_empty() {
         if (flags & AT_EMPTY_PATH) == 0 {
@@ -887,7 +887,10 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
     let inner = task.inner_exclusive_access();
     let cwd = inner.cwd.clone();
     let fd_table_len = inner.fd_table.len();
-    
+    if path_str.is_empty() {
+        drop(inner);
+        return sys_fstat(dirfd as usize, st);
+    }
     if path_str.contains("Zone.Identifier") {
         let mut stat: Stat = unsafe { core::mem::zeroed() };
         stat.mode = 0o100755; // 假装它是个普通空文件，让 du 闭嘴
