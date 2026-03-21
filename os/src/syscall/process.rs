@@ -1,7 +1,6 @@
 //! Process management syscalls
 //! 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
 //! 内存管理也暂时放在此处
-
 pub use crate::{
     arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, fs::*, mm::{UserBuffer, mmap, translated_byte_buffer, translated_ref, translated_refmut, translated_str}, task::{
         MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_token, exit_current_and_run_next, fork::*, pid2task, suspend_current_and_run_next
@@ -10,7 +9,7 @@ pub use crate::{
 };
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 
-use super::errno::Errno::*;
+use super::{errno::Errno::*, normalize_leading_dot_path};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -290,8 +289,8 @@ pub fn sys_renameat2(
     let task = current_task().unwrap();
     let token = task.inner_exclusive_access().memory_set.token();
 
-    let old_path = translated_str(token, oldpath_ptr as *const u8);
-    let new_path = translated_str(token, newpath_ptr as *const u8);
+    let old_path = normalize_leading_dot_path(translated_str(token, oldpath_ptr as *const u8));
+    let new_path = normalize_leading_dot_path(translated_str(token, newpath_ptr as *const u8));
     
     // 解析父目录和文件名
     let old_parent_path = parent_path(&old_path);
@@ -455,8 +454,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let task = current_task().unwrap();
     let cwd = task.inner_exclusive_access().cwd.clone();
     drop(task);
-    let path = translated_str(token, path);
-    debug!("[kernel] sys_exec: path={}, args_ptr={:#x}", path, args as *const () as usize);
+    let path = normalize_leading_dot_path(translated_str(token, path));
     let mut args_vec: Vec<String> = Vec::new();
     loop {
         let arg_str_ptr = *translated_ref(token, args);
@@ -475,25 +473,17 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
 
         if app_inode.get_dentry().name.ends_with(".sh") {
-            // 兼容不同镜像布局：优先使用脚本同目录的 busybox，其次回退到根目录 /busybox
-            // 获取脚本父目录
-            let script_dir = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-            let busybox = if !script_dir.is_empty() {
-                let mut d = script_dir.to_string();
-                d.push_str("/busybox");
-                d
-            } else {
-                "/busybox".to_string()
-            };
+            let busybox = "/musl/busybox".to_string();
             
 
             let mut busybox_inode_opt: Option<Arc<OSInode>> = None;
+            println!("[kernel] sys_exec: trying to open busybox at '{}'", busybox);
             if let Some(inode) = open_file(ROOT_DENTRY.clone(), busybox.as_str(), OpenFlags::RDONLY) {
                 busybox_inode_opt = Some(inode);
             }
 
             if busybox_inode_opt.is_none() {
-                warn!("[kernel] sys_exec: open busybox failed for script '{}': tried {:?}", path, busybox);
+                println!("[kernel] sys_exec: open busybox failed for script '{}': tried {:?}", path, busybox);
                 return ENOENT.as_isize();
             }
 
@@ -513,7 +503,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
         let argc = args_vec.len();
-        trace!("[kernel] sys_exec: before task.exec");
+        println!("[kernel] sys_exec: before task.exec, current working dir={}, path='{}', argc={}, args={:?}", cwd.name, path, argc, args_vec);
         task.exec(all_data.as_slice(), args_vec);
         trace!("[kernel] sys_exec: after task.exec");
         // return argc because cx.x[10] will be covered with it later

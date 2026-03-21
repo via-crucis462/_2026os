@@ -125,8 +125,26 @@ mod errno;
 use fs::*;
 use process::*;
 use prctl::*;
+use alloc::string::String;
 
-use crate::{fs::Stat, task::SignalAction};
+use crate::{fs::Stat, task::{SignalAction, current_task}};
+
+pub(crate) fn normalize_leading_dot_path(path: String) -> String {
+    if !path.starts_with('.') {
+        return path;
+    }
+    let cwd = current_task().unwrap().inner_exclusive_access().cwd.get_full_path();
+    if path == "." {
+        return cwd;
+    }
+    if let Some(rest) = path.strip_prefix("./") {
+        if cwd.ends_with('/') {
+            return alloc::format!("{}{}", cwd, rest);
+        }
+        return alloc::format!("{}/{}", cwd, rest);
+    }
+    path.replacen('.', cwd.as_str(), 1)
+}
 
 #[no_mangle]
 /// handle syscall exception with `syscall_id` and other arguments

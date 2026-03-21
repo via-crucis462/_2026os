@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 use alloc::string::ToString;
 use crate::syscall::translated_ref;
 
-use super::errno::Errno::*;
+use super::{errno::Errno::*, normalize_leading_dot_path};
 
 const F_DUPFD: usize = 0;
 const F_GETFD: usize = 1;
@@ -39,7 +39,7 @@ pub struct Statfs {
 }
 pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
     let token = current_user_token();
-    let path_str = translated_str(token, path);
+    let path_str = normalize_leading_dot_path(translated_str(token, path));
     trace!("kernel: sys_statfs path={}", path_str);
 
     // 暂时伪实现，不返回真实数据
@@ -153,7 +153,7 @@ const AT_FDCWD: isize = -100;
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
-    let path_str = translated_str(token, path);
+    let path_str = normalize_leading_dot_path(translated_str(token, path));
     //println!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
 
     let start_dentry = if path_str.starts_with('/') {
@@ -213,7 +213,7 @@ pub fn sys_close(fd: usize) -> isize {
 pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
-    let path_str = translated_str(token, path);
+    let path_str = normalize_leading_dot_path(translated_str(token, path));
     debug!("[kernel] sys_accessat: dirfd={}, path={}, mode={}", dirfd, path_str, _mode);
 
     let start_dentry = if path_str.starts_with('/') {
@@ -376,7 +376,7 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
 pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut Statx) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
-    let path_str = translated_str(token, path);
+    let path_str = normalize_leading_dot_path(translated_str(token, path));
     trace!("[kernel] sys_statx: dirfd={}, path={}, mask={:#x}, flags={:#x}", dirfd, path_str, mask, flags);
     const AT_EMPTY_PATH: u32 = 0x1000;
     if path_str.is_empty() {
@@ -433,7 +433,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut 
 
 pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
     let token = current_user_token();
-    let path = translated_str(token, path);
+    let path = normalize_leading_dot_path(translated_str(token, path));
     debug!("[kernel] sys_mkdir: path={}", path);
     
     if let Some(_) = make_dir(path.as_str(), _mode) {
@@ -462,7 +462,7 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
     }
     // 路径获取
     let token = current_user_token();
-    let path_str = translated_str(token, _path);
+    let path_str = normalize_leading_dot_path(translated_str(token, _path));
     if path_str.is_empty() {
         return ENOENT.as_isize();
     }
@@ -563,7 +563,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
 pub fn sys_utimensat(_dirfd: i32, path_ptr: usize, _times_ptr: usize, _flags: usize) -> isize {
     let task = current_task().unwrap();
     let token = task.inner_exclusive_access().memory_set.token();
-    let path_str = translated_str(token, path_ptr as *const u8);
+    let path_str = normalize_leading_dot_path(translated_str(token, path_ptr as *const u8));
 
     let cwd = task.inner_exclusive_access().cwd.clone();
     
@@ -643,7 +643,7 @@ fn has_non_dot_entries(dir_inode: &Arc<dyn crate::fs::VfsInode>) -> bool {
 /// 调整：修复了不减小目录链接数的错误
 pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
     let token = current_user_token();
-    let path_str = translated_str(token, path);
+    let path_str = normalize_leading_dot_path(translated_str(token, path));
     trace!("kernel: sys_unlinkat dirfd={} path={} flags={:#x}", dirfd, path_str, flags);
 
     if (flags & !AT_REMOVEDIR) != 0 {
@@ -831,8 +831,8 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
 
 pub fn sys_chdir(path: *const u8) -> isize {
     let token = current_user_token();
-    let path_str = translated_str(token, path);
-    debug!("[kernel] sys_chdir: path={}", path_str);
+    let path_str = normalize_leading_dot_path(translated_str(token, path));
+    println!("[kernel] sys_chdir: path={}", path_str);
     
     let task = current_task().unwrap();
     let cwd = task.inner_exclusive_access().cwd.clone();
@@ -864,8 +864,8 @@ pub fn sys_chdir(path: *const u8) -> isize {
 
 pub fn sys_mount(source: *const u8, target: *const u8, filesystemtype: *const u8, mountflags: u32) -> isize {
     let token = current_user_token();
-    let source_str = translated_str(token, source);
-    let target_str = translated_str(token, target);
+    let source_str = normalize_leading_dot_path(translated_str(token, source));
+    let target_str = normalize_leading_dot_path(translated_str(token, target));
     let filesystemtype_str = translated_str(token, filesystemtype);
     debug!("[kernel] sys_mount: source={}, target={}, filesystemtype={}, mountflags={}", source_str, target_str, filesystemtype_str, mountflags);
     return 0; // 目前仅支持 ext4 文件系统的挂载
@@ -873,14 +873,14 @@ pub fn sys_mount(source: *const u8, target: *const u8, filesystemtype: *const u8
 
 pub fn sys_umount(target: *const u8) -> isize {
     let token = current_user_token();
-    let target_str = translated_str(token, target);
+    let target_str = normalize_leading_dot_path(translated_str(token, target));
     debug!("[kernel] sys_umount: target={}", target_str);
     return 0;
 }
 
 pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
     let token = current_user_token();
-    let path_str = crate::mm::translated_str(token, path_ptr); 
+    let path_str = normalize_leading_dot_path(crate::mm::translated_str(token, path_ptr)); 
     trace!("kernel: sys_fstatat dirfd={} path={}", dirfd, path_str);
 
     let task = current_task().unwrap();

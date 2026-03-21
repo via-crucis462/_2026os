@@ -83,7 +83,7 @@ impl Ext4Inode {
         }
     }
 
-    pub(crate) fn update_dir_block_checksum_if_needed(&self, block_buf: &mut [u8]) {
+    pub fn update_dir_block_checksum_if_needed(&self, block_buf: &mut [u8]) {
         if !self.is_dir() {
             return;
         }
@@ -109,7 +109,8 @@ impl Ext4Inode {
         let mut crc = self.ext4_checksum_seed();
         crc = Self::crc32c_update(crc, &self.inode_id.to_le_bytes());
         crc = Self::crc32c_update(crc, &disk_inode.i_generation.to_le_bytes());
-        crc = Self::crc32c_update(crc, &block_buf[..tail_off + 8]);
+        // ext4 dir block checksum covers bytes before the 12-byte fake tail.
+        crc = Self::crc32c_update(crc, &block_buf[..tail_off]);
 
         block_buf[tail_off + 8..tail_off + 12].copy_from_slice(&crc.to_le_bytes());
     }
