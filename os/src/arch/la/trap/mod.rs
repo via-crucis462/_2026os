@@ -172,7 +172,7 @@ pub fn trap_handler() -> ! {
                     let vpn = VirtAddr::from(badv).floor();
                     match inner.memory_set.translate(vpn) {
                         Some(pte) => {
-                            println!(
+                            error!(
                                 "[kernel] user_fault_pte: badaddr={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
                                 badv,
                                 vpn.0,
@@ -184,15 +184,15 @@ pub fn trap_handler() -> ! {
                             );
                         }
                         None => {
-                            println!(
-                                "[kernel] user_fault_pte: badaddr={:#x}, vpn={:#x}, pte=<none>",
+                            error!(
+                                "[kernel] user_fault: badaddr={:#x}, vpn={:#x}, pte=<none>",
                                 badv,
                                 vpn.0,
                             );
                         }
                     }
                 }
-                println!(
+                error!(
                     "[kernel] user_fault: pid={}, cause={:?}, ecode={:#x}, pc={:#x}, badaddr={:#x}, estat={:#x}, badi={:#x}",
                     crate::task::current_task().unwrap().pid.0,
                     cause,
@@ -202,7 +202,7 @@ pub fn trap_handler() -> ! {
                     estat,
                     badi
                 );
-                error!("[kernel] trap_handler: {:?} in PID {}, estat={:#x}, era={:#x}, badv={:#x},badi={:#x}",
+                debug!("[kernel] trap_handler: {:?} in PID {}, estat={:#x}, era={:#x}, badv={:#x},badi={:#x}",
                     cause,
                     crate::task::current_task().unwrap().pid.0,
                     estat,

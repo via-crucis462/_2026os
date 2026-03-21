@@ -244,7 +244,7 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> i
 }
 
 pub fn sys_pipe(pipe: *mut u32) -> isize {
-	println!("kernel:pid[{}] sys_pipe", current_task().unwrap().pid.0);
+	debug!("kernel:pid[{}] sys_pipe", current_task().unwrap().pid.0);
     let task = current_task().unwrap();
     let token = current_user_token();
     let mut inner = task.inner_exclusive_access();
