@@ -153,7 +153,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     /*if syscall_id != 64 && syscall_id != 63 {
         println!("[Syscall Trace] ID: {}", syscall_id);
     }*/
-    //println!("[kernel] syscall: id={}, args={:?}", syscall_id, args);
+    //debug!("[kernel] syscall: id={}, args={:?}", syscall_id, args);
     match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),

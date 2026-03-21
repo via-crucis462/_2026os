@@ -154,7 +154,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
     let task = current_task().unwrap();
     let token = current_user_token();
     let path_str = normalize_leading_dot_path(translated_str(token, path));
-    //println!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
+    //debug!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
@@ -832,7 +832,7 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
 pub fn sys_chdir(path: *const u8) -> isize {
     let token = current_user_token();
     let path_str = normalize_leading_dot_path(translated_str(token, path));
-    println!("[kernel] sys_chdir: path={}", path_str);
+    debug!("[kernel] sys_chdir: path={}", path_str);
     
     let task = current_task().unwrap();
     let cwd = task.inner_exclusive_access().cwd.clone();

@@ -477,13 +477,13 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             
 
             let mut busybox_inode_opt: Option<Arc<OSInode>> = None;
-            println!("[kernel] sys_exec: trying to open busybox at '{}'", busybox);
+            debug!("[kernel] sys_exec: trying to open busybox at '{}'", busybox);
             if let Some(inode) = open_file(ROOT_DENTRY.clone(), busybox.as_str(), OpenFlags::RDONLY) {
                 busybox_inode_opt = Some(inode);
             }
 
             if busybox_inode_opt.is_none() {
-                println!("[kernel] sys_exec: open busybox failed for script '{}': tried {:?}", path, busybox);
+                debug!("[kernel] sys_exec: open busybox failed for script '{}': tried {:?}", path, busybox);
                 return ENOENT.as_isize();
             }
 
@@ -503,7 +503,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
         let argc = args_vec.len();
-        println!("[kernel] sys_exec: before task.exec, current working dir={}, path='{}', argc={}, args={:?}", cwd.name, path, argc, args_vec);
+        debug!("[kernel] sys_exec: before task.exec, current working dir={}, path='{}', argc={}, args={:?}", cwd.name, path, argc, args_vec);
         task.exec(all_data.as_slice(), args_vec);
         trace!("[kernel] sys_exec: after task.exec");
         // return argc because cx.x[10] will be covered with it later
@@ -609,14 +609,14 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
     let ret = match mmap::do_mmap(start, len, mmap_prot , mmap_flags) {
         Ok(addr) => addr,
         Err(_) => {
-            //println!("[kernel] sys_mmap: do_mmap failed for start={:#x}, len={:#x}, prot={:?}, flags={:?}", start, len, mmap_prot, mmap_flags);
+            //debug!("[kernel] sys_mmap: do_mmap failed for start={:#x}, len={:#x}, prot={:?}, flags={:?}", start, len, mmap_prot, mmap_flags);
             return Errno::ENOMEM.as_isize(); // 内存不足
         }
     };
 
     // 如果是文件映射（非匿名映射）且 FD 合法，读取内容
     if !mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) && fd >= 0 { // 先前逻辑反了
-        //println!("[kernel] sys_mmap: file mapping requested for fd={}, start={:#x}, len={:#x}, prot={:?}, flags={:?}", fd, start, len, mmap_prot, mmap_flags);
+        //debug!("[kernel] sys_mmap: file mapping requested for fd={}, start={:#x}, len={:#x}, prot={:?}, flags={:?}", fd, start, len, mmap_prot, mmap_flags);
         let task = current_task().unwrap();
         let token = current_user_token();
         let inner = task.inner_exclusive_access();
@@ -635,7 +635,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
             }
         }
     }
-    //println!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
+    //debug!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
     ret as isize
 }
 

@@ -28,7 +28,7 @@ run_ext4:
 
 	@DIR_SIZE_KB=$$(du -sk "$(SRC_DIR)" | cut -f1); \
 	 echo "Source directory size: $${DIR_SIZE_KB} KB"; \
-	 IMG_SIZE_MB=$$(( $${DIR_SIZE_KB} * 120 / 100 / 1024 + 5 )); \
+	 IMG_SIZE_MB=$$(( $${DIR_SIZE_KB} * 200 / 100 / 1024 + 5 )); \
 	 echo "TARGET_EXT4 image size: $${IMG_SIZE_MB} MB"; \
 	 echo "Generating $(TARGET_EXT4) from $(SRC_DIR)..."; \
 	 dd if=/dev/zero of=$(TARGET_EXT4) bs=1M count=$${IMG_SIZE_MB}; \
