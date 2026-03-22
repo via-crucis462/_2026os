@@ -156,6 +156,9 @@ pub fn add_initproc() {
 pub fn check_signals_error_of_current() -> Option<(i32, &'static str)> {
     let task = current_task().unwrap();
     let task_inner = task.inner_exclusive_access();
+    if task_inner.killed == true {
+        return Some((1, "killed by signal"));
+    }
     // println!(
     //     "[K] check_signals_error_of_current {:?}",
     //     task_inner.signals
@@ -223,7 +226,7 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
         trap_ctx.set_a0(sig);
     } else {
         // default action
-        println!("[K] task/call_user_signal_handler: default action: ignore it or kill process");
+        trace!("[K] task/call_user_signal_handler: default action: ignore it or kill process");
     }
 }
 
