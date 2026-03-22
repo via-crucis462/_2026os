@@ -78,9 +78,9 @@ pub fn trap_handler() -> ! {
             suspend_current_and_run_next();
         }
         _ => {
-             println!(
+            println!(
                 "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
-                crate::task::current_task().unwrap().tid.0,
+                crate::task::current_task().unwrap().pid.0,
                 scause.cause(),
                 current_trap_cx().get_rt(),
                 stval

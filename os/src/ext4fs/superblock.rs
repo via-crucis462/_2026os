@@ -12,6 +12,10 @@ pub struct Ext4SuperBlock {
     pub inodes_per_group: u32,
     pub first_data_block: u32,
     pub incompat_features: u32,
+    pub ro_compat_features: u32,
+    pub uuid: [u8; 16],
+    pub checksum_seed: u32,
+    pub desc_size: u32, // 组描述符大小，可能是32或64
 }
 
 impl Ext4SuperBlock {
@@ -31,6 +35,15 @@ impl Ext4SuperBlock {
             inodes_per_group: ext4_superblock_disk.s_inodes_per_group,
             first_data_block: ext4_superblock_disk.s_first_data_block,
             incompat_features: ext4_superblock_disk.s_feature_incompat,
+            ro_compat_features: ext4_superblock_disk.s_feature_ro_compat,
+            uuid: ext4_superblock_disk.s_uuid,
+            checksum_seed: ext4_superblock_disk.s_checksum_seed,
+            // 暂未检查是否正确，但测试发现能跑
+            desc_size: if (ext4_superblock_disk.s_feature_incompat & 0x0080) != 0 {
+                ext4_superblock_disk.s_desc_size as u32
+            } else {
+                32
+            },
         }
     }
     pub fn group_num(&self) -> u32 {

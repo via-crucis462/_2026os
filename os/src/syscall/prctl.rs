@@ -172,5 +172,5 @@ pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5:
 pub fn sys_arch_prctl(option: usize, addr: usize) -> isize {
     // 摘自linux手册：仅支持 Linux/x86-64 的 64 位程序
     // 不实现
-    -1
+    Errno::ENOSYS.as_isize()
 } 

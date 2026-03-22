@@ -109,6 +109,7 @@ impl PageTable {
             let pte = &mut ppn.get_pte_array()[*idx];
             //println!("find_pte: vpn = {:?}, i = {}", vpn, i);
             if pte.is_empty() {
+                println!("find_pte: vpn = {:?}, i = {}, pte is empty", vpn, i);
                 return None;
             }
             if i == 2 {
