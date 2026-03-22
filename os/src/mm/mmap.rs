@@ -22,7 +22,6 @@ bitflags! {
         const MAP_PRIVATE   = 1 << 1;
         const MAP_ANONYMOUS = 1 << 2;
         const MAP_FIXED     = 1 << 4;
-        const MAP_FIXED     = 1 << 4;
     }
 }
 

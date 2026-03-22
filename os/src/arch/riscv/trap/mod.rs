@@ -80,7 +80,7 @@ pub fn trap_handler() -> ! {
         _ => {
             println!(
                 "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
-                crate::task::current_task().unwrap().pid.0,
+                crate::task::current_task().unwrap().process().pid.0,
                 scause.cause(),
                 current_trap_cx().get_rt(),
                 stval

@@ -41,15 +41,15 @@ const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
 /// fstat syscall
 const SYSCALL_FSTAT: usize = 80;
-/// exit syscall
 const SYSCALL_UTIMENSAT: usize = 88;
+/// exit syscall
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;// RISCV
 const SYSCALL_SLEEP:usize =101;
-/// yield syscall
 const SYSCALL_SYSLOG: usize = 116;
+/// yield syscall
 const SYSCALL_YIELD: usize = 124;
 /// kill syscall
 const SYSCALL_KILL: usize = 129;
@@ -125,8 +125,26 @@ mod errno;
 use fs::*;
 use process::*;
 use prctl::*;
+use alloc::string::String;
 
-use crate::{fs::Stat, task::SignalAction};
+use crate::{fs::Stat, task::{SignalAction, current_task}};
+
+pub(crate) fn normalize_leading_dot_path(path: String) -> String {
+    if !path.starts_with('.') {
+        return path;
+    }
+    let cwd = current_task().unwrap().process().inner_exclusive_access().cwd.get_full_path();
+    if path == "." {
+        return cwd;
+    }
+    if let Some(rest) = path.strip_prefix("./") {
+        if cwd.ends_with('/') {
+            return alloc::format!("{}{}", cwd, rest);
+        }
+        return alloc::format!("{}/{}", cwd, rest);
+    }
+    path.replacen('.', cwd.as_str(), 1)
+}
 
 #[no_mangle]
 /// handle syscall exception with `syscall_id` and other arguments
@@ -156,7 +174,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[2] as *mut SignalAction,
         ),
         SYSCALL_SLEEP => sys_nanosleep(args[0] as *const TimeSpec, args[1] as *mut TimeSpec),
-        SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as u32),
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1]as *mut _),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
@@ -173,6 +190,15 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETSID => sys_getsid(args[0]),
         SYSCALL_SETSID => sys_setsid(),
         SYSCALL_GETTID => sys_gettid(),
+        SYSCALL_STATFS=> sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
+        SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
+        SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
+        SYSCALL_SYSLOG => sys_syslog(args[0], args[1], args[2]),
+        SYSCALL_SYSINFO => sys_sysinfo(args[0]),
+        SYSCALL_RENAMEAT2 => sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], args[4]),
+        SYSCALL_UTIMENSAT => sys_utimensat(args[0] as i32, args[1], args[2], args[3]),
+        SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
+        SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
         SYSCALL_STATFS=> sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
         SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
         SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
@@ -218,6 +244,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RESQ => sys_resq(),
         SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
-        _ =>  panic!("Unsupported syscall_id: {}", syscall_id),
+        _ =>  Errno::ENOSYS.as_isize(),
     }
 }

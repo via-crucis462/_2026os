@@ -16,7 +16,7 @@ copy: copy-rv copy-la
 
 build: build-rv build-la copy
 
-test-rv: all
+test-rv: build-rv copy-rv
 	@rm -f kernel_output.log
 	@qemu-system-riscv64 -machine virt \
 	-kernel kernel-rv \
@@ -29,7 +29,7 @@ test-rv: all
 	-rtc base=utc\
 	| tee kernel_output.log
 
-test-la: all
+test-la: build-la copy-la
 	@rm -f kernel_output.log
 	@qemu-system-loongarch64 \
 	-kernel kernel-la \

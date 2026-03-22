@@ -478,6 +478,7 @@ impl MemorySet {
             if let Some(new_addr) = self.find_free_area(length) {
                 start_va = new_addr;
             } else {
+                //println!("[kernel] mmap failed: no suitable free area found for length {:#x}", length);
                 return Err(-1);
             }
         }
@@ -511,18 +512,20 @@ impl MemorySet {
         if prot != mmap::MMapProt::PROT_NONE {
             permission |= MapPermission::U;
         }
-
+        //println!("[kernel] mmap: mapping area [{:#x}, {:#x}) with permissions {:?}", start_va, start_va + length, permission);
         // 映射区域
         self.insert_file_area(
-            VirtAddr::from(start_va),
-            VirtAddr::from(start_va + length),
+        VirtAddr::from(start_va),
+        VirtAddr::from(start_va + length),
             permission,
         );
         #[cfg(target_arch = "loongarch64")]
         Self::flush_tlb_after_mapping_change();
         Ok(start_va)
+        
     }
 
+    /// 在当前地址空间中寻找一个长度为 length 的空闲连续区域
     pub fn find_free_area(&self, length: usize) -> Option<usize> {
         // 从用户空间的 0x4000_0000 开始往上找
          //println!("[kernel] find_free_area: finding free area for length {:#x}", length);
@@ -535,16 +538,31 @@ impl MemorySet {
 
         // 获取按起始虚拟页号排序后的区域列表
         
+        // 搜索起点：LoongArch 推荐的用户基址 0x1_2000_0000
+        let mut current_addr: usize = USER_APP_BASE;
+        // 搜索终点：用户虚拟空间上限 (39位宽下为 512GB)
+        let limit_addr: usize = USER_APP_MAX_SIZE; 
         
+        // 获取按起始虚拟页号排序后的区域列表
         let mut sorted_areas: Vec<_> = self.areas.iter().collect();
         sorted_areas.sort_by_key(|a| a.vpn_range.get_start());
+        
+        for _area in sorted_areas.iter() {
+            /*println!(
+                "[kernel] find_free_area: existing area [{:#x}, {:#x})",
+                area.vpn_range.get_start().0 * PAGE_SIZE,
+                area.vpn_range.get_end().0 * PAGE_SIZE
+            );*/
+        }
         
         for area in sorted_areas {
             let area_start: usize = area.vpn_range.get_start().0 * PAGE_SIZE;
             if current_addr + length <= area_start {
                 return Some(current_addr);
             }
-            let area_end: usize = area.vpn_range.get_end().into();
+            
+            // 否则，将探测点更新为当前区域的结束地址
+            let area_end: usize = area.vpn_range.get_end().0 * PAGE_SIZE;
             if area_end > current_addr {
                 current_addr = area_end;
             }
@@ -594,6 +612,10 @@ impl MemorySet {
                     let right_ft = mid_ft.split_off(&end_vpn);
                     // 中间部分解除映射
                     drop(mid_ft);
+                    // 从页表中清除
+                    for vpn in VPNRange::new(start_vpn, end_vpn) {
+                        area.unmap_one(&mut self.page_table, vpn);
+                    }
                      for vpn in VPNRange::new(start_vpn, end_vpn) {
                         area.unmap_one(&mut self.page_table, vpn);
                     }
@@ -631,6 +653,8 @@ impl MemorySet {
             |area| area.vpn_range.get_start() < area.vpn_range.get_end()||
             area.vpn_range.get_start() <= brk_end.into()//brk之前的全部保留
             );
+        #[cfg(target_arch = "loongarch64")]
+        Self::flush_tlb_after_mapping_change();
              #[cfg(target_arch = "loongarch64")]
         Self::flush_tlb_after_mapping_change();
         Ok(())

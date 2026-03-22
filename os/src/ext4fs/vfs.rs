@@ -130,19 +130,19 @@ impl VfsInode for Ext4Inode {
     }
 
     fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>> {
-        println!("VFS: Creating directory '{}' in inode {}", name, self.inode_id);
+        info!("VFS: Creating directory '{}' in inode {}", name, self.inode_id);
         if !self.is_dir() {
-            println!("VFS: create_dir failed - inode {} is not a directory", self.inode_id);
+            info!("VFS: create_dir failed - inode {} is not a directory", self.inode_id);
             return None;
         }
         // 1. 判断目录项
         if self.find(name).is_some() {
-            println!("VFS: Directory '{}' already exists in inode {}", name, self.inode_id);
+            info!("VFS: Directory '{}' already exists in inode {}", name, self.inode_id);
             return None;
         }
         // 2. 分配 Inode_id
         let new_inode_id = self.fs.alloc_inode()?;
-        println!("VFS: Creating directory '{}' with inode id {}", name, new_inode_id);
+        info!("VFS: Creating directory '{}' with inode id {}", name, new_inode_id);
         // 3. 在磁盘上初始化该 Inode 结构
         let (block_id, offset) = self.fs.get_inode_pos(new_inode_id);
         let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
@@ -181,6 +181,11 @@ impl VfsInode for Ext4Inode {
         self.delete_dir_entry(name)
     }
 
+    fn dec_link_count(&self) -> bool {
+        self.fs.decrease_link_count(self.inode_id);
+        true
+    }
+
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
         if !self.is_dir() {
             return -1;
@@ -216,7 +221,7 @@ impl VfsInode for Ext4Inode {
                         let d_reclen = (total_len + 7) & !7; 
                         
                         if buf_offset + d_reclen > buf_len {
-                            println!("VFS: getdents buffer full, stopping read");
+                          //  println!("VFS: getdents buffer full, stopping read");
                             break; 
                         }
 
@@ -257,7 +262,7 @@ impl VfsInode for Ext4Inode {
         }
 
         if !last_name.is_empty() {
-             //println!("VFS: getdents last entry name: {}", last_name);
+           //  println!("VFS: getdents last entry name: {}", last_name);
         }
 
         buf_offset as isize

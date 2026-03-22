@@ -23,8 +23,6 @@ pub use pcb::*;
 use manager::*;
 use crate::sync::*;
 
-
-
 /// 任务处理器，改为pub供外部调用
 pub mod processor;
 
@@ -32,9 +30,9 @@ mod switch;
 /// fork相关实现
 pub mod clone;
 #[allow(clippy::module_inception)]
-
-
+#[allow(unused)]
 use crate::fs::ROOT_DENTRY;
+#[allow(unused)]
 use crate::fs::{open_file, OpenFlags};
 pub use crate::process::id::*;
 use alloc::sync::Arc;
@@ -42,7 +40,7 @@ pub use context::TaskContext;
 use lazy_static::*;
 use manager::fetch_task;
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
+pub use task::{TaskControlBlock, TaskStatus, TaskControlBlockInner};
 
 pub use action::{SignalAction, SignalActions};
 pub use manager::{add_task, tid2task};
@@ -176,15 +174,35 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     schedule(&mut _unused as *mut _);
 }
 
+#[repr(C)]
+struct InitProcData<T: ?Sized> {
+    pub _align: [u64; 0],
+    pub bytes: T,
+}
+
+#[link_section = ".data"]
+#[cfg(target_arch = "riscv64")]
+static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
+    _align: [],
+    bytes: *include_bytes!("../arch/riscv/initproc"),
+};
+
+#[link_section = ".data"]
+#[cfg(target_arch = "loongarch64")]
+static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
+    _align: [],
+    bytes: *include_bytes!("../arch/la/initproc"),
+};
+
 lazy_static! {
     /// Creation of initial process
     ///
     /// the name "initproc" may be changed to any other app name like "usertests",
     /// but we have user_shell, so we don't need to change it.
     pub static ref INITTASK: Arc<TaskControlBlock> = {
-        let inode = open_file(ROOT_DENTRY.clone(),"ch7b_initproc", OpenFlags::RDONLY).unwrap();
-        let v = inode.read_all();
-        let (proc, task) =  ProcessControlBlock::new(v.as_slice());
+        //let inode = open_file(ROOT_DENTRY.clone(),"ch7b_initproc", OpenFlags::RDONLY).unwrap();
+        //let v = inode.read_all();
+        let (proc, task) =  ProcessControlBlock::new(&INITPROC_DATA.bytes);
         // 将 initproc 加入全局进程列表
         add_process(proc);
         task
