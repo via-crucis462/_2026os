@@ -104,7 +104,21 @@ pub fn trap_handler() -> ! {
         trace!("[kernel] trap_handler: .. check signals {}", msg);
         exit_current_and_run_next(errno);
     }
+    let killed = current_task().unwrap().inner_exclusive_access().killed;
+    if killed {
+        // -1 代表异常退出，如果是 SIGSEGV，也可以传它的信号值 (比如 11)
+        exit_current_and_run_next(-1); 
+    }
+    let final_cx = current_trap_cx();
+    if final_cx.get_rt() == 0xfffffffffffffffe {
+        println!("\n[BINGO] sepc became -2 just before returning to user space!");
+        println!("Syscall ID (a7) was: {}", final_cx.x[17]);
+        println!("Return value (a0) is: {}", final_cx.x[10]);
+        println!("Current PID: {}", current_task().unwrap().tid.0);
+        loop {} // 冻结 CPU！
+    }
     trap_return();
+    
 }
 
 // 注意：不用VirtAddr包装，因为sv39要求高位符号扩展

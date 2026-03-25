@@ -538,14 +538,57 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         }
 
         let all_data = app_inode.read_all();
+        if all_data.len() < 4 || &all_data[0..4] != &[0x7f, 0x45, 0x4c, 0x46] {
+            debug!("[kernel] sys_exec: not an ELF file, returning ENOEXEC for {}", path);
+            return -8; 
+        }
+        let elf = xmas_elf::ElfFile::new(&all_data).unwrap();
+        let mut interp_path: Option<String> = None;
+
+        // 遍历 ELF 的所有段，寻找类型为 Interp (解释器/动态链接器) 的段
+        for ph in elf.program_iter() {
+            if ph.get_type() == Ok(xmas_elf::program::Type::Interp) {
+                let offset = ph.offset() as usize;
+                let size = ph.file_size() as usize;
+                // 从文件数据中切出路径字符串，并去掉末尾的 '\0' 字符
+                let interp_str = core::str::from_utf8(&all_data[offset..offset + size])
+                    .unwrap_or("")
+                    .trim_end_matches('\0'); 
+                
+                interp_path = Some(interp_str.to_string());
+                println!("[kernel] sys_exec: Found interpreter: {}", interp_str);
+                break;
+            }
+        }
+        let mut interp_data: Option<Vec<u8>> = None;
+        if let Some(ref path) = interp_path {
+            let clean_path = if path.starts_with("/") { &path[1..] } else { path.as_str() };
+            let actual_path = match clean_path {
+                "lib/ld-musl-riscv64.so.1" => "musl/lib/libc.so",
+                "lib/ld-linux-riscv64-lp64d.so.1" => "glibc/lib/ld-linux-riscv64-lp64d.so.1",
+                _ => clean_path,
+            };
+            debug!("[kernel] sys_exec: redirecting interpreter path from '{}' to '{}'", clean_path, actual_path);
+            debug!("[kernel] sys_exec: trying to open interpreter at '{}'", clean_path);
+            
+            // 去根目录找这个解释器文件
+            if let Some(interp_inode) = open_file(ROOT_DENTRY.clone(), actual_path, OpenFlags::RDONLY) {
+                let data = interp_inode.read_all();
+                debug!("[kernel] sys_exec: interpreter loaded, size={}", data.len());
+                interp_data = Some(data);
+            } else {
+                debug!("[kernel] sys_exec: failed to open interpreter {}", actual_path);
+                return ENOENT.as_isize(); 
+            }
+        }
         let task = current_task().unwrap();
         let argc = args_vec.len();
         debug!("[kernel] sys_exec: before task.exec, current working dir={}, path='{}', argc={}, args={:?}", cwd.name, path, argc, args_vec);
-        task.process().exec(task, all_data.as_slice(), args_vec, on_main_hart);
+        task.process().exec(task, all_data.as_slice(), interp_data.as_deref(), args_vec, on_main_hart);
         let task = current_task().unwrap();
         let task_inner = task.inner_exclusive_access();
         let trap_cx = task_inner.get_trap_cx();
-        /*println!(
+        println!(
             "[kernel][exec-debug] done: hart={}, pid={}, tid={}, task_cx.ra={:#x}, task_cx.sp={:#x}, trap.sepc={:#x}, trap.sp={:#x}, trap.ksp={:#x}, trap_addr={:#x}",
             get_hart_id(),
             task.getpid(),
@@ -556,7 +599,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             trap_cx.x[2],
             trap_cx.kernel_sp,
             task_inner.trap_cx_addr
-        );*/
+        );
         trace!("[kernel] sys_exec: after task.exec");
         // return argc because cx.x[10] will be covered with it later
         argc as isize

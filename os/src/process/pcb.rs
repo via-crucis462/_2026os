@@ -186,9 +186,46 @@ impl ProcessControlBlock {
 
     /// Load a new elf to replace the original application address space and 
     /// 待修改
-    pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8], args: Vec<String>, on_main_hart: bool) {
+    pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8],interp_data: Option<&[u8]>, args: Vec<String>, on_main_hart: bool) {
         // 生成新地址空间
         let (mut memory_set, mut user_sp, entry_point, phdr_addr, phnum, phent) = MemorySet::from_elf(elf_data);
+        let mut final_entry_point = entry_point; // 默认入口为主程序入口
+        const INTERP_BASE: usize = 0x40000000;   // 给解释器找一个宽敞的基地址（避开主程序）
+        const AT_BASE: usize = 7;                // 辅助向量里代表解释器基址的 ID
+
+        if let Some(interp) = interp_data {
+            // 解析解释器的 ELF
+            let elf = xmas_elf::ElfFile::new(interp).unwrap();
+            // 新的入口点 = 解释器的基地址 + 解释器 ELF 里的偏移
+            final_entry_point = INTERP_BASE + elf.header.pt2.entry_point() as usize;
+
+            // 遍历解释器的所有段，把 LOAD 段映射进当前进程的页表
+            for ph in elf.program_iter() {
+                if ph.get_type() == Ok(xmas_elf::program::Type::Load) {
+                    let start_va = INTERP_BASE + ph.virtual_addr() as usize;
+                    let end_va = start_va + ph.mem_size() as usize;
+                    
+                    let mut map_perm = crate::mm::MapPermission::U; // 记得确认你的 MapPermission 路径
+                    let ph_flags = ph.flags();
+                    if ph_flags.is_read() { map_perm |= crate::mm::MapPermission::R; }
+                    if ph_flags.is_write() { map_perm |= crate::mm::MapPermission::W; }
+                    if ph_flags.is_execute() { map_perm |= crate::mm::MapPermission::X; }
+                    
+                    let map_area = crate::mm::MapArea::new(
+                        start_va.into(),
+                        end_va.into(),
+                        crate::mm::MapType::Framed,
+                        map_perm,
+                    );
+                    
+                    let offset = ph.offset() as usize;
+                    let file_size = ph.file_size() as usize;
+                    let data = &interp[offset..offset + file_size];
+                    
+                    memory_set.push(map_area, Some(data),start_va); 
+                }
+            }
+        }
         debug!(
             "[kernel] task::exec: entry_point={:#x}, user_sp={:#x}",
             entry_point, user_sp
@@ -222,8 +259,12 @@ impl ProcessControlBlock {
         auxv.push((AT_PAGESZ, 4096));
         auxv.push((AT_ENTRY, entry_point));
         auxv.push((AT_RANDOM, random_at));
-        auxv.push((0, 0)); // AT_NULL
+         // AT_NULL
         // 压入 AUXV
+        if interp_data.is_some() {
+            auxv.push((AT_BASE, INTERP_BASE));
+        }
+        auxv.push((0, 0));
         for (id, val) in auxv.iter().rev() {
             user_sp -= core::mem::size_of::<usize>();
             *translated_refmut(memory_set.token(), user_sp as *mut usize) = *val;
@@ -290,7 +331,7 @@ impl ProcessControlBlock {
 
         // 修改trap上下文
         let mut trap_cx = TrapContext::app_init_context(
-            entry_point,
+            final_entry_point,
             user_sp, // 让用户程序一进来 sp 就指向 argc
             KERNEL_SPACE.exclusive_access().token(),
             kernel_stack_top,
