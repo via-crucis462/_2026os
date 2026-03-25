@@ -1,6 +1,7 @@
 use super::{VfsInode, Stat, Statx, ROOT_DENTRY};
 use alloc::sync::Arc;
 use alloc::string::String;
+use crate::fs::TmpfsDirInode;
 
 
 
@@ -125,18 +126,12 @@ impl VfsInode for MountsInode {
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
 pub fn mount_procfs() {
-    println!("[VFS] Mounting pseudo-filesystem: /proc");
-
-    let proc_dir = Arc::new(ProcDirInode);
-    let meminfo = Arc::new(MemInfoInode);
-
-
-    let proc_dentry = ROOT_DENTRY.insert(String::from("proc"), proc_dir);
+    let proc_dentry = ROOT_DENTRY.insert(String::from("proc"), Arc::new(TmpfsDirInode::new()));
     
-
-    proc_dentry.insert(String::from("meminfo"), meminfo);
+    // 2. 往这个内存目录里塞入特殊的虚拟文件
+    proc_dentry.insert(String::from("meminfo"), Arc::new(MemInfoInode));
     proc_dentry.insert(String::from("mounts"), Arc::new(MountsInode));
     
-    println!("[VFS] /proc/meminfo mounted successfully!");
+    println!("[VFS] /proc/meminfo and mounts mounted successfully!");
 }
 

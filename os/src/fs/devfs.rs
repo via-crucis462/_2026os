@@ -1,6 +1,7 @@
 use super::{VfsInode, Stat, Statx, ROOT_DENTRY};
 use alloc::sync::Arc;
 use alloc::string::String;
+use crate::fs::tmpfs::TmpfsDirInode;
 
 
 // 1. /dev 目录本身
@@ -119,21 +120,15 @@ impl VfsInode for RtcInode {
 }
 
 // 4. 执行挂载
-
 pub fn mount_devfs() {
     println!("[VFS] Mounting pseudo-filesystem: /dev");
+    // 这里用 TmpfsDirInode 替代你之前写的只读的 DevDirInode
+    let dev_dentry = ROOT_DENTRY.insert(String::from("dev"), Arc::new(TmpfsDirInode::new()));
     
-    let dev_dir = Arc::new(DevDirInode);
-    let null_inode = Arc::new(NullInode);
-    let zero_inode = Arc::new(ZeroInode);
-
-    // 在根目录下挂载 dev
-    let dev_dentry = ROOT_DENTRY.insert(String::from("dev"), dev_dir);
-    let rtc_inode = Arc::new(RtcInode);
-    dev_dentry.insert(String::from("rtc"), rtc_inode.clone());
-    // 在 dev 目录下挂载 null 和 zero
-    dev_dentry.insert(String::from("null"), null_inode);
-    dev_dentry.insert(String::from("zero"), zero_inode);
+    dev_dentry.insert(String::from("null"), Arc::new(NullInode));
+    dev_dentry.insert(String::from("zero"), Arc::new(ZeroInode));
+    dev_dentry.insert(String::from("rtc"), Arc::new(RtcInode));
     
-    println!("[VFS] /dev/null and /dev/zero mounted successfully!");
+    // shm 共享内存测试必备，里面建的文件直接吃内存，正经的 Tmpfs！
+    dev_dentry.insert(String::from("shm"), Arc::new(TmpfsDirInode::new())); 
 }

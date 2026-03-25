@@ -117,6 +117,7 @@ fn main_init(hart_id: usize) {
     mm::init();
     mm::remap_test();
     arch::trap::init();
+    fs::init_test_env();
     fs::mount_procfs();
     fs::mount_devfs();
     fs::list_apps();
@@ -155,10 +156,10 @@ fn other_init() {
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger();
-    fs::mount_procfs();
+   /*  fs::mount_procfs();
     fs::mount_devfs();
     fs::list_apps();
-    task::add_initproc();
+    task::add_initproc();*///ai说的这段不正常
     task::run_tasks();
 }
 
@@ -189,8 +190,6 @@ pub fn rust_main() -> ! {
     fs::mount_procfs();
     fs::mount_devfs();
     fs::list_apps();
-    fs::mount_procfs();
-    fs::mount_devfs();
     task::add_initproc();
     arch::trap::enable_timer_interrupt();
     task::run_tasks();

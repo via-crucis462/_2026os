@@ -7,6 +7,7 @@ mod dir_entry;
 mod file_tree;
 mod procfs;
 mod devfs;
+mod tmpfs;
 pub use devfs::mount_devfs;
 pub use procfs::mount_procfs;
 pub use dir_entry::DirEntry;
@@ -14,6 +15,8 @@ pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
 pub use file_tree::{Dentry};
 use crate::mm::UserBuffer;
 use alloc::sync::Arc;
+use alloc::string::String;
+use crate::fs::tmpfs::TmpfsDirInode;
 /// trait File for all file types
 pub trait File: Send + Sync {
     /// the file readable?
@@ -153,3 +156,13 @@ bitflags! {
 pub use inode::{list_apps, OpenFlags, open_file, ROOT_INODE, ROOT_VFS_INODE, make_dir, OSInode};
 pub use pipe::{make_pipe, Pipe};
 pub use stdio::{Stdin, Stdout};
+
+
+
+pub fn init_test_env() {
+println!("[VFS] Mounting true Tmpfs directories in memory...");
+
+    ROOT_DENTRY.insert(String::from("tmp"), Arc::new(TmpfsDirInode::new()));
+    ROOT_DENTRY.insert(String::from("var"), Arc::new(TmpfsDirInode::new()));
+}
+

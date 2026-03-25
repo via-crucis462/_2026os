@@ -556,7 +556,6 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
                     .trim_end_matches('\0'); 
                 
                 interp_path = Some(interp_str.to_string());
-                println!("[kernel] sys_exec: Found interpreter: {}", interp_str);
                 break;
             }
         }
@@ -588,7 +587,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         let task = current_task().unwrap();
         let task_inner = task.inner_exclusive_access();
         let trap_cx = task_inner.get_trap_cx();
-        println!(
+        /*println!(
             "[kernel][exec-debug] done: hart={}, pid={}, tid={}, task_cx.ra={:#x}, task_cx.sp={:#x}, trap.sepc={:#x}, trap.sp={:#x}, trap.ksp={:#x}, trap_addr={:#x}",
             get_hart_id(),
             task.getpid(),
@@ -599,7 +598,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             trap_cx.x[2],
             trap_cx.kernel_sp,
             task_inner.trap_cx_addr
-        );
+        );*/
         trace!("[kernel] sys_exec: after task.exec");
         // return argc because cx.x[10] will be covered with it later
         argc as isize
