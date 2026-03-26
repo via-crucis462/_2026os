@@ -64,7 +64,7 @@ pub fn trap_handler() -> ! {
         Trap::Exception(Exception::UserEnvCall) => {
             let mut cx = current_trap_cx();
             cx.set_rt(cx.get_rt() + 4);
-            // get system call return value
+            // get system call return valuehandle_signals
             let result = syscall(
                 cx.x[17], 
                 [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]]
@@ -76,6 +76,42 @@ pub fn trap_handler() -> ! {
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_trigger();
             suspend_current_and_run_next();
+        }
+        Trap::Exception(Exception::StorePageFault) |
+        Trap::Exception(Exception::LoadPageFault) |
+        Trap::Exception(Exception::InstructionPageFault) => {
+            let task = current_task().unwrap();
+            let process = task.process(); 
+            let mut process_inner = process.inner_exclusive_access();
+            
+            // 【修改 1】：获取当前的栈指针 SP
+            let sp = current_trap_cx().x[2];
+            
+            // 【修改 2】：把 sp 传进去，支持动态扩栈
+            if process_inner.memory_set.handle_page_fault(stval, sp) {
+                // 修复成功！释放锁
+                drop(process_inner);
+                drop(process);
+                drop(task);
+            } else {
+                drop(process_inner);
+                drop(process);
+                drop(task);
+                
+                println!(
+                    "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}, sp={:#x}",
+                    crate::task::current_task().unwrap().process().pid.0,
+                    scause.cause(),
+                    current_trap_cx().get_rt(),
+                    stval,
+                    sp
+                );
+                
+                // 取消原来的 current_add_signal(SignalFlags::SIGSEGV);
+                // 发信号压栈死循环。
+                // 直接以 11 (SIGSEGV的默认信号值) 退出码击毙当前进程！
+                crate::task::exit_current_and_run_next(11);
+            }
         }
         _ => {
             println!(

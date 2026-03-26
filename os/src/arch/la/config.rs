@@ -11,7 +11,7 @@ pub const PAGE_SIZE: usize = 0x1000;
 pub const PAGE_SIZE_BITS: usize = 12;
 
 /// user app's stack size
-pub const USER_STACK_SIZE: usize = PAGE_SIZE * 2;
+pub const USER_STACK_SIZE: usize = 0x20000;
 /// kernel stack size
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 2;
 /// kernel heap size

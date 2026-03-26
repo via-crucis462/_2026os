@@ -374,11 +374,13 @@ impl MemorySet {
             memory_set.push(new_area, None, start_va.0);
             // copy data from another space
             for vpn in area.vpn_range {
-                let src_ppn = user_space.translate(vpn).unwrap().ppn();
-                let dst_ppn = memory_set.translate(vpn).unwrap().ppn();
-                dst_ppn
-                    .get_bytes_array()
-                    .copy_from_slice(src_ppn.get_bytes_array());
+                if let Some(src_pte) = user_space.translate(vpn) {
+                    if src_pte.is_valid() {
+                        let src_ppn = src_pte.ppn();
+                        let dst_ppn = memory_set.translate(vpn).unwrap().ppn();
+                        dst_ppn.get_bytes_array().copy_from_slice(src_ppn.get_bytes_array());
+                    }
+                }
             }
         }
 
@@ -576,87 +578,83 @@ impl MemorySet {
     }
     /// munmap的实现
     /// 注意：不允许取消映射brk之前的区域
-    pub fn munmap(&mut self, start: usize, length: usize) -> Result<(),i32> {
+    pub fn munmap(&mut self, start: usize, length: usize) -> Result<(), i32> {
         let brk_idx = self.brk_index;
-        let brk_area = &self.areas[brk_idx];// brk area
-        let _brk_start = brk_area.vpn_range.get_start().0 * PAGE_SIZE;
+        let brk_area = &self.areas[brk_idx];
         let brk_end = brk_area.vpn_range.get_end().0 * PAGE_SIZE;
 
         let end = start + length;
-        let start_vpn = VirtAddr::from(start).floor();// 目标起始页号
-        let end_vpn = VirtAddr::from(end).ceil();// 目标结束页号
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
 
-        // 可能存在的新area，写在外面以避免for循环中self引用问题引发的报错
-        let mut new_area: Option<MapArea> = None;
+        // 收集因从中间截断而产生的新右半部分区域
+        let mut new_areas: Vec<MapArea> = Vec::new();
 
         for area in self.areas.iter_mut() {
-            // 暂时未检查是否：取消映射trampoline
+            let a_start = area.vpn_range.get_start();
+            let a_end = area.vpn_range.get_end();
 
-            // 找到有重合部分的区域
-            if area.vpn_range.get_start() < end_vpn && area.vpn_range.get_end() > start_vpn {// 有交集;
-                let inc_left = area.vpn_range.get_start() >= start_vpn;// 删左边部分
-                let inc_right = area.vpn_range.get_end() <= end_vpn;// 删右边部分
-                let split = (!inc_left) & (!inc_right);// 从中间分开成两个部分
-                let all = inc_left & inc_right;// 删掉整个区域
+            // 检查是否有交集
+            if a_start < end_vpn && a_end > start_vpn {
+                let delete_left = a_start >= start_vpn; // 目标区域覆盖了当前块的左侧
+                let delete_right = a_end <= end_vpn;    // 目标区域覆盖了当前块的右侧
 
-
-                if all {
-                    // 使其长度为0, 稍后再删除
-                    area.shrink_to(&mut self.page_table, area.vpn_range.get_start());
-                } else if split {
-                    // 缩短自身，成为新段的左边部分
-                    let old_end = area.vpn_range.get_end();
-                    let mut mid_ft = area.data_frames.split_off(&start_vpn);
-                    area.resize(area.vpn_range.get_start(), start_vpn);
-                    // 取出右边保留部分的ft
-                    let right_ft = mid_ft.split_off(&end_vpn);
-                    // 中间部分解除映射
-                    drop(mid_ft);
-                    // 从页表中清除
+                if delete_left && delete_right {
+                    // 情况1：All（当前块被目标区域完全包裹，全部删掉）
+                    for vpn in VPNRange::new(a_start, a_end) {
+                        area.unmap_one(&mut self.page_table, vpn);
+                    }
+                    area.resize(a_start, a_start); // 长度设为0，稍后统一 retain 清理
+                    
+                } else if !delete_left && !delete_right {
+                    // 情况2：Split（目标区域在当前块中间，一分为二）
+                    // 2.1 清理中间被 unmap 的页表和物理页
                     for vpn in VPNRange::new(start_vpn, end_vpn) {
                         area.unmap_one(&mut self.page_table, vpn);
                     }
-                     for vpn in VPNRange::new(start_vpn, end_vpn) {
-                        area.unmap_one(&mut self.page_table, vpn);
-                    }
-                    // 新建右边部分
-                    new_area = Some(MapArea::new(
-                        VirtAddr::from(end),
-                        VirtAddr::from(old_end),
+                    // 2.2 切出右半部分保留的物理帧
+                    let right_frames = area.data_frames.split_off(&end_vpn);
+                    // 2.3 缩短当前块，作为左半部分
+                    area.resize(a_start, start_vpn);
+                    // 2.4 新建右半部分
+                    let mut right_area = MapArea::new(
+                        VirtAddr::from(end_vpn.0 * PAGE_SIZE),
+                        VirtAddr::from(a_end.0 * PAGE_SIZE),
                         area.map_type,
                         area.map_perm,
-                    ));
-                    new_area.as_mut().unwrap().data_frames = right_ft;
-                } else if inc_left {
-                    // 解除映射左边部分
-                    for vpn in VPNRange::new(area.vpn_range.get_start(), end_vpn) {
+                    );
+                    right_area.data_frames = right_frames;
+                    new_areas.push(right_area);
+                    
+                } else if delete_left {
+                    // 情况3：Inc_Left（删掉左边部分）
+                    for vpn in VPNRange::new(a_start, end_vpn) {
                         area.unmap_one(&mut self.page_table, vpn);
                     }
-                    // 调整范围
-                    area.resize(end_vpn, area.vpn_range.get_end());
-                } else if inc_right {
-                    // 删右边部分
-                    area.shrink_to(&mut self.page_table, start_vpn);
+                    area.resize(end_vpn, a_end);
+                    
+                } else if delete_right {
+                    // 情况4：Inc_Right（删掉右边部分）
+                    for vpn in VPNRange::new(start_vpn, a_end) {
+                        area.unmap_one(&mut self.page_table, vpn);
+                    }
+                    area.resize(a_start, start_vpn);
                 }
-
             }
         }
 
-        // 如果有，插入新area
-        if let Some(area) = new_area {
-            self.areas.push(area);
-        }
+        // 插入劈开产生的新区域
+        self.areas.extend(new_areas);
 
-        // 删除长度为0的area
-        // 但不删除brk之前
-        self.areas.retain(
-            |area| area.vpn_range.get_start() < area.vpn_range.get_end()||
-            area.vpn_range.get_start() <= brk_end.into()//brk之前的全部保留
-            );
+        // 删除长度为0的区域，但不删除brk及之前的区域
+        self.areas.retain(|area| {
+            area.vpn_range.get_start() < area.vpn_range.get_end() ||
+            area.vpn_range.get_start() <= VirtAddr::from(brk_end).floor()
+        });
+
         #[cfg(target_arch = "loongarch64")]
         Self::flush_tlb_after_mapping_change();
-             #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
+
         Ok(())
     }
     // brk的实现（通过调整brk区域大小实现）
@@ -680,6 +678,102 @@ impl MemorySet {
             }
         }
         Ok(addr)
+    }
+    pub fn brk(&mut self, addr: usize) -> Result<usize, i32> {
+        let brk_area = &mut self.areas[self.brk_index];
+        let old_brk = brk_area.vpn_range.get_end().0 * PAGE_SIZE;
+        
+        if addr == 0 {
+            return Ok(old_brk);
+        }
+        
+        let start_vpn = brk_area.vpn_range.get_start();
+        let new_end_vpn = VirtAddr::from(addr).ceil();
+
+        if addr > old_brk {
+            // 扩大堆区：只修改虚拟页号范围，物理页等缺页异常(handle_page_fault)去分配
+            brk_area.resize(start_vpn, new_end_vpn);
+        } else if addr < old_brk {
+            if addr < start_vpn.0 * PAGE_SIZE {
+                return Err(-1); // 不允许把堆缩到起点之前
+            }
+            // 缩小堆区：不仅改范围，还要真正回收多余的物理页
+            brk_area.shrink_to(&mut self.page_table, new_end_vpn);
+        }
+        Ok(addr)
+    }
+    /// 处理缺页异常。如果触发异常的地址在合法区域内，则为其分配物理页；否则返回 false。
+    #[no_mangle]
+    #[inline(never)]
+    pub fn handle_page_fault(&mut self, bad_addr: usize, sp: usize) -> bool {
+        let vpn = VirtAddr::from(bad_addr).floor();
+        let page_table = &mut self.page_table;
+        
+        // 1. 遍历寻找包含该虚拟页号的合法内存段 (MapArea)
+        if let Some(area) = self.areas.iter_mut().find(|a| {
+            vpn >= a.vpn_range.get_start() && vpn < a.vpn_range.get_end()
+        }) {
+            // 2. 检查该页是否已经在页表中映射
+            if let Some(pte) = page_table.translate(vpn) {
+                if pte.is_valid() {
+                    // 已经映射却还报 Fault，通常是非法写只读段
+                    return false; 
+                }
+            }
+            
+            // 3. 确认为合法的未映射页（惰性分配触发），立刻分配物理帧并映射！
+            area.map_one(page_table, vpn);
+            
+            #[cfg(target_arch = "loongarch64")]
+            Self::flush_tlb_after_mapping_change();
+            
+            return true; // 惰性分配修复成功！
+        }
+        
+        // ==========================================================
+        // 4. 【新增】：动态扩张用户栈 (Dynamic Stack Growth)
+        // ==========================================================
+        let sp_vpn = VirtAddr::from(sp).floor();
+        
+        // 设定一个栈最大允许单次/总共扩张的大小，比如 32 页 (128KB)，防止恶意程序耗尽内存
+        const MAX_EXPAND_PAGES: usize = 32;
+
+        let mut expand_idx = None;
+        for (idx, area) in self.areas.iter().enumerate() {
+            let start_vpn = area.vpn_range.get_start();
+            
+            // 检查缺页地址(vpn)是否紧贴着该段的下方，且距离不超过限制
+            if vpn < start_vpn && (start_vpn.0 - vpn.0) <= MAX_EXPAND_PAGES {
+                // 进一步确认：缺页确实发生在栈指针(sp)附近，这证明是正常的压栈行为
+                if vpn.0 <= sp_vpn.0 && (sp_vpn.0 - vpn.0) <= MAX_EXPAND_PAGES {
+                    expand_idx = Some((idx, start_vpn));
+                    break;
+                }
+            }
+        }
+
+        if let Some((idx, old_start_vpn)) = expand_idx {
+            // 执行扩张：将该 Area 的起点向下延伸到 vpn (注意保留原来的终点)
+            self.areas[idx].vpn_range = crate::mm::address::VPNRange::new(
+                vpn,
+                self.areas[idx].vpn_range.get_end()
+            );
+            
+            // 为刚刚扩张出来的这些虚拟页（从 vpn 到 old_start_vpn）全部分配物理帧并映射
+            for v in vpn.0..old_start_vpn.0 {
+                // 假设你引入了 VirtPageNum
+                self.areas[idx].map_one(page_table, VirtPageNum::from(v));
+            }
+            
+            #[cfg(target_arch = "loongarch64")]
+            Self::flush_tlb_after_mapping_change();
+            
+            // trace!("[kernel] User stack dynamically expanded down to {:#x}", bad_addr);
+            return true; // 栈扩张修复成功！
+        }
+
+        // 5. 如果既不在合法区域，也不符合栈扩张规则，则是真正的野指针/无可救药的溢出
+        false
     }
 
 }
@@ -743,10 +837,18 @@ impl MapArea {
         page_table.map(vpn, ppn, pte_flags);
     }
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
-        if self.map_type == MapType::Framed {
-            self.data_frames.remove(&vpn);
+        match self.map_type {
+            MapType::Framed | MapType::File => {
+                // 只有当惰性物理页真正存在时（remove 成功），才去解除页表映射
+                if self.data_frames.remove(&vpn).is_some() {
+                    page_table.unmap(vpn);
+                }
+            }
+            MapType::Identical => {
+                // 恒等映射通常是一次性全映射的，直接解映射
+                page_table.unmap(vpn);
+            }
         }
-        page_table.unmap(vpn);
     }
     pub fn map(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {

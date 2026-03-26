@@ -773,14 +773,32 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
 pub fn sys_brk(addr: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
-    trace!("kernel:pid[{}] sys_brk", process.pid.0);
-    if let Ok(res) = mmap::do_brk(addr){
-        res as isize
+    
+    // 1. 先拿到当前的 brk 位置
+    let mut inner = process.inner_exclusive_access();
+    let current_brk = inner.program_brk;
+    
+    trace!("kernel:pid[{}] sys_brk: request addr={:#x}, current_brk={:#x}", process.pid.0, addr, current_brk);
+
+    // 2. 按照 Linux 规范，如果传入 0，意思是“查询当前 brk 在哪”
+    if addr == 0 {
+        return current_brk as isize;
+    }
+
+    // 3. 释放 inner 锁，防止 mmap::do_brk 内部再次获取 process 锁导致死锁！
+    drop(inner); 
+
+    // 4. 调用底层的 brk 处理逻辑
+    if let Ok(new_brk) = mmap::do_brk(addr) {
+        // 成功的话，记得一定要把进程的 program_brk 更新掉
+        let mut inner = process.inner_exclusive_access();
+        inner.program_brk = new_brk;
+        new_brk as isize
     } else {
-        current_task().unwrap().process().inner_exclusive_access().program_brk as isize
+        // 失败的话，返回原来的 brk
+        current_brk as isize
     }
 }
-
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
 pub fn sys_spawn(_path: *const u8) -> isize {
