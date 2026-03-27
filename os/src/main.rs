@@ -117,6 +117,7 @@ fn main_init(hart_id: usize) {
     mm::init();
     mm::remap_test();
     arch::trap::init();
+    fs::setup_oscomp_env();
     fs::init_test_env();
     fs::mount_procfs();
     fs::mount_devfs();

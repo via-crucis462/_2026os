@@ -67,58 +67,90 @@ impl Dentry {
     /// 递归查找完整路径，例如 "bin/sh" 或 "/bin/sh"
     /// 将self作为起点，不考虑路径是否以'/'开头
     pub fn find_tree(self: &Arc<Self>, path: &str, follow_links: bool) -> Option<Arc<Dentry>> {
-        
-        if path == "." || path == "" {
+        if path.is_empty() {
             return Some(self.clone());
         }
-        let segments: alloc::vec::Vec<&str> = path
+
+        // 1. 确定搜索起点
+        let mut current = if path.starts_with('/') {
+            ROOT_DENTRY.clone()
+        } else {
+            self.clone()
+        };
+
+        // 2. 将路径拆解为动态组件队列 (忽略 ".")
+        let mut components: alloc::vec::Vec<String> = path
             .split('/')
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && *s != ".")
+            .map(String::from)
             .collect();
-        
-        let mut current = self.clone();
-        let num_segments = segments.len();
-        //println!("Dentry::find_tree: current={}, path={}, follow_links={}", current.name, path, follow_links);
-        
-        for (i, seg) in segments.into_iter().enumerate() {
-            if seg == "." {
-                continue;
-            } else if seg == ".." {
+
+        let mut symlink_depth = 0;
+        const MAX_SYMLINK_DEPTH: usize = 8; // 最大软链接解析深度
+
+        // 3. 核心迭代解析循环
+        while !components.is_empty() {
+            let comp = components.remove(0); // 取出当前要解析的层级
+
+            // 处理上一级目录 ".."
+            if comp == ".." {
                 if let Some(parent) = current.parent.upgrade() {
                     current = parent;
                 }
                 continue;
             }
-            
-            let next = current.find_child(seg)?;
-            
-            // 符号链接处理
+
+            // 查找子节点（利用你写好的带缓存的 find_child）
+            let next = current.find_child(&comp)?;
+
+            // 检查是不是软链接
             let stat = next.inode.get_stat();
-            if (stat.mode & 0o170000) == 0o120000 { // S_IFLNK
-                // 如果是最后一个路径分量且不需要追踪链接，则直接返回
-                if i == num_segments - 1 && !follow_links {
-                    return Some(next);
-                }
+            let is_symlink = (stat.mode & 0o170000) == 0o120000; // S_IFLNK
+
+            if is_symlink {
+                let is_last_segment = components.is_empty();
                 
-                // 否则追踪链接
+                // 如果是最后一个路径分量且不需要追踪链接（对应 O_NOFOLLOW），直接返回软链接的 Dentry
+                if is_last_segment && !follow_links {
+                    current = next;
+                    break;
+                }
+
+                // 深度检查，防止 A -> B -> A 死循环炸掉内核栈
+                symlink_depth += 1;
+                if symlink_depth > MAX_SYMLINK_DEPTH {
+                    warn!("[VFS] find_tree: ELOOP (Too many levels of symbolic links) path='{}'", path);
+                    return None;
+                }
+
+                // 读取软链接指向的目标路径
                 let size = stat.size as usize;
                 let mut buffer = alloc::vec![0u8; size];
-                next.inode.read_at(0, &mut buffer);
-                let target_path = core::str::from_utf8(&buffer).unwrap();
-                
-                let base = if target_path.starts_with('/') {
-                    ROOT_DENTRY.clone()
-                } else {
-                    current.clone()
-                };
-                
-                // 递归查找目标路径（限制深度以防死循环）
-                current = base.find_tree(target_path, true)?;
+                let read_len = next.inode.read_at(0, &mut buffer);
+                let target_path = alloc::string::String::from_utf8_lossy(&buffer[..read_len]).into_owned();
+
+                // 如果软链接目标是绝对路径，起点直接切回根目录
+                if target_path.starts_with('/') {
+                    current = ROOT_DENTRY.clone();
+                }
+
+                // 把软链接目标拆解，作为新的路径前缀塞入队列
+                let mut new_comps: alloc::vec::Vec<String> = target_path
+                    .split('/')
+                    .filter(|s| !s.is_empty() && *s != ".")
+                    .map(String::from)
+                    .collect();
+
+                // 原有剩下的路径接在展开的软链接后面
+                new_comps.extend(components);
+                components = new_comps;
+
             } else {
-                //println!("Dentry::find_tree: found segment '{}'", seg);
+                // 普通文件或目录，正常步进
                 current = next;
             }
         }
+
         Some(current)
     }
 

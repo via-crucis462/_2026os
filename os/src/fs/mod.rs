@@ -7,7 +7,8 @@ mod dir_entry;
 mod file_tree;
 mod procfs;
 mod devfs;
-mod tmpfs;
+pub mod tmpfs;
+pub use tmpfs::setup_oscomp_env;
 pub use devfs::mount_devfs;
 pub use procfs::mount_procfs;
 pub use dir_entry::DirEntry;
@@ -17,6 +18,8 @@ use crate::mm::UserBuffer;
 use alloc::sync::Arc;
 use alloc::string::String;
 use crate::fs::tmpfs::TmpfsDirInode;
+use alloc::collections::VecDeque; // 如果你用了队列
+
 /// trait File for all file types
 pub trait File: Send + Sync {
     /// the file readable?
@@ -138,6 +141,44 @@ pub trait VfsInode: Send + Sync {
     fn rename_dir_entry(&self, _old_name: &str, _new_name: &str) -> bool{
         false
     }
+    /// 1. 创建软链接
+    /// 在当前目录下创建一个名为 `name` 的软链接，指向 `target`
+    fn create_symlink(&self, name: &str, target: &str) -> Option<Arc<dyn VfsInode>> {
+        // 0o120777 代表 S_IFLNK (0o120000) 加上 777 权限
+        // 这个 mode 位会被你的底层识别为 0xA000 (因为 0o120000 换算成 16 进制正是 0xA000)
+        let inode = self.create_file(name, 0o120777)?; 
+        
+        // 直接调用 write_at，它会自动判断小于 60 字节的进 i_block，大于的进数据块！
+        let bytes = target.as_bytes();
+        let written = inode.write_at(0, bytes);
+        
+        if written == bytes.len() {
+            Some(inode)
+        } else {
+            // 写入失败时最好删掉刚创建的 entry，这里做简单的防御性返回
+            trace!("VFS: create_symlink failed to write target path");
+            None
+        }
+    }
+
+    fn readlink(&self) -> String {
+        let size = self.get_size();
+        if size == 0 {
+            return String::new();
+        }
+        
+        // 分配对应大小的缓冲区，调用你已经写好的 read_at 逻辑读取目标路径
+        let mut buf = alloc::vec![0u8; size];
+        self.read_at(0, &mut buf);
+        
+        // 转换为字符串并返回
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+    /// 3. 创建硬链接
+    fn link(&self, name: &str, inode: Arc<dyn VfsInode>) -> bool {
+        false
+    }
+    
 }
 
 bitflags! {
@@ -150,6 +191,8 @@ bitflags! {
         const DIR   = 0o040000;
         /// ordinary regular file
         const FILE  = 0o100000;
+        // symbolic link (S_IFLNK)  
+        const SYMLINK = 0o120000;
     }
 }
 
@@ -165,4 +208,6 @@ println!("[VFS] Mounting true Tmpfs directories in memory...");
     ROOT_DENTRY.insert(String::from("tmp"), Arc::new(TmpfsDirInode::new()));
     ROOT_DENTRY.insert(String::from("var"), Arc::new(TmpfsDirInode::new()));
 }
+
+const MAX_SYMLINK_DEPTH: usize = 8; // 地雷1：防止无限递归导致内核栈溢出
 

@@ -2,6 +2,7 @@
 //! 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
 //! 内存管理也暂时放在此处
 use crate::get_hart_id;
+use alloc::vec;
 pub use crate::{
     arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, 
     fs::*, 
@@ -487,127 +488,113 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let task = current_task().unwrap();
     let cwd = task.process().inner_exclusive_access().cwd.clone();
     drop(task);
-    let path = normalize_leading_dot_path(translated_str(token, path));
+    
+    let path_str = normalize_leading_dot_path(translated_str(token, path));
     let mut args_vec: Vec<String> = Vec::new();
+    
+    // 提取原始参数数组
     loop {
         let arg_str_ptr = *translated_ref(token, args);
-        if arg_str_ptr == 0 {
-            break;
-        }
+        if arg_str_ptr == 0 { break; }
         let arg_str = translated_str(token, arg_str_ptr as *const u8);
-        debug!("[kernel] sys_exec: arg='{}'", arg_str);
         args_vec.push(arg_str);
-        unsafe {
-            args = args.add(1);
+        unsafe { args = args.add(1); }
+    }
+    
+    trace!("[kernel] sys_exec: before open_file");
+    
+    // 1. 尝试正常打开主程序
+    let mut app_inode_opt = open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY);
+
+    // 2. 【核心修复】如果找不到文件且请求的是标准命令，尝试重定向到 busybox
+    if app_inode_opt.is_none() && (path_str.contains("bin/") || !path_str.contains("/")) {
+        let requested_cmd = crate::fs::file_name(path_str.as_str());
+        
+        // 根据环境路径选择 busybox 位置
+        let busybox_path = if path_str.contains("musl") { "/musl/busybox" } else { "/glibc/busybox" };
+
+        debug!("[kernel] sys_exec: '{}' not found, falling back to {}", path_str, busybox_path);
+        
+        if let Some(busybox_inode) = open_file(ROOT_DENTRY.clone(), busybox_path, OpenFlags::RDONLY) {
+             // 重新构造参数：["busybox", "cmd", "arg1", ...]
+             // 这样 busybox 就能通过 argv[1] 知道你想跑什么命令
+             let mut new_args = vec!["busybox".to_string(), requested_cmd.clone()];
+             if args_vec.len() > 1 {
+                 new_args.extend(args_vec[1..].iter().cloned());
+             }
+             args_vec = new_args;
+             app_inode_opt = Some(busybox_inode);
         }
     }
-    trace!("[kernel] sys_exec: before open_file");
-    let mut on_main_hart = false;
-    if let Some(mut app_inode) = open_file(cwd.clone(), path.as_str(), OpenFlags::RDONLY) {
+
+    // 3. 继续执行逻辑
+    if let Some(mut app_inode) = app_inode_opt {
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
-        // initproc和shell在主核上运行
-        if app_inode.get_dentry().name.contains("shell") || app_inode.get_dentry().name.contains("init") {
+        
+        let mut on_main_hart = false;
+        let app_name = app_inode.get_dentry().name.clone();
+        if app_name.contains("shell") || app_name.contains("init") {
             on_main_hart = true;
         }
-        if app_inode.get_dentry().name.ends_with(".sh") {
-            let busybox = "/musl/busybox".to_string();
-            
-
-            let mut busybox_inode_opt: Option<Arc<OSInode>> = None;
-            debug!("[kernel] sys_exec: trying to open busybox at '{}'", busybox);
-            if let Some(inode) = open_file(ROOT_DENTRY.clone(), busybox.as_str(), OpenFlags::RDONLY) {
-                busybox_inode_opt = Some(inode);
-            }
-
-            if busybox_inode_opt.is_none() {
-                debug!("[kernel] sys_exec: open busybox failed for script '{}': tried {:?}", path, busybox);
+        
+        // 脚本处理逻辑 (.sh)
+        if app_name.ends_with(".sh") {
+            let busybox = "/musl/busybox";
+            if let Some(inode) = open_file(cwd.clone(), busybox, OpenFlags::RDONLY) {
+                let mut new_args = vec!["busybox".to_string(), "sh".to_string()];
+                // 如果脚本没带参数，把脚本路径加进去
+                if args_vec.len() <= 1 { new_args.push(path_str.clone()); }
+                new_args.extend(args_vec);
+                args_vec = new_args;
+                app_inode = inode;
+            } else {
                 return ENOENT.as_isize();
             }
-
-            let mut new_args:Vec<String> = Vec::new();
-            new_args.push("busybox".to_string());
-            new_args.push("sh".to_string());
-            if args_vec.is_empty() {
-                new_args.push(path.clone());
-            }
-            for arg in args_vec.iter(){
-                new_args.push(arg.clone());
-            }
-            args_vec = new_args;
-            app_inode = busybox_inode_opt.unwrap();
         }
 
         let all_data = app_inode.read_all();
+        // 验证 ELF 签名
         if all_data.len() < 4 || &all_data[0..4] != &[0x7f, 0x45, 0x4c, 0x46] {
-            debug!("[kernel] sys_exec: not an ELF file, returning ENOEXEC for {}", path);
-            return -8; 
+            return -8; // ENOEXEC
         }
+        
         let elf = xmas_elf::ElfFile::new(&all_data).unwrap();
         let mut interp_path: Option<String> = None;
 
-        // 遍历 ELF 的所有段，寻找类型为 Interp (解释器/动态链接器) 的段
+        // 寻找动态链接器 (Interp)
         for ph in elf.program_iter() {
             if ph.get_type() == Ok(xmas_elf::program::Type::Interp) {
                 let offset = ph.offset() as usize;
                 let size = ph.file_size() as usize;
-                // 从文件数据中切出路径字符串，并去掉末尾的 '\0' 字符
                 let interp_str = core::str::from_utf8(&all_data[offset..offset + size])
-                    .unwrap_or("")
-                    .trim_end_matches('\0'); 
-                
+                    .unwrap_or("").trim_end_matches('\0'); 
                 interp_path = Some(interp_str.to_string());
                 break;
             }
         }
+        
         let mut interp_data: Option<Vec<u8>> = None;
-        if let Some(ref path) = interp_path {
-            let clean_path = if path.starts_with("/") { &path[1..] } else { path.as_str() };
-            let actual_path = match clean_path {
-                "lib/ld-musl-riscv64.so.1" => "musl/lib/libc.so",
-                "lib/ld-linux-riscv64-lp64d.so.1" => "glibc/lib/ld-linux-riscv64-lp64d.so.1",
-                _ => clean_path,
-            };
-            debug!("[kernel] sys_exec: redirecting interpreter path from '{}' to '{}'", clean_path, actual_path);
-            debug!("[kernel] sys_exec: trying to open interpreter at '{}'", clean_path);
-            
-            // 去根目录找这个解释器文件
-            if let Some(interp_inode) = open_file(ROOT_DENTRY.clone(), actual_path, OpenFlags::RDONLY) {
-                let data = interp_inode.read_all();
-                debug!("[kernel] sys_exec: interpreter loaded, size={}", data.len());
-                interp_data = Some(data);
+        if let Some(ref interp) = interp_path {
+            debug!("[kernel] sys_exec: loading interpreter at '{}'", interp);
+            if let Some(interp_inode) = open_file(cwd.clone(), interp.as_str(), OpenFlags::RDONLY) {
+                interp_data = Some(interp_inode.read_all());
             } else {
-                debug!("[kernel] sys_exec: failed to open interpreter {}", actual_path);
                 return ENOENT.as_isize(); 
             }
         }
+        
         let task = current_task().unwrap();
         let argc = args_vec.len();
-        debug!("[kernel] sys_exec: before task.exec, current working dir={}, path='{}', argc={}, args={:?}", cwd.name, path, argc, args_vec);
+        
+        // 真正开始替换进程空间
         task.process().exec(task, all_data.as_slice(), interp_data.as_deref(), args_vec, on_main_hart);
-        let task = current_task().unwrap();
-        let task_inner = task.inner_exclusive_access();
-        let trap_cx = task_inner.get_trap_cx();
-        /*println!(
-            "[kernel][exec-debug] done: hart={}, pid={}, tid={}, task_cx.ra={:#x}, task_cx.sp={:#x}, trap.sepc={:#x}, trap.sp={:#x}, trap.ksp={:#x}, trap_addr={:#x}",
-            get_hart_id(),
-            task.getpid(),
-            task.gettid(),
-            task_inner.task_cx.ra,
-            task_inner.task_cx.sp,
-            trap_cx.get_rt(),
-            trap_cx.x[2],
-            trap_cx.kernel_sp,
-            task_inner.trap_cx_addr
-        );*/
-        trace!("[kernel] sys_exec: after task.exec");
-        // return argc because cx.x[10] will be covered with it later
+        
         argc as isize
     } else {
-        warn!("[kernel] sys_exec: open_file failed");
+        warn!("[kernel] sys_exec: failed to locate executable for {}", path_str);
         ENOENT.as_isize()
     }
 }
-
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {

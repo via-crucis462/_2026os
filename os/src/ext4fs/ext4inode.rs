@@ -355,7 +355,30 @@ impl Ext4Inode {
 
         let old_size_bytes = self.fs.get_disk_inode(self.inode_id).size() as usize;
         let end = offset + buf.len();
-        
+        if self.is_symlink() && end <= 60 {
+            let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
+            let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
+            block_cache.lock().modify(inode_offset, |disk_inode: &mut Ext4InodeDisk| {
+                let mut i_block_bytes = [0u8; 60];
+                // 1. 先把原有的 i_block 数据读出来
+                for i in 0..15 {
+                    i_block_bytes[i * 4..(i + 1) * 4].copy_from_slice(&disk_inode.i_block[i].to_le_bytes());
+                }
+                // 2. 将新的字符串覆盖进去
+                i_block_bytes[offset..end].copy_from_slice(buf);
+                // 3. 写回 i_block (转换回 u32 数组)
+                for i in 0..15 {
+                    disk_inode.i_block[i] = u32::from_le_bytes(i_block_bytes[i * 4..(i + 1) * 4].try_into().unwrap());
+                }
+                
+                // 4. 更新磁盘 Inode 大小
+                if end > old_size_bytes {
+                    disk_inode.i_size_lo = end as u32;
+                    disk_inode.i_size_high = 0;
+                }
+            });
+            return buf.len(); // 写入成功，直接返回
+        }
         while curr_offset < end {
             let inner_block_id = (curr_offset / block_size) as u32;
             let block_pos = curr_offset % block_size;
