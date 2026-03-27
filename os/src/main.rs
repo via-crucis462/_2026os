@@ -117,10 +117,11 @@ fn main_init(hart_id: usize) {
     mm::init();
     mm::remap_test();
     arch::trap::init();
-    fs::setup_oscomp_env();
-    fs::init_test_env();
+
+    fs::init_test_env(); 
     fs::mount_procfs();
-    fs::mount_devfs();
+    fs::setup_oscomp_env(); 
+    
     fs::list_apps();
     task::add_initproc();
     arch::trap::enable_timer_interrupt();

@@ -6,29 +6,6 @@ use crate::fs::tmpfs::TmpfsDirInode;
 
 // 1. /dev 目录本身
 
-pub struct DevDirInode;
-
-impl VfsInode for DevDirInode {
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
-    fn get_size(&self) -> usize { 0 }
-    fn get_stat(&self) -> Stat {
-        Stat {
-            dev: 0, ino: 900,
-            mode: 0o040555, // 0o040000 目录, 0o555 读/执行权限
-            nlink: 2,
-            uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
-            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
-            ctime_sec: 0, ctime_nsec: 0, __unused: [0;1],
-        }
-    }
-    fn get_statx(&self) -> Statx { unimplemented!() }
-    fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
-    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
-    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
-    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
-    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { 0 }
-}
 
 // 2. /dev/null
 
@@ -131,4 +108,23 @@ pub fn mount_devfs() {
     
     // shm 共享内存测试必备，里面建的文件直接吃内存，正经的 Tmpfs！
     dev_dentry.insert(String::from("shm"), Arc::new(TmpfsDirInode::new())); 
+}
+
+impl NullInode {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl ZeroInode {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+// 如果你有 RtcInode，也顺手补一个
+impl RtcInode {
+    pub fn new() -> Self {
+        Self
+    }
 }

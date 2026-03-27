@@ -175,7 +175,7 @@ impl Dentry {
             return Some(new_child);
         }
         // 3. 磁盘也没找到，按照要求 panic
-        error!("VFS: File '{}' not found in directory '{}'", name, self.name);
+        trace!("VFS: File '{}' not found in directory '{}'", name, self.name);
         None
     }
 

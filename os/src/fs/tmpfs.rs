@@ -5,6 +5,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 use crate::fs::ROOT_DENTRY;
 use alloc::vec;
+use crate::fs::devfs::NullInode;
+use crate::fs::devfs::ZeroInode;
+use crate::fs::devfs::RtcInode;
+
 // 全局唯一的 Inode 分配器
 static TMPFS_INO_COUNTER: AtomicUsize = AtomicUsize::new(10000);
 
@@ -132,57 +136,73 @@ impl super::VfsInode for TmpfsDirInode {
 }
 
 pub fn setup_oscomp_env() {
-    info!("VFS: Building virtual FHS directories using Tmpfs...");
+    println!("[VFS] INFO: Start setup_oscomp_env...");
     let root = ROOT_DENTRY.clone();
 
-    // 1. 创建基于 Tmpfs 的虚拟目录 Inode
-    let bin_dir: Arc<dyn super::VfsInode> = Arc::new(TmpfsDirInode::new());
-    let sbin_dir: Arc<dyn super::VfsInode> = Arc::new(TmpfsDirInode::new());
-    let usr_dir: Arc<dyn super::VfsInode> = Arc::new(TmpfsDirInode::new());
-    let usr_bin_dir: Arc<dyn super::VfsInode> = Arc::new(TmpfsDirInode::new());
-    let lib_dir: Arc<dyn super::VfsInode> = Arc::new(TmpfsDirInode::new());
+    // 1. 挂载 /tmp (解决嫌疑一，LTP 刚需！)
+    root.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new()));
+    println!("[VFS] Mounted /tmp");
 
-    // 2. 将这些虚拟目录挂载到全局 Dentry 树中
-    // 这让它们在 VFS 层面完全“真实存在”
-    let bin_dentry = root.insert("bin".to_string(), bin_dir);
-    let sbin_dentry = root.insert("sbin".to_string(), sbin_dir);
-    let usr_dentry = root.insert("usr".to_string(), usr_dir);
-    let usr_bin_dentry = usr_dentry.insert("bin".to_string(), usr_bin_dir);
-    let lib_dentry = root.insert("lib".to_string(), lib_dir);
+    // 2. 挂载 bin, sbin, usr 等虚拟目录
+    let bin_dentry = root.insert("bin".to_string(), Arc::new(TmpfsDirInode::new()));
+    let sbin_dentry = root.insert("sbin".to_string(), Arc::new(TmpfsDirInode::new()));
+    let usr_dentry = root.insert("usr".to_string(), Arc::new(TmpfsDirInode::new()));
+    let usr_bin_dentry = usr_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new()));
+    let lib_dentry = root.insert("lib".to_string(), Arc::new(TmpfsDirInode::new()));
 
-    info!("VFS: Virtual directories /bin, /sbin, /usr/bin, /lib mounted");
-
-    // 3. 寻找实际磁盘上的 busybox 和动态链接库
+    // 3. 将 Busybox 和 libc 的真实 Inode 映射进虚拟目录
     if let Some(musl_dir) = root.find_tree("/musl", true) {
         
-        // --- 处理所有的基础命令 (映射到 busybox) ---
+        // --- 降维打击：批量注入 Busybox 命令 ---
         if let Some(busybox_node) = musl_dir.find_child("busybox") {
-            let busybox_inode = busybox_node.inode.clone();
+            let bb_inode = busybox_node.inode.clone();
             
-            // LTP 测试常用的 busybox 小工具列表
-            let applets = vec![
-                "basename", "dirname", "sh", "grep", "sed", "awk", 
-                "cat", "ls", "rm", "echo", "true", "false", "wc", "mkdir"
+            // 覆盖所有 LTP 和脚本常用的命令
+            let applets = [
+                "basename", "dirname", "sh", "grep", "sed", "awk", "cat", 
+                "ls", "rm", "echo", "true", "false", "wc", "mkdir", "rmdir", "touch", "env"
             ];
             
             for app in applets {
-                // 核心：把 busybox 的实体 Inode 以不同名字直接塞进虚拟目录的 Dentry 里！
-                // 这相当于在内存里创建了硬链接。
-                bin_dentry.insert(app.to_string(), busybox_inode.clone());
-                sbin_dentry.insert(app.to_string(), busybox_inode.clone());
-                usr_bin_dentry.insert(app.to_string(), busybox_inode.clone());
+                bin_dentry.insert(app.to_string(), bb_inode.clone());
+                sbin_dentry.insert(app.to_string(), bb_inode.clone());
+                usr_bin_dentry.insert(app.to_string(), bb_inode.clone());
             }
-            info!("VFS: Busybox applets populated");
+            println!("[VFS] Populated busybox applets");
         }
+        let dev_dentry = if let Some(dev) = root.find_tree("/dev", true) {
+            dev
+        } else {
+            // 理论上不会走到这，因为你在 mount_devfs 已经建了
+            root.insert("dev".to_string(), Arc::new(TmpfsDirInode::new()))
+        };
 
-        // --- 处理动态链接库 (让 ELF 加载器能找到 libc.so) ---
-        // 假设 libc.so 在 /musl/libc.so 或者 /musl/lib/libc.so
-        // 这里以 /musl/libc.so 为例，如果你的在 lib 下请改为 find_tree("/musl/lib/libc.so", true)
+        // 安全地把 shm 塞进现有的 /dev 里
+        dev_dentry.insert("shm".to_string(), Arc::new(TmpfsDirInode::new()));
+        dev_dentry.insert("null".to_string(), Arc::new(NullInode::new())); 
+        dev_dentry.insert("zero".to_string(), Arc::new(ZeroInode::new()));
+        dev_dentry.insert("rtc".to_string(), Arc::new(RtcInode::new()));
+
+        // 2. 挂载 shm
+        dev_dentry.insert("shm".to_string(), Arc::new(TmpfsDirInode::new()));
+        println!("[VFS] Mounted /dev/shm safely");
+        if root.find_tree("/dev/shm", true).is_some() {
+        println!("DEBUG: /dev/shm path is VALID");
+        } else {
+            println!("DEBUG: /dev/shm path is BROKEN!");
+        }
+        // --- 挂载动态链接库 ---
         if let Some(libc_node) = root.find_tree("/musl/libc.so", true).or_else(|| root.find_tree("/musl/lib/libc.so", true)) {
-            // RISC-V MUSL 的 ELF 头通常会找 ld-musl-riscv64.so.1
             lib_dentry.insert("ld-musl-riscv64.so.1".to_string(), libc_node.inode.clone());
             lib_dentry.insert("libc.so".to_string(), libc_node.inode.clone());
-            info!("VFS: libc.so symlinks populated");
+            println!("[VFS] Populated libc.so symlinks");
         }
+    } else {
+        println!("[VFS] WARNING: /musl not found, skipped busybox mapping.");
+    }
+    if root.find_tree("/dev/shm", true).is_some() {
+    println!("DEBUG: /dev/shm path is VALID");
+    } else {
+        println!("DEBUG: /dev/shm path is BROKEN!");
     }
 }

@@ -506,27 +506,6 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     // 1. 尝试正常打开主程序
     let mut app_inode_opt = open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY);
 
-    // 2. 【核心修复】如果找不到文件且请求的是标准命令，尝试重定向到 busybox
-    if app_inode_opt.is_none() && (path_str.contains("bin/") || !path_str.contains("/")) {
-        let requested_cmd = crate::fs::file_name(path_str.as_str());
-        
-        // 根据环境路径选择 busybox 位置
-        let busybox_path = if path_str.contains("musl") { "/musl/busybox" } else { "/glibc/busybox" };
-
-        debug!("[kernel] sys_exec: '{}' not found, falling back to {}", path_str, busybox_path);
-        
-        if let Some(busybox_inode) = open_file(ROOT_DENTRY.clone(), busybox_path, OpenFlags::RDONLY) {
-             // 重新构造参数：["busybox", "cmd", "arg1", ...]
-             // 这样 busybox 就能通过 argv[1] 知道你想跑什么命令
-             let mut new_args = vec!["busybox".to_string(), requested_cmd.clone()];
-             if args_vec.len() > 1 {
-                 new_args.extend(args_vec[1..].iter().cloned());
-             }
-             args_vec = new_args;
-             app_inode_opt = Some(busybox_inode);
-        }
-    }
-
     // 3. 继续执行逻辑
     if let Some(mut app_inode) = app_inode_opt {
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
