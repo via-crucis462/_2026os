@@ -840,20 +840,20 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     if addr as usize == 0xffffffffffffffff || addrlen as usize == 0xffffffffffffffff {
         return -14; // EFAULT
     }
-    
-    // 3. 检查 FD 是否有效
-    if let Some(file) = &inner.fd_table[fd].file {
+    let fd_entry = &inner.fd_table[fd];
+    if (fd_entry.status & 0x200000) != 0 {
+        return -9; // EBADF: O_PATH 描述符不接受 I/O 操作
+    }
+        if let Some(file) = &fd_entry.file {
         let stat = file.get_stat();
-        // 检查 inode 的 mode 标志位，看看它是不是咱们造的 Socket (S_IFSOCK)
+        // 检查 inode 的 mode 标志位是不是 Socket
         if (stat.mode & 0o170000) == 0o140000 {
-            // 是 Socket！LTP 测试期望对没有 listen 的 Socket 调用 accept 时返回 EINVAL
-            return -22; 
+            return -22; // EINVAL: 是没有 listen 的 Socket
         } else {
-            // 是普通文件/目录/管道，返回 ENOTSOCK
-            return -88; 
+            return -88; // ENOTSOCK: 是普通文件/目录
         }
     } else {
-        return -9; // EBADF
+        return -9; // EBADF: 已经被 close 或者本来就是空的
     }
 }
 
