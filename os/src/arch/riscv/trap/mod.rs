@@ -56,6 +56,16 @@ pub fn enable_timer_interrupt() {
 #[no_mangle]
 pub fn trap_handler() -> ! {
     trace!("[kernel] trap_handler: a trap from user space");
+    let scause = riscv::register::scause::read();
+    let sepc = riscv::register::sepc::read();
+    let stval = riscv::register::stval::read();
+
+    log::debug!(
+        "trap_handler: cause: {:?}, sepc: {:#x}, stval: {:#x}", 
+        scause.cause(), 
+        sepc, 
+        stval
+    );
     set_kernel_trap_entry();
     let scause = scause::read();
     let stval = stval::read();

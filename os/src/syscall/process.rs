@@ -2,6 +2,7 @@
 //! 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
 //! 内存管理也暂时放在此处
 use crate::get_hart_id;
+use crate::process::FileDescriptor;
 use alloc::vec;
 pub use crate::{
     arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, 
@@ -1045,15 +1046,39 @@ pub fn sys_pselect6(
     }
 }
 pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
-    println!("[kernel] sys_socket(domain={}, type={}, protocol={})", domain, socket_type, protocol);
-    
+    // 1. 获取当前进程
     let task = current_task().unwrap();
-    let process = task.process();
-// 3. 获取进程的内部可变锁 (PCBInner)
+    let process = task.process(); 
     let mut inner = process.inner_exclusive_access();
-    let fd = inner.alloc_fd();
-    // 把假 Socket 塞进进程的文件描述符表里
-    // 伪代码: task.fd_table[fd] = Arc::new(DummySocketInode);
+    
+    // 2. 寻找空闲 FD 坑位
+    // 报错原因：fd_opt 现在是 &FileDescriptor，需要访问它的 .file 字段
+    let mut allocated_fd = None;
+    for (i, fd_desc) in inner.fd_table.iter().enumerate() {
+        if fd_desc.file.is_none() {
+            allocated_fd = Some(i);
+            break;
+        }
+    }
+    
+    // 3. 包装 Socket 文件
+    // 注意：这里需要根据你的 pcb.rs 构造 FileDescriptor 结构体
+    let socket_file = Arc::new(DummySocket);
+    let fd_desc = FileDescriptor {
+        file: Some(socket_file),
+        cloexec: false, // 默认不开启
+        status: 0,
+    };
+    
+    // 4. 插入到 fd_table
+    let fd = if let Some(idx) = allocated_fd {
+        inner.fd_table[idx] = fd_desc;
+        idx
+    } else {
+        let idx = inner.fd_table.len();
+        inner.fd_table.push(fd_desc);
+        idx
+    };
     
     fd as isize
 }

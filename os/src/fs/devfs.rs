@@ -7,30 +7,59 @@ use crate::fs::File;
 use crate::arch::sbi::console_getchar;
 use crate::task::suspend_current_and_run_next;
 // 1. /dev 目录本身
+
 pub struct TtyInode;
 
 impl TtyInode {
-    pub fn new() -> Self {
-        Self
-    }
+    pub fn new() -> Self { Self }
 }
 
-// ==========================================
-// 身份一：作为 VfsInode，以便能挂载到 /dev/tty
-// ==========================================
+// 唯一身份：VfsInode（OSInode 包装器会去调用它）
 impl super::VfsInode for TtyInode {
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    
+    // 把原来 File 里的读取键盘逻辑搬过来
+    fn read_at(&self, _offset: usize, buf: &mut [u8]) -> usize {
+        if buf.is_empty() { return 0; }
+        let mut c: usize;
+        loop {
+            c = console_getchar();
+            if c == 13 || c == '\r' as usize {
+                c = 10; // 回车转换行
+            }
+            if c == 0 || c == 0xffffffffffffffff {
+                suspend_current_and_run_next(); // 非阻塞挂起
+                continue;
+            } else {
+                break;
+            }
+        }
+        buf[0] = c as u8;
+        1 // 终端按行/字符缓冲，每次返回1个字符即可
+    }
+
+    // 真正的屏幕输出逻辑
+    fn write_at(&self, _offset: usize, buf: &[u8]) -> usize { 
+        if let Ok(s) = core::str::from_utf8(buf) {
+            print!("{}", s);
+        } else {
+            for &b in buf {
+                print!("{}", b as char);
+            }
+        }
+        buf.len() // 完美返回长度，骗过 C 库
+    }
+    
     fn get_size(&self) -> usize { 0 }
     
     fn get_stat(&self) -> super::Stat {
         super::Stat {
-            mode: 0o020000, // 核心约束：字符设备标志位
+            mode: 0o020000, // 字符设备标志位 (S_IFCHR)
             blksize: 4096,
             ..Default::default()
         }
     }
     
+    // 下面全部保持默认/空实现
     fn get_statx(&self) -> super::Statx { unimplemented!() }
     fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
@@ -38,85 +67,6 @@ impl super::VfsInode for TtyInode {
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
-
-// ==========================================
-// 身份二：作为 File 接口，处理具体 FD 的 I/O
-// ==========================================
-impl File for TtyInode {
-    fn readable(&self) -> bool { true }
-    fn writable(&self) -> bool { true }
-
-    /// 核心约束：安全读取，非阻塞挂起
-    fn read(&self, user_buf: UserBuffer) -> usize {
-        let mut count = 0;
-        // 核心约束：使用 into_iter() 获取指针，严禁越界/原始指针运算
-        for byte_ref in user_buf.into_iter() {
-            let mut c: usize;
-            loop {
-                c = console_getchar();
-                if c == 13 || c == '\r' as usize {
-                    c = 10; // 回车转换行
-                }
-                
-                // 核心约束：获取不到输入则主动释放 CPU，避免死锁 busy-loop
-                if c == 0 || c == 0xffffffffffffffff {
-                    suspend_current_and_run_next();
-                    continue;
-                } else {
-                    break;
-                }
-            }
-            
-            unsafe {
-                *byte_ref = c as u8;
-            }
-            count += 1;
-            break; // 每次只读取 1 字节（与你现有的 Stdin 逻辑保持一致，符合控制台标准行缓冲特性）
-        }
-        count
-    }
-
-    /// 核心约束：安全写入，支持多段缓冲区
-    fn write(&self, user_buf: UserBuffer) -> usize {
-        let mut count = 0;
-        // 核心约束：遍历 buffers 进行安全操作
-        for buffer in user_buf.buffers {
-            // 尝试使用 utf-8 打印。如果是合法字符则批量输出，性能更好
-            if let Ok(s) = core::str::from_utf8(buffer) {
-                print!("{}", s);
-            } else {
-                // 如果遇到非标准 UTF-8 二进制数据（部分测试用例会写奇怪的东西），降级为按字节强制打印
-                for &b in buffer.iter() {
-                    print!("{}", b as char);
-                }
-            }
-            count += buffer.len();
-        }
-        count
-    }
-
-    /// 核心约束：字符设备忽略 offset，直接转发给 read
-    fn read_at(&self, _offset: usize, buf: UserBuffer) -> usize {
-        self.read(buf)
-    }
-
-    /// 核心约束：字符设备忽略 offset，直接转发给 write
-    fn write_at(&self, _offset: usize, buf: UserBuffer) -> usize {
-        self.write(buf)
-    }
-
-    fn get_stat(&self) -> super::Stat {
-        super::Stat {
-            mode: 0o020000, // 字符设备
-            blksize: 4096,
-            ..Default::default()
-        }
-    }
-
-    fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
-}
-
-// 2. /dev/null
 
 pub struct NullInode;
 
