@@ -7,7 +7,7 @@ use crate::sync::MPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
 use virtio_drivers::{Hal, VirtIOBlk, VirtIOHeader};
-
+use virtio_drivers::DeviceType;
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000;
 /// VirtIOBlock device driver strcuture for virtio_blk device
@@ -59,11 +59,28 @@ impl BlockDevice for VirtIOBlock {
 
 impl VirtIOBlock {
     #[allow(unused)]
-    /// Create a new VirtIOBlock driver with VIRTIO0 base_addr for virtio_blk device
     pub fn new() -> Self {
+        let mut blk_addr: usize = 0;
+        
+        // 和网卡一样，动态扫描 8 个槽位寻找磁盘
+        for i in 1..=8 {
+            let addr = 0x10000000 + 0x1000 * i;
+            let header = unsafe { &mut *(addr as *mut VirtIOHeader) };
+            
+            if header.verify() && header.device_type() == DeviceType::Block {
+                println!("[kernel] Found virtio-blk device at {:#x}", addr);
+                blk_addr = addr;
+                break;
+            }
+        }
+        
+        if blk_addr == 0 {
+            panic!("[kernel] virtio-blk device not found!");
+        }
+
         unsafe {
             Self(MPSafeCell::new(
-                VirtIOBlk::<VirtioHal>::new(&mut *(VIRTIO0 as *mut VirtIOHeader)).unwrap(),
+                VirtIOBlk::<VirtioHal>::new(&mut *(blk_addr as *mut VirtIOHeader)).unwrap(),
             ))
         }
     }

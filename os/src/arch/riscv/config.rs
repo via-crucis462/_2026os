@@ -25,7 +25,7 @@ pub const MEMORY_END: usize = 0x88000000;
 /// 这里也定义一个
 pub const DMA_SIZE: usize = 0;
 /// The base address of control registers in Virtio_Block device
-pub const MMIO: &[(usize, usize)] = &[(0x10001000, 0x1000)];
+pub const MMIO: &[(usize, usize)] = &[(0x10001000, 0x8000),];
 
 /// 和la同步这个变量不过不设值
 pub const OFFSET_FOR_USER_APP: usize = 0;

@@ -44,6 +44,7 @@ pub mod syscall;
 pub mod process;
 
 pub use arch::config::*;
+use crate::drivers::block::NET_DEVICE;
 
 pub use process::task;
 #[allow(unused)]
@@ -117,7 +118,7 @@ fn main_init(hart_id: usize) {
     mm::init();
     mm::remap_test();
     arch::trap::init();
-
+    lazy_static::initialize(&NET_DEVICE);
     fs::init_test_env(); 
     fs::mount_procfs();
     fs::setup_oscomp_env(); 
