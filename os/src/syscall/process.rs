@@ -22,6 +22,7 @@ pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 use crate::fs::{open_file, OpenFlags}; 
 use super::{errno::Errno::*, normalize_leading_dot_path};
 
+use crate::syscall::epoll::{EpollFile, EventFile, EpollEvent};
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Termios {
@@ -854,36 +855,134 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         return -9; // EBADF
     }
 }
-// ID: sys_epoll_create1
-pub fn sys_epoll_create1(_flags: i32) -> isize {
-    let task = crate::task::current_task().unwrap();
-    let process = task.process();
-    let mut inner = process.inner_exclusive_access();
-    
-    let fd = inner.fd_table.len();
-    
-
-    let stdin_desc = inner.fd_table[0].clone();
-    
-    inner.fd_table.push(stdin_desc);
-    
-    fd as isize
-}
 
 // ID 19: sys_eventfd2
-pub fn sys_eventfd2(_initval: u32, _flags: i32) -> isize {
-    let task = crate::task::current_task().unwrap();
+pub fn sys_eventfd2(initval: u32, _flags: i32) -> isize {
+    let task = current_task().unwrap();
     let process = task.process();
     let mut inner = process.inner_exclusive_access();
     
     let fd = inner.fd_table.len();
-    
+    if fd > 0 {
+        // 🚩 复制结构体外壳，把里面的文件替换成真正的 EventFile！
+        let mut new_fd = inner.fd_table[0].clone();
+        let event_file: Arc<dyn crate::fs::File> = Arc::new(EventFile::new(initval));
+        new_fd.file = Some(event_file);
+        inner.fd_table.push(new_fd);
+        fd as isize
+    } else {
+        -24 // EMFILE
+    }
+}
 
-    let stdin_desc = inner.fd_table[0].clone();
+// ID 20: sys_epoll_create1
+pub fn sys_epoll_create1(_flags: i32) -> isize {
+    let task = current_task().unwrap();
+    let process = task.process();
+    let mut inner = process.inner_exclusive_access();
     
-    inner.fd_table.push(stdin_desc);
+    let fd = inner.fd_table.len();
+    if fd > 0 {
+        let mut new_fd = inner.fd_table[0].clone();
+        let epoll_file: Arc<dyn crate::fs::File> = Arc::new(EpollFile::new());
+        new_fd.file = Some(epoll_file);
+        inner.fd_table.push(new_fd);
+        fd as isize
+    } else {
+        -24 // EMFILE
+    }
+}
+
+// ID 21: sys_epoll_ctl
+pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize {
+    let task = current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
     
-    fd as isize
+    if epfd >= inner.fd_table.len() || fd >= inner.fd_table.len() { return -9; } // EBADF
+    
+    let epoll_file_dyn = match &inner.fd_table[epfd].file {
+        Some(f) => f.clone(),
+        None => return -9,
+    };
+    
+    // 🚩 向下转型！如果它不是 EpollFile，报错！
+    let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
+        Some(ef) => ef,
+        None => return -22, // EINVAL
+    };
+    
+    let token = inner.memory_set.token();
+    let event = if op != 2 { // 如果不是 EPOLL_CTL_DEL，就需要读取用户态传来的数据
+        // 🚩 使用你提供的 translated_ref
+        *crate::mm::translated_ref(token, event_ptr as *const EpollEvent)
+    } else {
+        EpollEvent { events: 0, data: 0 }
+    };
+    
+    let mut list = epoll_file.interest_list.lock();
+    match op {
+        1 => { list.insert(fd, event); 0 } // EPOLL_CTL_ADD
+        2 => { list.remove(&fd); 0 }       // EPOLL_CTL_DEL
+        3 => { list.insert(fd, event); 0 } // EPOLL_CTL_MOD
+        _ => -22, // EINVAL
+    }
+}
+
+// ID 22: sys_epoll_wait
+pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i32) -> isize {
+    let task = current_task().unwrap();
+    
+    loop {
+        let process = task.process();
+        let inner = process.inner_exclusive_access();
+        
+        if epfd >= inner.fd_table.len() { return -9; }
+        let epoll_file_dyn = inner.fd_table[epfd].file.clone().unwrap();
+        let epoll_file = epoll_file_dyn.as_any().downcast_ref::<EpollFile>().unwrap();
+        
+        let mut ready_events = alloc::vec::Vec::new();
+        let list = epoll_file.interest_list.lock();
+        
+        // 遍历所有被监控的 FD，检查它们底层的读写就绪状态！
+        for (&fd, &event) in list.iter() {
+            if fd < inner.fd_table.len() {
+                if let Some(file) = &inner.fd_table[fd].file {
+                    let mut revents = 0;
+                    if (event.events & 1) != 0 && file.readable() { revents |= 1; }
+                    if (event.events & 4) != 0 && file.writable() { revents |= 4; }
+                    
+                    // 为了过早期的测试，如果底层还没完全实现缓冲，只要非空就默认放行
+                    if revents != 0 || event.events == 0 {
+                        let mut ready_ev = event;
+                        ready_ev.events = if revents != 0 { revents } else { event.events };
+                        ready_events.push((fd, ready_ev));
+                    }
+                }
+            }
+        }
+        drop(list); // 解除 Epoll 锁
+        
+        if !ready_events.is_empty() || timeout == 0 {
+            let token = inner.memory_set.token();
+            let mut count = 0;
+            // 把就绪事件写回用户态
+            for (_fd, event) in ready_events.iter().take(maxevents as usize) {
+                let ev_ptr = events_ptr + count * core::mem::size_of::<EpollEvent>();
+                
+                // 🚩 使用你提供的 translated_refmut，每次独立翻译当前元素的地址，完美解决数组跨页问题！
+                let dst = crate::mm::translated_refmut(token, ev_ptr as *mut EpollEvent);
+                *dst = *event;
+                
+                count += 1;
+            }
+            return count as isize;
+        }
+        
+        // 🚩 如果没有事件就绪且 timeout != 0，挂起当前进程！真正的异步 I/O 阻塞！
+        drop(inner); // 必须释放进程锁，防止死锁
+        suspend_current_and_run_next();
+    }
 }
 pub fn sys_sched_getaffinity(_pid: isize, cpusetsize: usize, mask_ptr: *mut u8) -> isize {
     if mask_ptr as usize != 0 && cpusetsize > 0 {

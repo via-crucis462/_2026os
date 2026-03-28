@@ -11,8 +11,13 @@
 //! submodules, and you should also implement syscalls this way.
 
 /// dup syscall
+const EPOLL_CTL_ADD: i32 = 1;
+const EPOLL_CTL_DEL: i32 = 2;
+const EPOLL_CTL_MOD: i32 = 3;
 const SYSCALL_EVENTFD2: usize = 19;
 const SYSCALL_EPOLL_CREATE1: usize = 20;
+const SYSCALL_EPOLL_CTL: usize = 21;
+const SYSCALL_EPOLL_WAIT: usize = 22;
 const SYSCALL_DUP: usize = 23;
 /// dup2 syscall
 const SYSCALL_DUP2: usize = 24;
@@ -142,6 +147,7 @@ use process::*;
 use prctl::*;
 use alloc::string::String;
 
+
 use crate::{fs::Stat, task::{SignalAction, current_task}};
 
 pub(crate) fn normalize_leading_dot_path(path: String) -> String {
@@ -212,6 +218,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         
         SYSCALL_EVENTFD2 => sys_eventfd2(args[0] as u32, args[1] as i32),
         SYSCALL_EPOLL_CREATE1 => sys_epoll_create1(args[0] as i32),
+        SYSCALL_EPOLL_CTL => sys_epoll_ctl(args[0], args[1] as i32, args[2], args[3]),
+        SYSCALL_EPOLL_WAIT => sys_epoll_wait(args[0], args[1], args[2] as i32, args[3] as i32),
         SYSCALL_BIND => sys_bind(args[0], args[1], args[2]),
         SYSCALL_LISTEN => sys_listen(args[0], args[1] as i32),
         SYSCALL_SOCKET => sys_socket(args[0], args[1], args[2]),

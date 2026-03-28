@@ -18,8 +18,10 @@ pub use file_tree::{Dentry};
 use crate::mm::UserBuffer;
 use alloc::sync::Arc;
 use alloc::string::String;
-use alloc::collections::VecDeque; // 如果你用了队列
-
+use alloc::collections::VecDeque; 
+use core::any::Any;
+pub mod epoll; 
+pub use epoll::{EpollFile, EpollEvent}; 
 /// trait File for all file types
 pub trait File: Send + Sync {
     /// the file readable?
@@ -43,6 +45,9 @@ pub trait File: Send + Sync {
     fn get_dentry(&self) -> Option<Arc<Dentry>> { None }
     fn lseek(&self, _offset: isize, _whence: i32) -> isize {
         -29 
+    }
+    fn as_any(&self) -> &dyn Any {
+        unimplemented!("as_any not implemented for this file type")
     }
 }
 
