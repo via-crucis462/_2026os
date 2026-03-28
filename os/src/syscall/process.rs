@@ -1082,6 +1082,25 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     
     fd as isize
 }
+pub fn sys_add_key(_type: *const u8, _desc: *const u8, _payload: *const u8, _plen: usize, _ringid: i32) -> isize {
+    // 假装成功生成了一个密钥，返回一个随机的密钥序列号 (比如 9999)
+    9999
+}
+
+// ID 218: request_key
+pub fn sys_request_key(_type: *const u8, _desc: *const u8, _callout_info: *const u8, _ringid: i32) -> isize {
+    9999
+}
+
+// ID 219: keyctl
+pub fn sys_keyctl(_operation: i32, _arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
+    // 假装所有对密钥的操作都完美执行
+    0
+}
+pub fn sys_msync(_addr: usize, _len: usize, _flags: u32) -> isize {
+    // 我们的 shm 是纯内存文件系统，数据实时可见，不需要刷盘，直接伪装成功！
+    0
+}
 pub fn sys_times(tms_ptr: *mut usize) -> isize {
     let token = current_user_token();
     // 暂时伪实现，写0

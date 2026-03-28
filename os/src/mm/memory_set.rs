@@ -367,18 +367,54 @@ impl MemorySet {
         // map trampoline
         #[cfg(target_arch = "riscv64")]
         memory_set.map_trampoline();
+        
         // copy data sections/trap_context/user_stack
         for area in user_space.areas.iter() {
-            let mut new_area: MapArea = MapArea::from_another(area);
-            let start_va: VirtAddr = new_area.vpn_range.get_start().into();
-            memory_set.push(new_area, None, start_va.0);
-            // copy data from another space
-            for vpn in area.vpn_range {
-                if let Some(src_pte) = user_space.translate(vpn) {
-                    if src_pte.is_valid() {
-                        let src_ppn = src_pte.ppn();
-                        let dst_ppn = memory_set.translate(vpn).unwrap().ppn();
-                        dst_ppn.get_bytes_array().copy_from_slice(src_ppn.get_bytes_array());
+            if area.is_shared {
+                // ==========================================
+                // 🚀 黑魔法：共享内存！只拷页表，不拷数据！
+                // ==========================================
+                let mut new_area = MapArea::new(
+                    VirtAddr::from(area.vpn_range.get_start().0 * PAGE_SIZE),
+                    VirtAddr::from(area.vpn_range.get_end().0 * PAGE_SIZE),
+                    area.map_type,
+                    area.map_perm,
+                );
+                new_area.is_shared = true;
+
+                // 遍历父进程的虚拟页号
+                for vpn in area.vpn_range {
+                    if let Some(src_pte) = user_space.translate(vpn) {
+                        if src_pte.is_valid() {
+                            // 强行把子进程的虚拟页，映射到父进程的同一块物理页（PPN）上！
+                            let flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
+                            memory_set.page_table.map(vpn, src_pte.ppn(), flags);
+                        }
+                    }
+                }
+                // 注意：没有 copy_data，也没有生成 FrameTracker，完美共享！
+                memory_set.areas.push(new_area);
+
+            } else {
+                // ==========================================
+                // 🐢 传统流程：私有内存，走原来的深拷贝逻辑
+                // ==========================================
+                let mut new_area: MapArea = MapArea::from_another(area);
+                let start_va: VirtAddr = new_area.vpn_range.get_start().into();
+                memory_set.push(new_area, None, start_va.0);
+                
+                // copy data from another space
+                for vpn in area.vpn_range {
+                    if let Some(src_pte) = user_space.translate(vpn) {
+                        if src_pte.is_valid() {
+                            let src_ppn = src_pte.ppn();
+                            // 由于惰性分配，我们要确保目标页分配了再拷贝
+                            if memory_set.translate(vpn).is_none() || !memory_set.translate(vpn).unwrap().is_valid() {
+                                memory_set.page_table.translate_create(vpn);
+                            }
+                            let dst_ppn = memory_set.translate(vpn).unwrap().ppn();
+                            dst_ppn.get_bytes_array().copy_from_slice(src_ppn.get_bytes_array());
+                        }
                     }
                 }
             }
@@ -521,6 +557,9 @@ impl MemorySet {
         VirtAddr::from(start_va + length),
             permission,
         );
+        if mmap_flags.contains(mmap::MMapFlags::MAP_SHARED) {
+            self.areas.last_mut().unwrap().is_shared = true;
+        }
         #[cfg(target_arch = "loongarch64")]
         Self::flush_tlb_after_mapping_change();
         Ok(start_va)
@@ -783,6 +822,7 @@ pub struct MapArea {
     data_frames: BTreeMap<VirtPageNum, FrameTracker>,
     map_type: MapType,
     map_perm: MapPermission,
+    pub is_shared: bool,
 }
 
 impl MapArea {
@@ -799,6 +839,7 @@ impl MapArea {
             data_frames: BTreeMap::new(),
             map_type,
             map_perm,
+            is_shared: false,
         }
     }
     pub fn from_another(another: &Self) -> Self {
@@ -807,6 +848,7 @@ impl MapArea {
             data_frames: BTreeMap::new(),
             map_type: another.map_type,
             map_perm: another.map_perm,
+            is_shared: another.is_shared,
         }
     }
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
@@ -839,13 +881,17 @@ impl MapArea {
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         match self.map_type {
             MapType::Framed | MapType::File => {
-                // 只有当惰性物理页真正存在时（remove 成功），才去解除页表映射
                 if self.data_frames.remove(&vpn).is_some() {
                     page_table.unmap(vpn);
+                } else if self.is_shared {
+                    // 核心：子进程的共享页没有 FrameTracker（因为物理页在父进程手里），
+                    // 但子进程退出时依然需要解除自己页表里的映射，防止死锁或崩溃。
+                    if page_table.translate(vpn).is_some() && page_table.translate(vpn).unwrap().is_valid() {
+                        page_table.unmap(vpn);
+                    }
                 }
             }
             MapType::Identical => {
-                // 恒等映射通常是一次性全映射的，直接解映射
                 page_table.unmap(vpn);
             }
         }

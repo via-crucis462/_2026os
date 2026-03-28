@@ -90,6 +90,9 @@ const SYSCALL_SOCKET: usize = 198;
 /// brk syscall
 const SYSCALL_ACCEPT: usize = 202;
 const SYSCALL_BRK: usize = 214;
+const SYSCALL_ADD_KEY: usize = 217;
+const SYSCALL_REQUEST_KEY: usize = 218;
+const SYSCALL_KEYCTL: usize = 219;
 /// munmap syscall
 const SYSCALL_MUNMAP: usize = 215;
 /// clone syscall
@@ -99,6 +102,7 @@ const SYSCALL_EXEC: usize = 221;
 /// mmap syscall
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
+const SYSCALL_MSYNC: usize = 227;
 /// waitpid syscall
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_WAITPID: usize = 261;
@@ -239,6 +243,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         args[2] as *mut u8, 
         args[3]
         ),
+        SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2] as u32),
+        SYSCALL_ADD_KEY => sys_add_key(args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3], args[4] as i32),
+        SYSCALL_REQUEST_KEY => sys_request_key(args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3] as i32),
+        SYSCALL_KEYCTL => sys_keyctl(args[0] as i32, args[1], args[2], args[3], args[4]),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_BRK => sys_brk(args[0] as *const () as usize),
         SYSCALL_UNAME => sys_uname(args[0] as *mut UtsName),
