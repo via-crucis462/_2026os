@@ -1,8 +1,7 @@
 use super::{VfsInode, Stat, Statx, ROOT_DENTRY};
 use alloc::sync::Arc;
 use alloc::string::String;
-use crate::fs::TmpfsDirInode;
-
+use crate::fs::{TmpfsDirInode, TmpfsFileInode};
 
 
 //造一个“空目录” Inode，专门给 /proc 文件夹用
@@ -126,12 +125,19 @@ impl VfsInode for MountsInode {
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
 pub fn mount_procfs() {
+    // 1. 创建 /proc 目录
     let proc_dentry = ROOT_DENTRY.insert(String::from("proc"), Arc::new(TmpfsDirInode::new()));
     
-    // 2. 往这个内存目录里塞入特殊的虚拟文件
+    // 2. 塞入特殊的虚拟文件
     proc_dentry.insert(String::from("meminfo"), Arc::new(MemInfoInode));
     proc_dentry.insert(String::from("mounts"), Arc::new(MountsInode));
     
-    println!("[VFS] /proc/meminfo and mounts mounted successfully!");
+    // 3. 在 /proc 下创建 self 目录
+    let self_dentry = proc_dentry.insert(String::from("self"), Arc::new(TmpfsDirInode::new()));
+    
+    // 4. 在 /proc/self 下创建 maps 空文件
+    // 直接用你写好的 TmpfsFileInode，它默认就是一个合法的、可读写的空文件！
+    self_dentry.insert(String::from("maps"), Arc::new(TmpfsFileInode::new()));
+    
+    println!("[VFS] /proc/meminfo, mounts, and /proc/self/maps mounted successfully!");
 }
-

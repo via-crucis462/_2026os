@@ -8,6 +8,7 @@ use alloc::vec;
 use crate::fs::devfs::NullInode;
 use crate::fs::devfs::ZeroInode;
 use crate::fs::devfs::RtcInode;
+use crate::fs::devfs::TtyInode;
 
 // 全局唯一的 Inode 分配器
 static TMPFS_INO_COUNTER: AtomicUsize = AtomicUsize::new(10000);
@@ -182,7 +183,7 @@ pub fn setup_oscomp_env() {
         dev_dentry.insert("null".to_string(), Arc::new(NullInode::new())); 
         dev_dentry.insert("zero".to_string(), Arc::new(ZeroInode::new()));
         dev_dentry.insert("rtc".to_string(), Arc::new(RtcInode::new()));
-
+        dev_dentry.insert("tty".to_string(), Arc::new(TtyInode::new()));
         // 2. 挂载 shm
         dev_dentry.insert("shm".to_string(), Arc::new(TmpfsDirInode::new()));
         println!("[VFS] Mounted /dev/shm safely");

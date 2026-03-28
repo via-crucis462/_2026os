@@ -9,6 +9,7 @@ mod procfs;
 mod devfs;
 pub mod tmpfs;
 pub use tmpfs::setup_oscomp_env;
+pub use tmpfs::{TmpfsFileInode, TmpfsDirInode};
 pub use devfs::mount_devfs;
 pub use procfs::mount_procfs;
 pub use dir_entry::DirEntry;
@@ -17,7 +18,6 @@ pub use file_tree::{Dentry};
 use crate::mm::UserBuffer;
 use alloc::sync::Arc;
 use alloc::string::String;
-use crate::fs::tmpfs::TmpfsDirInode;
 use alloc::collections::VecDeque; // 如果你用了队列
 
 /// trait File for all file types
@@ -211,3 +211,27 @@ println!("[VFS] Mounting true Tmpfs directories in memory...");
 
 const MAX_SYMLINK_DEPTH: usize = 8; // 地雷1：防止无限递归导致内核栈溢出
 
+
+
+pub struct DummySocketInode;
+
+impl VfsInode for DummySocketInode {
+    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn get_size(&self) -> usize { 0 }
+    fn get_stat(&self) -> Stat {
+        Stat {
+            dev: 0, ino: 9999, 
+            mode: 0o140777, // 注意这里的 0o140000 代表它是 Socket 类型 (S_IFSOCK)
+            nlink: 1, uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
+            ctime_sec: 0, ctime_nsec: 0, __unused: [0;1],
+        }
+    }
+    fn get_statx(&self) -> Statx { unimplemented!() }
+    fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
+    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
+    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
+}
