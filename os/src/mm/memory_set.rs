@@ -123,7 +123,7 @@ impl MemorySet {
         if let Some(data) = data {
             map_area.copy_data(&mut self.page_table, data, start_va);
         }
-        info!("map area: [{:#x}, {:#x}), {:?}", map_area.vpn_range.get_start().0 * PAGE_SIZE, map_area.vpn_range.get_end().0 * PAGE_SIZE, map_area.map_perm);
+        trace!("map area: [{:#x}, {:#x}), {:?}", map_area.vpn_range.get_start().0 * PAGE_SIZE, map_area.vpn_range.get_end().0 * PAGE_SIZE, map_area.map_perm);
         self.areas.push(map_area);
     }
     /// Mention that trampoline is not collected by areas.

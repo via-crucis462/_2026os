@@ -11,6 +11,8 @@
 //! submodules, and you should also implement syscalls this way.
 
 /// dup syscall
+const SYSCALL_EVENTFD2: usize = 19;
+const SYSCALL_EPOLL_CREATE1: usize = 20;
 const SYSCALL_DUP: usize = 23;
 /// dup2 syscall
 const SYSCALL_DUP2: usize = 24;
@@ -88,6 +90,8 @@ const SYSCALL_GETTID: usize = 178;
 const SYSCALL_SYSINFO: usize = 179;
 const SYSCALL_SOCKET: usize = 198;
 /// brk syscall
+const SYSCALL_BIND: usize = 200;
+const SYSCALL_LISTEN: usize = 201;
 const SYSCALL_ACCEPT: usize = 202;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_ADD_KEY: usize = 217;
@@ -205,6 +209,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETSID => sys_getsid(args[0]),
         SYSCALL_SETSID => sys_setsid(),
         SYSCALL_GETTID => sys_gettid(),
+        
+        SYSCALL_EVENTFD2 => sys_eventfd2(args[0] as u32, args[1] as i32),
+        SYSCALL_EPOLL_CREATE1 => sys_epoll_create1(args[0] as i32),
+        SYSCALL_BIND => sys_bind(args[0], args[1], args[2]),
+        SYSCALL_LISTEN => sys_listen(args[0], args[1] as i32),
         SYSCALL_SOCKET => sys_socket(args[0], args[1], args[2]),
         SYSCALL_ACCEPT    => sys_accept(args[0], args[1] as *mut u8, args[2] as *mut u32),
         SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0] as isize, args[1], args[2] as *mut u8),
