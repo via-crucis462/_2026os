@@ -12,7 +12,7 @@
 //! was. For example, timer interrupts trigger task preemption, and syscalls go
 //! to [`syscall()`].
 mod context;
-
+use crate::net::net_poll;
 use crate::{KERNEL_STACK_SIZE, PAGE_SIZE, get_hart_id};
 use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 use crate::mm::VirtAddr;
@@ -85,6 +85,7 @@ pub fn trap_handler() -> ! {
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_trigger();
+            net_poll();
             suspend_current_and_run_next();
         }
         Trap::Exception(Exception::StorePageFault) |

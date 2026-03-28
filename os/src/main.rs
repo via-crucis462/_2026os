@@ -38,6 +38,7 @@ pub mod ext4fs;
 pub mod fs;
 pub mod lang_items;
 pub mod logging;
+pub mod net;
 pub mod mm;
 pub mod sync;
 pub mod syscall;
@@ -119,6 +120,7 @@ fn main_init(hart_id: usize) {
     mm::remap_test();
     arch::trap::init();
     lazy_static::initialize(&NET_DEVICE);
+    lazy_static::initialize(&crate::net::NET_IFACE);
     fs::init_test_env(); 
     fs::mount_procfs();
     fs::setup_oscomp_env(); 

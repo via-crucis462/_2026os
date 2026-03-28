@@ -2,7 +2,8 @@
 //! 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
 //! 内存管理也暂时放在此处
 use crate::get_hart_id;
-use crate::process::FileDescriptor;
+use crate::process::FileDescriptor;    // 引入当前进程获取方法
+use crate::net::socket::TcpSocket;
 use alloc::vec;
 pub use crate::{
     arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, 
@@ -998,6 +999,7 @@ pub fn sys_setitimer(_which: usize, _new_value: *const u8, _old_value: *mut u8) 
     // 假装定时器设置成功，保证 LTP 测试框架的控制流不崩溃
     0
 }
+
 // ID 200
 pub fn sys_bind(_fd: usize, _addr: usize, _addr_len: usize) -> isize {
     // 假装绑定成功
@@ -1202,7 +1204,6 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     let mut inner = process.inner_exclusive_access();
     
     // 2. 寻找空闲 FD 坑位
-    // 报错原因：fd_opt 现在是 &FileDescriptor，需要访问它的 .file 字段
     let mut allocated_fd = None;
     for (i, fd_desc) in inner.fd_table.iter().enumerate() {
         if fd_desc.file.is_none() {
@@ -1211,16 +1212,16 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
         }
     }
     
-    // 3. 包装 Socket 文件
-    // 注意：这里需要根据你的 pcb.rs 构造 FileDescriptor 结构体
-    let socket_file = Arc::new(DummySocket);
+    // 3. 包装真正的 TCP Socket 文件！
+    // 🌟 这里换成我们写好的 TcpSocket
+    let socket_file = Arc::new(TcpSocket::new()); 
     let fd_desc = FileDescriptor {
         file: Some(socket_file),
         cloexec: false, // 默认不开启
         status: 0,
     };
     
-    // 4. 插入到 fd_table
+    // 4. 插入到 fd_table 并返回 fd
     let fd = if let Some(idx) = allocated_fd {
         inner.fd_table[idx] = fd_desc;
         idx
