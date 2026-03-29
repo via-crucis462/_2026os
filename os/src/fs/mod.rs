@@ -46,6 +46,13 @@ pub trait File: Send + Sync {
     fn lseek(&self, _offset: isize, _whence: i32) -> isize {
         -29 
     }
+    fn ready_to_read(&self) -> bool {
+        self.readable()
+    }
+    /// Is there space available to write right now?
+    fn ready_to_write(&self) -> bool {
+        self.writable()
+    }
     fn as_any(&self) -> &dyn Any {
         unimplemented!("as_any not implemented for this file type")
     }

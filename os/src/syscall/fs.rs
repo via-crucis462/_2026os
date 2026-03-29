@@ -75,57 +75,25 @@ fn ensure_fd_slots(inner: &mut crate::process::ProcessControlBlockInner, target_
     }
 }
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
-
     let token = current_user_token();
     let task = current_task().unwrap();
     let proc = task.process();
     let inner = proc.inner_exclusive_access();
+    // 检查 FD 是否越界或未打开
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
-        return EBADF.as_isize();
+        return EBADF.as_isize(); // 注意引入正确的 EBADF 路径
     }
-
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
-    
-    //获取文件名（需确保 File trait 实现了 get_dentry）
-    let _filename = if let Some(dentry) = file.get_dentry() {
-        dentry.name.clone()
-    } else {
-        "unknown".to_string()
-    };
-    
-    // 安全地获取用户缓冲区内容进行打印
-    let user_buffers = translated_byte_buffer(token, buf, len);
-    let mut print_content = alloc::vec![0u8; len];
-    let mut current_offset = 0;
-    for buffer in user_buffers {
-        let l = buffer.len();
-        print_content[current_offset..current_offset + l].copy_from_slice(buffer);
-        current_offset += l;
+    if !file.writable() {
+        return EACCES.as_isize(); 
     }
-
+    drop(inner); 
+    let user_buffer = UserBuffer::new(crate::mm::translated_byte_buffer(token, buf, len));
+  
+    let ax = file.write(user_buffer) as isize;
     
-    if fd >= inner.fd_table.len() {
-        return EBADF.as_isize();
-    }
-    if let Some(file) = &inner.fd_table[fd].file {
-        if !file.writable() {
-            //warn!("VFS: sys_write failed - fd {} ('{}') is not writable", fd, filename);
-            return EACCES.as_isize(); // 权限不足
-        }
-        let file = file.clone();
-        // release current task TCB manually to avoid multi-borrow
-        drop(inner);
-        trace!("[kernel] sys_write: fd={}, len={}", fd, len);
-        //println!("buf: {:p}, len: {}, content: {:?}", buf, len, unsafe { core::slice::from_raw_parts(buf, len) });
-        //let utf8_content = alloc::string::String::from_utf8_lossy(&print_content);
-        //println!("VFS: sys_write called on fd {} ('{}') with len {} , content: \"{}\"", fd, _filename, len, utf8_content);
-        let ax = file.write(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize;
-        //println!("VFS: sys_write wrote {} bytes to fd {} ('{}')", ax, fd, _filename);
-        ax
-    } else {
-        //warn!("VFS: sys_write failed - fd {} ('{}') is not open", fd, filename);
-        EBADF.as_isize() // 文件描述符无效
-    }
+  
+    ax
 }
 
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
@@ -287,6 +255,13 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     let proc = task.process();
     let token = current_user_token();
     let mut inner = proc.inner_exclusive_access();
+    let page_table = crate::mm::PageTable::from_token(token);
+    let va = pipe as usize;
+    if page_table.translate_va(crate::mm::VirtAddr::from(va)).is_none() ||
+       page_table.translate_va(crate::mm::VirtAddr::from(va + 4)).is_none() {
+        println!("[kernel]  sys_pipe error point: {:#x}，", va);
+        return -14; 
+    }
     let (pipe_read, pipe_write) = make_pipe();
     let read_fd = inner.alloc_fd();
     inner.set_fd(read_fd, pipe_read, false, 0);
@@ -296,6 +271,7 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     let pipe_u32 = pipe as *mut u32;
     *translated_refmut(token, pipe_u32) = read_fd as u32;
     *translated_refmut(token, unsafe { pipe_u32.add(1) }) = write_fd as u32;
+    println!("pipe done");
     0
 }
 

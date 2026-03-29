@@ -3,7 +3,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::arch::config::PAGE_SIZE;
-
+use crate::process::current_task;
 #[allow(unused)]
 
 
@@ -182,10 +182,27 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     let mut start = ptr as usize;
     let end = start + len;
     let mut v = Vec::new();
+    let task = current_task().unwrap();
+    let process = task.process();
+    let mut inner = task.inner_exclusive_access();
+    let sp = inner.get_trap_cx().x[2];
+    let mut proc_inner = process.inner_exclusive_access();
     while start < end {
         let start_va = VirtAddr::from(start);
         let mut vpn = start_va.floor();
-        let ppn = page_table.translate(vpn).unwrap().ppn();
+        let ppn = match page_table.translate(vpn) {
+            Some(pte) if pte.is_valid() => pte.ppn(),
+            _ => {
+                // 尝试用你的 handle_page_fault 修复它（比如触发 Lazy Allocation）
+                // 注意：这里需要传入当前的 sp 供栈扩张逻辑使用
+               if proc_inner.memory_set.handle_page_fault(start, sp) {
+                    page_table.translate(vpn).unwrap().ppn()
+                } else {
+                    // 真的越界了，返回空 Vec，上层会返回 -EFAULT
+                    return Vec::new();
+                }
+            }
+        };
         vpn.step();
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));

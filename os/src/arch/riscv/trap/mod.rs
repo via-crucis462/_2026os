@@ -91,6 +91,10 @@ pub fn trap_handler() -> ! {
         Trap::Exception(Exception::StorePageFault) |
         Trap::Exception(Exception::LoadPageFault) |
         Trap::Exception(Exception::InstructionPageFault) => {
+            /*println!(
+                "[kernel] error  {:#x},  {:#x}",
+                stval, sepc
+            );*/
             let task = current_task().unwrap();
             let process = task.process(); 
             let mut process_inner = process.inner_exclusive_access();
@@ -100,6 +104,7 @@ pub fn trap_handler() -> ! {
             
             // 【修改 2】：把 sp 传进去，支持动态扩栈
             if process_inner.memory_set.handle_page_fault(stval, sp) {
+                println!("[WATCHDOG] : {:#x}, PC: {:#x}", stval, sepc);
                 // 修复成功！释放锁
                 drop(process_inner);
                 drop(process);
