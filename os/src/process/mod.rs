@@ -317,7 +317,10 @@ fn check_pending_signals() {
         let proc = task.process();
         let task_inner = task.inner_exclusive_access();
         let proc_inner = proc.inner_exclusive_access();
-        let signal = SignalFlags::from_bits(1 << sig).unwrap();
+        let signal = match SignalFlags::from_bits(1 << (sig - 1)) {
+            Some(s) => s,
+            None => continue,
+        };
         if task_inner.signals.contains(signal) && (!task_inner.signal_mask.contains(signal)) {
             let mut masked = true;
             let handling_sig = task_inner.handling_sig;
@@ -340,7 +343,6 @@ fn check_pending_signals() {
                 if signal == SignalFlags::SIGKILL
                     || signal == SignalFlags::SIGSTOP
                     || signal == SignalFlags::SIGCONT
-                    || signal == SignalFlags::SIGDEF
                 {
                     // signal is a kernel signal
                     call_kernel_signal_handler(signal);

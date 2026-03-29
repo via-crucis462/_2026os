@@ -138,6 +138,7 @@ impl ProcessControlBlock {
                 gid: 0,
                 euid: 0,
                 egid: 0,
+                pgid: pid_handle.0,
                 alive_task_count: 0,
                 tasks: Vec::new(),
             })
@@ -421,6 +422,7 @@ impl ProcessControlBlock {
                 gid: parent_inner.gid,
                 euid: parent_inner.euid,
                 egid: parent_inner.egid,
+                pgid: parent_inner.pgid,
                 tasks: Vec::new(),
                 alive_task_count: 1,
             })
@@ -581,7 +583,8 @@ pub struct ProcessControlBlockInner {
     pub gid: u32,  // 真实组 ID
     pub euid: u32, // 有效用户 ID (Effective)
     pub egid: u32, // 有效组 ID (Effective)
-    
+    // 🚩 新增：进程组 ID
+    pub pgid: usize,
     // 进程下的线程数
     pub tasks: Vec<Arc<TaskControlBlock>>, 
     // 存活进程数，等于0相当于僵尸进程

@@ -271,7 +271,7 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     let pipe_u32 = pipe as *mut u32;
     *translated_refmut(token, pipe_u32) = read_fd as u32;
     *translated_refmut(token, unsafe { pipe_u32.add(1) }) = write_fd as u32;
-    println!("pipe done");
+    //println!("pipe done");
     0
 }
 

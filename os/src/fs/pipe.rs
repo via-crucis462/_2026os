@@ -179,7 +179,7 @@ impl File for Pipe {
                 if ring_buffer.all_write_ends_closed() {
                     return already_read;
                 }
-                println!("[kernel] Pipe Read Empty: already_read={}, waiting...", already_read);
+               //println!("[kernel] Pipe Read Empty: already_read={}, waiting...", already_read);
                 drop(ring_buffer);
                 suspend_current_and_run_next();
                 continue;
@@ -192,7 +192,7 @@ impl File for Pipe {
                    
                     already_read += 1;
                     if already_read % 1024 == 0 {
-                        println!("[kernel] Pipe Read Progress: {} / {}", already_read, want_to_read);
+                     //   println!("[kernel] Pipe Read Progress: {} / {}", already_read, want_to_read);
                     }
                     if already_read == want_to_read {
                         return want_to_read;
@@ -215,7 +215,7 @@ impl File for Pipe {
                 if ring_buffer.all_read_ends_closed() {
                     return already_write;
                 }
-                println!("[kernel] Pipe Write Full: already_write={}, waiting for consumer...", already_write);
+              //  println!("[kernel] Pipe Write Full: already_write={}, waiting for consumer...", already_write);
                 drop(ring_buffer);
                 suspend_current_and_run_next();
                 continue;
@@ -229,7 +229,7 @@ impl File for Pipe {
                     ring_buffer.write_byte(unsafe { *byte_ref });
                     already_write += 1;
                     if already_write % 1024 == 0 {
-                        println!("[kernel] Pipe Write Progress: {} / {}", already_write, want_to_write);
+                  //      println!("[kernel] Pipe Write Progress: {} / {}", already_write, want_to_write);
                     }
                     if already_write == want_to_write {
                         return want_to_write;

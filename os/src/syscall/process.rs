@@ -5,6 +5,8 @@ use crate::get_hart_id;
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
 use alloc::vec;
+use crate::syscall::EPOLL_CTL_DEL;
+
 pub use crate::{
     arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, 
     fs::*, 
@@ -95,49 +97,107 @@ pub struct PollFd {
 const POLLIN: i16 = 0x001;
 const POLLOUT: i16 = 0x004;
 const POLLERR: i16 = 0x008;
+const POLLHUP: u16 = 0x0010;
 
-pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, _tmo_p: usize, _sigmask: usize) -> isize {
-    let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
-    let token = inner.get_user_token();
-    if ufds_ptr == 0 || nfds == 0 {
-        return 0; 
+pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> isize {
+    println!("[kernel] sys_ppoll: ufds={:#x}, nfds={}, tmo_p={:#x}", ufds_ptr, nfds, tmo_p);
+    if ufds_ptr == 0 && nfds > 0 {
+        return -1; // 或者返回对应的错误码（EFAULT）
     }
-    let mut ready_count = 0;
-    // 遍历用户传进来的 pollfd 数组
-    for i in 0..nfds {
-        // 根据虚拟地址算出真实物理地址，并拿到可变引用
-        let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
-        let pollfd = translated_refmut(token, pollfd_ptr);
-        let fd = pollfd.fd;
-        pollfd.revents = 0; // 先清空返回状态
-        // 负数的 fd 按照 POSIX 标准被忽略
-        if fd < 0 {
-            continue;
-        }
-        let fd_usize = fd as usize;
+
+    // 🚩 1. 在进入循环前，一次性解析好超时时间，算出 Deadline
+    let has_timeout = tmo_p != 0;
+    let mut deadline_ms: usize = 0;
+
+    if has_timeout {
+        let task = current_task().unwrap();
+        // 获取一下 token 用来翻译用户态指针
+        let token = task.process().inner_exclusive_access().get_user_token();
         
-        // 检查 fd 是否合法
-        if fd_usize >= inner.fd_table.len() || inner.fd_table[fd_usize].file.is_none() {
-            pollfd.revents = POLLERR; // 报错：坏的描述符
-            ready_count += 1;
-        } else {
-            let file = inner.fd_table[fd_usize].file.as_ref().unwrap();
-            // 没做复杂的阻塞等待，直接查看文件状态并标记
-            if (pollfd.events & POLLIN) != 0 && file.readable() {
-                pollfd.revents |= POLLIN;
+        // 解析出 TimeSpec
+        let timespec = crate::mm::translated_ref(token, tmo_p as *const TimeSpec);
+        
+        // 换算成毫秒 (秒 * 1000 + 纳秒 / 1,000,000)
+        let timeout_ms = timespec.tv_sec * 1000 + timespec.tv_nsec / 1_000_000;
+        
+        // 算出绝对的超时时间点
+        deadline_ms = get_time_ms() + timeout_ms;
+    }
+
+    // 🚩 2. 开始属于 ppoll 的死循环
+    loop {
+        let task = current_task().unwrap();
+        let proc = task.process();
+        let inner = proc.inner_exclusive_access();
+        let token = inner.get_user_token();
+
+        let mut ready_count = 0;
+        
+        // 遍历轮询所有的 fd
+        for i in 0..nfds {
+            let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
+            let pollfd = crate::mm::translated_refmut(token, pollfd_ptr);
+            let mut task_inner = task.inner_exclusive_access();
+            let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
+            // 也可以加上对 SIGKILL/SIGSTOP 等不可屏蔽信号的特判
+            let unmaskable = task_inner.signals.bits() & (
+                (1 << (9 - 1)) | (1 << (19 - 1))
+            );
+
+            if (pending | unmaskable) != 0 {
+                drop(task_inner); // 🚩 撤退前千万记得放锁！
+                // trace!("[kernel] syscall interrupted by signal, returning EINTR");
+                return -4; // EINTR
             }
-            if (pollfd.events & POLLOUT) != 0 && file.writable() {
-                pollfd.revents |= POLLOUT;
-            }
-            if pollfd.revents != 0 {
+            drop(task_inner); // 查完信号没问题，放开线程锁
+            let fd = pollfd.fd;
+            pollfd.revents = 0;
+            
+            if fd < 0 { continue; }
+            let fd_usize = fd as usize;
+            
+            if fd_usize >= inner.fd_table.len() || inner.fd_table[fd_usize].file.is_none() {
+                pollfd.revents = 0x008; // POLLERR 的值通常是 0x008
                 ready_count += 1;
+            } else {
+                let file = inner.fd_table[fd_usize].file.as_ref().unwrap();
+                
+                // ⚠️ 记得用刚才修好的 ready_to_read / ready_to_write
+                if (pollfd.events & POLLIN) != 0 && file.ready_to_read() {
+                    pollfd.revents |= POLLIN;
+                }
+                
+                // 检查写
+                if (pollfd.events & POLLOUT) != 0 && file.ready_to_write() {
+                    pollfd.revents |= POLLOUT;
+
+                }
+                if pollfd.revents != 0 {
+                    ready_count += 1;
+                }
+            }
+            println!("[kernel] ppoll fd={} target_events={:#x} ready_revents={:#x}", 
+          pollfd.fd, pollfd.events, pollfd.revents);
+        }
+        
+        // 🚩 3. 如果找到了就绪事件，立即返回！
+        if ready_count > 0 {
+            return ready_count as isize;
+        }
+        
+        // 🚩 4. 如果没找到事件，处理超时逻辑
+        if has_timeout {
+            if get_time_ms() >= deadline_ms {
+                return 0; // 时间到了，真的一滴都没有了，返回 0
             }
         }
+        
+        // 🚩 5. 没超时或无限等待，乖乖让出 CPU 等待下一次调度
+        drop(inner); // 必须先 drop 掉锁，否则切走之后别的进程拿不到锁就死锁了！
+        suspend_current_and_run_next();
+
     }
-    // 返回有多少个 FD 已经准备好了
-    ready_count as isize
+
 }
 pub fn sys_exit(exit_code: i32) -> ! {
     trace!("kernel:pid[{}] sys_exit", current_task().unwrap().process().pid.0);
@@ -168,10 +228,23 @@ pub fn sys_getpgid(_pid: usize) -> isize {
 }
 
 // 假装设置成功，返回 0
-pub fn sys_setpgid(_pid: usize, _pgid: usize) -> isize { 
-    0 
+pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
+    let task = current_task().unwrap();
+    let current_proc = task.process();
+    
+    // 如果 pid 为 0，表示操作当前进程
+    let target_pid = if pid == 0 { current_proc.pid.0 } else { pid };
+    
+    if let Some(proc) = get_process(target_pid) {
+        let mut inner = proc.inner_exclusive_access();
+        
+        // 如果 pgid 为 0，意思是将目标进程的 pgid 设为它的 pid
+        inner.pgid = if pgid == 0 { target_pid } else { pgid };
+        0
+    } else {
+        -3 // ESRCH
+    }
 }
-
 pub fn sys_getgid() -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
@@ -625,36 +698,84 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
 }
 
 pub fn sys_kill(pid: isize, signum: i32) -> isize {
-    let current = current_task().unwrap();
-    let process = current.process();
-    trace!("kernel:pid[{}] sys_kill", process.pid.0);
-    drop(process);
-    drop(current);
-    if let Some(proc) = get_process(pid as usize) {
-        if let Some(flag) = SignalFlags::from_bits(1 << signum) {
-            // insert the signal if legal
+    if signum < 0 || signum > 64 {
+        return -22; // EINVAL
+    }
+
+    let current_task = current_task().unwrap();
+    let current_pgid = current_task.process().inner_exclusive_access().pgid;
+
+    // 提前解析出信号 Flag
+    let flag = if signum == 0 {
+        None // 0 号信号不发实体信号，只用于探测
+    } else {
+        match SignalFlags::from_bits(1 << (signum - 1)) {
+            Some(f) => Some(f),
+            None => return -22,
+        }
+    };
+
+    if pid > 0 {
+        // 🔵 正常逻辑：发送给单个指定 PID 的进程
+        if let Some(proc) = get_process(pid as usize) {
+            if signum == 0 { return 0; } // 探测成功
+            
+            let flag = flag.unwrap();
             let mut inner = proc.inner_exclusive_access();
-            if inner.signals.contains(flag) {
-                return 0;
-            }
             inner.signals.insert(flag);
-            for task in inner.tasks.iter() {
-                let mut task_inner = task.inner_exclusive_access();
-                if !task_inner.signal_mask.contains(flag) {
-                    task_inner.signals.insert(flag);
-                    drop(task_inner);
-                    break;
+            
+            let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
+            
+            for task_arc in inner.tasks.iter() {
+                let mut t_inner = task_arc.inner_exclusive_access();
+                if !t_inner.signal_mask.contains(flag) || is_unmaskable {
+                    t_inner.signals.insert(flag);
+                    drop(t_inner); // 放锁
+                    crate::process::wake_up_task(task_arc.clone()); // 叫醒！
+                    break; // 一个进程只需一个线程去处理信号即可
                 }
             }
-            0
+            return 0;
         } else {
-            EINVAL.as_isize() // 信号不合法
+            return -3; // ESRCH
         }
-    } else {
-        ESRCH.as_isize() // 进程不存在
-    }
-}
+    } else if pid == 0 || pid < -1 {
+        // 🚩 进阶逻辑：广播给整个进程组！
+        // pid == 0 时，发给当前进程所在的进程组
+        // pid < -1 时，发给目标组 (-pid)
+        let target_pgid = if pid == 0 { current_pgid } else { (-pid) as usize };
+        let mut success = false;
 
+        // ⚠️ 遍历所有存在的进程。如果你有全局进程池 iter，请替换这里的循环。
+        // 这里提供一种通用的 fallback 写法：遍历一个合理的 PID 范围
+        for i in 1..4096 { 
+            if let Some(proc) = get_process(i) {
+                let mut inner = proc.inner_exclusive_access();
+                if inner.pgid == target_pgid {
+                    success = true;
+                    if signum == 0 { continue; } // 仅探测
+                    
+                    let flag = flag.unwrap();
+                    inner.signals.insert(flag);
+                    let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
+                    
+                    for task_arc in inner.tasks.iter() {
+                        let mut t_inner = task_arc.inner_exclusive_access();
+                        if !t_inner.signal_mask.contains(flag) || is_unmaskable {
+                            t_inner.signals.insert(flag);
+                            drop(t_inner);
+                            crate::process::wake_up_task(task_arc.clone()); // 叫醒同组子进程！
+                            break; 
+                        }
+                    }
+                }
+            }
+        }
+        return if success { 0 } else { -3 };
+    }
+
+    -1 // 未知情况或无权限
+}
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
@@ -794,37 +915,36 @@ pub fn sys_sigprocmask(
 ) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
-    // 拿 token (用于读写指针)
     let token = process.inner_exclusive_access().get_user_token();
-    
     let mut inner = task.inner_exclusive_access();
-    
-    // 1. 如果用户要求保存旧掩码
+
+    // 1. 写回旧掩码：bits() 返回 u64，在 RV64 下对应 usize
     if oldset_ptr as usize != 0 {
-        // 取出目前的 signal_mask 的 bits 强转成 usize 写回用户态
         *translated_refmut(token, oldset_ptr) = inner.signal_mask.bits() as usize;
     }
-    
-    // 2. 如果用户传入了新掩码
+
+    // 2. 更新新掩码
     if set_ptr as usize != 0 {
-        let set_val = *translated_refmut(token, set_ptr as *mut usize);
-        // 把用户传进来的 usize 转换成你的 SignalFlags
-        // 如果有无效的位，为了严谨最好用 from_bits_truncate，或者 fallback 到 empty
-        let set_flags = SignalFlags::from_bits_truncate(set_val as u32);
-        
-        const SIG_BLOCK: i32 = 0;
-        const SIG_UNBLOCK: i32 = 1;
-        const SIG_SETMASK: i32 = 2;
-        
+        // 使用 translated_ref 安全读取新掩码
+        let set_val = *translated_ref(token, set_ptr);
+        let mut set_flags = SignalFlags::from_bits_truncate(set_val as u64);
+
+        // 🚩 核心：POSIX 规定 SIGKILL 和 SIGSTOP 不能被屏蔽
+        set_flags.remove(SignalFlags::SIGKILL);
+        set_flags.remove(SignalFlags::SIGSTOP);
+
+        const SIG_BLOCK: i32 = 0;   // 把 set 中的信号加到当前屏蔽位图中
+        const SIG_UNBLOCK: i32 = 1; // 从当前屏蔽位图中删除 set 中的信号
+        const SIG_SETMASK: i32 = 2; // 直接用 set 替换当前位图
+
         match how {
-            SIG_BLOCK => inner.signal_mask.insert(set_flags), // 添加掩码
-            SIG_UNBLOCK => inner.signal_mask.remove(set_flags), // 移除掩码
-            SIG_SETMASK => inner.signal_mask = set_flags, // 直接覆盖
-            _ => return -22, // -EINVAL 严谨的错误码
+            SIG_BLOCK => inner.signal_mask.insert(set_flags),
+            SIG_UNBLOCK => inner.signal_mask.remove(set_flags),
+            SIG_SETMASK => inner.signal_mask = set_flags,
+            _ => return -22, // EINVAL
         }
     }
-    
-    0 // 成功
+    0
 }
 pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let task = crate::task::current_task().unwrap();
@@ -891,7 +1011,7 @@ pub fn sys_epoll_create1(_flags: i32) -> isize {
         fd as isize
     } else {
         -24 // EMFILE
-    }
+    }   
 }
 
 // ID 21: sys_epoll_ctl
@@ -899,6 +1019,9 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
+    if op != EPOLL_CTL_DEL && event_ptr == 0 {
+        return -14; // 返回 -EFAULT
+    }
     
     if epfd >= inner.fd_table.len() || fd >= inner.fd_table.len() { return -9; } // EBADF
     
@@ -932,7 +1055,22 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
 
 // ID 22: sys_epoll_wait
 pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i32) -> isize {
+    println!(
+        "[kernel] sys_epoll_wait: epfd={}, events_ptr={:#x}, maxevents={}, timeout={}ms",
+        epfd, events_ptr, maxevents, timeout
+    );
     let task = current_task().unwrap();
+    if events_ptr == 0 {
+        return -14; // 返回 -EFAULT (Bad address)
+    }
+    
+    // 🚩 2. 防御非法容量：POSIX 规定 maxevents 必须大于 0
+    if maxevents <= 0 {
+        return -22; // 返回 -EINVAL (Invalid argument)
+    }   
+
+    // 🚩 1. 记录进来的起始时间（用于带超时的阻塞）
+    let start_time = get_time_ms(); 
     
     loop {
         let process = task.process();
@@ -945,15 +1083,14 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
         let mut ready_events = alloc::vec::Vec::new();
         let list = epoll_file.interest_list.lock();
         
-        // 遍历所有被监控的 FD，检查它们底层的读写就绪状态！
+        // 遍历所有被监控的 FD，检查就绪状态
         for (&fd, &event) in list.iter() {
             if fd < inner.fd_table.len() {
                 if let Some(file) = &inner.fd_table[fd].file {
                     let mut revents = 0;
-                    if (event.events & 1) != 0 && file.readable() { revents |= 1; }
-                    if (event.events & 4) != 0 && file.writable() { revents |= 4; }
+                    if (event.events & 1) != 0 && file.ready_to_read() { revents |= 1; }
+                    if (event.events & 4) != 0 && file.ready_to_write() { revents |= 4; }
                     
-                    // 为了过早期的测试，如果底层还没完全实现缓冲，只要非空就默认放行
                     if revents != 0 || event.events == 0 {
                         let mut ready_ev = event;
                         ready_ev.events = if revents != 0 { revents } else { event.events };
@@ -962,26 +1099,35 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
                 }
             }
         }
-        drop(list); // 解除 Epoll 锁
+        drop(list); 
         
-        if !ready_events.is_empty() || timeout == 0 {
+        // 🚩 2. 如果找到了就绪事件，立即处理并返回
+        if !ready_events.is_empty() {
             let token = inner.memory_set.token();
             let mut count = 0;
-            // 把就绪事件写回用户态
             for (_fd, event) in ready_events.iter().take(maxevents as usize) {
                 let ev_ptr = events_ptr + count * core::mem::size_of::<EpollEvent>();
-                
-                // 🚩 使用你提供的 translated_refmut，每次独立翻译当前元素的地址，完美解决数组跨页问题！
                 let dst = crate::mm::translated_refmut(token, ev_ptr as *mut EpollEvent);
                 *dst = *event;
-                
                 count += 1;
             }
             return count as isize;
         }
         
-        // 🚩 如果没有事件就绪且 timeout != 0，挂起当前进程！真正的异步 I/O 阻塞！
-        drop(inner); // 必须释放进程锁，防止死锁
+        // 🚩 3. 如果没找到事件，处理超时逻辑！
+        if timeout == 0 {
+            // 非阻塞模式，直接返回 0 个事件
+            return 0; 
+        } else if timeout > 0 {
+            // 限时阻塞模式，看看有没有超时
+            let current_time = get_time_ms();
+            if current_time - start_time >= timeout as usize {
+                return 0; // 超时了！赶紧返回 0，千万别卡死！
+            }
+        }
+        
+        // 如果 timeout == -1 或者还没超时，挂起当前进程，让出 CPU
+        drop(inner); 
         suspend_current_and_run_next();
     }
 }
@@ -1087,40 +1233,48 @@ pub fn sys_rt_sigaction(
     old_action: *mut SignalAction,
     sigsetsize: usize,
 ) -> isize {
-    trace!("kernel:pid[{}] sys_sigaction", current_task().unwrap().process().pid.0);
+    // 1. 校验 sigsetsize
     if sigsetsize < core::mem::size_of::<u32>() {
-        return EINVAL.as_isize();
+        return -22; // EINVAL
     }
+    
+    // 2. 校验信号编号范围 (1~64)
     if signum <= 0 || signum as usize > MAX_SIG {
-        return EINVAL.as_isize();
+        return -22; // EINVAL
     }
 
-    let token = current_user_token();
+    // 3. 正规操作：绝对禁止修改 SIGKILL(9) 和 SIGSTOP(19)
+    if signum == 9 || signum == 19 {
+        return -22; // EINVAL (POSIX 规定此处返回 EINVAL)
+    }
+
     let task = current_task().unwrap();
     let proc = task.process();
-    trace!("kernel:pid[{}] sys_sigaction", proc.pid.0);
+    // trace!("kernel:pid[{}] sys_sigaction", proc.pid.0); // 调试时可打开
+    
     let mut inner = proc.inner_exclusive_access();
     let token = inner.memory_set.token();
-    if signum as *const () as usize > MAX_SIG {
-        return -1;
-    }
-    if let Some(flag) = SignalFlags::from_bits(1 << signum) {
-        if check_sigaction_error(flag) {
-            return -1;
-        }
+
+    // 🚩 核心修复：数组下标必须从 0 开始，所以是 signum - 1
+    let table_idx = (signum - 1) as usize;
+
+    // 4. 保存旧的 SignalAction
     if !old_action.is_null() {
-        let prev_action = inner.signal_actions.table[signum as *const () as usize];
+        let prev_action = inner.signal_actions.table[table_idx];
+        // 注意：LTP 可能会传坏指针，如果这里 translated_refmut 报错，
+        // 说明你需要像 translated_byte_buffer 那样加一层合法性检查。
         *translated_refmut(token, old_action) = prev_action;
     }
+
+    // 5. 如果新 action 为空，说明只是来查询的，直接返回
     if action.is_null() {
-        println!("action is null");
         return 0;
     }
-        inner.signal_actions.table[signum as *const () as usize] = *translated_ref(token, action);
-        0
-    } else {
-        ESRCH.as_isize()
-    }
+
+    // 6. 覆盖新的 SignalAction
+    inner.signal_actions.table[table_idx] = *translated_ref(token, action);
+    
+    0 // 成功
 }
 
 use crate::fs::ROOT_DENTRY; 
