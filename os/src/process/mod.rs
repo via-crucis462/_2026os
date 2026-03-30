@@ -65,6 +65,7 @@ pub fn suspend_current_and_run_next() {
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
     drop(task_inner);
+    drop(task);
     /*
     // ---- release current PCB
 
@@ -112,17 +113,17 @@ pub const IDLE_PID: usize = 0;
 
 /// Exit the current 'Running' task and run the next task in task list.
     pub fn exit_current_and_run_next(exit_code: i32) {
-    let task = take_current_task().unwrap();
+    // 改为暂时不take，schedule到runtasks中统一处理
+    let task = current_task().unwrap();
+    // remove from tid2task
+    remove_from_tid2task(task.gettid());
+
     let pid = task.getpid();
     if pid == IDLE_PID {
         println!("[kernel] Idle process exit with exit_code {} ...", exit_code);
         panic!("All applications completed!");
     }
-    
 
-    // remove from tid2task
-    remove_from_tid2task(task.gettid());
-    
     // **** access current TCB exclusively
     let mut task_inner = task.inner_exclusive_access();
     let proc = task.process();
