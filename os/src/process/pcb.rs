@@ -269,6 +269,7 @@ impl ProcessControlBlock {
             None,
             trap_cx_va.0,
         );
+        #[cfg(target_arch = "riscv64")]
         // 重新获取一次trap_cx_addr，因为原内存空间将被销毁
         let trap_cx_addr: usize = {
             {
@@ -280,12 +281,14 @@ impl ProcessControlBlock {
                 trap_cx_pa.into()
             }
         };
+        #[cfg(target_arch = "loongarch64")]
+        let trap_cx_addr: usize = caller_task.inner_exclusive_access().trap_cx_addr;
         proc_inner.memory_set = memory_set;
 
         #[cfg(target_arch = "riscv64")]
         let kernel_stack_top = caller_task.kernel_stack.get_top();
         #[cfg(target_arch = "loongarch64")]
-        let kernel_stack_top = caller_task.kernel_stack.get_top();
+        let kernel_stack_top = trap_cx_addr;
 
         // 修改trap上下文
         let mut trap_cx = TrapContext::app_init_context(
@@ -334,6 +337,7 @@ impl ProcessControlBlock {
             None,
             trap_cx_va.0,
         );
+        #[cfg(target_arch = "riscv64")]
         let trap_cx_addr = {
             let trap_cx_ppn = memory_set
                 .translate(trap_cx_va.into())
@@ -343,8 +347,13 @@ impl ProcessControlBlock {
             let trap_cx_addr: usize = trap_cx_pa.into();
             trap_cx_addr
         };
+        #[cfg(target_arch = "loongarch64")]
+        let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
 
+        #[cfg(target_arch = "riscv64")]
         let kernel_stack_top = kernel_stack.get_top();
+        #[cfg(target_arch = "loongarch64")]
+        let kernel_stack_top = trap_cx_addr;
 
         // copy fd table
         let new_fd_table = parent_inner.fd_table.clone();
