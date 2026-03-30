@@ -7,7 +7,6 @@
 use super::__switch;
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
-#[cfg(target_arch = "riscv64")]
 use crate::get_hart_id;
 use crate::MAIN_HART_ID;
 use crate::sync::*;
