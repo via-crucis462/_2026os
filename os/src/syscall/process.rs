@@ -733,6 +733,7 @@ pub fn sys_brk(addr: usize) -> isize {
     let process = task.process();
     trace!("kernel:pid[{}] sys_brk", process.pid.0);
     if let Ok(res) = mmap::do_brk(addr){
+        println!("[kernel] sys_brk: new brk={:#x} for addr={:#x}", res, addr);
         res as isize
     } else {
         current_task().unwrap().process().inner_exclusive_access().program_brk as isize

@@ -41,6 +41,20 @@ pub fn trap_from_kernel() -> ! {
         badv,
         badi
     );
+    if let Some(task) = current_task() {
+        let proc = task.process();
+        let inner = proc.inner_exclusive_access();
+        println!(
+            "[kernel] trap_from_kernel: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
+            task.getpid(),
+            task.gettid(),
+            inner.heap_bottom,
+            inner.program_brk,
+        );
+        inner.memory_set.debug_dump_areas(Some(badv), Some(era));
+    } else {
+        println!("[kernel] trap_from_kernel: no current task");
+    }
     loop {
         // 死循环
     }
@@ -237,6 +251,20 @@ pub fn trap_handler() -> ! {
                             }
                         }
                     }
+                }
+                if let Some(task) = current_task() {
+                    let proc = task.process();
+                    let inner = proc.inner_exclusive_access();
+                    println!(
+                        "[kernel] trap_from_kernel: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
+                        task.getpid(),
+                        task.gettid(),
+                        inner.heap_bottom,
+                        inner.program_brk,
+                    );
+                    inner.memory_set.debug_dump_areas(Some(badv), Some(era));
+                } else {
+                    println!("[kernel] trap_from_kernel: no current task");
                 }
                 error!("[kernel] trap_handler: {:?} in PID {}, estat={:#x}, era={:#x}, badv={:#x},badi={:#x}",
                     cause,
