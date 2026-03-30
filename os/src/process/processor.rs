@@ -89,9 +89,6 @@ pub fn run_tasks() {
                 drop(processor);
                 
                 crate::arch::timer::set_next_trigger();
-                unsafe {
-                    asm!("wfi");
-                }
                 continue;
             } 
             //warn!("[kernel] hart {}, run_tasks: fetched tid={} of pid={}", hart_id, task.tid.0, task.getpid());
@@ -119,9 +116,6 @@ pub fn run_tasks() {
             }
         } else {
             crate::arch::timer::set_next_trigger();
-            unsafe {
-                asm!("wfi");
-            }
             warn!("no tasks available in hart {}", hart_id);
         }
     }
