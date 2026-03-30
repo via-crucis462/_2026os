@@ -116,6 +116,8 @@ enum Cause {
 /// 的111页和97页
 #[no_mangle]
 pub fn trap_handler() -> ! {
+    // 设置内核态异常入口，防止嵌套中断时重入 __alltraps 破坏上下文
+    set_kernel_trap_entry();
     //println!("[kernel] called trap_handler");
     let estat :usize;
     let era :usize;
@@ -164,7 +166,8 @@ pub fn trap_handler() -> ! {
             _ => {
                   let ecode = (estat >> 16) & 0x3f;
                 if let Some(task) = current_task() {
-                    let inner = task.inner_exclusive_access();
+                    let proc = task.process();
+                    let inner = proc.inner_exclusive_access();
                     let vpn = VirtAddr::from(badv).floor();
                     match inner.memory_set.translate(vpn) {
                         Some(pte) => {
@@ -187,20 +190,57 @@ pub fn trap_handler() -> ! {
                             );
                         }
                     }
+                    // BRK(ecode=0xc): 验证 ERA 处物理页内容
+                    if ecode == 0xc {
+                        let era_vpn = VirtAddr::from(era).floor();
+                        let era_offset = era & 0xFFF;
+                        // 读取硬件CSR中实际的PGDL值
+                        let hw_pgdl: usize;
+                        let hw_asid: usize;
+                        unsafe {
+                            asm!("csrrd {}, 0x19", out(reg) hw_pgdl);
+                            asm!("csrrd {}, 0x18", out(reg) hw_asid);
+                        }
+                        println!(
+                            "[BRK诊断] hw_pgdl={:#x}, hw_asid={:#x}, 软件pgdl={:#x}",
+                            hw_pgdl, hw_asid, inner.get_user_token()
+                        );
+                        match inner.memory_set.translate(era_vpn) {
+                            Some(era_pte) => {
+                                let era_ppn = era_pte.ppn();
+                                let page_bytes = era_ppn.get_bytes_array();
+                                let w = u32::from_le_bytes([
+                                    page_bytes[era_offset],
+                                    page_bytes[era_offset+1],
+                                    page_bytes[era_offset+2],
+                                    page_bytes[era_offset+3],
+                                ]);
+                                // 也通过硬件PGDL手动遍历页表
+                                use crate::mm::PageTable;
+                                let hw_pt = PageTable::from_token(hw_pgdl);
+                                let hw_pte_result = hw_pt.find_pte(era_vpn);
+                                let (hw_ppn_val, hw_pte_bits) = match hw_pte_result {
+                                    Some(hw_pte) => (hw_pte.ppn().0, hw_pte.bits),
+                                    None => (0xdead, 0x0),
+                                };
+                                println!(
+                                    "[BRK诊断] era={:#x} vpn={:#x} 软件ppn={:#x} pte={:#x} 物理指令={:#010x} badi={:#010x}",
+                                    era, era_vpn.0, era_ppn.0, era_pte.bits, w, badi
+                                );
+                                println!(
+                                    "[BRK诊断] 硬件页表查找: hw_ppn={:#x} hw_pte={:#x}",
+                                    hw_ppn_val, hw_pte_bits
+                                );
+                            }
+                            None => {
+                                println!("[BRK诊断] era={:#x}, era_vpn={:#x}, 软件页表无PTE!", era, era_vpn.0);
+                            }
+                        }
+                    }
                 }
-                println!(
-                    "[kernel] user_fault: pid={}, cause={:?}, ecode={:#x}, pc={:#x}, badaddr={:#x}, estat={:#x}, badi={:#x}",
-                    crate::task::current_task().unwrap().pid.0,
-                    cause,
-                    ecode,
-                    era,
-                    badv,
-                    estat,
-                    badi
-                );
                 error!("[kernel] trap_handler: {:?} in PID {}, estat={:#x}, era={:#x}, badv={:#x},badi={:#x}",
                     cause,
-                    crate::task::current_task().unwrap().pid.0,
+                    crate::task::current_task().unwrap().tid.0,
                     estat,
                     era,
                     badv,
@@ -218,6 +258,7 @@ pub fn trap_handler() -> ! {
     }
     trap_return();
 }
+
 
 #[no_mangle]
 /// return to user space
