@@ -101,7 +101,7 @@ impl ProcessControlBlock {
             let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
             trap_cx_pa.into()
         };
-        info!("TaskControlBlock::new: translated trap_cx_addr = {:#x}", trap_cx_addr);
+        //info!("TaskControlBlock::new: translated trap_cx_addr = {:#x}", trap_cx_addr);
         #[cfg(target_arch = "loongarch64")]
         let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
 
@@ -317,9 +317,9 @@ impl ProcessControlBlock {
             None,
             trap_cx_va.0,
         );
+        #[cfg(target_arch = "riscv64")]
         // 重新获取一次trap_cx_addr，因为原内存空间将被销毁
         let trap_cx_addr: usize = {
-            #[cfg(target_arch = "riscv64")]
             {
                 let trap_cx_ppn = memory_set
                     .translate(trap_cx_va.into())
@@ -329,8 +329,9 @@ impl ProcessControlBlock {
                 trap_cx_pa.into()
             }
         };
+        #[cfg(target_arch = "loongarch64")]
+        let trap_cx_addr: usize = caller_task.inner_exclusive_access().trap_cx_addr;
         proc_inner.memory_set = memory_set;
-
         #[cfg(target_arch = "riscv64")]
         let kernel_stack_top = caller_task.kernel_stack.get_top();
         #[cfg(target_arch = "loongarch64")]
@@ -361,6 +362,7 @@ impl ProcessControlBlock {
         
     }
 
+
     /// Fork from parent to child
     /// 已编辑，添加了stack参数 
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
@@ -375,7 +377,7 @@ impl ProcessControlBlock {
         let tid_handle = Arc::new(tid_alloc());
         let kernel_stack = kstack_alloc();
 
-        let trap_cx_va: VirtAddr = (kernel_stack.get_top() - KERNEL_STACK_SIZE).into();
+        let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(&kernel_stack).into();
         memory_set.push(
             MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
                 MapType::Framed, MapPermission::R | MapPermission::W),
@@ -383,28 +385,23 @@ impl ProcessControlBlock {
             trap_cx_va.0,
         );
         #[cfg(target_arch = "riscv64")]
-        let trap_cx_ppn = memory_set
-            .translate(trap_cx_va.into())
-            .unwrap()
-            .ppn();
-        info!("fork: translated trap_cx_ppn = {:#x}", trap_cx_ppn.0);
-        #[cfg(target_arch = "riscv64")]
         let trap_cx_addr = {
+            let trap_cx_ppn = memory_set
+                .translate(trap_cx_va.into())
+                .unwrap()
+                .ppn();
             let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
             let trap_cx_addr: usize = trap_cx_pa.into();
             trap_cx_addr
         };
-        
-
         #[cfg(target_arch = "loongarch64")]
         let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
+
         #[cfg(target_arch = "riscv64")]
         let kernel_stack_top = kernel_stack.get_top();
         #[cfg(target_arch = "loongarch64")]
         let kernel_stack_top = trap_cx_addr;
 
-        #[cfg(target_arch = "loongarch64")]
-        let parent_trap_cx = *parent_inner.get_trap_cx();
         // copy fd table
         let new_fd_table = parent_inner.fd_table.clone();
         let proc_control_block = Arc::new(ProcessControlBlock {
@@ -459,12 +456,9 @@ impl ProcessControlBlock {
         // modify kernel_sp in trap_cx
         // **** access child PCB exclusively
         let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
-        #[cfg(target_arch = "loongarch64")]
-        {
-            *trap_cx = parent_trap_cx;
-        }
-        #[cfg(target_arch = "riscv64")]{
             *trap_cx = *caller_inner.get_trap_cx();
+        #[cfg(target_arch = "riscv64")]
+        {
             trap_cx.kernel_sp = kernel_stack_top;
         }
         if let Some(sp) = sp {

@@ -1,5 +1,7 @@
 // 全局线程调度器
-use crate::{CPU_CORE_NUM, arch::sbi::sbi_wakeup_harts, process, sync::MPSafeCell};
+use crate::{CPU_CORE_NUM, process, sync::MPSafeCell};
+#[cfg(target_arch = "riscv64")]
+use crate::{arch::sbi::sbi_wakeup_harts};
 use super::*;
 use super::manager::*;
 use lazy_static::*;

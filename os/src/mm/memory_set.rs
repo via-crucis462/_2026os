@@ -815,6 +815,30 @@ impl MemorySet {
         false
     }
 
+    pub fn debug_dump_areas(&self, badv: Option<usize>, era: Option<usize>) {
+        println!(
+            "[kernel] memory_set: asid={}, brk_index={}, area_count={}",
+            self.asid.0,
+            self.brk_index,
+            self.areas.len()
+        );
+        for (idx, area) in self.areas.iter().enumerate() {
+            let start = area.vpn_range.get_start().0 * PAGE_SIZE;
+            let end = area.vpn_range.get_end().0 * PAGE_SIZE;
+            let badv_hit = badv.map(|addr| addr >= start && addr < end).unwrap_or(false);
+            let era_hit = era.map(|addr| addr >= start && addr < end).unwrap_or(false);
+            println!(
+                "[kernel] area[{}] [{:#x}, {:#x}) {:?}{}{}{}",
+                idx,
+                start,
+                end,
+                area.map_perm,
+                if idx == self.brk_index { " [brk]" } else { "" },
+                if badv_hit { " [BADV]" } else { "" },
+                if era_hit { " [ERA]" } else { "" },
+            );
+        }
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {

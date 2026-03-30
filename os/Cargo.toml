@@ -28,6 +28,9 @@ virtio-drivers = { git = "https://github.com/rcore-os/virtio-drivers", rev = "4e
 # pci = "0.0.1" # 已经导入项目中并按规范复制许可证等
 virtio-drivers-la = { package = "virtio-drivers", version = "0.12.0" } # 重命名以避免冲突
 
-[profile.release]
-debug = true
-opt-level = 1
+[profile.dev]
+opt-level = 2
+debug = 2
+
+[profile.dev.package."*"]
+opt-level = 2

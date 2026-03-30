@@ -7,7 +7,6 @@
 use super::__switch;
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
-#[cfg(target_arch = "riscv64")]
 use crate::get_hart_id;
 use crate::MAIN_HART_ID;
 use crate::sync::*;
@@ -66,7 +65,6 @@ lazy_static! {
 
 // 获取并锁住当前处理器
 pub fn current_processor() -> MPSafeGuard<'static, Processor> {
-    #[cfg(target_arch = "riscv64")]
     let hart_id = get_hart_id();
     PROCESSORS[hart_id].exclusive_access()
 }
@@ -91,6 +89,7 @@ pub fn run_tasks() {
                 drop(processor);
                 
                 crate::arch::timer::set_next_trigger();
+                #[cfg(target_arch = "riscv64")]
                 unsafe {
                     asm!("wfi");
                 }
@@ -121,6 +120,7 @@ pub fn run_tasks() {
             }
         } else {
             crate::arch::timer::set_next_trigger();
+            #[cfg(target_arch = "riscv64")]
             unsafe {
                 asm!("wfi");
             }

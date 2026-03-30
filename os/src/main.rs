@@ -133,6 +133,7 @@ fn main_init(hart_id: usize) {
     task::run_tasks();
 }
 
+#[cfg(target_arch = "riscv64")]
 fn init_other_hart(hart_id: usize) {
     /*unsafe {
          asm!(
@@ -147,7 +148,27 @@ fn init_other_hart(hart_id: usize) {
         start_hart(i, _start as *const() as usize, 0);
     }
 }
-
+#[cfg(target_arch = "loongarch64")]
+pub fn init_other_hart(hart_id: usize) {
+    let current_hart = get_hart_id();
+    if current_hart != hart_id {
+        warn!(
+            "[kernel][la] init_other_hart: arg_hart_id={} != tp_hart_id={}",
+            hart_id,
+            current_hart
+        );
+    }
+    MAIN_HART_ID.store(current_hart, Ordering::Release);
+    let start_addr = _start as *const () as usize;
+    for i in 0..CPU_CORE_NUM {
+        if i == current_hart {
+            continue;
+        }
+        arch::la::ipi::csr_mail_send(start_addr as u64, i, 0);
+        arch::la::ipi::send_ipi_single(i, 1);
+        info!("[kernel][la] wakeup hart {} with start={:#x}", i, start_addr);
+    }
+}
 use mm::KERNEL_SPACE;
 fn other_init() {
     // 调试用，先把其他核关了
@@ -161,14 +182,22 @@ fn other_init() {
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger();
-   /*  fs::mount_procfs();
-    fs::mount_devfs();
-    fs::list_apps();
-    task::add_initproc();*///ai说的这段不正常
     task::run_tasks();
 }
 
 /// 获取当前核心的hart id
+#[cfg(target_arch = "loongarch64")]
+pub fn get_hart_id() -> usize {
+    let hart_id: usize;
+    unsafe {
+         asm!(
+            "move {}, $tp",
+            out(reg) hart_id
+        );
+    }
+    hart_id
+}
+#[cfg(target_arch = "riscv64")]
 pub fn get_hart_id() -> usize {
     let hart_id: usize;
     unsafe {
@@ -179,7 +208,6 @@ pub fn get_hart_id() -> usize {
     }
     hart_id
 }
-
 // la的main需重写
 #[cfg(target_arch = "loongarch64")]
 #[no_mangle]
