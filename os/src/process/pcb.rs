@@ -136,8 +136,11 @@ impl ProcessControlBlock {
                 exit_code: 0,
                 uid: 0,
                 gid: 0,
+                sid:0,
                 euid: 0,
+                is_zombie: false,
                 egid: 0,
+                
                 pgid: pid_handle.0,
                 alive_task_count: 0,
                 tasks: Vec::new(),
@@ -155,6 +158,7 @@ impl ProcessControlBlock {
                 signal_mask: SignalFlags::empty(),
                 handling_sig: -1,
                 killed: false,
+                signal_mask_backup: None,
                 frozen: false,
                 trap_ctx_backup: None,
                 exit_code: 0,
@@ -193,6 +197,7 @@ impl ProcessControlBlock {
         let mut final_entry_point = entry_point; // 默认入口为主程序入口
         const INTERP_BASE: usize = 0x40000000;   // 给解释器找一个宽敞的基地址（避开主程序）
         const AT_BASE: usize = 7;                // 辅助向量里代表解释器基址的 ID
+        
 
         if let Some(interp) = interp_data {
             // 解析解释器的 ELF
@@ -299,6 +304,7 @@ impl ProcessControlBlock {
         proc_inner.heap_bottom = memory_top;
         proc_inner.program_brk = memory_top;
         proc_inner.on_main_hart = on_main_hart;
+        proc_inner.signal_actions = SignalActions::default();
         if let Some(argv0) = args.first() {
             proc_inner.pname = argv0.clone();
         }
@@ -421,9 +427,11 @@ impl ProcessControlBlock {
                 uid: parent_inner.uid,
                 gid: parent_inner.gid,
                 euid: parent_inner.euid,
+                sid:parent_inner.sid,
                 egid: parent_inner.egid,
                 pgid: parent_inner.pgid,
                 tasks: Vec::new(),
+                is_zombie: false,
                 alive_task_count: 1,
             })
         });
@@ -434,6 +442,7 @@ impl ProcessControlBlock {
             kernel_stack: kernel_stack,
             inner: MPSafeCell::new(TaskControlBlockInner {
                 trap_cx_addr,
+                signal_mask_backup: None,
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
                 signal_mask: caller_inner.signal_mask,
@@ -583,8 +592,10 @@ pub struct ProcessControlBlockInner {
     pub gid: u32,  // 真实组 ID
     pub euid: u32, // 有效用户 ID (Effective)
     pub egid: u32, // 有效组 ID (Effective)
+    pub sid: usize,
     // 🚩 新增：进程组 ID
     pub pgid: usize,
+    pub is_zombie: bool,
     // 进程下的线程数
     pub tasks: Vec<Arc<TaskControlBlock>>, 
     // 存活进程数，等于0相当于僵尸进程

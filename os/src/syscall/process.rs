@@ -102,10 +102,10 @@ const POLLHUP: u16 = 0x0010;
 pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> isize {
     println!("[kernel] sys_ppoll: ufds={:#x}, nfds={}, tmo_p={:#x}", ufds_ptr, nfds, tmo_p);
     if ufds_ptr == 0 && nfds > 0 {
-        return -1; // 或者返回对应的错误码（EFAULT）
+        return -1; // EFAULT
     }
 
-    // 🚩 1. 在进入循环前，一次性解析好超时时间，算出 Deadline
+    // 1. 在进入循环前，一次性解析好超时时间，算出 Deadline
     let has_timeout = tmo_p != 0;
     let mut deadline_ms: usize = 0;
 
@@ -124,32 +124,49 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         deadline_ms = get_time_ms() + timeout_ms;
     }
 
-    // 🚩 2. 开始属于 ppoll 的死循环
+    // 2. 备份原始掩码，并应用临时掩码
+    let task = current_task().unwrap();
+    let mut task_inner = task.inner_exclusive_access();
+    let original_mask = task_inner.signal_mask;
+    
+    if _sigmask != 0 {
+        let token = task.process().inner_exclusive_access().get_user_token();
+        let mask_val = *crate::mm::translated_ref(token, _sigmask as *const usize);
+        task_inner.signal_mask = SignalFlags::from_bits_truncate(mask_val as u64);
+    }
+    drop(task_inner);
+
+    // 3. 开始属于 ppoll 的死循环
     loop {
         let task = current_task().unwrap();
         let proc = task.process();
+        
+        // --- 🟢 检查信号 (使用当前的临时掩码) ---
+        let mut task_inner = task.inner_exclusive_access();
+        let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
+        // 特判 SIGKILL(9) 和 SIGSTOP(19) 这两个绝对不可屏蔽的信号
+        let unmaskable = task_inner.signals.bits() & ((1 << (9 - 1)) | (1 << (19 - 1)));
+
+        if (pending | unmaskable) != 0 {
+            // 🚩 核心：被打断返回前，必须恢复原始的信号掩码！
+            //task_inner.signal_mask = original_mask;
+            println!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
+                     task_inner.signals.bits(), task_inner.signal_mask.bits());
+            drop(task_inner); // 放锁
+            return -4; // EINTR
+        }
+        drop(task_inner); 
+        // ----------------------------------------
+
         let inner = proc.inner_exclusive_access();
         let token = inner.get_user_token();
-
         let mut ready_count = 0;
         
-        // 遍历轮询所有的 fd
+        // --- 🔵 遍历轮询所有的 fd ---
         for i in 0..nfds {
             let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
             let pollfd = crate::mm::translated_refmut(token, pollfd_ptr);
-            let mut task_inner = task.inner_exclusive_access();
-            let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
-            // 也可以加上对 SIGKILL/SIGSTOP 等不可屏蔽信号的特判
-            let unmaskable = task_inner.signals.bits() & (
-                (1 << (9 - 1)) | (1 << (19 - 1))
-            );
-
-            if (pending | unmaskable) != 0 {
-                drop(task_inner); // 🚩 撤退前千万记得放锁！
-                // trace!("[kernel] syscall interrupted by signal, returning EINTR");
-                return -4; // EINTR
-            }
-            drop(task_inner); // 查完信号没问题，放开线程锁
+            
             let fd = pollfd.fd;
             pollfd.revents = 0;
             
@@ -157,54 +174,92 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
             let fd_usize = fd as usize;
             
             if fd_usize >= inner.fd_table.len() || inner.fd_table[fd_usize].file.is_none() {
-                pollfd.revents = 0x008; // POLLERR 的值通常是 0x008
+                pollfd.revents = 0x008; // POLLERR
                 ready_count += 1;
             } else {
                 let file = inner.fd_table[fd_usize].file.as_ref().unwrap();
                 
-                // ⚠️ 记得用刚才修好的 ready_to_read / ready_to_write
+                // 检查读
                 if (pollfd.events & POLLIN) != 0 && file.ready_to_read() {
                     pollfd.revents |= POLLIN;
                 }
-                
                 // 检查写
                 if (pollfd.events & POLLOUT) != 0 && file.ready_to_write() {
                     pollfd.revents |= POLLOUT;
-
                 }
+                
                 if pollfd.revents != 0 {
                     ready_count += 1;
                 }
             }
-            println!("[kernel] ppoll fd={} target_events={:#x} ready_revents={:#x}", 
-          pollfd.fd, pollfd.events, pollfd.revents);
+            println!("[kernel] ppoll fd={} target_events={:#x} ready_revents={:#x}", pollfd.fd, pollfd.events, pollfd.revents);
         }
         
-        // 🚩 3. 如果找到了就绪事件，立即返回！
+        // 4. 如果找到了就绪事件，恢复掩码并返回！
         if ready_count > 0 {
+            drop(inner);
+            let mut task_inner = task.inner_exclusive_access();
+            task_inner.signal_mask = original_mask; // 🚩 恢复原始掩码
+            drop(task_inner);
             return ready_count as isize;
         }
         
-        // 🚩 4. 如果没找到事件，处理超时逻辑
+        // 5. 如果没找到事件，处理超时逻辑
         if has_timeout {
             if get_time_ms() >= deadline_ms {
-                return 0; // 时间到了，真的一滴都没有了，返回 0
+                drop(inner);
+                let mut task_inner = task.inner_exclusive_access();
+                task_inner.signal_mask = original_mask; // 🚩 恢复原始掩码
+                drop(task_inner);
+                return 0; // 超时返回 0
             }
         }
         
-        // 🚩 5. 没超时或无限等待，乖乖让出 CPU 等待下一次调度
-        drop(inner); // 必须先 drop 掉锁，否则切走之后别的进程拿不到锁就死锁了！
+        // 6. 没超时或无限等待，乖乖让出 CPU 等待下一次调度
+        drop(inner); // 必须先 drop 掉锁！
         suspend_current_and_run_next();
-
     }
-
 }
 pub fn sys_exit(exit_code: i32) -> ! {
     trace!("kernel:pid[{}] sys_exit", current_task().unwrap().process().pid.0);
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
+pub fn sys_exit_group(exit_code: i32) -> ! {
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let pid = proc.pid.0;
+    let mut proc_inner = proc.inner_exclusive_access();
+    println!("[EXIT_GROUP] PID {} starts exiting. Total threads to kill: {}", pid, proc_inner.tasks.len());
+    // 🚩 1. 真正的“全家桶”清理：给本进程内所有其他线程打上标记
+    // 遍历当前进程的所有线程（tasks 列表）
+    for thread in proc_inner.tasks.iter() {
+        if thread.gettid() != task.gettid() {
+            let mut t_inner = thread.inner_exclusive_access();
+            // 标记这些线程为 killed，它们下次进入 trap_handler 时会自尽
+            t_inner.killed = true; 
+            // 顺便给它们发个信号，把可能在睡觉的线程唤醒
+            t_inner.signals.insert(SignalFlags::SIGKILL);
+            drop(t_inner);
+            crate::process::wake_up_task(thread.clone());
+        }
+    }
 
+    // 🚩 2. 状态锁定
+    // 确保 alive_task_count 在这里被修正，使得当前线程成为最后一个回收资源的
+    proc_inner.alive_task_count = 1; 
+    
+    // 记录退出码
+    proc_inner.exit_code = exit_code;
+    println!("[EXIT_GROUP] PID {} cleanup done. Calling exit_current_and_run_next...", pid);
+    drop(proc_inner);
+    drop(proc);
+    drop(task);
+
+    // 🚩 3. 走正常的退出流程
+    exit_current_and_run_next(exit_code);
+    panic!("Unreachable!");
+}
 pub fn sys_yield() -> isize {
     //trace!("kernel: sys_yield");
     suspend_current_and_run_next();
@@ -215,7 +270,23 @@ pub fn sys_gettid() -> isize {
     // 目前线程ID和进程ID是一样的
     sys_getpid()
 }
-
+pub fn sys_rt_sigreturn() -> isize {
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    
+    // 1. 清除当前正在处理的信号标记
+    inner.handling_sig = -1;
+    
+    // 2. 还原被打断时的生死时刻 (比如当时 ppoll 刚返回的 -4)
+    if let Some(backup) = inner.trap_ctx_backup.take() {
+        *inner.get_trap_cx() = backup;
+    }
+    
+    // 🚩 3. 极其关键！因为 sys_rt_sigreturn 返回 isize，调度器会把它强行写入 a0 寄存器。
+    // 为了不破坏刚刚还原出来的 a0（里面存着 ppoll 的 EINTR -4），
+    // 我们必须返回还原后 trap_context 里的 a0 值！
+    inner.get_trap_cx().x[10] as isize
+}
 pub fn sys_getuid() -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
@@ -223,8 +294,24 @@ pub fn sys_getuid() -> isize {
     inner.uid as isize
 }
 // 假装获取成功，返回 PGID 为 0
-pub fn sys_getpgid(_pid: usize) -> isize { 
-    0 
+pub fn sys_getpgid(pid: usize) -> isize {
+    let task = current_task().unwrap();
+    
+    // 如果 pid 为 0，表示获取当前进程的 pgid
+    if pid == 0 {
+        let process = task.process();
+        let inner = process.inner_exclusive_access();
+
+        return inner.pgid as isize;
+    }
+
+    // 否则查找指定 pid 的进程
+    if let Some(proc) = get_process(pid) {
+        let inner = proc.inner_exclusive_access();
+        inner.pgid as isize
+    } else {
+        -3 // ESRCH (No such process)
+    }
 }
 
 // 假装设置成功，返回 0
@@ -291,13 +378,44 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
     inner.clear_child_tid = tidptr;
     proc.pid.0 as isize 
 }
-// 假装获取会话 ID 成功，返回 0
-pub fn sys_getsid(_pid: usize) -> isize { 
-    0 
+
+pub fn sys_getsid(pid: usize) -> isize {
+    let task = current_task().unwrap();
+    
+    // 如果 pid 为 0，获取当前进程的 sid
+    if pid == 0 {
+
+        let proc = task.process();
+        let mut inner = proc.inner_exclusive_access();
+        return inner.sid as isize;
+    }
+
+    if let Some(proc) = get_process(pid) {
+        let inner = proc.inner_exclusive_access();
+        inner.sid as isize
+    } else {
+        -3 // ESRCH
+    }
 }
-// 假装创建新会话成功，返回新的 SID (这里用 0 代替)
-pub fn sys_setsid() -> isize { 
-    0 
+
+/// 创建新会话，当前进程成为会话首进程（Session Leader）和进程组首进程
+pub fn sys_setsid() -> isize {
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let mut inner = proc.inner_exclusive_access();
+    
+    let pid = proc.pid.0;
+    
+    // POSIX 规定：如果当前进程已经是进程组组长，则 setsid 失败（返回 EPERM）
+    if inner.pgid == pid {
+        return -1; // EPERM (Operation not permitted)
+    }
+    
+    // 将 sid 和 pgid 都设置为当前进程的 pid
+    inner.sid = pid;
+    inner.pgid = pid;
+    
+    pid as isize // 成功时返回新的会话 ID
 }
 pub fn sys_clock_gettime(_clock_id: usize, tp: *mut TimeSpec) -> isize {
     let total_us = get_time_us();
@@ -655,48 +773,66 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
 pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
+    // 提前拿到当前进程的 pgid
+    let current_pgid = proc.inner_exclusive_access().pgid; 
+    
     const WNOHANG: usize = 0x1;
     let nohang = (options & WNOHANG) != 0;
-    // 开启一个死循环，直到找到僵尸才 return
+    println!("[wait4] P{} waiting for PID/PGID: {}, options: {}", current_pgid, pid, options);
+
     loop {
         let mut proc_inner = proc.inner_exclusive_access();
         
+        // 🚩 核心逻辑：严谨的 4 种 POSIX 匹配判定
+        let is_match = |p: &alloc::sync::Arc<crate::task::ProcessControlBlock>| -> bool {
+            let child_pid = p.getpid();
+            if pid == -1 {
+                true // 任意子进程
+            } else if pid > 0 {
+                child_pid == pid as usize // 特定 PID
+            } else if pid == 0 {
+                p.inner_exclusive_access().pgid == current_pgid // 同进程组
+            } else { // pid < -1
+                p.inner_exclusive_access().pgid == (-pid) as usize // 特定进程组
+            }
+        };
+
         // 1. 检查是否存在符合要求的子进程
-        if !proc_inner.children.iter().any(|p| pid == -1 || pid as *const () as usize == p.getpid()) {
-            return -1; // 一个孩子都没有，直接返回错误
+        if !proc_inner.children.iter().any(|p| is_match(p)) {
+            println!("[wait4] P{} has no matching children for filter {}", current_pgid, pid);
+            return -1; // 真的是一个匹配的都没有，才返回 ECHILD
         }
     
         // 2. 尝试找一个“已经死掉”的僵尸孩子
         let pair = proc_inner.children.iter().enumerate().find(|(_, p)| {
-            p.inner_exclusive_access().is_zombie() && (pid == -1 || pid as *const () as usize == p.getpid())
+            p.inner_exclusive_access().is_zombie && is_match(p)
         });
     
         if let Some((idx, _)) = pair {
-            // --- A. 找到了僵尸！收尸成功 ---
+            // --- A. 收尸成功 ---
             let child = proc_inner.children.remove(idx);
-            let pid = child.getpid();
+            let child_pid = child.getpid();
             let exit_code = child.inner_exclusive_access().exit_code;
-            assert_eq!(Arc::strong_count(&child), 1);
-            // 左移 8 位（这里还是要保留的！）
+            assert_eq!(alloc::sync::Arc::strong_count(&child), 1);
+            println!("[wait4] P{} collected Zombie P{} (code: {})", current_pgid, child_pid, exit_code);
+            // 组装状态码
             let status = (exit_code & 0xff) << 8;
-            // wait(NULL) is valid: userspace may pass a null status pointer.
             if exit_code_ptr as usize != 0 {
                 *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
             }
             
-            return pid as isize; // 成功返回
+            return child_pid as isize; 
         } else {
             if nohang {
-                return 0;
+                return 0; 
             }
-            // --- B. 孩子还活着 ---
-            // 释放进程锁并阻塞当前任务，等待子进程退出时被唤醒。
+            // --- B. 孩子还活着，睡眠等待 ---
+            println!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
             drop(proc_inner);
             crate::process::current_task_to_sleep(proc.wait_queue.lock());
         }
     }
 }
-
 pub fn sys_kill(pid: isize, signum: i32) -> isize {
     if signum < 0 || signum > 64 {
         return -22; // EINVAL
@@ -722,18 +858,26 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
             
             let flag = flag.unwrap();
             let mut inner = proc.inner_exclusive_access();
-            inner.signals.insert(flag);
+            inner.signals.insert(flag); // 进程级 pending
             
             let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
             
             for task_arc in inner.tasks.iter() {
                 let mut t_inner = task_arc.inner_exclusive_access();
-                if !t_inner.signal_mask.contains(flag) || is_unmaskable {
-                    t_inner.signals.insert(flag);
+                
+                // 🚩 1. 绝对无条件插入信号 (Generation)
+                t_inner.signals.insert(flag);
+                
+                // 🚩 2. 判断是否被屏蔽 (Delivery check)
+                let is_unblocked = !t_inner.signal_mask.contains(flag);
+                
+                if is_unblocked || is_unmaskable {
                     drop(t_inner); // 放锁
-                    crate::process::wake_up_task(task_arc.clone()); // 叫醒！
-                    break; // 一个进程只需一个线程去处理信号即可
+                    crate::process::wake_up_task(task_arc.clone()); // 真正唤醒！
+                } else {
+                    drop(t_inner); // 被屏蔽了，记录完毕，不打扰睡眠
                 }
+                break; // LTP 中一个进程通常只需要一个线程去处理信号即可
             }
             return 0;
         } else {
@@ -741,13 +885,10 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         }
     } else if pid == 0 || pid < -1 {
         // 🚩 进阶逻辑：广播给整个进程组！
-        // pid == 0 时，发给当前进程所在的进程组
-        // pid < -1 时，发给目标组 (-pid)
         let target_pgid = if pid == 0 { current_pgid } else { (-pid) as usize };
         let mut success = false;
 
-        // ⚠️ 遍历所有存在的进程。如果你有全局进程池 iter，请替换这里的循环。
-        // 这里提供一种通用的 fallback 写法：遍历一个合理的 PID 范围
+        // 遍历整个系统的 PID 空间（通用写法）
         for i in 1..4096 { 
             if let Some(proc) = get_process(i) {
                 let mut inner = proc.inner_exclusive_access();
@@ -756,25 +897,33 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
                     if signum == 0 { continue; } // 仅探测
                     
                     let flag = flag.unwrap();
-                    inner.signals.insert(flag);
+                    inner.signals.insert(flag); // 进程级 pending
                     let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
                     
                     for task_arc in inner.tasks.iter() {
                         let mut t_inner = task_arc.inner_exclusive_access();
-                        if !t_inner.signal_mask.contains(flag) || is_unmaskable {
-                            t_inner.signals.insert(flag);
+                        
+                        // 🚩 1. 无条件插入信号
+                        t_inner.signals.insert(flag);
+                        
+                        // 🚩 2. 判断屏蔽并决定是否唤醒
+                        let is_unblocked = !t_inner.signal_mask.contains(flag);
+                        
+                        if is_unblocked || is_unmaskable {
                             drop(t_inner);
-                            crate::process::wake_up_task(task_arc.clone()); // 叫醒同组子进程！
-                            break; 
+                            crate::process::wake_up_task(task_arc.clone());
+                        } else {
+                            drop(t_inner);
                         }
+                        break; 
                     }
                 }
             }
         }
-        return if success { 0 } else { -3 };
+        return if success { 0 } else { -3 }; // 如果整个组都没找到，报 ESRCH
     }
 
-    -1 // 未知情况或无权限
+    -1 // 未知情况
 }
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
@@ -794,16 +943,45 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     }
     0
 }
-pub fn sys_nanosleep(req: *const TimeSpec, _rem: *mut TimeSpec) -> isize {
+pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
     let start = get_time_ms();
-    // 写入用户传入的结构体
     let token = current_user_token();
-    let len = *translated_ref(token, req); 
+    let req_val = *translated_ref(token, req); 
 
-    let duration_ms = len.tv_sec * 1000 + len.tv_nsec / 1_000_000;
+    let duration_ms = req_val.tv_sec * 1000 + req_val.tv_nsec / 1_000_000;
+   println!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
     while get_time_ms() < start + duration_ms {
-        suspend_current_and_run_next();// 切换任务除非时间到
+        // 🚩 1. 检查是否有未屏蔽的信号到来
+        let task = current_task().unwrap();
+        let inner = task.inner_exclusive_access();
+        let pending = inner.signals.bits() & !inner.signal_mask.bits();
+        // 放开锁，避免死锁
+        drop(inner);
+        drop(task);
+
+        if pending != 0 {
+            // 🚩 2. 如果有信号，必须提早醒来 (Interrupted system call)
+            // 计算还剩下多少时间没睡完
+            let now = get_time_ms();
+            let elapsed = now - start;
+            let rem_ms = if duration_ms > elapsed { duration_ms - elapsed } else { 0 };
+            
+            // 如果用户传入了 rem 指针，把剩下的时间写进去
+            if rem as usize != 0 {
+                let rem_spec = translated_refmut(token, rem);
+                rem_spec.tv_sec = rem_ms / 1000;
+                rem_spec.tv_nsec = (rem_ms % 1000) * 1_000_000;
+            }
+            
+            // 🚩 3. 返回 -EINTR (-4)，触发外层的 trap_handler 调用 handle_signals
+            return -4; 
+        }
+
+        // 没有信号，继续让出 CPU
+        suspend_current_and_run_next();
     }
+    
+    // 正常睡醒，返回 0
     0
 }
 pub fn sys_mprotect(_start: usize, _len: usize, _prot: usize) -> isize {
@@ -1184,26 +1362,39 @@ pub fn sys_ftruncate(fd: usize, _len: usize) -> isize {
     -9 // -EBADF
 }
 pub fn sys_sigreturn() -> isize {
+    println!("[SIG_RET] ENTERED sys_sigreturn!");
+    
     let task = current_task().unwrap();
-    let process = task.process();
-    trace!("kernel:pid[{}] sys_sigreturn", process.pid.0);
-    drop(process);
-    drop(task);
-    if let Some(task) = current_task() {
-        let mut inner = task.inner_exclusive_access();
-        inner.handling_sig = -1;
-        // restore the trap context
+    let mut inner = task.inner_exclusive_access();
+    
+    // 🚩 测试 1：检查修改前的状态
+    let old_sig = inner.handling_sig;
+    
+    // 执行修改
+    inner.handling_sig = -1;
+    
+    // 🚩 测试 2：立刻回读，确认内存写入成功
+    let new_sig = inner.handling_sig;
+    println!("[SIG_RET] State Change: {} -> {}", old_sig, new_sig);
+    if let Some(mask_backup) = inner.signal_mask_backup.take() {
+        inner.signal_mask = mask_backup;
+        println!("[SIG_RET] Mask restored to: {:#x}", inner.signal_mask.bits());
+    }
+    // 恢复 trap 上下文
+    if let Some(backup) = inner.trap_ctx_backup.take() {
         let trap_ctx = inner.get_trap_cx();
-        *trap_ctx = inner.trap_ctx_backup.unwrap();
-        // Here we return the value of a0 in the trap_ctx,
-        // otherwise it will be overwritten after we trap
-        // back to the original execution of the application.
+        *trap_ctx = backup;
+        
+        // 🚩 测试 3：检查恢复后的 PC 指针和 a0
+        // 这能告诉你程序准备跳回到原来的哪一行执行
+        println!("[SIG_RET] Restoration: PC={:#x}, a0={}", trap_ctx.sepc, trap_ctx.x[10]);
+        
         trap_ctx.get_a0() as isize
     } else {
-        ESRCH.as_isize() // 没有当前任务
+        println!("[SIG_RET] ERROR: No backup context found for PID {}", task.getpid());
+        -1
     }
 }
-
 const SIG_BLOCK: usize = 0;
 const SIG_UNBLOCK: usize = 1;
 const SIG_SETMASK: usize = 2;

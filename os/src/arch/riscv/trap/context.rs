@@ -10,7 +10,7 @@ pub struct TrapContext {
     /// Supervisor Status Register
     sstatus: Sstatus,
     /// Supervisor Exception Program Counter
-    sepc: usize,
+    pub sepc: usize,
     /// Token of kernel address space
     pub kernel_satp: usize,
     /// Kernel stack pointer of the current application
@@ -31,6 +31,9 @@ impl TrapContext {
     /// 设置返回值，a0对应x10
     pub fn set_a0(&mut self, a0: usize) {
         self.x[10] = a0;
+    }
+    pub fn set_ra(&mut self, ra: usize) {
+        self.x[1] = ra; // RISC-V 中 x1 是 Return Address
     }
     pub fn set_a1(&mut self, a1: usize) {
         self.x[11] = a1;

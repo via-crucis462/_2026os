@@ -72,7 +72,7 @@ pub struct TaskControlBlockInner {
     pub signal_mask: SignalFlags,
     // the signal which is being handling
     pub handling_sig: isize,
-    
+    pub signal_mask_backup: Option<SignalFlags>,
     // if the task is killed
     pub killed: bool,
     // if the task is frozen by a signal

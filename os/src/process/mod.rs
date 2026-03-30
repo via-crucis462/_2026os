@@ -19,6 +19,7 @@ pub use id::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle};
 use spin::{Mutex, MutexGuard};
 pub use task::*;
 pub use pcb::*;
+use crate::mm::translated_byte_buffer;
 
 use manager::*;
 use crate::sync::*;
@@ -107,73 +108,77 @@ pub fn wake_up_one(mut wait_queue: MutexGuard<WaitQueue>) {
 pub const IDLE_PID: usize = 0;
 
 /// Exit the current 'Running' task and run the next task in task list.
-/// 初步修改，逻辑待检查
-/// 2026.3.18,当前实现中，exit_current_and_run_next会将当前进程的子进程移交给initproc，
-/// 即子进程不会直接去世，而是仍会执行完剩余的代码，直到自己也调用exit_current_and_run_next退出。
-pub fn exit_current_and_run_next(exit_code: i32) {
-    //println!("called exit_current_and_run_next with exit_code {}", exit_code);
-    // take from Processor
+    pub fn exit_current_and_run_next(exit_code: i32) {
     let task = take_current_task().unwrap();
-
     let pid = task.getpid();
     if pid == IDLE_PID {
-        println!(
-            "[kernel] Idle process exit with exit_code {} ...",
-            exit_code
-        );
+        println!("[kernel] Idle process exit with exit_code {} ...", exit_code);
         panic!("All applications completed!");
     }
+    
 
     // remove from tid2task
     remove_from_tid2task(task.gettid());
+    
     // **** access current TCB exclusively
-    let mut task_inner: MPSafeGuard<'_, TaskControlBlockInner> = task.inner_exclusive_access();
+    let mut task_inner = task.inner_exclusive_access();
     let proc = task.process();
     let mut proc_inner = proc.inner_exclusive_access();
+    
     // Change status to Zombie
     task_inner.task_status = TaskStatus::Zombie;
-    // Record exit code
     task_inner.exit_code = exit_code;
-    // do not move to its parent but under initproc
+    
+    // Decrease the number of alive tasks
     proc_inner.alive_task_count -= 1;
     let parent_to_wake = proc_inner.parent.as_ref().and_then(|p| p.upgrade());
-    let wake_parent = proc_inner.is_zombie();
-    // ++++++ access initproc TCB exclusively
-    // ++++++ release parent PCB
-    if proc_inner.is_zombie() {
-        /*println!(
-            "[kernel] pid={} exit with exit_code {}",
-            pid, exit_code
-        );*/
+    
+    // 🚩 核心判定：使用直接访问字段 proc_inner.is_zombie
+    if proc_inner.alive_task_count == 0 || proc_inner.is_zombie {
+        // 1. 确保标志位被设为 true，这样 wait4 遍历 children 时一抓一个准
+        proc_inner.is_zombie = true;
+        // 注意：如果是单线程程序，alive_task_count 减到 0 时，is_zombie 之前是 false，
+        // 这里会把它变成 true，正式宣告进程进入僵尸态。
+
         let initproc = INITTASK.process();
         let mut initproc_inner = initproc.inner_exclusive_access();
+        if !proc_inner.children.is_empty() {
+            println!("[kernel] Process {} orphans {} children to initproc", pid, proc_inner.children.len());
+        }
+        // 2. 托孤：把所有未退出的子进程交给 initproc
         for child in proc_inner.children.iter() {
             child.inner_exclusive_access().parent = Some(Arc::downgrade(&initproc));
             initproc_inner.children.push(child.clone());
         }
         drop(initproc_inner);
-        // recycle resources of the process
+        
+        // 3. 清理当前进程持有的资源
         proc_inner.children.clear();
-        // deallocate user space
         proc_inner.memory_set.recycle_data_pages();
-        // drop file descriptors
         proc_inner.fd_table.clear();
         remove_process(pid);
+        
+        // 4. 唤醒父进程并发送 SIGCHLD 信号
         if let Some(parent) = parent_to_wake {
+            let mut parent_inner = parent.inner_exclusive_access();
+            parent_inner.signals.insert(SignalFlags::SIGCHLD);
+            drop(parent_inner); 
+            
             wake_up_one(parent.wait_queue.lock());
         }
     }
+    
     // **** release current PCB
     drop(proc_inner);
     drop(proc);
     drop(task_inner);
     // drop task manually to maintain rc correctly
-    drop(task);// proc 也会随之drop
-    // we do not have to save task context
+    drop(task); 
+    
+    // schedule next task
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
-}
-
+}   
 #[repr(C)]
 struct InitProcData<T: ?Sized> {
     pub _align: [u64; 0],
@@ -261,113 +266,177 @@ fn call_kernel_signal_handler(signal: SignalFlags) {
         }
     }
 }
-
-/// call user signal handler
-fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
+pub fn handle_signals() {
     let task = current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
-    let proc = task.process();
-    let proc_inner = proc.inner_exclusive_access();
-    let handler = proc_inner.signal_actions.table[sig].handler;
-    if handler != 0 {
-        // user handler
-
-        // handle flag
-        task_inner.handling_sig = sig as isize;
-        task_inner.signals ^= signal;
-
-        // backup trapframe
-        let trap_ctx = task_inner.get_trap_cx();
-        task_inner.trap_ctx_backup = Some(*trap_ctx);
-
-        // modify trapframe
-        trap_ctx.set_rt(handler);
-
-        // put args (a0)
-        trap_ctx.set_a0(sig);
-    } else {
-        // Default action when user does not install a handler:
-        // 1) always consume the pending signal bit;
-        // 2) ignore known ignore-by-default signals;
-        // 3) terminate for the rest.
-        task_inner.signals.remove(signal);
-        match signal {
-            SignalFlags::SIGCHLD | SignalFlags::SIGURG | SignalFlags::SIGWINCH => {
-                trace!(
-                    "[K] task/call_user_signal_handler: ignore default signal {:?}",
-                    signal
-                );
-            }
-            _ => {
-                task_inner.killed = true;
-                println!(
-                    "[K] task/call_user_signal_handler: default terminate for signal {:?}",
-                    signal
-                );
-            }
+    
+    
+    // 2. 检查是否有未屏蔽的信号 (或者不可屏蔽的 SIGKILL/SIGSTOP)
+    let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
+    let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18));
+    let final_pending = pending | unmaskable;
+    
+    if final_pending != 0 {
+        // 3. 取出第一个需要处理的信号编号 (1-based)
+        let process = task.process(); // 拿到所属进程
+        let mut proc_inner = process.inner_exclusive_access(); // 锁住进程
+        let sig = final_pending.trailing_zeros() as usize + 1;
+        let flag = SignalFlags::from_bits(1 << (sig - 1)).unwrap();
+        let handler_addr = proc_inner.signal_actions.table[sig].handler;
+        if handler_addr == 0 || handler_addr == 1 {
+            // println!("[SIG PROBE] Ignore or Default action for sig {}. Clearing it.", sig);
+            
+            // 直接把信号从信箱里抹掉，当作没发生过（或者按需直接杀死进程）
+            task_inner.signals.remove(flag); 
+            return; // 直接返回，千万不要调用 call_user_signal_handler！
+        }
+        println!("[SIG PROBE] Calling handler for sig: {}, final_pending: {:#x}", sig, final_pending);
+        // 🚩 核心：必须先放锁，再调用你写好的处理函数！
+        drop(task_inner); 
+        drop(proc_inner);
+        // 4. 呼叫你之前写好的神级函数，它会篡改 sepc 和 ra
+        call_user_signal_handler(sig, flag);
+    }else {
+        // 🛑 探针 3：走到了这里但没有信号要处理
+        // 注意：如果你看到大量探针3，说明有奇怪的系统调用唤醒，但信号已经被清空或完全被屏蔽。
+        let raw_signals = task_inner.signals.bits();
+        let raw_mask = task_inner.signal_mask.bits();
+        if raw_signals != 0 {
+            println!("[SIG PROBE] Signals exist ({:#x}) but fully masked ({:#x})", raw_signals, raw_mask);
         }
     }
 }
+/// call user signal handler
+fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
+    let task = current_task().unwrap();
+    let proc = task.process();
+    
+    let action = {
+        let proc_inner = proc.inner_exclusive_access();
+        proc_inner.signal_actions.table[sig - 1]
+    };  
+    let handler = action.handler;
+    let restorer = action.restorer;
 
+    const SIG_DFL: usize = 0;
+    const SIG_IGN: usize = 1;
+    
+    let mut task_inner = task.inner_exclusive_access();
+    let before_bits = task_inner.signals.bits();
+    task_inner.signals.remove(signal); // 把信号从 pending 队列中拿走
+    let after_bits = task_inner.signals.bits(); 
+    println!(
+        "[SIG_CLEAN] Signal:{:?}({:?}) | Bits: {:#x} -> {:#x}", 
+        signal, sig, before_bits, after_bits
+    );
+
+    // 🚩 分支 1：要求忽略
+    if handler == SIG_IGN {
+        return; // 直接返回，无事发生，绝不修改 handling_sig！
+    } 
+    // 🚩 分支 2：执行用户自定义 Handler
+    else if handler != SIG_DFL {
+        // --- 👇 只有确定要跳转用户态了，才能修改状态和备份 👇 ---
+        
+        let trap_ctx = task_inner.get_trap_cx();
+        task_inner.trap_ctx_backup = Some(*trap_ctx);
+        task_inner.signal_mask_backup = Some(task_inner.signal_mask);
+        
+        // 设置当前正在处理的信号
+        task_inner.handling_sig = sig as isize;
+        // 临时屏蔽当前信号，防止处理时被同一个信号再次打断
+        task_inner.signal_mask.insert(signal);
+        
+        // (可选：如果 action 里有 sa_mask，也应该在这里合并进来)
+        // task_inner.signal_mask.bits |= action.sa_mask;
+
+        // 设置用户态入口和参数
+        // 注意：这里应该是修改 PC 指针，如果是 rCore 通常叫 set_sepc 或修改 trap_ctx.sepc
+        trap_ctx.sepc = handler; // ⚠️ 原代码 trap_ctx.set_rt 可能有误，确保是设为 Program Counter
+        trap_ctx.set_a0(sig);
+
+        // 设置返回地址 (ra)
+        if restorer != 0 {
+            trap_ctx.set_ra(restorer);
+        } else {
+            // ... 注入栈上蹦床代码 (逻辑保持你原来的写法) ...
+            println!("[KERNEL WARNING] restorer is 0! Injecting trampoline on stack...");
+            // ... 你的计算 sp, 写 trampoline, 设置 set_ra(sp) 的代码 ...
+            // trap_ctx.set_ra(sp);
+            // trap_ctx.x[2] = sp;
+        }
+        // --- 👆 状态修改结束 👆 ---
+    } 
+    // 🚩 分支 3：默认行为
+    else {
+        match signal {
+            SignalFlags::SIGCHLD | SignalFlags::SIGURG | SignalFlags::SIGWINCH => {
+                // 默认忽略的信号，直接打个日志就行
+                // trace!("[K] ignore default signal {:?}", signal);
+            }
+            _ => {
+                // 默认终止进程的信号
+                task_inner.killed = true;
+                // println!("[K] default terminate for signal {:?}", signal);
+            }
+        }
+    }
+}   
 /// Check if the current task has any signal to handle
 /// 仅部分修改
 fn check_pending_signals() {
-    for sig in 0..(MAX_SIG + 1) {
+    let task = current_task().unwrap();
+    let task_inner = task.inner_exclusive_access();
+    
+    let signals = task_inner.signals.bits();
+    let mask = task_inner.signal_mask.bits();
+    let handling = task_inner.handling_sig;
+    
+    // 🚨 探头 3.1：进门第一眼，看看进程当前真实状态！
+    if signals != 0 {
+        println!("[PROBE 3.1] check_pending: signals={:#x}, mask={:#x}, handling_sig={}", signals, mask, handling);
+    }
+    drop(task_inner); // 先放锁，免得死锁
+
+    // 注意：信号编号从 1 开始，最大通常是 64。不能从 0 开始，否则 0 - 1 会溢出！
+    for sig in 1..=MAX_SIG { 
         let task = current_task().unwrap();
         let proc = task.process();
         let task_inner = task.inner_exclusive_access();
         let proc_inner = proc.inner_exclusive_access();
+        
         let signal = match SignalFlags::from_bits(1 << (sig - 1)) {
             Some(s) => s,
             None => continue,
         };
-        if task_inner.signals.contains(signal) && (!task_inner.signal_mask.contains(signal)) {
-            let mut masked = true;
-            let handling_sig = task_inner.handling_sig;
-            if handling_sig == -1 {
-                masked = false;
-            } else {
-                let handling_sig = handling_sig as *const () as usize;
-                if !proc_inner.signal_actions.table[handling_sig]
-                    .mask
-                    .contains(signal)
-                {
-                    masked = false;
+        
+        if task_inner.signals.contains(signal) {
+            let is_masked = task_inner.signal_mask.contains(signal);
+            
+            // 🚨 探头 3.2：看看每一个存在的信号，它是怎么被判定拦截的！
+            println!("[PROBE 3.2] found pending sig: {}, is_masked: {}", sig, is_masked);
+            
+            if !is_masked {
+                let mut masked = false;
+                if task_inner.handling_sig != -1 {
+                    // 这里原本逻辑有点绕，简化一下：如果你正在处理信号，我们保守点先不打断
+                    masked = true; 
+                    println!("[PROBE 3.3] skipped sig {} because currently handling {}", sig, task_inner.handling_sig);
                 }
-            }
-            if !masked {
-                drop(task_inner);
-                drop(task);
-                drop(proc_inner);
-                drop(proc);
-                if signal == SignalFlags::SIGKILL
-                    || signal == SignalFlags::SIGSTOP
-                    || signal == SignalFlags::SIGCONT
-                {
-                    // signal is a kernel signal
-                    call_kernel_signal_handler(signal);
-                } else {
-                    // signal is a user signal
-                    call_user_signal_handler(sig, signal);
-                    return;
+                
+                if !masked {
+                    println!("[PROBE 3.4] delivering sig {} to user handler!", sig);
+                    drop(task_inner);
+                    drop(proc_inner);
+                    
+                    if signal == SignalFlags::SIGKILL || signal == SignalFlags::SIGSTOP || signal == SignalFlags::SIGCONT {
+                        call_kernel_signal_handler(signal);
+                    } else {
+                        call_user_signal_handler(sig, signal);
+                        return;
+                    }
                 }
             }
         }
-    }
-}
-
-/// Handle signals for the current process
-pub fn handle_signals() {
-    loop {
-        check_pending_signals();
-        let (frozen, killed) = {
-            let task = current_task().unwrap();
-            let task_inner = task.inner_exclusive_access();
-            (task_inner.frozen, task_inner.killed)
-        };
-        if !frozen || killed {
-            break;
-        }
-        suspend_current_and_run_next();
     }
 }

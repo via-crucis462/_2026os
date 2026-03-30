@@ -173,7 +173,7 @@ pub(crate) fn normalize_leading_dot_path(path: String) -> String {
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     //if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
        // println!("[kernel] >>> Ready to enter Syscall ID: {}", syscall_id);
-   //}
+  // }
 
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
@@ -189,7 +189,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_LSEEK=> sys_lseek(args[0], args[1] as isize, args[2] as i32),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut Stat),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
-        SYSCALL_EXIT_GROUP => sys_exit(args[0] as i32),
+        SYSCALL_EXIT_GROUP =>sys_exit_group(args[0] as i32),
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_KILL => sys_kill(args[0] as isize, args[1] as i32),
         SYSCALL_SIGACTION => sys_sigaction(
@@ -288,11 +288,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
         _ =>  Errno::ENOSYS.as_isize(),
     };
-    if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
-        println!(
+    //if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
+       /*  println!(
             "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], ret
-        );
-    }
+        );*/
+    //}
     ret
 }
