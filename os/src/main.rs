@@ -176,10 +176,6 @@ fn other_init() {
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger();
-    fs::mount_procfs();
-    fs::mount_devfs();
-    fs::list_apps();
-    task::add_initproc();
     task::run_tasks();
 }
 
