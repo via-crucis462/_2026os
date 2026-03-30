@@ -1,0 +1,104 @@
+
+sudo mount -o loop sdcard-rv.img ./my_sdcard
+sudo umount ./my_sdcard
+cp -f /root/rcore/user-rv/target/riscv64gc-unknown-none-elf/release/initproc /root/rcore/_2026os/os/src/arch/riscv/initproc
+make debug-rv
+make test-rv
+riscv64-unknown-elf-gdb \
+    -ex 'file target/riscv64gc-unknown-none-elf/release/os' \
+    -ex 'set arch riscv:rv64' \
+    -ex 'target remote localhost:1234'
+target remote localhost:1234
+grep -E "^\s*(pub )?(fn|struct|enum) " src/mm/memory_set.rs//获得函数签名和函数参数
+nm /root/rcore/_2026os/os/target/riscv64gc-unknown-none-elf/release/os | grep sys_munmap//获得函数地址和名称
+# 1. 载入真正的内核文件（如果 GDB 提示 "no debugging symbols found"，说明这个 kernel-rv 被剥离了符号表，你可能需要找 target 目录下的未裁剪版本）
+(gdb) file /root/rcore/_2026os/os/target/riscv64gc-unknown-none-elf/release/os
+
+# 2. 连接到被冻结的 QEMU
+(gdb) target remote localhost:1234
+
+# 3. 接下来你可以打断点，比如我们想抓 sys_exec
+(gdb) b sys_exec
+
+# 4. 让时间开始流动
+(gdb) c
+
+b 函数名：设置断点 (比如 b sys_exec)
+
+c (continue)：继续运行直到下一个断点
+
+n (next)：单步执行（不进入函数内部）
+
+s (step)：单步执行（跳进函数内部去看看）
+
+q (quit)：退出 GDB
+
+perl -pe 's/\x1b\[[0-9;]*[mGKF]//g' os.log > clean.log
+make run > os.log 2>&1
+monitor 允许你直接向 QEMU 监视器发送指令。system_reset 相当于按下了虚拟机上的“复位键”。
+(gdb) load
+(gdb) monitor system_reset
+(gdb) c
+
+b <location>: 在函数名、行号或绝对地址处设断点。
+
+b main (函数名)
+
+b *0x80200000 (绝对地址，调试内核最常用)
+
+info b: 查看所有断点列表。
+
+delete <num>: 删除编号为 num 的断点。
+
+disable/enable <num>: 暂时禁用或启用某个断点。
+
+hbreak: 硬件断点。在调试 ROM 代码或只读内存时非常有用（QEMU 模拟环境常用）。
+
+c (continue): 继续运行直到下一个断点。
+
+n (next): 单步执行（跳过函数调用）。
+
+s (step): 单步执行（进入函数内部）。
+
+si / ni: 汇编级别的单步执行。调试内核启动或中断处理程序（Trap）时必须用这个，因为很多地方没有 C 源码对应。
+
+finish: 运行到当前函数返回为止。
+
+info reg: 查看通用寄存器（a0, t0, ra 等）。
+
+info all-reg: 查看包括 CSR（控制与状态寄存器）在内的所有寄存器。
+
+p $a0: 直接查看某个特定寄存器的值（注意要加 $ 符号）。
+
+monitor help: 查看 QEMU 支持哪些监视器命令。
+
+monitor info mem: 查看当前的虚拟内存映射（页表情况）。
+
+monitor system_reset: 复位虚拟机（记得配合前面说的 -no-shutdown 参数）。
+
+layout split: 开启 TUI（文本用户界面）模式，同时看到源码和汇编，非常直观。按 Ctrl+L 刷新乱掉的界面。
+
+#!/bin/bash
+
+echo "#### OS COMP TEST GROUP START ltp-musl ####"
+
+# 定义目标目录
+target_dir="ltp/testcases/bin"
+
+# 遍历目录下的所有文件
+for file in "$target_dir"/*; do
+  # 跳过目录，仅处理文件
+  if [ -f "$file" ]; then
+    # 输出文件名
+    echo "RUN LTP CASE $(basename "$file")"
+
+    "$file"
+    ret=$?
+
+    # 输出文件名和返回值
+    echo "FAIL LTP CASE $(basename "$file") : $ret"
+  fi
+done
+
+
+echo "#### OS COMP TEST GROUP END ltp-musl ####"
