@@ -1,15 +1,16 @@
 // 正在为la64重写
 // 参考https://godones.github.io/rCoreloongArch/app.html
+use crate::process::processor::current_user_asid;
 mod context;
+
+use crate::{KERNEL_STACK_SIZE, PAGE_SIZE, get_hart_id};
+use crate::mm::VirtAddr;
 use crate::syscall::syscall;
-use crate::task::processor::current_user_asid;
 use crate::task::{
-    check_signals_error_of_current, current_add_signal, current_trap_cx, current_user_token,
-    exit_current_and_run_next, handle_signals, suspend_current_and_run_next, SignalFlags,
+    KernelStack, SignalFlags, check_signals_error_of_current, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token, exit_current_and_run_next, handle_signals, suspend_current_and_run_next
 };
-
+use crate::arch::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
-
 global_asm!(include_str!("trap.S"));
 
 extern "C" {
@@ -280,3 +281,12 @@ pub  extern "C" fn csr_info(){
 }
 
 pub use context::TrapContext;
+
+pub fn current_trap_cx_user_va() -> usize {
+    current_task().unwrap().kernel_stack.get_top() - KERNEL_STACK_SIZE
+}
+
+pub fn trap_cx_va_by_kernel_stack(kernel_stack: &KernelStack) -> usize {
+    let kernel_stack_top = kernel_stack.get_top();
+    kernel_stack_top - KERNEL_STACK_SIZE
+}

@@ -101,7 +101,7 @@ impl ProcessControlBlock {
             let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
             trap_cx_pa.into()
         };
-        info!("TaskControlBlock::new: translated trap_cx_addr = {:#x}", trap_cx_addr);
+        //info!("TaskControlBlock::new: translated trap_cx_addr = {:#x}", trap_cx_addr);
         #[cfg(target_arch = "loongarch64")]
         let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
 
@@ -339,7 +339,7 @@ impl ProcessControlBlock {
             .translate(trap_cx_va.into())
             .unwrap()
             .ppn();
-        info!("fork: translated trap_cx_ppn = {:#x}", trap_cx_ppn.0);
+        //info!("fork: translated trap_cx_ppn = {:#x}", trap_cx_ppn.0);
         #[cfg(target_arch = "riscv64")]
         let trap_cx_addr = {
             let trap_cx_pa: PhysAddr = trap_cx_ppn.into();

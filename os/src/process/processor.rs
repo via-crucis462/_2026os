@@ -66,7 +66,6 @@ lazy_static! {
 
 // 获取并锁住当前处理器
 pub fn current_processor() -> MPSafeGuard<'static, Processor> {
-    #[cfg(target_arch = "riscv64")]
     let hart_id = get_hart_id();
     PROCESSORS[hart_id].exclusive_access()
 }

@@ -1,4 +1,5 @@
 //! 多核安全数据管理器
+#[cfg(target_arch = "riscv64")]
 use riscv::register::sstatus;
 use super::*;
 
