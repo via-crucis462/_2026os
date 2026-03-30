@@ -285,17 +285,13 @@ impl ProcessControlBlock {
         let trap_cx_addr: usize = caller_task.inner_exclusive_access().trap_cx_addr;
         proc_inner.memory_set = memory_set;
 
-        #[cfg(target_arch = "riscv64")]
-        let kernel_stack_top = caller_task.kernel_stack.get_top();
-        #[cfg(target_arch = "loongarch64")]
-        let kernel_stack_top = trap_cx_addr;
 
         // 修改trap上下文
         let mut trap_cx = TrapContext::app_init_context(
             entry_point,
             user_sp, // 让用户程序一进来 sp 就指向 argc
             KERNEL_SPACE.exclusive_access().token(),
-            kernel_stack_top,
+            trap_cx_addr,
             trap_handler as *const () as usize,
         );
         
@@ -389,7 +385,7 @@ impl ProcessControlBlock {
             kernel_stack: kernel_stack,
             inner: MPSafeCell::new(TaskControlBlockInner {
                 trap_cx_addr,
-                task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                task_cx: TaskContext::goto_trap_return(kernel_stack_top),//执行栈的栈顶
                 task_status: TaskStatus::Ready,
                 signal_mask: caller_inner.signal_mask,
                 handling_sig: caller_inner.handling_sig,
