@@ -483,6 +483,7 @@ pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
 }
 
 pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
+    //println!("curent core id: {}, sys_exec called with path: {:?}, args: {:?}", get_hart_id(), path, args);
     let token = current_user_token();
     let task = current_task().unwrap();
     let cwd = task.process().inner_exclusive_access().cwd.clone();

@@ -409,12 +409,12 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
 
     total_written as isize
 }
-pub fn sys_statx(dirfd: isize, path: *const u8, mask: u32, flags: u32, st: *mut Statx) -> isize {
+pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut Statx) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
     let proc = task.process();
     let path_str = translated_str(token, path);
-    println!("[kernel] sys_statx: dirfd={}, path={}, mask={:#x}, flags={:#x}", dirfd, path_str, mask, flags);
+    println!("[kernel] sys_statx: dirfd={}, path={}, flags={:#x}, mask={:#x}", dirfd, path_str, flags, mask);
     const AT_EMPTY_PATH: u32 = 0x1000;
     if path_str.is_empty() {
         if (flags & AT_EMPTY_PATH) == 0 {

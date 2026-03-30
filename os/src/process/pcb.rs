@@ -284,14 +284,17 @@ impl ProcessControlBlock {
         #[cfg(target_arch = "loongarch64")]
         let trap_cx_addr: usize = caller_task.inner_exclusive_access().trap_cx_addr;
         proc_inner.memory_set = memory_set;
-
+        #[cfg(target_arch = "riscv64")]
+        let kernel_stack_top = caller_task.kernel_stack.get_top();
+        #[cfg(target_arch = "loongarch64")]
+        let kernel_stack_top = trap_cx_addr;
 
         // 修改trap上下文
         let mut trap_cx = TrapContext::app_init_context(
             entry_point,
             user_sp, // 让用户程序一进来 sp 就指向 argc
             KERNEL_SPACE.exclusive_access().token(),
-            trap_cx_addr,
+            kernel_stack_top,
             trap_handler as *const () as usize,
         );
         

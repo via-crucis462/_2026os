@@ -1,6 +1,6 @@
 MODE ?= debug
 RV_SMP ?= 4
-LA_SMP ?= 1
+LA_SMP ?= 4
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
 RV_ELF ?= os/target/riscv64gc-unknown-none-elf/$(MODE)/os
@@ -42,7 +42,7 @@ test-la: build-la copy-la
 	@qemu-system-loongarch64 \
 	-kernel kernel-la \
 	-m 1G -nographic \
-	-smp 1 \
+	-smp $(LA_SMP) \
 	-drive file=sdcard-la.img,if=none,format=raw,id=x0 \
 	-device virtio-blk-pci,drive=x0 \
 	-no-reboot \
