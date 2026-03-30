@@ -184,6 +184,7 @@ fn other_init() {
 }
 
 /// 获取当前核心的hart id
+#[cfg(target_arch = "loongarch64")]
 pub fn get_hart_id() -> usize {
     let hart_id: usize;
     unsafe {
@@ -194,7 +195,17 @@ pub fn get_hart_id() -> usize {
     }
     hart_id
 }
-
+#[cfg(target_arch = "riscv64")]
+pub fn get_hart_id() -> usize {
+    let hart_id: usize;
+    unsafe {
+         asm!(
+            "mv {}, tp",
+            out(reg) hart_id
+        );
+    }
+    hart_id
+}
 // la的main需重写
 #[cfg(target_arch = "loongarch64")]
 #[no_mangle]
