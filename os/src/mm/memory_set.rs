@@ -816,7 +816,7 @@ impl MemorySet {
     }
 
     pub fn debug_dump_areas(&self, badv: Option<usize>, era: Option<usize>) {
-        println!(
+        error!(
             "[kernel] memory_set: asid={}, brk_index={}, area_count={}",
             self.asid.0,
             self.brk_index,
@@ -827,7 +827,7 @@ impl MemorySet {
             let end = area.vpn_range.get_end().0 * PAGE_SIZE;
             let badv_hit = badv.map(|addr| addr >= start && addr < end).unwrap_or(false);
             let era_hit = era.map(|addr| addr >= start && addr < end).unwrap_or(false);
-            println!(
+            error!(
                 "[kernel] area[{}] [{:#x}, {:#x}) {:?}{}{}{}",
                 idx,
                 start,

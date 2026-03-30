@@ -157,7 +157,7 @@ impl VfsInode for RtcInode {
 
 // 4. 执行挂载
 pub fn mount_devfs() {
-    println!("[VFS] Mounting pseudo-filesystem: /dev");
+    info!("[VFS] Mounting pseudo-filesystem: /dev");
     // 这里用 TmpfsDirInode 替代你之前写的只读的 DevDirInode
     let dev_dentry = ROOT_DENTRY.insert(String::from("dev"), Arc::new(TmpfsDirInode::new()));
     

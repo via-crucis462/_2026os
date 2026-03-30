@@ -100,9 +100,9 @@ const POLLERR: i16 = 0x008;
 const POLLHUP: u16 = 0x0010;
 
 pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> isize {
-    println!("[kernel] sys_ppoll: ufds={:#x}, nfds={}, tmo_p={:#x}", ufds_ptr, nfds, tmo_p);
+    info!("[kernel] sys_ppoll: ufds={:#x}, nfds={}, tmo_p={:#x}", ufds_ptr, nfds, tmo_p);
     if ufds_ptr == 0 && nfds > 0 {
-        return -1; // EFAULT
+        return EFAULT.as_isize(); // EFAULT
     }
 
     // 1. 在进入循环前，一次性解析好超时时间，算出 Deadline
@@ -150,10 +150,10 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         if (pending | unmaskable) != 0 {
             // 🚩 核心：被打断返回前，必须恢复原始的信号掩码！
             //task_inner.signal_mask = original_mask;
-            println!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
+            info!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
                      task_inner.signals.bits(), task_inner.signal_mask.bits());
             drop(task_inner); // 放锁
-            return -4; // EINTR
+            return EINTR.as_isize(); // EINTR
         }
         drop(task_inner); 
         // ----------------------------------------
@@ -192,7 +192,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
                     ready_count += 1;
                 }
             }
-            println!("[kernel] ppoll fd={} target_events={:#x} ready_revents={:#x}", pollfd.fd, pollfd.events, pollfd.revents);
+            info!("[kernel] ppoll fd={} target_events={:#x} ready_revents={:#x}", pollfd.fd, pollfd.events, pollfd.revents);
         }
         
         // 4. 如果找到了就绪事件，恢复掩码并返回！
@@ -230,7 +230,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     let proc = task.process();
     let pid = proc.pid.0;
     let mut proc_inner = proc.inner_exclusive_access();
-    println!("[EXIT_GROUP] PID {} starts exiting. Total threads to kill: {}", pid, proc_inner.tasks.len());
+    info!("[EXIT_GROUP] PID {} starts exiting. Total threads to kill: {}", pid, proc_inner.tasks.len());
     // 🚩 1. 真正的“全家桶”清理：给本进程内所有其他线程打上标记
     // 遍历当前进程的所有线程（tasks 列表）
     for thread in proc_inner.tasks.iter() {
@@ -251,7 +251,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     
     // 记录退出码
     proc_inner.exit_code = exit_code;
-    println!("[EXIT_GROUP] PID {} cleanup done. Calling exit_current_and_run_next...", pid);
+    info!("[EXIT_GROUP] PID {} cleanup done. Calling exit_current_and_run_next...", pid);
     drop(proc_inner);
     drop(proc);
     drop(task);
@@ -394,7 +394,7 @@ pub fn sys_getsid(pid: usize) -> isize {
         let inner = proc.inner_exclusive_access();
         inner.sid as isize
     } else {
-        -3 // ESRCH
+        return ESRCH.as_isize();
     }
 }
 
@@ -408,7 +408,7 @@ pub fn sys_setsid() -> isize {
     
     // POSIX 规定：如果当前进程已经是进程组组长，则 setsid 失败（返回 EPERM）
     if inner.pgid == pid {
-        return -1; // EPERM (Operation not permitted)
+        return EPERM.as_isize(); // EPERM (Operation not permitted)
     }
     
     // 将 sid 和 pgid 都设置为当前进程的 pid
@@ -422,7 +422,7 @@ pub fn sys_clock_gettime(_clock_id: usize, tp: *mut TimeSpec) -> isize {
     let sec = total_us / 1_000_000;
     let nsec = (total_us % 1_000_000) * 1_000;
     if tp as usize == 0 {
-        return -14; 
+        return EFAULT.as_isize();
     }
     let token = current_user_token();
     let time_spec = translated_refmut(token, tp);
@@ -540,7 +540,7 @@ pub fn sys_renameat2(
         }
     }
     
-    -1
+    ENOENT.as_isize()
 }
 pub fn sys_getpid() -> isize {
 	let task = current_task().unwrap();
@@ -581,7 +581,7 @@ pub struct Sysinfo {
 
 pub fn sys_sysinfo(sysinfo_ptr: usize) -> isize {
     if sysinfo_ptr == 0 {
-        return -EFAULT.as_isize();
+        return EFAULT.as_isize();
     }
     let token = current_task().unwrap().process().inner_exclusive_access().memory_set.token();
     let sysinfo = translated_refmut(token, sysinfo_ptr as *mut Sysinfo);
@@ -779,7 +779,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
     
     const WNOHANG: usize = 0x1;
     let nohang = (options & WNOHANG) != 0;
-    println!("[wait4] P{} waiting for PID/PGID: {}, options: {}", current_pgid, pid, options);
+    info!("[wait4] P{} waiting for PID/PGID: {}, options: {}", current_pgid, pid, options);
 
     loop {
         let mut proc_inner = proc.inner_exclusive_access();
@@ -800,7 +800,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
 
         // 1. 检查是否存在符合要求的子进程
         if !proc_inner.children.iter().any(|p| is_match(p)) {
-            println!("[wait4] P{} has no matching children for filter {}", current_pgid, pid);
+            info!("[wait4] P{} has no matching children for filter {}", current_pgid, pid);
             return -1; // 真的是一个匹配的都没有，才返回 ECHILD
         }
     
@@ -815,7 +815,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
             let child_pid = child.getpid();
             let exit_code = child.inner_exclusive_access().exit_code;
             assert_eq!(alloc::sync::Arc::strong_count(&child), 1);
-            println!("[wait4] P{} collected Zombie P{} (code: {})", current_pgid, child_pid, exit_code);
+            info!("[wait4] P{} collected Zombie P{} (code: {})", current_pgid, child_pid, exit_code);
             // 组装状态码
             let status = (exit_code & 0xff) << 8;
             if exit_code_ptr as usize != 0 {
@@ -828,7 +828,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                 return 0; 
             }
             // --- B. 孩子还活着，睡眠等待 ---
-            println!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
+            info!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
             drop(proc_inner);
             crate::process::current_task_to_sleep(proc.wait_queue.lock());
         }
@@ -950,7 +950,7 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
     let req_val = *translated_ref(token, req); 
 
     let duration_ms = req_val.tv_sec * 1000 + req_val.tv_nsec / 1_000_000;
-   println!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
+   info!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
     while get_time_ms() < start + duration_ms {
         // 🚩 1. 检查是否有未屏蔽的信号到来
         let task = current_task().unwrap();
@@ -1171,7 +1171,7 @@ pub fn sys_eventfd2(initval: u32, _flags: i32) -> isize {
         inner.fd_table.push(new_fd);
         fd as isize
     } else {
-        -24 // EMFILE
+        EMFILE.as_isize() // EMFILE
     }
 }
 
@@ -1189,7 +1189,7 @@ pub fn sys_epoll_create1(_flags: i32) -> isize {
         inner.fd_table.push(new_fd);
         fd as isize
     } else {
-        -24 // EMFILE
+        EMFILE.as_isize() // EMFILE
     }   
 }
 
@@ -1199,20 +1199,20 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     let process = task.process();
     let inner = process.inner_exclusive_access();
     if op != EPOLL_CTL_DEL && event_ptr == 0 {
-        return -14; // 返回 -EFAULT
+        return EFAULT.as_isize(); // 返回 -EFAULT
     }
     
-    if epfd >= inner.fd_table.len() || fd >= inner.fd_table.len() { return -9; } // EBADF
+    if epfd >= inner.fd_table.len() || fd >= inner.fd_table.len() { return EBADF.as_isize(); } // EBADF
     
     let epoll_file_dyn = match &inner.fd_table[epfd].file {
         Some(f) => f.clone(),
-        None => return -9,
+        None => return EBADF.as_isize(),
     };
     
     // 🚩 向下转型！如果它不是 EpollFile，报错！
     let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
         Some(ef) => ef,
-        None => return -22, // EINVAL
+        None => return EINVAL.as_isize(), // EINVAL
     };
     
     let token = inner.memory_set.token();
@@ -1228,24 +1228,24 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
         1 => { list.insert(fd, event); 0 } // EPOLL_CTL_ADD
         2 => { list.remove(&fd); 0 }       // EPOLL_CTL_DEL
         3 => { list.insert(fd, event); 0 } // EPOLL_CTL_MOD
-        _ => -22, // EINVAL
+        _ => EINVAL.as_isize(), // EINVAL
     }
 }
 
 // ID 22: sys_epoll_wait
 pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i32) -> isize {
-    println!(
+    info!(
         "[kernel] sys_epoll_wait: epfd={}, events_ptr={:#x}, maxevents={}, timeout={}ms",
         epfd, events_ptr, maxevents, timeout
     );
     let task = current_task().unwrap();
     if events_ptr == 0 {
-        return -14; // 返回 -EFAULT (Bad address)
+        return EFAULT.as_isize(); // 返回 -EFAULT (Bad address)
     }
     
     // 🚩 2. 防御非法容量：POSIX 规定 maxevents 必须大于 0
     if maxevents <= 0 {
-        return -22; // 返回 -EINVAL (Invalid argument)
+        return EINVAL.as_isize(); // 返回 -EINVAL (Invalid argument)
     }   
 
     // 🚩 1. 记录进来的起始时间（用于带超时的阻塞）
@@ -1255,7 +1255,7 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
         let process = task.process();
         let inner = process.inner_exclusive_access();
         
-        if epfd >= inner.fd_table.len() { return -9; }
+        if epfd >= inner.fd_table.len() { return EBADF.as_isize(); }
         let epoll_file_dyn = inner.fd_table[epfd].file.clone().unwrap();
         let epoll_file = epoll_file_dyn.as_any().downcast_ref::<EpollFile>().unwrap();
         
@@ -1343,14 +1343,14 @@ pub fn sys_ftruncate(fd: usize, _len: usize) -> isize {
     
     // 1. 严谨校验 FD 合法性 (不能越界)
     if fd >= inner.fd_table.len() {
-        return -9; // -EBADF (Bad file descriptor)
+        return EBADF.as_isize(); // -EBADF (Bad file descriptor)
     }
     
     // 2. 获取文件对象
     if let Some(file) = &inner.fd_table[fd].file {
         // 3. 严谨校验：ftruncate 要求文件必须是以可写模式打开的
         if !file.writable() {
-            return -22; // -EINVAL (Invalid argument) 或者 EBADF
+            return EINVAL.as_isize(); // -EINVAL (Invalid argument) 或者 EBADF
         }
         
         // 文件有效且可写！
@@ -1360,10 +1360,10 @@ pub fn sys_ftruncate(fd: usize, _len: usize) -> isize {
     }
     
     // FD 为空（被 close 了或者没分配）
-    -9 // -EBADF
+    EBADF.as_isize() // -EBADF
 }
 pub fn sys_sigreturn() -> isize {
-    println!("[SIG_RET] ENTERED sys_sigreturn!");
+    info!("[SIG_RET] ENTERED sys_sigreturn!");
     
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
@@ -1376,10 +1376,10 @@ pub fn sys_sigreturn() -> isize {
     
     // 🚩 测试 2：立刻回读，确认内存写入成功
     let new_sig = inner.handling_sig;
-    println!("[SIG_RET] State Change: {} -> {}", old_sig, new_sig);
+    info!("[SIG_RET] State Change: {} -> {}", old_sig, new_sig);
     if let Some(mask_backup) = inner.signal_mask_backup.take() {
         inner.signal_mask = mask_backup;
-        println!("[SIG_RET] Mask restored to: {:#x}", inner.signal_mask.bits());
+        info!("[SIG_RET] Mask restored to: {:#x}", inner.signal_mask.bits());
     }
     // 恢复 trap 上下文
     if let Some(backup) = inner.trap_ctx_backup.take() {
@@ -1388,11 +1388,11 @@ pub fn sys_sigreturn() -> isize {
         
         // 🚩 测试 3：检查恢复后的 PC 指针和 a0
         // 这能告诉你程序准备跳回到原来的哪一行执行
-        println!("[SIG_RET] Restoration: PC={:#x}, a0={}", trap_ctx.sepc, trap_ctx.x[10]);
+        info!("[SIG_RET] Restoration: PC={:#x}, a0={}", trap_ctx.sepc, trap_ctx.x[10]);
         
         trap_ctx.get_a0() as isize
     } else {
-        println!("[SIG_RET] ERROR: No backup context found for PID {}", task.getpid());
+        info!("[SIG_RET] ERROR: No backup context found for PID {}", task.getpid());
         -1
     }
 }

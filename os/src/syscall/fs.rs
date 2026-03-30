@@ -196,7 +196,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
     } else {
         trace!("VFS: File '{}' not found", path_str);
         debug!("[kernel] sys_openat: failed path={}", path_str);
-        -1
+            ENOENT.as_isize()
     }
 }
 
@@ -209,7 +209,7 @@ pub fn sys_close(fd: usize) -> isize {
         return EBADF.as_isize();
     }
     if inner.fd_table[fd].file.is_none() {
-        return -1;
+        return EBADF.as_isize();
     }
     inner.clear_fd(fd);
     0
@@ -250,7 +250,7 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> i
 }
 
 pub fn sys_pipe(pipe: *mut usize) -> isize {
-	println!("kernel:pid[{}] sys_pipe", current_task().unwrap().process().pid.0);
+	trace!("kernel:pid[{}] sys_pipe", current_task().unwrap().process().pid.0);
     let task = current_task().unwrap();
     let proc = task.process();
     let token = current_user_token();
@@ -259,8 +259,8 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     let va = pipe as usize;
     if page_table.translate_va(crate::mm::VirtAddr::from(va)).is_none() ||
        page_table.translate_va(crate::mm::VirtAddr::from(va + 4)).is_none() {
-        println!("[kernel]  sys_pipe error point: {:#x}，", va);
-        return -14; 
+        trace!("[kernel]  sys_pipe error point: {:#x}，", va);
+          return EFAULT.as_isize();
     }
     let (pipe_read, pipe_write) = make_pipe();
     let read_fd = inner.alloc_fd();
@@ -284,7 +284,7 @@ pub fn sys_dup(fd: usize) -> isize {
         return EBADF.as_isize();
     }
     if inner.fd_table[fd].file.is_none() {
-        return -1;
+        return EBADF.as_isize();
     }
     let new_fd = inner.alloc_fd();
     let file = Arc::clone(inner.fd_table[fd].file.as_ref().unwrap());
@@ -311,7 +311,7 @@ pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
     let proc = task.process();
     let mut inner = proc.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
-        return -1;
+        return EBADF.as_isize();
     }
 
     if fd == new_fd {
@@ -390,7 +390,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
     let token = current_user_token();
     let proc = task.process();
     let path_str = translated_str(token, path);
-    println!("[kernel] sys_statx: dirfd={}, path={}, flags={:#x}, mask={:#x}", dirfd, path_str, flags, mask);
+    trace!("[kernel] sys_statx: dirfd={}, path={}, flags={:#x}, mask={:#x}", dirfd, path_str, flags, mask);
     const AT_EMPTY_PATH: u32 = 0x1000;
     if path_str.is_empty() {
         if (flags & AT_EMPTY_PATH) == 0 {
@@ -616,7 +616,7 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
         if dirfd < 0 || (dirfd as usize) >= fd_table_len || inner.fd_table[dirfd as usize].file.is_none() {
             return EBADF.as_isize();
         }
-        println!("[kernel] sys_unlinkat: resolve relative to dirfd {} is WIP", dirfd);
+        trace!("[kernel] sys_unlinkat: resolve relative to dirfd {} is WIP", dirfd);
         cwd.clone() 
     };
 
@@ -646,7 +646,7 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
             return 0;
         } else {
             // 驱动引起的删除不成功
-            println!("[kernel] VFS failed to delete '{}'. Underlay FS returned None.", name);
+            error!("[kernel] VFS failed to delete '{}'. Underlay FS returned None.", name);
             return EACCES.as_isize();
         }
     }

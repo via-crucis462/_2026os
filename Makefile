@@ -1,5 +1,5 @@
 MODE ?= debug
-RV_SMP ?= 4
+RV_SMP ?= 1
 LA_SMP ?= 4
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
@@ -28,7 +28,7 @@ test-rv: build-rv copy-rv
 	@rm -f kernel_output.log
 	@qemu-system-riscv64 -machine virt \
 	-kernel kernel-rv \
-	-m 1G -nographic -smp 4 \
+	-m 1G -nographic -smp $(RV_SMP) \
 	-bios default -drive file=sdcard-rv.img,if=none,format=raw,id=x0 \
 	-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 	-no-reboot \

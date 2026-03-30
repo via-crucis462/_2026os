@@ -161,7 +161,7 @@ impl File for Pipe {
         let ring_buffer = self.buffer.exclusive_access();
         let space = ring_buffer.available_write();
         if space == 0 {
-            println!("[kernel] PIPE IS FULL! head={}, tail={}", ring_buffer.head, ring_buffer.tail);
+            error!("[kernel] PIPE IS FULL! head={}, tail={}", ring_buffer.head, ring_buffer.tail);
         }
         // 有空间可写，或者读端全关了（BROKEN PIPE），都算可写就绪
         ring_buffer.available_write() > 0 || ring_buffer.all_read_ends_closed()

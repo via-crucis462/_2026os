@@ -57,7 +57,7 @@ pub use signal::{SignalFlags, MAX_SIG};
 pub fn suspend_current_and_run_next() {
     //debug!("[kernel] suspend_current_and_run_next");
     // There must be an application running.
-    let task = take_current_task().unwrap();
+    let task = current_task().unwrap();
 
     // ---- access current TCB exclusively
     let mut task_inner = task.inner_exclusive_access();
@@ -65,6 +65,7 @@ pub fn suspend_current_and_run_next() {
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
     drop(task_inner);
+    /*
     // ---- release current PCB
 
     // Keep main-hart-affined tasks on the current hart queue to avoid cross-hart
@@ -75,7 +76,9 @@ pub fn suspend_current_and_run_next() {
     } else {
         add_task_into_pool(task);
     }
+    */
     // jump to scheduling cycle
+    // 将释放留到schedule里统一处理，避免提前被别的核抢走
     schedule(task_cx_ptr);
 }
 
@@ -143,7 +146,7 @@ pub const IDLE_PID: usize = 0;
         let initproc = INITTASK.process();
         let mut initproc_inner = initproc.inner_exclusive_access();
         if !proc_inner.children.is_empty() {
-            println!("[kernel] Process {} orphans {} children to initproc", pid, proc_inner.children.len());
+            warn!("[kernel] Process {} orphans {} children to initproc", pid, proc_inner.children.len());
         }
         // 2. 托孤：把所有未退出的子进程交给 initproc
         for child in proc_inner.children.iter() {
@@ -290,7 +293,7 @@ pub fn handle_signals() {
             task_inner.signals.remove(flag); 
             return; // 直接返回，千万不要调用 call_user_signal_handler！
         }
-        println!("[SIG PROBE] Calling handler for sig: {}, final_pending: {:#x}", sig, final_pending);
+        info!("[SIG PROBE] Calling handler for sig: {}, final_pending: {:#x}", sig, final_pending);
         // 🚩 核心：必须先放锁，再调用你写好的处理函数！
         drop(task_inner); 
         drop(proc_inner);
@@ -302,7 +305,7 @@ pub fn handle_signals() {
         let raw_signals = task_inner.signals.bits();
         let raw_mask = task_inner.signal_mask.bits();
         if raw_signals != 0 {
-            println!("[SIG PROBE] Signals exist ({:#x}) but fully masked ({:#x})", raw_signals, raw_mask);
+            warn!("[SIG PROBE] Signals exist ({:#x}) but fully masked ({:#x})", raw_signals, raw_mask);
         }
     }
 }
@@ -325,7 +328,7 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
     let before_bits = task_inner.signals.bits();
     task_inner.signals.remove(signal); // 把信号从 pending 队列中拿走
     let after_bits = task_inner.signals.bits(); 
-    println!(
+    info!(
         "[SIG_CLEAN] Signal:{:?}({:?}) | Bits: {:#x} -> {:#x}", 
         signal, sig, before_bits, after_bits
     );
@@ -360,7 +363,7 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
             trap_ctx.set_ra(restorer);
         } else {
             // ... 注入栈上蹦床代码 (逻辑保持你原来的写法) ...
-            println!("[KERNEL WARNING] restorer is 0! Injecting trampoline on stack...");
+            warn!("[KERNEL WARNING] restorer is 0! Injecting trampoline on stack...");
             // ... 你的计算 sp, 写 trampoline, 设置 set_ra(sp) 的代码 ...
             // trap_ctx.set_ra(sp);
             // trap_ctx.x[2] = sp;
@@ -394,7 +397,7 @@ fn check_pending_signals() {
     
     // 🚨 探头 3.1：进门第一眼，看看进程当前真实状态！
     if signals != 0 {
-        println!("[PROBE 3.1] check_pending: signals={:#x}, mask={:#x}, handling_sig={}", signals, mask, handling);
+        info!("[PROBE 3.1] check_pending: signals={:#x}, mask={:#x}, handling_sig={}", signals, mask, handling);
     }
     drop(task_inner); // 先放锁，免得死锁
 
@@ -414,18 +417,18 @@ fn check_pending_signals() {
             let is_masked = task_inner.signal_mask.contains(signal);
             
             // 🚨 探头 3.2：看看每一个存在的信号，它是怎么被判定拦截的！
-            println!("[PROBE 3.2] found pending sig: {}, is_masked: {}", sig, is_masked);
+            info!("[PROBE 3.2] found pending sig: {}, is_masked: {}", sig, is_masked);
             
             if !is_masked {
                 let mut masked = false;
                 if task_inner.handling_sig != -1 {
                     // 这里原本逻辑有点绕，简化一下：如果你正在处理信号，我们保守点先不打断
                     masked = true; 
-                    println!("[PROBE 3.3] skipped sig {} because currently handling {}", sig, task_inner.handling_sig);
+                    info!("[PROBE 3.3] skipped sig {} because currently handling {}", sig, task_inner.handling_sig);
                 }
                 
                 if !masked {
-                    println!("[PROBE 3.4] delivering sig {} to user handler!", sig);
+                    info!("[PROBE 3.4] delivering sig {} to user handler!", sig);
                     drop(task_inner);
                     drop(proc_inner);
                     

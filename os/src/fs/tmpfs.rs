@@ -137,12 +137,12 @@ impl super::VfsInode for TmpfsDirInode {
 }
 
 pub fn setup_oscomp_env() {
-    println!("[VFS] INFO: Start setup_oscomp_env...");
+    info!("[VFS] INFO: Start setup_oscomp_env...");
     let root = ROOT_DENTRY.clone();
 
     // 1. 挂载 /tmp (解决嫌疑一，LTP 刚需！)
     root.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new()));
-    println!("[VFS] Mounted /tmp");
+    info!("[VFS] Mounted /tmp");
 
     // 2. 挂载 bin, sbin, usr 等虚拟目录
     let bin_dentry = root.insert("bin".to_string(), Arc::new(TmpfsDirInode::new()));
@@ -169,7 +169,7 @@ pub fn setup_oscomp_env() {
                 sbin_dentry.insert(app.to_string(), bb_inode.clone());
                 usr_bin_dentry.insert(app.to_string(), bb_inode.clone());
             }
-            println!("[VFS] Populated busybox applets");
+            info!("[VFS] Populated busybox applets");
         }
         let dev_dentry = if let Some(dev) = root.find_tree("/dev", true) {
             dev
@@ -186,24 +186,24 @@ pub fn setup_oscomp_env() {
         dev_dentry.insert("tty".to_string(), Arc::new(TtyInode::new()));
         // 2. 挂载 shm
         dev_dentry.insert("shm".to_string(), Arc::new(TmpfsDirInode::new()));
-        println!("[VFS] Mounted /dev/shm safely");
+        info!("[VFS] Mounted /dev/shm safely");
         if root.find_tree("/dev/shm", true).is_some() {
-        println!("DEBUG: /dev/shm path is VALID");
+        info!("DEBUG: /dev/shm path is VALID");
         } else {
-            println!("DEBUG: /dev/shm path is BROKEN!");
+            error!("DEBUG: /dev/shm path is BROKEN!");
         }
         // --- 挂载动态链接库 ---
         if let Some(libc_node) = root.find_tree("/musl/libc.so", true).or_else(|| root.find_tree("/musl/lib/libc.so", true)) {
             lib_dentry.insert("ld-musl-riscv64.so.1".to_string(), libc_node.inode.clone());
             lib_dentry.insert("libc.so".to_string(), libc_node.inode.clone());
-            println!("[VFS] Populated libc.so symlinks");
+            info!("[VFS] Populated libc.so symlinks");
         }
     } else {
-        println!("[VFS] WARNING: /musl not found, skipped busybox mapping.");
+        info!("[VFS] WARNING: /musl not found, skipped busybox mapping.");
     }
     if root.find_tree("/dev/shm", true).is_some() {
-    println!("DEBUG: /dev/shm path is VALID");
+    info!("DEBUG: /dev/shm path is VALID");
     } else {
-        println!("DEBUG: /dev/shm path is BROKEN!");
+        error!("DEBUG: /dev/shm path is BROKEN!");
     }
 }

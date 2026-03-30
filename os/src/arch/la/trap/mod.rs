@@ -44,7 +44,7 @@ pub fn trap_from_kernel() -> ! {
     if let Some(task) = current_task() {
         let proc = task.process();
         let inner = proc.inner_exclusive_access();
-        println!(
+        error!(
             "[kernel] trap_from_kernel: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
             task.getpid(),
             task.gettid(),
@@ -53,7 +53,7 @@ pub fn trap_from_kernel() -> ! {
         );
         inner.memory_set.debug_dump_areas(Some(badv), Some(era));
     } else {
-        println!("[kernel] trap_from_kernel: no current task");
+        error!("[kernel] trap_from_kernel: no current task");
     }
     loop {
         // 死循环
@@ -142,7 +142,7 @@ fn is_brk_process() -> bool {
 
 fn debug_dump_user_stack_window(tag: &str, token: usize, sp: usize, words: usize) {
     let page_table = PageTable::from_token(token);
-    println!(
+    error!(
         "[kernel] brk_stack {}: sp={:#x}, dumping {} words",
         tag,
         sp,
@@ -153,7 +153,7 @@ fn debug_dump_user_stack_window(tag: &str, token: usize, sp: usize, words: usize
         match page_table.translate_va(VirtAddr::from(va)) {
             Some(pa) => {
                 let value = *pa.get_ref::<usize>();
-                println!(
+                error!(
                     "[kernel] brk_stack {}: [{:#x}] = {:#x}",
                     tag,
                     va,
@@ -161,7 +161,7 @@ fn debug_dump_user_stack_window(tag: &str, token: usize, sp: usize, words: usize
                 );
             }
             None => {
-                println!(
+                error!(
                     "[kernel] brk_stack {}: [{:#x}] = <unmapped>",
                     tag,
                     va
@@ -172,7 +172,7 @@ fn debug_dump_user_stack_window(tag: &str, token: usize, sp: usize, words: usize
 }
 
 fn debug_dump_brk_snapshot(tag: &str, cx: &TrapContext, token: usize) {
-    println!(
+    error!(
         "[kernel] brk_trace {}: era={:#x}, user_sp={:#x}, a0={:#x}, a1={:#x}, a2={:#x}, a3={:#x}, a4={:#x}, a5={:#x}, a6={:#x}, a7={:#x}",
         tag,
         cx.get_rt(),
@@ -257,7 +257,7 @@ pub fn trap_handler() -> ! {
                     let vpn = VirtAddr::from(badv).floor();
                     match inner.memory_set.translate(vpn) {
                         Some(pte) => {
-                            println!(
+                            error!(
                                 "[kernel] user_fault_pte: badaddr={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
                                 badv,
                                 vpn.0,
@@ -269,7 +269,7 @@ pub fn trap_handler() -> ! {
                             );
                         }
                         None => {
-                            println!(
+                            error!(
                                 "[kernel] user_fault_pte: badaddr={:#x}, vpn={:#x}, pte=<none>",
                                 badv,
                                 vpn.0,
@@ -287,7 +287,7 @@ pub fn trap_handler() -> ! {
                             asm!("csrrd {}, 0x19", out(reg) hw_pgdl);
                             asm!("csrrd {}, 0x18", out(reg) hw_asid);
                         }
-                        println!(
+                        error!(
                             "[BRK诊断] hw_pgdl={:#x}, hw_asid={:#x}, 软件pgdl={:#x}",
                             hw_pgdl, hw_asid, inner.get_user_token()
                         );
@@ -309,17 +309,17 @@ pub fn trap_handler() -> ! {
                                     Some(hw_pte) => (hw_pte.ppn().0, hw_pte.bits),
                                     None => (0xdead, 0x0),
                                 };
-                                println!(
+                                error!(
                                     "[BRK诊断] era={:#x} vpn={:#x} 软件ppn={:#x} pte={:#x} 物理指令={:#010x} badi={:#010x}",
                                     era, era_vpn.0, era_ppn.0, era_pte.bits, w, badi
                                 );
-                                println!(
+                                error!(
                                     "[BRK诊断] 硬件页表查找: hw_ppn={:#x} hw_pte={:#x}",
                                     hw_ppn_val, hw_pte_bits
                                 );
                             }
                             None => {
-                                println!("[BRK诊断] era={:#x}, era_vpn={:#x}, 软件页表无PTE!", era, era_vpn.0);
+                                error!("[BRK诊断] era={:#x}, era_vpn={:#x}, 软件页表无PTE!", era, era_vpn.0);
                             }
                         }
                     }
@@ -337,7 +337,7 @@ pub fn trap_handler() -> ! {
                 if let Some(task) = current_task() {
                     let proc = task.process();
                     let inner = proc.inner_exclusive_access();
-                    println!(
+                    error!(
                         "[kernel] trap_from_kernel: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
                         task.getpid(),
                         task.gettid(),
@@ -346,7 +346,7 @@ pub fn trap_handler() -> ! {
                     );
                     inner.memory_set.debug_dump_areas(Some(badv), Some(era));
                 } else {
-                    println!("[kernel] trap_from_kernel: no current task");
+                    error!("[kernel] trap_from_kernel: no current task");
                 }
                 error!("[kernel] trap_handler: {:?} in PID {}, estat={:#x}, era={:#x}, badv={:#x},badi={:#x}",
                     cause,
@@ -415,7 +415,7 @@ pub fn trap_return() -> ! {
 
 #[no_mangle]
 pub extern "C" fn debug_print(){
-    println!("[kernel] debug_print called");
+    error!("[kernel] debug_print called");
 }
 
 #[no_mangle]
@@ -423,11 +423,11 @@ pub  extern "C" fn csr_info(){
     unsafe {
         let mut csr: usize;
         asm!("csrrd {}, 0x8C", out(reg) csr); // TLBRELO0?
-        println!("[kernel] csr_info: TLBRELO0 = {:#x}", csr );
+        error!("[kernel] csr_info: TLBRELO0 = {:#x}", csr );
         //11001001001011000110010001
         asm!("csrrd {}, 0x8D", out(reg) csr); // TLBRELO1?
         //11001001001110000110010001
-        println!("[kernel] csr_info: TLBRELO1 = {:#x}", csr );
+        error!("[kernel] csr_info: TLBRELO1 = {:#x}", csr );
     }
 }
 

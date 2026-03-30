@@ -105,7 +105,7 @@ pub fn trap_handler() -> ! {
             
             // 【修改 2】：把 sp 传进去，支持动态扩栈
             if process_inner.memory_set.handle_page_fault(stval, sp) {
-                println!("[WATCHDOG] : {:#x}, PC: {:#x}", stval, sepc);
+                info!("[WATCHDOG] : {:#x}, PC: {:#x}", stval, sepc);
                 // 修复成功！释放锁
                 drop(process_inner);
                 drop(process);
@@ -115,7 +115,7 @@ pub fn trap_handler() -> ! {
                 drop(process);
                 drop(task);
                 
-                println!(
+                error!(
                     "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}, sp={:#x}",
                     crate::task::current_task().unwrap().process().pid.0,
                     scause.cause(),
@@ -131,16 +131,16 @@ pub fn trap_handler() -> ! {
             }
         }
         _ => {
-            println!(
+            error!(
                 "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
                 crate::task::current_task().unwrap().process().pid.0,
                 scause.cause(),
                 current_trap_cx().get_rt(),
                 stval
             );
-            println!("[kernel] Trap! Source: User");
-            println!("[kernel] Scause: {:?} (Code: {})", scause.cause(), scause.bits());
-            println!("[kernel] Stval:  {:#x} (Bad Address)", stval);
+            error!("[kernel] Trap! Source: User");
+            error!("[kernel] Scause: {:?} (Code: {})", scause.cause(), scause.bits());
+            error!("[kernel] Stval:  {:#x} (Bad Address)", stval);
             error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, bad instruction = {:#x}",
                 scause.cause(),
                 current_task().unwrap().process().pid.0,
@@ -219,7 +219,7 @@ pub fn trap_from_kernel() -> ! {
     let satp_v = satp::read().bits();
     let hart_id = crate::get_hart_id();
 
-    println!(
+    error!(
         "[kernel][panic] trap_from_kernel: hart={}, cause={:?}, sepc={:#x}, stval={:#x}, sstatus={:#x}, satp={:#x}",
         hart_id,
         cause,
@@ -230,14 +230,14 @@ pub fn trap_from_kernel() -> ! {
     );
 
     if let Some(task) = crate::task::current_task() {
-        println!(
+        error!(
             "[kernel][panic] current task snapshot: pid={}, tid={}, task_ptr={:#x}",
             task.getpid(),
             task.gettid(),
             (&*task) as *const _ as usize
         );
     } else {
-        println!("[kernel][panic] no current task on this hart");
+        error!("[kernel][panic] no current task on this hart");
     }
 
     panic!(

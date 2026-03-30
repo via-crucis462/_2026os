@@ -139,5 +139,5 @@ pub fn mount_procfs() {
     // 直接用你写好的 TmpfsFileInode，它默认就是一个合法的、可读写的空文件！
     self_dentry.insert(String::from("maps"), Arc::new(TmpfsFileInode::new()));
     
-    println!("[VFS] /proc/meminfo, mounts, and /proc/self/maps mounted successfully!");
+    info!("[VFS] /proc/meminfo, mounts, and /proc/self/maps mounted successfully!");
 }

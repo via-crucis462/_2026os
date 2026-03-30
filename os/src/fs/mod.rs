@@ -215,8 +215,7 @@ pub use stdio::{Stdin, Stdout};
 
 
 pub fn init_test_env() {
-println!("[VFS] Mounting true Tmpfs directories in memory...");
-
+    println!("[VFS] Mounting true Tmpfs directories in memory...");
     ROOT_DENTRY.insert(String::from("tmp"), Arc::new(TmpfsDirInode::new()));
     ROOT_DENTRY.insert(String::from("var"), Arc::new(TmpfsDirInode::new()));
 }

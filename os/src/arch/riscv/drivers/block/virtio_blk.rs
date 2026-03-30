@@ -68,7 +68,7 @@ impl VirtIOBlock {
             let header = unsafe { &mut *(addr as *mut VirtIOHeader) };
             
             if header.verify() && header.device_type() == DeviceType::Block {
-                println!("[kernel] Found virtio-blk device at {:#x}", addr);
+                info!("[kernel] Found virtio-blk device at {:#x}", addr);
                 blk_addr = addr;
                 break;
             }

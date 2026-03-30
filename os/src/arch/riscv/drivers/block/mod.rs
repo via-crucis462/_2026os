@@ -32,6 +32,5 @@ pub fn block_device_test() {
         block_device.read_block(i as usize, &mut read_buffer);
         assert_eq!(write_buffer, read_buffer);
     }
-    println!("[kernel] Virtio-net initialized successfully!");
     println!("block device test passed!");
 }
