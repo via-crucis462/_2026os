@@ -28,6 +28,9 @@ impl TrapContext {
     pub fn set_sp(&mut self, sp: usize) {
         self.x[2] = sp;
     }
+    pub fn get_sp(&self) -> usize {
+        self.x[2]
+    }
     /// 设置返回值，a0对应x10
     pub fn set_a0(&mut self, a0: usize) {
         self.x[10] = a0;

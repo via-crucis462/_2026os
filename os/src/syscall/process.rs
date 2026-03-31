@@ -3,6 +3,7 @@
 //! 内存管理也暂时放在此处
 use crate::get_hart_id;
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
+#[cfg(target_arch = "riscv64")]
 use crate::net::socket::TcpSocket;
 use alloc::vec;
 use crate::syscall::EPOLL_CTL_DEL;
@@ -285,7 +286,7 @@ pub fn sys_rt_sigreturn() -> isize {
     // 🚩 3. 极其关键！因为 sys_rt_sigreturn 返回 isize，调度器会把它强行写入 a0 寄存器。
     // 为了不破坏刚刚还原出来的 a0（里面存着 ppoll 的 EINTR -4），
     // 我们必须返回还原后 trap_context 里的 a0 值！
-    inner.get_trap_cx().x[10] as isize
+    inner.get_trap_cx().get_a0() as isize
 }
 pub fn sys_getuid() -> isize {
     let task = current_task().unwrap();
@@ -1388,7 +1389,7 @@ pub fn sys_sigreturn() -> isize {
         
         // 🚩 测试 3：检查恢复后的 PC 指针和 a0
         // 这能告诉你程序准备跳回到原来的哪一行执行
-        info!("[SIG_RET] Restoration: PC={:#x}, a0={}", trap_ctx.sepc, trap_ctx.x[10]);
+        info!("[SIG_RET] Restoration: PC={:#x}, a0={}", trap_ctx.get_rt(), trap_ctx.get_a0());
         
         trap_ctx.get_a0() as isize
     } else {
@@ -1544,6 +1545,13 @@ pub fn sys_pselect6(
     }
 }
 pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
+    #[cfg(target_arch = "loongarch64")]
+    {
+        let _ = (domain, socket_type, protocol);
+        return ENOSYS.as_isize();
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
     // 1. 获取当前进程
     let task = current_task().unwrap();
     let process = task.process(); 
@@ -1578,6 +1586,7 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     };
     
     fd as isize
+    }
 }
 pub fn sys_add_key(_type: *const u8, _desc: *const u8, _payload: *const u8, _plen: usize, _ringid: i32) -> isize {
     // 假装成功生成了一个密钥，返回一个随机的密钥序列号 (比如 9999)

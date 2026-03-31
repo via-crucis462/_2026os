@@ -38,6 +38,7 @@ pub mod ext4fs;
 pub mod fs;
 pub mod lang_items;
 pub mod logging;
+#[cfg(target_arch = "riscv64")]
 pub mod net;
 pub mod mm;
 pub mod sync;
@@ -45,6 +46,7 @@ pub mod syscall;
 pub mod process;
 
 pub use arch::config::*;
+#[cfg(target_arch = "riscv64")]
 use crate::drivers::block::NET_DEVICE;
 
 pub use process::task;
@@ -119,8 +121,11 @@ fn main_init(hart_id: usize) {
     mm::init();
     mm::remap_test();
     arch::trap::init();
+    #[cfg(target_arch = "riscv64")]
+    {
     lazy_static::initialize(&NET_DEVICE);
     lazy_static::initialize(&crate::net::NET_IFACE);
+    }
     fs::init_test_env(); 
     fs::mount_procfs();
     fs::setup_oscomp_env(); 
