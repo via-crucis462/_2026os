@@ -685,9 +685,9 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let cwd = task.process().inner_exclusive_access().cwd.clone();
     drop(task);
     
-    let path_str = normalize_leading_dot_path(translated_str(token, path));
+    let path_str = normalize_leading_dot_path(translated_str(token, path));//直接删除路径中的.，不进行其他处理
     let mut args_vec: Vec<String> = Vec::new();
-    
+    info!("[kernel] sys_exec: called with path '{}'", path_str);
     // 提取原始参数数组
     loop {
         let arg_str_ptr = *translated_ref(token, args);
@@ -706,31 +706,29 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     if let Some(mut app_inode) = app_inode_opt {
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         
-        let mut on_main_hart = false;
         let app_name = app_inode.get_dentry().name.clone();
-        if app_name.contains("shell") || app_name.contains("init") {
-            on_main_hart = true;
-        }
         
         // 脚本处理逻辑 (.sh)
         if app_name.ends_with(".sh") {
+            info!("[kernel] sys_exec: detected script '{}', trying to execute with busybox", app_name);
             let busybox = "/musl/busybox";
             if let Some(inode) = open_file(cwd.clone(), busybox, OpenFlags::RDONLY) {
-                let mut new_args = vec!["busybox".to_string(), "sh".to_string()];
+                let mut new_args = vec!["musl/busybox".to_string(), "sh".to_string()];
                 // 如果脚本没带参数，把脚本路径加进去
                 if args_vec.len() <= 1 { new_args.push(path_str.clone()); }
-                new_args.extend(args_vec);
+                //new_args.extend(args_vec);
                 args_vec = new_args;
                 app_inode = inode;
             } else {
-                return ENOENT.as_isize();
+                println!("[kernel] sys_exec: failed to open busybox for script execution");
+                return -ENOENT.as_isize();
             }
         }
 
         let all_data = app_inode.read_all();
         // 验证 ELF 签名
         if all_data.len() < 4 || &all_data[0..4] != &[0x7f, 0x45, 0x4c, 0x46] {
-            return -8; // ENOEXEC
+            return -ENOEXEC.as_isize(); // ENOEXEC
         }
         
         let elf = xmas_elf::ElfFile::new(&all_data).unwrap();
@@ -754,20 +752,22 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             if let Some(interp_inode) = open_file(cwd.clone(), interp.as_str(), OpenFlags::RDONLY) {
                 interp_data = Some(interp_inode.read_all());
             } else {
-                return ENOENT.as_isize(); 
+                return -ENOENT.as_isize(); 
             }
         }
         
         let task = current_task().unwrap();
         let argc = args_vec.len();
-        
+        for i in 0..argc {
+            info!("[kernel] sys_exec: arg[{}] = '{}'", i, args_vec[i]);
+        }
         // 真正开始替换进程空间
-        task.process().exec(task, all_data.as_slice(), interp_data.as_deref(), args_vec, on_main_hart);
-        
+        task.process().exec(task, all_data.as_slice(), interp_data.as_deref(), args_vec, false);
+        println!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
         argc as isize
     } else {
-        warn!("[kernel] sys_exec: failed to locate executable for {}", path_str);
-        ENOENT.as_isize()
+        println!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
+        -ENOENT.as_isize()
     }
 }
 /// If there is not a child process whose pid is same as given, return -1.

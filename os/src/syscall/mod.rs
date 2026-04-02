@@ -171,9 +171,9 @@ pub(crate) fn normalize_leading_dot_path(path: String) -> String {
 /// handle syscall exception with `syscall_id` and other arguments
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
-    //if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
-       // println!("[kernel] >>> Ready to enter Syscall ID: {}", syscall_id);
-  // }
+    /*if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
+       println!("[kernel] >>> Ready to enter Syscall ID: {}", syscall_id);
+   }*/
 
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),

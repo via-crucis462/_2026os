@@ -138,7 +138,7 @@ pub fn run_tasks() {
             unsafe {
                 asm!("wfi");
             }
-            warn!("no tasks available in hart {}", hart_id);
+            trace!("no tasks available in hart {}", hart_id);
         }
     }
 }
