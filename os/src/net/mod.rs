@@ -22,14 +22,27 @@ pub struct TxToken;
 impl Device for VirtioNetDevice {
     type RxToken<'a> = RxToken where Self: 'a;
     type TxToken<'a> = TxToken where Self: 'a;
-
+    #[cfg(target_arch = "riscv64")]
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let mut driver = NET_DEVICE.0.exclusive_access();
         if driver.can_recv() {
             let mut buf = vec![0u8; 2048];
+            
             if let Ok(len) = driver.recv(&mut buf) {
                 buf.truncate(len); 
                 return Some((RxToken { buffer: buf }, TxToken));
+            }   
+        }
+        None
+    }
+    #[cfg(target_arch = "loongarch64")]
+    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        let mut driver = NET_DEVICE.0.exclusive_access();
+        if driver.can_recv() {
+            if let Ok(buf) = driver.receive() {
+                let bytes = buf.as_bytes();
+                let mut vec_buf = bytes.to_vec();
+                return Some((RxToken { buffer: vec_buf }, TxToken));
             }
         }
         None
@@ -62,6 +75,7 @@ impl phy::RxToken for RxToken {
 }
 
 impl phy::TxToken for TxToken {
+    #[cfg(target_arch = "riscv64")]
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
@@ -72,13 +86,30 @@ impl phy::TxToken for TxToken {
         driver.send(&buffer).expect("Failed to send network packet");
         result
     }
+    #[cfg(target_arch = "loongarch64")]
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        let mut driver = NET_DEVICE.0.exclusive_access();
+        let mut tx_buf = driver.new_tx_buffer(len);
+        let result = f(tx_buf.packet_mut()); 
+        driver.send(tx_buf).expect("Failed to send network packet");
+        result
+    }
 }
 
 lazy_static! {
     pub static ref SOCKET_SET: MPSafeCell<SocketSet<'static>> = MPSafeCell::new(SocketSet::new(vec![]));
 
     pub static ref NET_IFACE: MPSafeCell<Interface> = {
+
+        #[cfg(target_arch = "riscv64")]
         let mac = NET_DEVICE.0.exclusive_access().mac();
+
+        #[cfg(target_arch = "loongarch64")]
+        let mac = NET_DEVICE.0.exclusive_access().mac_address();
+        
         let mac_addr = EthernetAddress::from_bytes(&mac);
         let mut config = Config::new(HardwareAddress::Ethernet(mac_addr));
         config.random_seed = 0x1122334455667788; 

@@ -38,7 +38,7 @@ pub mod ext4fs;
 pub mod fs;
 pub mod lang_items;
 pub mod logging;
-#[cfg(target_arch = "riscv64")]
+//#[cfg(target_arch = "riscv64")]
 pub mod net;
 pub mod mm;
 pub mod sync;
