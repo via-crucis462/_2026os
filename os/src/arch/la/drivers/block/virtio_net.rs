@@ -9,7 +9,7 @@ use virtio_drivers_la::transport::pci::PciTransport;
 pub struct VirtIONetWrapper(pub MPSafeCell<VirtIONet<VirtioHal, PciTransport, 256>>);
 
 impl VirtIONetWrapper {
-    /// 动态扫描 MMIO 区域，找到并初始化 VirtIO 网
+    /// pci扫描创建新网卡驱动
     pub unsafe fn new(transport: PciTransport) -> Self {
         let hal = VirtioHal;
         let net = VirtIONet::new(transport, 2048).expect("Failed to initialize VirtIONet");

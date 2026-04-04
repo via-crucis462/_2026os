@@ -721,14 +721,14 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
                 app_inode = inode;
             } else {
                 println!("[kernel] sys_exec: failed to open busybox for script execution");
-                return -ENOENT.as_isize();
+                return ENOENT.as_isize();
             }
         }
 
         let all_data = app_inode.read_all();
         // 验证 ELF 签名
         if all_data.len() < 4 || &all_data[0..4] != &[0x7f, 0x45, 0x4c, 0x46] {
-            return -ENOEXEC.as_isize(); // ENOEXEC
+            return ENOEXEC.as_isize(); // ENOEXEC
         }
         
         let elf = xmas_elf::ElfFile::new(&all_data).unwrap();
@@ -752,7 +752,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             if let Some(interp_inode) = open_file(cwd.clone(), interp.as_str(), OpenFlags::RDONLY) {
                 interp_data = Some(interp_inode.read_all());
             } else {
-                return -ENOENT.as_isize(); 
+                return ENOENT.as_isize(); 
             }
         }
         
@@ -767,7 +767,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         argc as isize
     } else {
         println!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
-        -ENOENT.as_isize()
+        ENOENT.as_isize()
     }
 }
 /// If there is not a child process whose pid is same as given, return -1.
@@ -1121,7 +1121,7 @@ pub fn sys_sigprocmask(
             SIG_BLOCK => inner.signal_mask.insert(set_flags),
             SIG_UNBLOCK => inner.signal_mask.remove(set_flags),
             SIG_SETMASK => inner.signal_mask = set_flags,
-            _ => return -22, // EINVAL
+            _ => return EINVAL.as_isize() // EINVAL
         }
     }
     0
@@ -1133,27 +1133,27 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     
     // 1. 检查 FD 是否越界
     if fd >= inner.fd_table.len() {
-        return -9; // EBADF
+        return EBADF.as_isize(); // EBADF
     }
     
     // 2. 🚩 拦截 LTP 的流氓 EFAULT (Bad Address) 测试！
     if addr as usize == 0xffffffffffffffff || addrlen as usize == 0xffffffffffffffff {
-        return -14; // EFAULT
+        return EFAULT.as_isize(); // EFAULT
     }
     let fd_entry = &inner.fd_table[fd];
     if (fd_entry.status & 0x200000) != 0 {
-        return -9; // EBADF: O_PATH 描述符不接受 I/O 操作
+        return EBADF.as_isize(); // EBADF: O_PATH 描述符不接受 I/O 操作
     }
         if let Some(file) = &fd_entry.file {
         let stat = file.get_stat();
         // 检查 inode 的 mode 标志位是不是 Socket
         if (stat.mode & 0o170000) == 0o140000 {
-            return -22; // EINVAL: 是没有 listen 的 Socket
+            return EINVAL.as_isize(); // EINVAL: 是没有 listen 的 Socket
         } else {
-            return -88; // ENOTSOCK: 是普通文件/目录
+            return ENOTSOCK.as_isize(); // ENOTSOCK: 是普通文件/目录
         }
     } else {
-        return -9; // EBADF: 已经被 close 或者本来就是空的
+        return EBADF.as_isize(); // EBADF: 已经被 close 或者本来就是空的
     }
 }
 
@@ -1428,17 +1428,17 @@ pub fn sys_rt_sigaction(
 ) -> isize {
     // 1. 校验 sigsetsize
     if sigsetsize < core::mem::size_of::<u32>() {
-        return -22; // EINVAL
+        return EINVAL.as_isize(); // EINVAL
     }
     
     // 2. 校验信号编号范围 (1~64)
     if signum <= 0 || signum as usize > MAX_SIG {
-        return -22; // EINVAL
+        return EINVAL.as_isize(); // EINVAL
     }
 
     // 3. 正规操作：绝对禁止修改 SIGKILL(9) 和 SIGSTOP(19)
     if signum == 9 || signum == 19 {
-        return -22; // EINVAL (POSIX 规定此处返回 EINVAL)
+        return EINVAL.as_isize(); // EINVAL (POSIX 规定此处返回 EINVAL)
     }
 
     let task = current_task().unwrap();
@@ -1489,7 +1489,7 @@ pub fn sys_fchmodat(_dirfd: isize, path_ptr: *const u8, _mode: u32) -> isize {
         }
         None => {
             // 文件不存在，严谨返回 -ENOENT (-2)
-            -2 
+            ENOENT.as_isize()
         }
     }
 }
