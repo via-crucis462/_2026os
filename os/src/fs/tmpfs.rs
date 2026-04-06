@@ -4,6 +4,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 use crate::fs::ROOT_DENTRY;
+use crate::mm::user_buffer;
 use alloc::vec;
 use crate::fs::devfs::NullInode;
 use crate::fs::devfs::ZeroInode;
@@ -148,17 +149,16 @@ pub fn setup_oscomp_env() {
     let bin_dentry = root.insert("bin".to_string(), Arc::new(TmpfsDirInode::new()));
     let sbin_dentry = root.insert("sbin".to_string(), Arc::new(TmpfsDirInode::new()));
     let usr_dentry = root.insert("usr".to_string(), Arc::new(TmpfsDirInode::new()));
+    let usr_local_dentry = usr_dentry.insert("local".to_string(), Arc::new(TmpfsDirInode::new()));
+    let usr_local_bin_dentry = usr_local_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new()));
     let usr_bin_dentry = usr_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new()));
     let lib_dentry = root.insert("lib".to_string(), Arc::new(TmpfsDirInode::new()));
+    let lib64_dentry = root.insert("lib64".to_string(), Arc::new(TmpfsDirInode::new()));
 
     // 3. 将 Busybox 和 libc 的真实 Inode 映射进虚拟目录
     if let Some(musl_dir) = root.find_tree("/musl", true) {
-        
-        // --- 降维打击：批量注入 Busybox 命令 ---
         if let Some(busybox_node) = musl_dir.find_child("busybox") {
             let bb_inode = busybox_node.inode.clone();
-            
-            // 覆盖所有 LTP 和脚本常用的命令
             let applets = [
                 "basename", "dirname", "sh", "grep", "sed", "awk", "cat", 
                 "ls", "rm", "echo", "true", "false", "wc", "mkdir", "rmdir", "touch", "env"
@@ -168,6 +168,7 @@ pub fn setup_oscomp_env() {
                 bin_dentry.insert(app.to_string(), bb_inode.clone());
                 sbin_dentry.insert(app.to_string(), bb_inode.clone());
                 usr_bin_dentry.insert(app.to_string(), bb_inode.clone());
+                usr_local_bin_dentry.insert(app.to_string(), bb_inode.clone());
             }
             info!("[VFS] Populated busybox applets");
         }
@@ -194,15 +195,23 @@ pub fn setup_oscomp_env() {
         }
         // --- 挂载动态链接库 ---
         if let Some(libc_node) = root.find_tree("/musl/libc.so", true).or_else(|| root.find_tree("/musl/lib/libc.so", true)) {
+            #[cfg(target_arch = "riscv64")]
             lib_dentry.insert("ld-musl-riscv64.so.1".to_string(), libc_node.inode.clone());
+            #[cfg(target_arch = "loongarch64")]
+            {
+                lib64_dentry.insert("ld-musl-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
+                lib64_dentry.insert("ld-linux-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
+                lib_dentry.insert("ld-musl-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
+                lib_dentry.insert("ld-linux-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
+            }
             lib_dentry.insert("libc.so".to_string(), libc_node.inode.clone());
             info!("[VFS] Populated libc.so symlinks");
         }
     } else {
-        info!("[VFS] WARNING: /musl not found, skipped busybox mapping.");
+        warn!("[VFS] WARNING: /musl not found, skipped busybox mapping.");
     }
     if root.find_tree("/dev/shm", true).is_some() {
-    info!("DEBUG: /dev/shm path is VALID");
+        info!("DEBUG: /dev/shm path is VALID");
     } else {
         error!("DEBUG: /dev/shm path is BROKEN!");
     }

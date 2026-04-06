@@ -3,7 +3,6 @@
 //! 内存管理也暂时放在此处
 use crate::get_hart_id;
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
-#[cfg(target_arch = "riscv64")]
 use crate::net::socket::TcpSocket;
 use alloc::vec;
 use crate::syscall::EPOLL_CTL_DEL;
@@ -763,10 +762,10 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         }
         // 真正开始替换进程空间
         task.process().exec(task, all_data.as_slice(), interp_data.as_deref(), args_vec, false);
-        println!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
+        info!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
         argc as isize
     } else {
-        println!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
+        error!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
         ENOENT.as_isize()
     }
 }
@@ -1544,14 +1543,13 @@ pub fn sys_pselect6(
         suspend_current_and_run_next();
     }
 }
+
+/// 网络相关，socket套接字创建，返回一个代表此socket的文件描述符，后续的网络相关操作通过这个文件描述符进行
+/// domain: 协议族，AF_INET=2（IPV4），AF_UNIX=1（本地进程间通信）
+/// type: 套接字类型，SOCK_STREAM=1（稳定传输，常用于TCP），SOCK_DGRAM=2（数据报传输，常用于UDP）
+/// protocol: 具体协议，通常为0表示默认协议
+/// 返回值：成功返回新创建的 socket 的文件描述符，失败返回 -1 并设置 errno
 pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
-    #[cfg(target_arch = "loongarch64")]
-    {
-        let _ = (domain, socket_type, protocol);
-        return ENOSYS.as_isize();
-    }
-    #[cfg(target_arch = "riscv64")]
-    {
     // 1. 获取当前进程
     let task = current_task().unwrap();
     let process = task.process(); 
@@ -1586,8 +1584,8 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     };
     
     fd as isize
-    }
 }
+
 pub fn sys_add_key(_type: *const u8, _desc: *const u8, _payload: *const u8, _plen: usize, _ringid: i32) -> isize {
     // 假装成功生成了一个密钥，返回一个随机的密钥序列号 (比如 9999)
     9999

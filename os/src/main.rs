@@ -46,7 +46,6 @@ pub mod syscall;
 pub mod process;
 
 pub use arch::config::*;
-#[cfg(target_arch = "riscv64")]
 use crate::drivers::block::NET_DEVICE;
 
 pub use process::task;
@@ -121,15 +120,11 @@ fn main_init(hart_id: usize) {
     mm::init();
     mm::remap_test();
     arch::trap::init();
-    #[cfg(target_arch = "riscv64")]
-    {
     lazy_static::initialize(&NET_DEVICE);
     lazy_static::initialize(&crate::net::NET_IFACE);
-    }
     fs::init_test_env(); 
     fs::mount_procfs();
     fs::setup_oscomp_env(); 
-    
     fs::list_apps();
     task::add_initproc();
     arch::trap::enable_timer_interrupt();
@@ -153,6 +148,7 @@ fn init_other_hart(hart_id: usize) {
         start_hart(i, _start as *const() as usize, 0);
     }
 }
+
 #[cfg(target_arch = "loongarch64")]
 pub fn init_other_hart(hart_id: usize) {
     let current_hart = get_hart_id();
@@ -174,6 +170,7 @@ pub fn init_other_hart(hart_id: usize) {
         info!("[kernel][la] wakeup hart {} with start={:#x}", i, start_addr);
     }
 }
+
 use mm::KERNEL_SPACE;
 fn other_init() {
     // 调试用，先把其他核关了
@@ -213,7 +210,8 @@ pub fn get_hart_id() -> usize {
     }
     hart_id
 }
-// la的main需重写
+
+// la的main
 #[cfg(target_arch = "loongarch64")]
 #[no_mangle]
 pub fn rust_main() -> ! {
@@ -227,12 +225,14 @@ pub fn rust_main() -> ! {
     drivers::search_pci();
     fs::mount_procfs();
     fs::mount_devfs();
+    fs::setup_oscomp_env(); 
     fs::list_apps();
     task::add_initproc();
     arch::trap::enable_timer_interrupt();
     task::run_tasks();
     panic!("Unreachable in rust_main!");
 }
+
 #[allow(unused)]
 use core::arch::{asm};
 #[cfg(target_arch = "loongarch64")]

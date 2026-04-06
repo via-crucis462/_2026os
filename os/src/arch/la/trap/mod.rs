@@ -10,6 +10,7 @@ use crate::task::{
     KernelStack, SignalFlags, check_signals_error_of_current, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token, exit_current_and_run_next, handle_signals, suspend_current_and_run_next
 };
 use crate::arch::timer::set_next_trigger;
+use crate::net::net_poll;
 use core::arch::{asm, global_asm};
 global_asm!(include_str!("trap.S"));
 
@@ -247,6 +248,7 @@ pub fn trap_handler() -> ! {
                 unsafe {
                     asm!("csrwr {}, 0x44", in(reg) 1);// 清除定时器中断
                 }
+                net_poll();
                 suspend_current_and_run_next();
             }
             _ => {
