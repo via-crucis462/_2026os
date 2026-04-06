@@ -1,25 +1,35 @@
 //! virtio_blk device driver
 
 mod virtio_blk;
+mod virtio_net;
 
 pub use virtio_blk::*;
 
 
 use crate::{ext4fs::BlockDevice};
+use crate::drivers::DeviceType;
 use lazy_static::*;
 #[allow(unused)]
 use crate::arch::drivers::pci;
 use alloc::sync::Arc;
 type BlockDeviceImpl = virtio_blk::VirtIOBlock;
+type NetDeviceImpl = virtio_net::VirtIONetWrapper;
 
 lazy_static! {
     /// The global block device driver instance: BLOCK_DEVICE with BlockDevice trait
     /// 已修改：从固定mmio地址改为扫描获取
     pub static ref BLOCK_DEVICE: Arc<BlockDeviceImpl> = {
-        let pci_device_trans = pci::scan_pci_device_to_trans().expect("Failed to find PCI device");
+        let pci_block_device_trans = pci::scan_pci_device_to_trans(DeviceType::VirtIOBlock).expect("Failed to find PCI device");
         unsafe {
-             Arc::new(BlockDeviceImpl::new(pci_device_trans))
+             Arc::new(BlockDeviceImpl::new(pci_block_device_trans))
         }
+    };
+    pub static ref NET_DEVICE: Arc<virtio_net::VirtIONetWrapper> = {
+        let pci_net_device_trans = pci::scan_pci_device_to_trans(DeviceType::VIrtIONet).expect("Failed to find PCI device");
+        unsafe {
+            Arc::new(virtio_net::VirtIONetWrapper::new(pci_net_device_trans))
+        }
+
     };
 }
 

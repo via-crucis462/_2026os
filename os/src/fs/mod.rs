@@ -223,7 +223,7 @@ pub fn init_test_env() {
 const MAX_SYMLINK_DEPTH: usize = 8; // 地雷1：防止无限递归导致内核栈溢出
 
 
-
+/*
 pub struct DummySocket;
 
 // 严格遵循你提供的 File Trait 签名
@@ -257,3 +257,4 @@ impl File for DummySocket {
         None 
     }
 }
+     */
