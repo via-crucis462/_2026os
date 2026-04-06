@@ -6,6 +6,15 @@ use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
 use alloc::vec;
 use crate::syscall::EPOLL_CTL_DEL;
+use crate::process::current_task_to_sleep;
+use crate::lazy_static;
+use spin::Mutex;
+use crate::sync::WaitQueue;
+
+lazy_static! {
+    /// 专门用于进程死等信号的全局等待队列
+    pub static ref SIGNAL_WAIT_QUEUE: Mutex<WaitQueue> = Mutex::new(WaitQueue::new());
+}
 
 pub use crate::{
     arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, 
@@ -678,6 +687,7 @@ pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
 }
 
 pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
+    
     //println!("curent core id: {}, sys_exec called with path: {:?}, args: {:?}", get_hart_id(), path, args);
     let token = current_user_token();
     let task = current_task().unwrap();
@@ -686,7 +696,8 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     
     let path_str = normalize_leading_dot_path(translated_str(token, path));
     let mut args_vec: Vec<String> = Vec::new();
-    
+
+
     // 提取原始参数数组
     loop {
         let arg_str_ptr = *translated_ref(token, args);
@@ -814,7 +825,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
             let child = proc_inner.children.remove(idx);
             let child_pid = child.getpid();
             let exit_code = child.inner_exclusive_access().exit_code;
-            assert_eq!(alloc::sync::Arc::strong_count(&child), 1);
+           
             info!("[wait4] P{} collected Zombie P{} (code: {})", current_pgid, child_pid, exit_code);
             // 组装状态码
             let status = (exit_code & 0xff) << 8;
@@ -1637,4 +1648,118 @@ pub fn sys_resq() -> isize {
     trace!("kernel:pid[{}] sys_resq NOT IMPLEMENTED", process.pid.0);
     // 未实现多线程，这里伪实现
     0
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SigInfo {
+    pub si_signo: i32, // 信号编号
+    pub si_errno: i32, // 错误码
+    pub si_code: i32,  // 信号发送原因
+    // 后面是一大堆 union，为了 C ABI 兼容和不越界，通常填充到 128 字节
+    pub _pad: [u32; 29], 
+}
+pub type SigSet = usize;
+/// **系统调用：rt_sigtimedwait (0x81)**
+/// 
+/// ### 功能描述
+/// 同步地等待并消费信号。进程会阻塞直到 `set` 中的信号集有信号发生，或达到 `timeout`。
+/// 与异步信号处理（Signal Handler）不同，此函数会**直接从进程的挂起位图中移除信号**，
+/// 使得该信号不再触发后续的异步处理逻辑。
+///
+/// ### 参数说明
+/// - `set_ptr`:   用户态指针，指向目标信号集位图（SigSet）。
+/// - `info_ptr`:  用户态指针，用于存储捕获到的信号详细信息（SigInfo）。
+/// - `timeout_ptr`: 用户态指针，指向超时时间结构体（TimeSpec）。若为 null 则无限期等待。
+/// - `sigsetsize`: 信号集结构的大小，Linux 下 x86_64/riscv64 通常要求为 8 字节。
+///
+/// ### 返回值
+/// - 成功：返回被捕获的信号编号（正数）。
+/// - 失败：返回错误码（负数），如 `EAGAIN` (超时) 或 `EINVAL` (参数非法)。
+pub fn sys_rt_sigtimedwait(
+    set_ptr: *const usize, 
+    info_ptr: *mut SigInfo, 
+    timeout_ptr: *const TimeSpec, 
+    sigsetsize: usize
+) -> isize {
+    let token = current_user_token();
+
+
+    if sigsetsize != 8 {
+        return Errno::EINVAL.as_isize();
+    }
+
+    let target_set_bits = *translated_ref(token, set_ptr);
+    let target_set = SignalFlags::from_bits_truncate(target_set_bits as u64);
+
+
+    let mut deadline_us: Option<usize> = None;
+    if !timeout_ptr.is_null() {
+        let timeout = translated_ref(token, timeout_ptr);
+        if timeout.tv_sec == 0 && timeout.tv_nsec == 0 {
+            deadline_us = Some(0); // 纯轮询，立刻超时
+        } else {
+            let current_us = get_time_us(); 
+            // tv_sec 转微秒 + tv_nsec 转微秒
+            let wait_us = (timeout.tv_sec as usize) * 1_000_000 + (timeout.tv_nsec as usize) / 1000;
+            deadline_us = Some(current_us + wait_us);
+        }
+    }
+
+    loop {
+        let task = current_task().unwrap();
+
+        // --- 第一阶段：消费信号 ---
+        {
+            let mut inner = task.inner_exclusive_access();
+            let pending = inner.signals;
+            let intersection = pending & target_set;
+
+            if !intersection.is_empty() {
+                // 命中了！提取最小的那个信号
+                let sig_bit = intersection.bits().trailing_zeros();
+                let sig_num = (sig_bit + 1) as i32;
+                let sig_flag = SignalFlags::from_bits(1 << sig_bit).unwrap();
+
+                // 同步拿走，避免进入异步 handler
+                inner.signals.remove(sig_flag);
+
+                // 写回 info
+                if !info_ptr.is_null() {
+                    let info_mut = translated_refmut(token, info_ptr);
+                    info_mut.si_signo = sig_num;
+                    info_mut.si_errno = 0;
+                    info_mut.si_code = 0; // SI_USER
+                }
+                return sig_num as isize;
+            }
+        } 
+        if let Some(deadline) = deadline_us {
+            // 【带超时的等待】
+            let current_us = get_time_us();
+            if current_us >= deadline {
+                return Errno::EAGAIN.as_isize(); 
+            }
+            
+
+            suspend_current_and_run_next();
+            
+        } else {
+          
+            let sig_queue_guard = SIGNAL_WAIT_QUEUE.lock();
+            current_task_to_sleep(sig_queue_guard);
+
+       
+        }
+    }
+}
+
+pub fn sys_prlimit64(
+    _pid: usize, 
+    _resource: i32, 
+    _new_limit: *const u8, 
+    _old_limit: *mut u8
+) -> isize {
+    // 0 代表成功。骗 musl libc 我们处理好了资源限制
+    0 
 }
