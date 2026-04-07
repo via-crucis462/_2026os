@@ -751,7 +751,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             if let Some(interp_inode) = open_file(cwd.clone(), interp.as_str(), OpenFlags::RDONLY) {
                 interp_data = Some(interp_inode.read_all());
             } else {
-                return ENOENT.as_isize(); 
+                //return ENOENT.as_isize(); 
             }
         }
         
