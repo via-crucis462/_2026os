@@ -314,14 +314,20 @@ pub fn scan_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTransport> {
                     continue;
                 }
             },
-            DeviceType::VIrtIONet => {
+            DeviceType::VirtIONet => {
                 if dev.id.vendor_id != 0x1AF4 || dev.id.device_id != 0x1000 {
                     continue;
                 }
             },
             // _ => continue,
         }
-        
+        println!("found a target device: bus={:#x} dev={:#x} func={:#x}", 
+            dev.loc.bus,
+            dev.loc.device,
+            dev.loc.function
+        );
+        println!("device info: vendor_id={:#x}, device_id={:#x}, class={:#x}, subclass={:#x}",
+            dev.id.vendor_id, dev.id.device_id, dev.id.class, dev.id.subclass);
         // 初始化bar
         for (idx, obar) in dev.bars.iter().enumerate() {
             if let Some(bar) = obar {
@@ -370,6 +376,11 @@ pub fn scan_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTransport> {
         let r_oot = Box::new(root);
         // 注：将生命周期暴力改为static（会泄露内存），不过暂时不会有问题，因为不会反复调用
         let ref_root  = Box::leak(r_oot);
+        println!("creating transport for device: bus={:#x} dev={:#x} func={:#x}", 
+            dev.loc.bus,
+            dev.loc.device,
+            dev.loc.function
+        );
         return Some(
             PciTransport::new::<VirtioHal, CSpaceAccessMethod>(
                 ref_root,
@@ -377,6 +388,7 @@ pub fn scan_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTransport> {
             ).unwrap()
         );
     }
+    println!("no target device found");
     None
 }
 

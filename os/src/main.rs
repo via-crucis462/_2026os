@@ -91,7 +91,7 @@ extern "C" {
     fn _start();
 }
 
-#[cfg(target_arch = "riscv64")]
+
 #[no_mangle]
 /// the rust entry-point of os
 pub fn rust_main(hart_id: usize) -> ! {
@@ -103,6 +103,8 @@ pub fn rust_main(hart_id: usize) -> ! {
     ).is_ok();
 
     if is_main_hart {
+        #[cfg(target_arch = "loongarch64")]
+        la::mm::la_kernel_init_mem();// 设置映射窗口
         clear_bss();
         logging::init();
         info!("[kernel] Hello, world!");
@@ -116,12 +118,41 @@ pub fn rust_main(hart_id: usize) -> ! {
     
 }
 
+/* la的main，单核版本，已弃用
+#[cfg(target_arch = "loongarch64")]
+#[no_mangle]
+pub fn rust_main() -> ! {
+    la::mm::la_kernel_init_mem();// 设置映射窗口
+    clear_bss();
+    logging::init();
+    info!("[kernel] Hello, world!");
+    mm::init();
+    // mm::remap_test(); // 内核态取消了页表映射，因此跳过测试
+    arch::trap::init();
+    info!("drivers::search_pci"); drivers::search_pci(); info!("done drivers");
+    fs::mount_procfs();
+    fs::mount_devfs();
+    fs::setup_oscomp_env(); 
+    fs::list_apps();
+    task::add_initproc();
+    arch::trap::enable_timer_interrupt();
+    task::run_tasks();
+    panic!("Unreachable in rust_main!");
+}
+ */ 
+
 fn main_init(hart_id: usize) {
     mm::init();
+    #[cfg(target_arch = "riscv64")]
     mm::remap_test();
     arch::trap::init();
-    lazy_static::initialize(&NET_DEVICE);
-    lazy_static::initialize(&crate::net::NET_IFACE);
+    #[cfg(target_arch = "loongarch64")]
+    info!("drivers::search_pci"); drivers::search_pci(); info!("done drivers");
+    #[cfg(target_arch = "riscv64")]
+    {
+        lazy_static::initialize(&NET_DEVICE);
+        lazy_static::initialize(&crate::net::NET_IFACE);
+    }
     fs::init_test_env(); 
     fs::mount_procfs();
     fs::setup_oscomp_env(); 
@@ -150,7 +181,7 @@ fn init_other_hart(hart_id: usize) {
 }
 
 #[cfg(target_arch = "loongarch64")]
-pub fn init_other_hart(hart_id: usize) {
+fn init_other_hart(hart_id: usize) {
     let current_hart = get_hart_id();
     if current_hart != hart_id {
         warn!(
@@ -180,7 +211,9 @@ fn other_init() {
             "wfi",
         );
     } */
+    #[cfg(target_arch = "riscv64")]
     KERNEL_SPACE.exclusive_access().activate();
+    la::mm::la_kernel_init_mem();// 设置映射窗口
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger();
@@ -209,28 +242,6 @@ pub fn get_hart_id() -> usize {
         );
     }
     hart_id
-}
-
-// la的main
-#[cfg(target_arch = "loongarch64")]
-#[no_mangle]
-pub fn rust_main() -> ! {
-    la::mm::la_kernel_init_mem();// 设置映射窗口
-    clear_bss();
-    logging::init();
-    info!("[kernel] Hello, world!");
-    mm::init();
-    // mm::remap_test(); // 内核态取消了页表映射，因此跳过测试
-    arch::trap::init();
-    drivers::search_pci();
-    fs::mount_procfs();
-    fs::mount_devfs();
-    fs::setup_oscomp_env(); 
-    fs::list_apps();
-    task::add_initproc();
-    arch::trap::enable_timer_interrupt();
-    task::run_tasks();
-    panic!("Unreachable in rust_main!");
 }
 
 #[allow(unused)]

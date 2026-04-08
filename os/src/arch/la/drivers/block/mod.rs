@@ -25,9 +25,13 @@ lazy_static! {
         }
     };
     pub static ref NET_DEVICE: Arc<virtio_net::VirtIONetWrapper> = {
-        let pci_net_device_trans = pci::scan_pci_device_to_trans(DeviceType::VIrtIONet).expect("Failed to find PCI device");
+        info!("NET_DEVICE lazy init: begin scan transport");
+        let pci_net_device_trans = pci::scan_pci_device_to_trans(DeviceType::VirtIONet).expect("Failed to find PCI device");
+        info!("NET_DEVICE lazy init: transport ready, build VirtIONetWrapper");
         unsafe {
-            Arc::new(virtio_net::VirtIONetWrapper::new(pci_net_device_trans))
+            let net = Arc::new(virtio_net::VirtIONetWrapper::new(pci_net_device_trans));
+            info!("NET_DEVICE lazy init: done");
+            net
         }
 
     };
