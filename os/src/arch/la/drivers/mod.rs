@@ -10,7 +10,7 @@ use crate::{drivers::pci::{PCIDevice,scan_bus}, sync::MPSafeCell};
 
 pub enum DeviceType {
     VirtIOBlock,
-    VIrtIONet,
+    VirtIONet,
     //
 }
 
@@ -26,7 +26,7 @@ pub fn search_pci() {
         manager.push(device);
     }
     // 列出设备，调试用
-    // manager.list();
+    manager.list();
 }
 
 // pci设备管理器
