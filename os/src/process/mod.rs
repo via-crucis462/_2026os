@@ -160,7 +160,7 @@ pub const IDLE_PID: usize = 0;
         proc_inner.children.clear();
         proc_inner.memory_set.recycle_data_pages();
         proc_inner.fd_table.clear();
-        remove_process(pid);
+
         
         // 4. 唤醒父进程并发送 SIGCHLD 信号
         if let Some(parent) = parent_to_wake {
