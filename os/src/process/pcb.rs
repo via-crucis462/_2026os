@@ -587,7 +587,7 @@ pub struct ProcessControlBlockInner {
     pub euid: u32, // 有效用户 ID (Effective)
     pub egid: u32, // 有效组 ID (Effective)
     pub sid: usize,
-    // 🚩 新增：进程组 ID
+
     pub pgid: usize,
     pub is_zombie: bool,
     // 进程下的线程数

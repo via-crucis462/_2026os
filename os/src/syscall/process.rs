@@ -157,7 +157,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         let unmaskable = task_inner.signals.bits() & ((1 << (9 - 1)) | (1 << (19 - 1)));
 
         if (pending | unmaskable) != 0 {
-            // 🚩 核心：被打断返回前，必须恢复原始的信号掩码！
+         
             //task_inner.signal_mask = original_mask;
             info!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
                      task_inner.signals.bits(), task_inner.signal_mask.bits());
@@ -208,7 +208,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         if ready_count > 0 {
             drop(inner);
             let mut task_inner = task.inner_exclusive_access();
-            task_inner.signal_mask = original_mask; // 🚩 恢复原始掩码
+            task_inner.signal_mask = original_mask; 
             drop(task_inner);
             return ready_count as isize;
         }
@@ -218,7 +218,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
             if get_time_ms() >= deadline_ms {
                 drop(inner);
                 let mut task_inner = task.inner_exclusive_access();
-                task_inner.signal_mask = original_mask; // 🚩 恢复原始掩码
+                task_inner.signal_mask = original_mask; 
                 drop(task_inner);
                 return 0; // 超时返回 0
             }
@@ -240,7 +240,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     let pid = proc.pid.0;
     let mut proc_inner = proc.inner_exclusive_access();
     info!("[EXIT_GROUP] PID {} starts exiting. Total threads to kill: {}", pid, proc_inner.tasks.len());
-    // 🚩 1. 真正的“全家桶”清理：给本进程内所有其他线程打上标记
+
     // 遍历当前进程的所有线程（tasks 列表）
     for thread in proc_inner.tasks.iter() {
         if thread.gettid() != task.gettid() {
@@ -254,7 +254,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
         }
     }
 
-    // 🚩 2. 状态锁定
+
     // 确保 alive_task_count 在这里被修正，使得当前线程成为最后一个回收资源的
     proc_inner.alive_task_count = 1; 
     
@@ -265,7 +265,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     drop(proc);
     drop(task);
 
-    // 🚩 3. 走正常的退出流程
+    //   3. 走正常的退出流程
     exit_current_and_run_next(exit_code);
     panic!("Unreachable!");
 }
@@ -291,7 +291,7 @@ pub fn sys_rt_sigreturn() -> isize {
         *inner.get_trap_cx() = backup;
     }
     
-    // 🚩 3. 极其关键！因为 sys_rt_sigreturn 返回 isize，调度器会把它强行写入 a0 寄存器。
+    //   3. 极其关键！因为 sys_rt_sigreturn 返回 isize，调度器会把它强行写入 a0 寄存器。
     // 为了不破坏刚刚还原出来的 a0（里面存着 ppoll 的 EINTR -4），
     // 我们必须返回还原后 trap_context 里的 a0 值！
     inner.get_trap_cx().get_a0() as isize
@@ -794,7 +794,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
     loop {
         let mut proc_inner = proc.inner_exclusive_access();
         
-        // 🚩 核心逻辑：严谨的 4 种 POSIX 匹配判定
+        //   核心逻辑：严谨的 4 种 POSIX 匹配判定
         let is_match = |p: &alloc::sync::Arc<crate::task::ProcessControlBlock>| -> bool {
             let child_pid = p.getpid();
             if pid == -1 {
@@ -876,10 +876,10 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
             for task_arc in inner.tasks.iter() {
                 let mut t_inner = task_arc.inner_exclusive_access();
                 
-                // 🚩 1. 绝对无条件插入信号 (Generation)
+                //   1. 绝对无条件插入信号 (Generation)
                 t_inner.signals.insert(flag);
                 
-                // 🚩 2. 判断是否被屏蔽 (Delivery check)
+                //   2. 判断是否被屏蔽 (Delivery check)
                 let is_unblocked = !t_inner.signal_mask.contains(flag);
                 
                 if is_unblocked || is_unmaskable {
@@ -895,7 +895,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
             return -3; // ESRCH
         }
     } else if pid == 0 || pid < -1 {
-        // 🚩 进阶逻辑：广播给整个进程组！
+        //   进阶逻辑：广播给整个进程组！
         let target_pgid = if pid == 0 { current_pgid } else { (-pid) as usize };
         let mut success = false;
 
@@ -914,10 +914,10 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
                     for task_arc in inner.tasks.iter() {
                         let mut t_inner = task_arc.inner_exclusive_access();
                         
-                        // 🚩 1. 无条件插入信号
+                        //   1. 无条件插入信号
                         t_inner.signals.insert(flag);
                         
-                        // 🚩 2. 判断屏蔽并决定是否唤醒
+                        //   2. 判断屏蔽并决定是否唤醒
                         let is_unblocked = !t_inner.signal_mask.contains(flag);
                         
                         if is_unblocked || is_unmaskable {
@@ -962,7 +962,7 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
     let duration_ms = req_val.tv_sec * 1000 + req_val.tv_nsec / 1_000_000;
    info!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
     while get_time_ms() < start + duration_ms {
-        // 🚩 1. 检查是否有未屏蔽的信号到来
+        //   1. 检查是否有未屏蔽的信号到来
         let task = current_task().unwrap();
         let inner = task.inner_exclusive_access();
         let pending = inner.signals.bits() & !inner.signal_mask.bits();
@@ -971,7 +971,7 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
         drop(task);
 
         if pending != 0 {
-            // 🚩 2. 如果有信号，必须提早醒来 (Interrupted system call)
+            //   2. 如果有信号，必须提早醒来 (Interrupted system call)
             // 计算还剩下多少时间没睡完
             let now = get_time_ms();
             let elapsed = now - start;
@@ -984,7 +984,7 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
                 rem_spec.tv_nsec = (rem_ms % 1000) * 1_000_000;
             }
             
-            // 🚩 3. 返回 -EINTR (-4)，触发外层的 trap_handler 调用 handle_signals
+            //   3. 返回 -EINTR (-4)，触发外层的 trap_handler 调用 handle_signals
             return -4; 
         }
 
@@ -1118,7 +1118,7 @@ pub fn sys_sigprocmask(
         let set_val = *translated_ref(token, set_ptr);
         let mut set_flags = SignalFlags::from_bits_truncate(set_val as u64);
 
-        // 🚩 核心：POSIX 规定 SIGKILL 和 SIGSTOP 不能被屏蔽
+        //   核心：POSIX 规定 SIGKILL 和 SIGSTOP 不能被屏蔽
         set_flags.remove(SignalFlags::SIGKILL);
         set_flags.remove(SignalFlags::SIGSTOP);
 
@@ -1145,7 +1145,7 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         return EBADF.as_isize(); // EBADF
     }
     
-    // 2. 🚩 拦截 LTP 的流氓 EFAULT (Bad Address) 测试！
+    // 2.   拦截 LTP 的流氓 EFAULT (Bad Address) 测试！
     if addr as usize == 0xffffffffffffffff || addrlen as usize == 0xffffffffffffffff {
         return EFAULT.as_isize(); // EFAULT
     }
@@ -1174,7 +1174,7 @@ pub fn sys_eventfd2(initval: u32, _flags: i32) -> isize {
     
     let fd = inner.fd_table.len();
     if fd > 0 {
-        // 🚩 复制结构体外壳，把里面的文件替换成真正的 EventFile！
+        //   复制结构体外壳，把里面的文件替换成真正的 EventFile！
         let mut new_fd = inner.fd_table[0].clone();
         let event_file: Arc<dyn crate::fs::File> = Arc::new(EventFile::new(initval));
         new_fd.file = Some(event_file);
@@ -1219,7 +1219,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
         None => return EBADF.as_isize(),
     };
     
-    // 🚩 向下转型！如果它不是 EpollFile，报错！
+    //   向下转型！如果它不是 EpollFile，报错！
     let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
         Some(ef) => ef,
         None => return EINVAL.as_isize(), // EINVAL
@@ -1227,7 +1227,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     
     let token = inner.memory_set.token();
     let event = if op != 2 { // 如果不是 EPOLL_CTL_DEL，就需要读取用户态传来的数据
-        // 🚩 使用你提供的 translated_ref
+        //   使用你提供的 translated_ref
         *crate::mm::translated_ref(token, event_ptr as *const EpollEvent)
     } else {
         EpollEvent { events: 0, data: 0 }
@@ -1253,12 +1253,12 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
         return EFAULT.as_isize(); // 返回 -EFAULT (Bad address)
     }
     
-    // 🚩 2. 防御非法容量：POSIX 规定 maxevents 必须大于 0
+    //   2. 防御非法容量：POSIX 规定 maxevents 必须大于 0
     if maxevents <= 0 {
         return EINVAL.as_isize(); // 返回 -EINVAL (Invalid argument)
     }   
 
-    // 🚩 1. 记录进来的起始时间（用于带超时的阻塞）
+    //   1. 记录进来的起始时间（用于带超时的阻塞）
     let start_time = get_time_ms(); 
     
     loop {
@@ -1290,7 +1290,7 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
         }
         drop(list); 
         
-        // 🚩 2. 如果找到了就绪事件，立即处理并返回
+        //   2. 如果找到了就绪事件，立即处理并返回
         if !ready_events.is_empty() {
             let token = inner.memory_set.token();
             let mut count = 0;
@@ -1303,7 +1303,7 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
             return count as isize;
         }
         
-        // 🚩 3. 如果没找到事件，处理超时逻辑！
+        //   3. 如果没找到事件，处理超时逻辑！
         if timeout == 0 {
             // 非阻塞模式，直接返回 0 个事件
             return 0; 
@@ -1378,13 +1378,13 @@ pub fn sys_sigreturn() -> isize {
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     
-    // 🚩 测试 1：检查修改前的状态
+    //   测试 1：检查修改前的状态
     let old_sig = inner.handling_sig;
     
     // 执行修改
     inner.handling_sig = -1;
     
-    // 🚩 测试 2：立刻回读，确认内存写入成功
+    //   测试 2：立刻回读，确认内存写入成功
     let new_sig = inner.handling_sig;
     info!("[SIG_RET] State Change: {} -> {}", old_sig, new_sig);
     if let Some(mask_backup) = inner.signal_mask_backup.take() {
@@ -1396,7 +1396,7 @@ pub fn sys_sigreturn() -> isize {
         let trap_ctx = inner.get_trap_cx();
         *trap_ctx = backup;
         
-        // 🚩 测试 3：检查恢复后的 PC 指针和 a0
+        //   测试 3：检查恢复后的 PC 指针和 a0
         // 这能告诉你程序准备跳回到原来的哪一行执行
         info!("[SIG_RET] Restoration: PC={:#x}, a0={}", trap_ctx.get_rt(), trap_ctx.get_a0());
         
@@ -1457,7 +1457,7 @@ pub fn sys_rt_sigaction(
     let mut inner = proc.inner_exclusive_access();
     let token = inner.memory_set.token();
 
-    // 🚩 核心修复：数组下标必须从 0 开始，所以是 signum - 1
+    //   核心修复：数组下标必须从 0 开始，所以是 signum - 1
     let table_idx = (signum - 1) as usize;
 
     // 4. 保存旧的 SignalAction

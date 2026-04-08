@@ -45,7 +45,7 @@ impl File for EpollFile {
     fn get_dentry(&self) -> Option<Arc<Dentry>> { None }
     fn lseek(&self, _offset: isize, _whence: i32) -> isize { -1 }
 
-    // 🚩 核心：允许系统调用把它还原成 EpollFile！
+
     fn as_any(&self) -> &dyn Any { self }
 }
 
@@ -79,6 +79,6 @@ impl File for EventFile {
     fn get_dentry(&self) -> Option<Arc<Dentry>> { None }
     fn lseek(&self, _offset: isize, _whence: i32) -> isize { -1 }
     
-    // 🚩 允许转回 EventFile
+
     fn as_any(&self) -> &dyn Any { self }
 }

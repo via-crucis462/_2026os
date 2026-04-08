@@ -61,7 +61,7 @@ impl super::VfsInode for TmpfsFileInode {
             ino: self.ino as u64,
             mode: 0o100777, nlink: 1, 
             uid: 0, gid: 0, rdev: 0, __pad: 0, 
-            // 🚩 修复点 1：把 u64 改成 i64 迎合你们的 Stat 结构体
+
             size: self.get_size() as i64, 
             blksize: 512, __pad2: 0,
             blocks: ((self.get_size() as i64) + 511) / 512, 

@@ -137,7 +137,7 @@ pub const IDLE_PID: usize = 0;
     proc_inner.alive_task_count -= 1;
     let parent_to_wake = proc_inner.parent.as_ref().and_then(|p| p.upgrade());
     
-    // 🚩 核心判定：使用直接访问字段 proc_inner.is_zombie
+
     if proc_inner.alive_task_count == 0 || proc_inner.is_zombie {
         // 1. 确保标志位被设为 true，这样 wait4 遍历 children 时一抓一个准
         proc_inner.is_zombie = true;
@@ -228,6 +228,9 @@ pub fn add_initproc() {
 pub fn check_signals_error_of_current() -> Option<(i32, &'static str)> {
     let task = current_task().unwrap();
     let task_inner = task.inner_exclusive_access();
+    if task_inner.killed {
+        return Some((9, "Killed by signal"));
+    }
     // println!(
     //     "[K] check_signals_error_of_current {:?}",
     //     task_inner.signals
@@ -282,26 +285,19 @@ pub fn handle_signals() {
     
     if final_pending != 0 {
         // 3. 取出第一个需要处理的信号编号 (1-based)
-        let process = task.process(); // 拿到所属进程
-        let mut proc_inner = process.inner_exclusive_access(); // 锁住进程
+       
         let sig = final_pending.trailing_zeros() as usize + 1;
         let flag = SignalFlags::from_bits(1 << (sig - 1)).unwrap();
-        let handler_addr = proc_inner.signal_actions.table[sig].handler;
-        if handler_addr == 0 || handler_addr == 1 {
-            // println!("[SIG PROBE] Ignore or Default action for sig {}. Clearing it.", sig);
-            
-            // 直接把信号从信箱里抹掉，当作没发生过（或者按需直接杀死进程）
-            task_inner.signals.remove(flag); 
-            return; // 直接返回，千万不要调用 call_user_signal_handler！
-        }
+       
+       
         info!("[SIG PROBE] Calling handler for sig: {}, final_pending: {:#x}", sig, final_pending);
-        // 🚩 核心：必须先放锁，再调用你写好的处理函数！
+        //  核心：必须先放锁，再调用你写好的处理函数！
         drop(task_inner); 
-        drop(proc_inner);
+
         // 4. 呼叫你之前写好的神级函数，它会篡改 sepc 和 ra
         call_user_signal_handler(sig, flag);
     }else {
-        // 🛑 探针 3：走到了这里但没有信号要处理
+        //  探针 3：走到了这里但没有信号要处理
         // 注意：如果你看到大量探针3，说明有奇怪的系统调用唤醒，但信号已经被清空或完全被屏蔽。
         let raw_signals = task_inner.signals.bits();
         let raw_mask = task_inner.signal_mask.bits();
@@ -334,11 +330,11 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
         signal, sig, before_bits, after_bits
     );
 
-    // 🚩 分支 1：要求忽略
+
     if handler == SIG_IGN {
         return; // 直接返回，无事发生，绝不修改 handling_sig！
     } 
-    // 🚩 分支 2：执行用户自定义 Handler
+
     else if handler != SIG_DFL {
         // --- 👇 只有确定要跳转用户态了，才能修改状态和备份 👇 ---
         
@@ -369,9 +365,9 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
             // trap_ctx.set_ra(sp);
             // trap_ctx.x[2] = sp;
         }
-        // --- 👆 状态修改结束 👆 ---
+
     } 
-    // 🚩 分支 3：默认行为
+  
     else {
         match signal {
             SignalFlags::SIGCHLD | SignalFlags::SIGURG | SignalFlags::SIGWINCH => {
