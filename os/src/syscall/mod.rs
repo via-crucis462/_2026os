@@ -288,11 +288,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
         _ =>  Errno::ENOSYS.as_isize(),
     };
-    //if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
-       /*  println!(
+    if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
+        debug!(
             "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], ret
-        );*/
-    //}
+        );
+    }
     ret
 }
