@@ -356,7 +356,7 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
 
         // 设置用户态入口和参数
         // 注意：这里应该是修改 PC 指针，如果是 rCore 通常叫 set_sepc 或修改 trap_ctx.sepc
-        trap_ctx.sepc = handler; // ⚠️ 原代码 trap_ctx.set_rt 可能有误，确保是设为 Program Counter
+        trap_ctx.set_rt(handler);
         trap_ctx.set_a0(sig);
 
         // 设置返回地址 (ra)

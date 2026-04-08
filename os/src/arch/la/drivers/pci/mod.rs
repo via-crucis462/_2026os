@@ -292,25 +292,36 @@ pub fn scan_bus(am: CSpaceAccessMethod) -> BusScan {
 }
 
 
-use crate::arch::la::drivers::block::*;
+use crate::drivers::{DeviceType , block::VirtioHal};
 use alloc::boxed::Box;
 
-pub fn scan_pci_device_to_trans() -> Option<PciTransport> {
+
+pub fn scan_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTransport> {
     //! bug: root会被泄露到堆中，可能会有问题
     //! 如果不使用这样的方式，此函数会有生命周期问题，不过目前的实现能跑
     let am = CSpaceAccessMethod::MemoryMapped;
     // 调用库中的扫描函数扫描第一个块设备
     for dev in scan_bus(am) {
-        // 只初始化块设备
-        if dev.id.vendor_id != 0x1AF4 || dev.id.device_id != 0x1001 {
-            continue;
-        }
         // 调试用，输出信息
         info!("found a boclk device: bus={:#x} dev={:#x} func={:#x}", 
             dev.loc.bus,
             dev.loc.device,
             dev.loc.function
         );
+        match dev_type {
+            DeviceType::VirtIOBlock => {
+                if dev.id.vendor_id != 0x1AF4 || dev.id.device_id != 0x1001 {
+                    continue;
+                }
+            },
+            DeviceType::VIrtIONet => {
+                if dev.id.vendor_id != 0x1AF4 || dev.id.device_id != 0x1000 {
+                    continue;
+                }
+            },
+            // _ => continue,
+        }
+        
         // 初始化bar
         for (idx, obar) in dev.bars.iter().enumerate() {
             if let Some(bar) = obar {

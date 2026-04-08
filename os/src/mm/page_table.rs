@@ -185,7 +185,7 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     let task = current_task().unwrap();
     let process = task.process();
     let mut inner = task.inner_exclusive_access();
-    let sp = inner.get_trap_cx().x[2];
+    let sp = inner.get_trap_cx().get_sp();
     let mut proc_inner = process.inner_exclusive_access();
     while start < end {
         let start_va = VirtAddr::from(start);

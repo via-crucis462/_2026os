@@ -294,7 +294,7 @@ pub fn sys_rt_sigreturn() -> isize {
     // 🚩 3. 极其关键！因为 sys_rt_sigreturn 返回 isize，调度器会把它强行写入 a0 寄存器。
     // 为了不破坏刚刚还原出来的 a0（里面存着 ppoll 的 EINTR -4），
     // 我们必须返回还原后 trap_context 里的 a0 值！
-    inner.get_trap_cx().x[10] as isize
+    inner.get_trap_cx().get_a0() as isize
 }
 pub fn sys_getuid() -> isize {
     let task = current_task().unwrap();
@@ -694,10 +694,9 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     let cwd = task.process().inner_exclusive_access().cwd.clone();
     drop(task);
     
-    let path_str = normalize_leading_dot_path(translated_str(token, path));
+    let path_str = normalize_leading_dot_path(translated_str(token, path));//直接删除路径中的.，不进行其他处理
     let mut args_vec: Vec<String> = Vec::new();
-
-
+    info!("[kernel] sys_exec: called with path '{}'", path_str);
     // 提取原始参数数组
     loop {
         let arg_str_ptr = *translated_ref(token, args);
@@ -716,23 +715,21 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     if let Some(mut app_inode) = app_inode_opt {
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         
-        let mut on_main_hart = false;
         let app_name = app_inode.get_dentry().name.clone();
-        if app_name.contains("shell") || app_name.contains("init") {
-            on_main_hart = true;
-        }
         
         // 脚本处理逻辑 (.sh)
         if app_name.ends_with(".sh") {
+            info!("[kernel] sys_exec: detected script '{}', trying to execute with busybox", app_name);
             let busybox = "/musl/busybox";
             if let Some(inode) = open_file(cwd.clone(), busybox, OpenFlags::RDONLY) {
-                let mut new_args = vec!["busybox".to_string(), "sh".to_string()];
+                let mut new_args = vec!["musl/busybox".to_string(), "sh".to_string()];
                 // 如果脚本没带参数，把脚本路径加进去
                 if args_vec.len() <= 1 { new_args.push(path_str.clone()); }
-                new_args.extend(args_vec);
+                //new_args.extend(args_vec);
                 args_vec = new_args;
                 app_inode = inode;
             } else {
+                println!("[kernel] sys_exec: failed to open busybox for script execution");
                 return ENOENT.as_isize();
             }
         }
@@ -740,7 +737,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         let all_data = app_inode.read_all();
         // 验证 ELF 签名
         if all_data.len() < 4 || &all_data[0..4] != &[0x7f, 0x45, 0x4c, 0x46] {
-            return -8; // ENOEXEC
+            return ENOEXEC.as_isize(); // ENOEXEC
         }
         
         let elf = xmas_elf::ElfFile::new(&all_data).unwrap();
@@ -764,19 +761,21 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             if let Some(interp_inode) = open_file(cwd.clone(), interp.as_str(), OpenFlags::RDONLY) {
                 interp_data = Some(interp_inode.read_all());
             } else {
-                return ENOENT.as_isize(); 
+                //return ENOENT.as_isize(); 
             }
         }
         
         let task = current_task().unwrap();
         let argc = args_vec.len();
-        
+        for i in 0..argc {
+            info!("[kernel] sys_exec: arg[{}] = '{}'", i, args_vec[i]);
+        }
         // 真正开始替换进程空间
-        task.process().exec(task, all_data.as_slice(), interp_data.as_deref(), args_vec, on_main_hart);
-        
+        task.process().exec(task, all_data.as_slice(), interp_data.as_deref(), args_vec, false);
+        info!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
         argc as isize
     } else {
-        warn!("[kernel] sys_exec: failed to locate executable for {}", path_str);
+        error!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
         ENOENT.as_isize()
     }
 }
@@ -1131,7 +1130,7 @@ pub fn sys_sigprocmask(
             SIG_BLOCK => inner.signal_mask.insert(set_flags),
             SIG_UNBLOCK => inner.signal_mask.remove(set_flags),
             SIG_SETMASK => inner.signal_mask = set_flags,
-            _ => return -22, // EINVAL
+            _ => return EINVAL.as_isize() // EINVAL
         }
     }
     0
@@ -1143,27 +1142,27 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     
     // 1. 检查 FD 是否越界
     if fd >= inner.fd_table.len() {
-        return -9; // EBADF
+        return EBADF.as_isize(); // EBADF
     }
     
     // 2. 🚩 拦截 LTP 的流氓 EFAULT (Bad Address) 测试！
     if addr as usize == 0xffffffffffffffff || addrlen as usize == 0xffffffffffffffff {
-        return -14; // EFAULT
+        return EFAULT.as_isize(); // EFAULT
     }
     let fd_entry = &inner.fd_table[fd];
     if (fd_entry.status & 0x200000) != 0 {
-        return -9; // EBADF: O_PATH 描述符不接受 I/O 操作
+        return EBADF.as_isize(); // EBADF: O_PATH 描述符不接受 I/O 操作
     }
         if let Some(file) = &fd_entry.file {
         let stat = file.get_stat();
         // 检查 inode 的 mode 标志位是不是 Socket
         if (stat.mode & 0o170000) == 0o140000 {
-            return -22; // EINVAL: 是没有 listen 的 Socket
+            return EINVAL.as_isize(); // EINVAL: 是没有 listen 的 Socket
         } else {
-            return -88; // ENOTSOCK: 是普通文件/目录
+            return ENOTSOCK.as_isize(); // ENOTSOCK: 是普通文件/目录
         }
     } else {
-        return -9; // EBADF: 已经被 close 或者本来就是空的
+        return EBADF.as_isize(); // EBADF: 已经被 close 或者本来就是空的
     }
 }
 
@@ -1399,7 +1398,7 @@ pub fn sys_sigreturn() -> isize {
         
         // 🚩 测试 3：检查恢复后的 PC 指针和 a0
         // 这能告诉你程序准备跳回到原来的哪一行执行
-        info!("[SIG_RET] Restoration: PC={:#x}, a0={}", trap_ctx.sepc, trap_ctx.x[10]);
+        info!("[SIG_RET] Restoration: PC={:#x}, a0={}", trap_ctx.get_rt(), trap_ctx.get_a0());
         
         trap_ctx.get_a0() as isize
     } else {
@@ -1438,17 +1437,17 @@ pub fn sys_rt_sigaction(
 ) -> isize {
     // 1. 校验 sigsetsize
     if sigsetsize < core::mem::size_of::<u32>() {
-        return -22; // EINVAL
+        return EINVAL.as_isize(); // EINVAL
     }
     
     // 2. 校验信号编号范围 (1~64)
     if signum <= 0 || signum as usize > MAX_SIG {
-        return -22; // EINVAL
+        return EINVAL.as_isize(); // EINVAL
     }
 
     // 3. 正规操作：绝对禁止修改 SIGKILL(9) 和 SIGSTOP(19)
     if signum == 9 || signum == 19 {
-        return -22; // EINVAL (POSIX 规定此处返回 EINVAL)
+        return EINVAL.as_isize(); // EINVAL (POSIX 规定此处返回 EINVAL)
     }
 
     let task = current_task().unwrap();
@@ -1499,7 +1498,7 @@ pub fn sys_fchmodat(_dirfd: isize, path_ptr: *const u8, _mode: u32) -> isize {
         }
         None => {
             // 文件不存在，严谨返回 -ENOENT (-2)
-            -2 
+            ENOENT.as_isize()
         }
     }
 }
@@ -1554,6 +1553,12 @@ pub fn sys_pselect6(
         suspend_current_and_run_next();
     }
 }
+
+/// 网络相关，socket套接字创建，返回一个代表此socket的文件描述符，后续的网络相关操作通过这个文件描述符进行
+/// domain: 协议族，AF_INET=2（IPV4），AF_UNIX=1（本地进程间通信）
+/// type: 套接字类型，SOCK_STREAM=1（稳定传输，常用于TCP），SOCK_DGRAM=2（数据报传输，常用于UDP）
+/// protocol: 具体协议，通常为0表示默认协议
+/// 返回值：成功返回新创建的 socket 的文件描述符，失败返回 -1 并设置 errno
 pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     // 1. 获取当前进程
     let task = current_task().unwrap();
@@ -1590,6 +1595,7 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     
     fd as isize
 }
+
 pub fn sys_add_key(_type: *const u8, _desc: *const u8, _payload: *const u8, _plen: usize, _ringid: i32) -> isize {
     // 假装成功生成了一个密钥，返回一个随机的密钥序列号 (比如 9999)
     9999
