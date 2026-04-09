@@ -100,7 +100,7 @@ const POLLERR: i16 = 0x008;
 const POLLHUP: u16 = 0x0010;
 
 pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> isize {
-    info!("[kernel] sys_ppoll: ufds={:#x}, nfds={}, tmo_p={:#x}", ufds_ptr, nfds, tmo_p);
+    debug!("[kernel] sys_ppoll: ufds={:#x}, nfds={}, tmo_p={:#x}", ufds_ptr, nfds, tmo_p);
     if ufds_ptr == 0 && nfds > 0 {
         return EFAULT.as_isize(); // EFAULT
     }
@@ -150,7 +150,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         if (pending | unmaskable) != 0 {
             // 🚩 核心：被打断返回前，必须恢复原始的信号掩码！
             //task_inner.signal_mask = original_mask;
-            info!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
+            debug!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
                      task_inner.signals.bits(), task_inner.signal_mask.bits());
             drop(task_inner); // 放锁
             return EINTR.as_isize(); // EINTR
@@ -192,7 +192,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
                     ready_count += 1;
                 }
             }
-            info!("[kernel] ppoll fd={} target_events={:#x} ready_revents={:#x}", pollfd.fd, pollfd.events, pollfd.revents);
+            trace!("[kernel] ppoll fd={} target_events={:#x} ready_revents={:#x}", pollfd.fd, pollfd.events, pollfd.revents);
         }
         
         // 4. 如果找到了就绪事件，恢复掩码并返回！
@@ -761,7 +761,13 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             info!("[kernel] sys_exec: arg[{}] = '{}'", i, args_vec[i]);
         }
         // 真正开始替换进程空间
-        task.process().exec(task, all_data.as_slice(), interp_data.as_deref(), args_vec, false);
+        task.process().exec(
+            task,
+            all_data.as_slice(),
+            interp_data.as_deref(),
+            args_vec,
+            cfg!(target_arch = "loongarch64"),
+        );
         info!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
         argc as isize
     } else {

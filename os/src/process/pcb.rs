@@ -410,7 +410,7 @@ impl ProcessControlBlock {
             pid: pid_handle.clone(),
             wait_queue: Mutex::new(WaitQueue::new()),
             inner: MPSafeCell::new(ProcessControlBlockInner {
-                on_main_hart: false, // fork出的子进程默认不在
+                on_main_hart: cfg!(target_arch = "loongarch64"), // LA 侧先固定到主核，避免未收敛的跨核执行路径
                 pname: parent_inner.pname.clone(),
                 base_size: parent_inner.base_size,
                 memory_set,

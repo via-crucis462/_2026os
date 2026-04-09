@@ -83,9 +83,16 @@ pub struct TaskControlBlockInner {
 }
 
 impl TaskControlBlockInner {
+    #[cfg(target_arch = "riscv64")]
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
         PhysAddr(self.trap_cx_addr).get_mut()
     }
+
+    #[cfg(target_arch = "loongarch64")]
+    pub fn get_trap_cx(&self) -> &'static mut TrapContext {
+        unsafe { (self.trap_cx_addr as *mut TrapContext).as_mut().unwrap() }
+    }
+
     fn get_status(&self) -> TaskStatus {
         self.task_status
     }

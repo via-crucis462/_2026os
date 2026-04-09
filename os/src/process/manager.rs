@@ -100,6 +100,10 @@ impl TaskManager {
     pub fn task_count(&self) -> usize {
         self.ready_queue.len()
     }
+
+    pub fn remove(&mut self, tid: usize) {
+        self.ready_queue.retain(|task| task.gettid() != tid);
+    }
 }
 
 lazy_static! {
@@ -146,7 +150,8 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
 }
 
 pub fn add_task_in_current_hart(task: Arc<TaskControlBlock>) {
-    //debug!("[kernel] TaskManager::add_task_in_current_hart: pid={}", task.getpid());
+    remove_task_from_all_local_queues(task.gettid());
+    remove_task_from_global_pool(task.gettid());
     let mut manager = get_current_task_manager().exclusive_access();
     manager.add(task);
 }
@@ -155,7 +160,12 @@ pub fn add_task_in_current_hart(task: Arc<TaskControlBlock>) {
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
 	//trace!("kernel: TaskManager::fetch_task");
     current_add_tasks();
-    get_current_task_manager().exclusive_access().fetch()
+    let task = get_current_task_manager().exclusive_access().fetch();
+    if let Some(task) = task.as_ref() {
+        remove_task_from_all_local_queues(task.gettid());
+        remove_task_from_global_pool(task.gettid());
+    }
+    task
 }
 
 pub fn cores_fetch_task() {
@@ -186,4 +196,10 @@ pub fn remove_from_tid2task(tid: usize) {
 
 pub fn task_count_in_mng() -> usize {
     TID2TCB.exclusive_access().len()
+}
+
+pub fn remove_task_from_all_local_queues(tid: usize) {
+    for hart_id in 0..CPU_CORE_NUM {
+        TASK_MANAGERS[hart_id].exclusive_access().remove(tid);
+    }
 }

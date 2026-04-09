@@ -84,7 +84,7 @@ pub fn run_tasks() {
             let mut processor = current_processor();
             if (task.process().inner_exclusive_access().on_main_hart &&
                 hart_id != MAIN_HART_ID.load(Ordering::Acquire)) {
-                error!("[kernel] run_tasks: task pid={} is on main hart, but current hart is {}, put it back into pool", task.getpid(), hart_id);
+                info!("[kernel] run_tasks: task pid={} is on main hart, but current hart is {}, put it back into pool", task.getpid(), hart_id);
                 add_task_into_pool(task);
                 drop(processor);
                 
@@ -134,6 +134,10 @@ pub fn run_tasks() {
             drop(processor);
         } else {
             crate::arch::timer::set_next_trigger();
+            #[cfg(target_arch = "loongarch64")]
+            unsafe {
+                asm!("idle 0");
+            }
             #[cfg(target_arch = "riscv64")]
             unsafe {
                 asm!("wfi");

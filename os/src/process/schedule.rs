@@ -66,6 +66,11 @@ impl TaskPool {
     pub fn count(&self) -> usize {
         self.inner.len()
     }
+
+    pub fn remove_task(&mut self, tid: usize) {
+        self.inner.retain(|task| task.gettid() != tid);
+    }
+
     pub fn add_task(&mut self, task: Arc<TaskControlBlock>) {
         let tid = task.gettid();
         if self.inner.iter().any(|t| t.gettid() == tid) {
@@ -104,11 +109,17 @@ impl TaskPool {
 
 pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
     trace!("[kernel] Scheduler::add_task_into_pool: pid={}", task.getpid());
+    remove_task_from_all_local_queues(task.gettid());
     let mut scheduler = SCHEDULER.exclusive_access();
+    scheduler.get_pool().remove_task(task.gettid());
     scheduler.get_pool().add_task(task);
     drop(scheduler);
     //sbi_wakeup_harts(0b1111);
     trace!("add into pool finised");
+}
+
+pub fn remove_task_from_global_pool(tid: usize) {
+    SCHEDULER.exclusive_access().get_pool().remove_task(tid);
 }
 
 pub fn ask_for_tasks() -> VecDeque<Arc<TaskControlBlock>> {

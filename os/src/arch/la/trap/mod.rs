@@ -35,9 +35,16 @@ pub fn trap_from_kernel() -> ! {
         asm!("csrrd {badv}, 0x7", badv = out(reg) badv);
         asm!("csrrd {badi}, 0x8", badi = out(reg) badi);
     }
+    let hart_id = get_hart_id();
+    let (ecode_name, ecode, esubcode, timer_pending) = decode_estat(estat);
     error!(
-        "[kernel] trap_from_kernel: ESTAT={:#x}, ERA={:#x}, BADV={:#x}, BADI={:#x}",
+        "[kernel][panic] trap_from_kernel: hart={}, ESTAT={:#x}, ECODE={}({:#x}), ESUBCODE={:#x}, timer_pending={}, ERA={:#x}, BADV={:#x}, BADI={:#x}",
+        hart_id,
         estat,
+        ecode_name,
+        ecode,
+        esubcode,
+        timer_pending,
         era,
         badv,
         badi
@@ -46,7 +53,7 @@ pub fn trap_from_kernel() -> ! {
         let proc = task.process();
         let inner = proc.inner_exclusive_access();
         error!(
-            "[kernel] trap_from_kernel: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
+            "[kernel][panic] current task snapshot: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
             task.getpid(),
             task.gettid(),
             inner.heap_bottom,
@@ -54,11 +61,20 @@ pub fn trap_from_kernel() -> ! {
         );
         inner.memory_set.debug_dump_areas(Some(badv), Some(era));
     } else {
-        error!("[kernel] trap_from_kernel: no current task");
+        error!("[kernel][panic] no current task on this hart");
     }
-    loop {
-        // 死循环
-    }
+    panic!(
+        "a trap from kernel! hart={}, estat={:#x}, ecode={}({:#x}), esubcode={:#x}, timer_pending={}, era={:#x}, badv={:#x}, badi={:#x}",
+        hart_id,
+        estat,
+        ecode_name,
+        ecode,
+        esubcode,
+        timer_pending,
+        era,
+        badv,
+        badi
+    );
 }
 
 /// Initialize trap handling
@@ -111,9 +127,8 @@ pub fn enable_timer_interrupt() {
         let mut ecfg: usize;
         asm!("csrrd {}, 0x4", out(reg) ecfg);
         asm!("csrwr {}, 0x4", in(reg) ecfg | (1 << 11)); // 使能定时器中断
-        let mut crmd: usize;
-        asm!("csrrd {}, 0x0", out(reg) crmd);
-        asm!("csrwr {}, 0x0", in(reg) crmd | (1 << 2)); // 使能中断
+        // 与riscv侧思路一致：这里只打开中断源，不在内核态全局开中断位。
+        // 内核态保持IE关闭，可避免空闲内核代码被时钟中断打入trap_from_kernel。
     }
 }
 
@@ -130,6 +145,60 @@ const BRK_PRINTF_START: usize = 0x13e8;
 const BRK_PRINTF_END: usize = 0x16bc;
 const SYS_WRITE: usize = 64;
 const SYS_BRK: usize = 214;
+
+fn decode_estat(estat: usize) -> (&'static str, usize, usize, bool) {
+    let ecode = (estat >> 16) & 0x3f;
+    let esubcode = (estat >> 22) & 0x1ff;
+    let timer_pending = ((estat >> 11) & 1) != 0;
+
+    let name = match ecode {
+        0 => "INT",
+        1 => "PIL",
+        2 => "PIS",
+        3 => "PIF",
+        4 => "PME",
+        5 => "PNR",
+        6 => "PNX",
+        7 => "PPI",
+        8 => match esubcode {
+            0 => "ADEF",
+            1 => "ADEM",
+            _ => "ADE",
+        },
+        9 => "ALE",
+        10 => "BCE",
+        11 => "SYS",
+        12 => "BRK",
+        13 => "INE",
+        14 => "IPE",
+        15 => "FPD",
+        16 => "SXD",
+        17 => "ASXD",
+        18 => match esubcode {
+            0 => "FPE",
+            1 => "VFPE",
+            _ => "FPE?",
+        },
+        19 => match esubcode {
+            0 => "WPEF",
+            1 => "WPEM",
+            _ => "WATCH",
+        },
+        20 => "BTDIS",
+        21 => "BTE",
+        22 => "GSPR",
+        23 => "HVC",
+        24 => match esubcode {
+            0 => "GCSC",
+            1 => "GCHC",
+            _ => "GCM",
+        },
+        25 => "SE",
+        _ => "UNKNOWN",
+    };
+
+    (name, ecode, esubcode, timer_pending)
+}
 
 fn is_brk_process() -> bool {
     current_task()

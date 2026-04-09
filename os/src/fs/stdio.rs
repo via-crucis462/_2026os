@@ -8,6 +8,15 @@ use crate::sync::MPSafeCell;
 
 lazy_static! {
     pub static ref STDOUT_LOCK: MPSafeCell<()> = MPSafeCell::new(());
+    static ref STDIN_BUFFERED_CHAR: MPSafeCell<Option<u8>> = MPSafeCell::new(None);
+}
+
+fn normalize_console_char(c: usize) -> Option<u8> {
+    if c == 0 || c == usize::MAX {
+        return None;
+    }
+    let normalized = if c == 13 || c == '\r' as usize { 10 } else { c };
+    Some(normalized as u8)
 }
 
 /// stdin file for getting chars from console
@@ -20,28 +29,31 @@ impl File for Stdin {
     fn readable(&self) -> bool {
         true
     }
+
+    fn ready_to_read(&self) -> bool {
+        if STDIN_BUFFERED_CHAR.exclusive_access().is_some() {
+            return true;
+        }
+        if let Some(ch) = normalize_console_char(console_getchar()) {
+            *STDIN_BUFFERED_CHAR.exclusive_access() = Some(ch);
+            return true;
+        }
+        false
+    }
+
     fn writable(&self) -> bool {
         false
     }
     fn read(&self, user_buf: UserBuffer) -> usize {
-        // assert_eq!(user_buf.len(), 1);
-        // busy loop
-        let mut c: usize;
-        loop {
-            c = console_getchar();
-            if c == 13 || c == '\r' as usize {
-                c = 10;
+        let ch = loop {
+            if let Some(ch) = STDIN_BUFFERED_CHAR.exclusive_access().take() {
+                break ch;
             }
-            
-            if c == 0 || c == 0xffffffffffffffff {
-                suspend_current_and_run_next();
-                continue;
-            } else {
-                break;
+            if let Some(ch) = normalize_console_char(console_getchar()) {
+                break ch;
             }
-
-        }
-        let ch = c as u8;
+            suspend_current_and_run_next();
+        };
         let mut count = 0;
         for byte_ref in user_buf.into_iter() {
             unsafe {
