@@ -148,7 +148,7 @@ fn main_init(hart_id: usize) {
     arch::trap::init();
     #[cfg(target_arch = "loongarch64")]
     info!("drivers::search_pci"); drivers::search_pci(); info!("done drivers");
-    #[cfg(target_arch = "riscv64")]
+    //#[cfg(target_arch = "riscv64")]
     {
         lazy_static::initialize(&NET_DEVICE);
         lazy_static::initialize(&crate::net::NET_IFACE);

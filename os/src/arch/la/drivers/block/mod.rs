@@ -19,18 +19,18 @@ lazy_static! {
     /// The global block device driver instance: BLOCK_DEVICE with BlockDevice trait
     /// 已修改：从固定mmio地址改为扫描获取
     pub static ref BLOCK_DEVICE: Arc<BlockDeviceImpl> = {
-        let pci_block_device_trans = pci::scan_pci_device_to_trans(DeviceType::VirtIOBlock).expect("Failed to find PCI device");
+        let pci_block_device_trans = pci::scan_and_init_pci_device_to_trans(DeviceType::VirtIOBlock).expect("Failed to find PCI device");
         unsafe {
              Arc::new(BlockDeviceImpl::new(pci_block_device_trans))
         }
     };
     pub static ref NET_DEVICE: Arc<virtio_net::VirtIONetWrapper> = {
-        info!("NET_DEVICE lazy init: begin scan transport");
-        let pci_net_device_trans = pci::scan_pci_device_to_trans(DeviceType::VirtIONet).expect("Failed to find PCI device");
-        info!("NET_DEVICE lazy init: transport ready, build VirtIONetWrapper");
+        debug!("NET_DEVICE lazy init: begin scan transport");
+        let pci_net_device_trans = pci::scan_and_init_pci_device_to_trans(DeviceType::VirtIONet).expect("Failed to find PCI device");
+        debug!("NET_DEVICE lazy init: transport ready, build VirtIONetWrapper");
         unsafe {
             let net = Arc::new(virtio_net::VirtIONetWrapper::new(pci_net_device_trans));
-            info!("NET_DEVICE lazy init: done");
+            debug!("NET_DEVICE lazy init: done");
             net
         }
 

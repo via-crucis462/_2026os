@@ -1,6 +1,6 @@
 MODE ?= debug
 RV_SMP ?= 4
-LA_SMP ?= 4
+LA_SMP ?= 1
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
 RV_ELF ?= os/target/riscv64gc-unknown-none-elf/$(MODE)/os
