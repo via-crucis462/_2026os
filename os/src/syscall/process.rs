@@ -766,7 +766,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             all_data.as_slice(),
             interp_data.as_deref(),
             args_vec,
-            cfg!(target_arch = "loongarch64"),
+            false,
         );
         info!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
         argc as isize
@@ -1628,6 +1628,7 @@ pub fn sys_msync(_addr: usize, _len: usize, _flags: u32) -> isize {
     0
 }
 pub fn sys_times(tms_ptr: *mut usize) -> isize {
+    //println!("[kernel] sys_times called with tms_ptr={:#x}", tms_ptr as usize);
     let token = current_user_token();
     // 暂时伪实现，写0
     let tms_val = Tms {
@@ -1644,10 +1645,16 @@ pub fn sys_times(tms_ptr: *mut usize) -> isize {
 pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> isize {
     let token = current_user_token();
     let mut user_buf = translated_byte_buffer(token, buf, len);
+    const LCG_MULTIPLIER: usize = 25_214_903_917;
+    const LCG_MASK: usize = (1usize << 48) - 1;
+
     for (i, buf) in user_buf.iter_mut().enumerate() {
-        let seed = get_timer_ticks() + buf.as_ptr() as usize + i;
+        let seed = get_timer_ticks()
+            .wrapping_add(buf.as_ptr() as usize)
+            .wrapping_add(i);
         // 类LGC算法，时间滴答作种
-        buf[0] = (((25214903917usize * seed) & ((1 << 48) - 1)) >> (8 * (i % 6))) as u8;
+        let mixed = LCG_MULTIPLIER.wrapping_mul(seed) & LCG_MASK;
+        buf[0] = (mixed >> (8 * (i % 6))) as u8;
     }
     len as isize
 }

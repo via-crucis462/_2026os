@@ -66,6 +66,9 @@ pub struct TaskControlBlockInner {
     /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
 
+    /// 当前由哪个 hart 持有运行所有权；None 表示可被调度领取。
+    pub owner_hart: Option<usize>,
+
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
     pub signals: SignalFlags,

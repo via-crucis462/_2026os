@@ -155,6 +155,7 @@ impl ProcessControlBlock {
                 trap_cx_addr,
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
+                owner_hart: None,
                 signal_mask: SignalFlags::empty(),
                 handling_sig: -1,
                 killed: false,
@@ -410,7 +411,7 @@ impl ProcessControlBlock {
             pid: pid_handle.clone(),
             wait_queue: Mutex::new(WaitQueue::new()),
             inner: MPSafeCell::new(ProcessControlBlockInner {
-                on_main_hart: cfg!(target_arch = "loongarch64"), // LA 侧先固定到主核，避免未收敛的跨核执行路径
+                on_main_hart: false, // LA 侧先固定到主核，避免未收敛的跨核执行路径
                 pname: parent_inner.pname.clone(),
                 base_size: parent_inner.base_size,
                 memory_set,
@@ -444,6 +445,7 @@ impl ProcessControlBlock {
                 signal_mask_backup: None,
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
+                owner_hart: None,
                 signal_mask: caller_inner.signal_mask,
                 handling_sig: caller_inner.handling_sig,
                 killed: false,

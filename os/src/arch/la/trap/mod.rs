@@ -6,6 +6,7 @@ mod context;
 use crate::{KERNEL_STACK_SIZE, PAGE_SIZE, get_hart_id};
 use crate::mm::{PageTable, VirtAddr};
 use crate::syscall::syscall;
+use crate::arch::mm::flush_tlb_for_asid;
 use crate::task::{
     KernelStack, SignalFlags, check_signals_error_of_current, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token, exit_current_and_run_next, handle_signals, suspend_current_and_run_next
 };
@@ -63,7 +64,7 @@ pub fn trap_from_kernel() -> ! {
     } else {
         error!("[kernel][panic] no current task on this hart");
     }
-    panic!(
+    debug!(
         "a trap from kernel! hart={}, estat={:#x}, ecode={}({:#x}), esubcode={:#x}, timer_pending={}, era={:#x}, badv={:#x}, badi={:#x}",
         hart_id,
         estat,
@@ -75,6 +76,7 @@ pub fn trap_from_kernel() -> ! {
         badv,
         badi
     );
+    loop{}
 }
 
 /// Initialize trap handling
@@ -329,7 +331,8 @@ pub fn trap_handler() -> ! {
                     match inner.memory_set.translate(vpn) {
                         Some(pte) => {
                             error!(
-                                "[kernel] user_fault_pte: badaddr={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
+                                "[kernel] user_fault_pte: current hart id={}, badaddr={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
+                                get_hart_id(),
                                 badv,
                                 vpn.0,
                                 pte.bits,
@@ -457,6 +460,7 @@ pub fn trap_return() -> ! {
         euen |= 0x1;
         asm!("csrwr {}, 0x2", in(reg) euen);
     }
+    flush_tlb_for_asid(id);
 //  crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
     //info!("trap_return: going to user mode, satp = {:#x}", user_satp);
     extern "C" {
