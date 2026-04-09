@@ -77,6 +77,12 @@ impl MemorySet {
     pub fn asid(&self) -> usize {
         self.asid.0
     }
+    pub fn areas(&self) -> &Vec<MapArea> {
+        &self.areas
+    }
+    pub fn brk_index(&self) -> usize {
+        self.brk_index
+    }
     /// Assume that no conflicts.
     pub fn insert_framed_area(
         &mut self,
@@ -371,9 +377,7 @@ impl MemorySet {
         // copy data sections/trap_context/user_stack
         for area in user_space.areas.iter() {
             if area.is_shared {
-                // ==========================================
-                // 🚀 黑魔法：共享内存！只拷页表，不拷数据！
-                // ==========================================
+                // 黑魔法：共享内存！只拷页表，不拷数据！
                 let mut new_area = MapArea::new(
                     VirtAddr::from(area.vpn_range.get_start().0 * PAGE_SIZE),
                     VirtAddr::from(area.vpn_range.get_end().0 * PAGE_SIZE),
@@ -396,9 +400,7 @@ impl MemorySet {
                 memory_set.areas.push(new_area);
 
             } else {
-                // ==========================================
-                // 🐢 传统流程：私有内存，走原来的深拷贝逻辑
-                // ==========================================
+                // 传统流程：私有内存，走原来的深拷贝逻辑
                 let mut new_area: MapArea = MapArea::from_another(area);
                 let start_va: VirtAddr = new_area.vpn_range.get_start().into();
                 memory_set.push(new_area, None, start_va.0);
@@ -476,6 +478,7 @@ impl MemorySet {
     /// append the area to new_end
     #[allow(unused)]
     pub fn append_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
+        //找到对应逻辑段
         if let Some(area) = self
             .areas
             .iter_mut()
@@ -696,51 +699,6 @@ impl MemorySet {
 
         Ok(())
     }
-    // brk的实现（通过调整brk区域大小实现）
-    // 注意到rcore已实现，不过其实现过简且用到了遍历，复杂度较高，这里重新实现一个更简单的版本
-    // 目前的实现有问题（必须页对齐）故暂时弃置
-    pub fn _brk(&mut self, addr: usize) -> Result<usize, i32> {        
-        let brk_area = &mut self.areas[self.brk_index];
-        let old_brk = brk_area.vpn_range.get_end().0 * PAGE_SIZE;
-        if addr == 0{
-            return Ok(old_brk);
-        } else {
-            if addr > old_brk {
-                // 扩大
-                brk_area.append_to(&mut self.page_table, VirtAddr::from(addr).ceil());
-            } else if addr < old_brk {
-                if addr < brk_area.vpn_range.get_start().0 * PAGE_SIZE {// 不允许缩小到起始地址之前
-                    return Err(-1);
-                }
-                // 缩小
-                brk_area.shrink_to(&mut self.page_table, VirtAddr::from(addr).ceil());
-            }
-        }
-        Ok(addr)
-    }
-    pub fn brk(&mut self, addr: usize) -> Result<usize, i32> {
-        let brk_area = &mut self.areas[self.brk_index];
-        let old_brk = brk_area.vpn_range.get_end().0 * PAGE_SIZE;
-        
-        if addr == 0 {
-            return Ok(old_brk);
-        }
-        
-        let start_vpn = brk_area.vpn_range.get_start();
-        let new_end_vpn = VirtAddr::from(addr).ceil();
-
-        if addr > old_brk {
-            // 扩大堆区：只修改虚拟页号范围，物理页等缺页异常(handle_page_fault)去分配
-            brk_area.resize(start_vpn, new_end_vpn);
-        } else if addr < old_brk {
-            if addr < start_vpn.0 * PAGE_SIZE {
-                return Err(-1); // 不允许把堆缩到起点之前
-            }
-            // 缩小堆区：不仅改范围，还要真正回收多余的物理页
-            brk_area.shrink_to(&mut self.page_table, new_end_vpn);
-        }
-        Ok(addr)
-    }
     /// 处理缺页异常。如果触发异常的地址在合法区域内，则为其分配物理页；否则返回 false。
     #[no_mangle]
     #[inline(never)]
@@ -866,6 +824,9 @@ impl MapArea {
             is_shared: false,
         }
     }
+    pub fn get_vpn_range(&self) -> &VPNRange {
+        &self.vpn_range
+    }
     pub fn from_another(another: &Self) -> Self {
         Self {
             vpn_range: VPNRange::new(another.vpn_range.get_start(), another.vpn_range.get_end()),
@@ -940,6 +901,7 @@ impl MapArea {
     #[allow(unused)]
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(self.vpn_range.get_end(), new_end) {
+            debug!("MapArea::append_to: old vpn end={:#x} , mapping new page vpn={:#x}", self.vpn_range.get_end().0, vpn.0);
             self.map_one(page_table, vpn)
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);

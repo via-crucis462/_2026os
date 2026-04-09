@@ -227,7 +227,7 @@ impl ProcessControlBlock {
                     let offset = ph.offset() as usize;
                     let file_size = ph.file_size() as usize;
                     let data = &interp[offset..offset + file_size];
-                    
+                    debug!("[kernel] task::exec: mapping interp segment: [{:#x}, {:#x}), offset={:#x}, file_size={:#x}", start_va, end_va, offset, file_size);
                     memory_set.push(map_area, Some(data),start_va); 
                 }
             }
@@ -358,7 +358,9 @@ impl ProcessControlBlock {
         // 删除其他线程（如果有）
         proc_inner.tasks.retain(|t| Arc::ptr_eq(t, &caller_task));
         proc_inner.alive_task_count = 1;
-
+        for i in proc_inner.memory_set.areas().iter() {
+            debug!("exec: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+        }
         
     }
 
@@ -504,20 +506,31 @@ impl ProcessControlBlock {
         // 超范围panic
         let size: isize = addr as isize - self.inner_exclusive_access().program_brk as isize;
         let mut inner = self.inner_exclusive_access();
-        let heap_bottom = inner.heap_bottom;
+        let heap_bottom = inner.memory_set.areas()[inner.memory_set.brk_index()].get_vpn_range().get_start().0 * PAGE_SIZE;
+        debug!("change_program_brk: addr={:#x}, current_brk={:#x}, current_heap_bottom={:#x}, size={}", addr, inner.program_brk, heap_bottom, size);
         let _old_break = inner.program_brk;
         let new_brk = addr as isize;
         if new_brk < heap_bottom as isize {
             return Err(-1);
         }
         let result = if size < 0 {
+            debug!("change_program_brk: before shrink_to, heap_bottom={:#x}, new_brk={:#x}", heap_bottom, new_brk);
             inner
                 .memory_set
                 .shrink_to(VirtAddr(heap_bottom), VirtAddr(new_brk as *const () as usize))
         } else {
+            debug!("change_program_brk: before append_to, heap_bottom={:#x}, new_brk={:#x}", heap_bottom, new_brk);
+            for i in inner.memory_set.areas().iter() {
+                debug!("change_program_brk: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+            }
             inner
                 .memory_set
-                .append_to(VirtAddr(heap_bottom), VirtAddr(new_brk as *const () as usize))
+                .append_to(VirtAddr(heap_bottom), VirtAddr(new_brk as *const () as usize));
+            
+            for i in inner.memory_set.areas().iter() {
+                debug!("change_program_brk: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+            }
+             true
         };
         //println!("brk: change from {:#x} to {:#x}", _old_break, new_brk);
         if result {
@@ -587,7 +600,7 @@ pub struct ProcessControlBlockInner {
     pub euid: u32, // 有效用户 ID (Effective)
     pub egid: u32, // 有效组 ID (Effective)
     pub sid: usize,
-    // 🚩 新增：进程组 ID
+    // 新增：进程组 ID
     pub pgid: usize,
     pub is_zombie: bool,
     // 进程下的线程数
