@@ -99,6 +99,11 @@ const SYSCALL_SOCKET: usize = 198;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_LISTEN: usize = 201;
 const SYSCALL_ACCEPT: usize = 202;
+const SYSCALL_CONNECT: usize = 203;
+const SYSCALL_GETSOCKNAME: usize = 204;
+const SYSCALL_RECVFROM: usize = 207;
+const SYSCALL_SENDTO: usize = 206;
+const SYSCALL_SETSOCKOPT: usize = 208;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_ADD_KEY: usize = 217;
 const SYSCALL_REQUEST_KEY: usize = 218;
@@ -142,12 +147,14 @@ const SYSCALL_ACCESSAT: usize = 48;
 mod fs;
 mod process;
 mod prctl;
-mod errno;
+pub mod errno;
+mod net;
 use fs::*;
 use process::*;
 use prctl::*;
 use alloc::string::String;
 
+use crate::syscall::net::*;
 
 use crate::{fs::Stat, task::{SignalAction, current_task}};
 
@@ -199,6 +206,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[1] as *const SignalAction,
             args[2] as *mut SignalAction,
         ),
+        SYSCALL_CONNECT => sys_connect(args[0], args[1] as *const u8, args[2] as u32),
+        SYSCALL_GETSOCKNAME => sys_getsockname(args[0], args[1] as *mut u8, args[2] as *mut u32),
+        SYSCALL_SENDTO => sys_sendto(args[0], args[1] as *const u8, args[2], args[3] as i32, args[4] as *const u8, args[5] as u32),
+        SYSCALL_RECVFROM => sys_recvfrom(args[0], args[1] as *mut u8, args[2], args[3] as i32, args[4] as *mut u8, args[5] as *mut u32),
+        SYSCALL_SETSOCKOPT => sys_setsockopt(args[0], args[1], args[2], args[3] as *const u8, args[4] as u32),
         SYSCALL_SETITIMER => sys_setitimer(args[0], args[1] as *const u8, args[2] as *mut u8),
         SYSCALL_FTRUNCATE => sys_ftruncate(args[0], args[1]),
         SYSCALL_FCHMODAT => sys_fchmodat(args[0] as isize, args[1] as *const u8, args[2] as u32),
@@ -226,7 +238,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_EPOLL_CREATE1 => sys_epoll_create1(args[0] as i32),
         SYSCALL_EPOLL_CTL => sys_epoll_ctl(args[0], args[1] as i32, args[2], args[3]),
         SYSCALL_EPOLL_WAIT => sys_epoll_wait(args[0], args[1], args[2] as i32, args[3] as i32),
-        SYSCALL_BIND => sys_bind(args[0], args[1], args[2]),
+        SYSCALL_BIND => sys_bind(args[0], args[1]as *const u8, args[2]),
         SYSCALL_LISTEN => sys_listen(args[0], args[1] as i32),
         SYSCALL_SOCKET => sys_socket(args[0], args[1], args[2]),
         SYSCALL_ACCEPT    => sys_accept(args[0], args[1] as *mut u8, args[2] as *mut u32),

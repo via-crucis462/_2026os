@@ -1149,36 +1149,7 @@ pub fn sys_sigprocmask(
     }
     0
 }
-pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
-    let task = crate::task::current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    
-    // 1. 检查 FD 是否越界
-    if fd >= inner.fd_table.len() {
-        return EBADF.as_isize(); // EBADF
-    }
-    
-    // 2.   拦截 LTP 的流氓 EFAULT (Bad Address) 测试！
-    if addr as usize == 0xffffffffffffffff || addrlen as usize == 0xffffffffffffffff {
-        return EFAULT.as_isize(); // EFAULT
-    }
-    let fd_entry = &inner.fd_table[fd];
-    if (fd_entry.status & 0x200000) != 0 {
-        return EBADF.as_isize(); // EBADF: O_PATH 描述符不接受 I/O 操作
-    }
-        if let Some(file) = &fd_entry.file {
-        let stat = file.get_stat();
-        // 检查 inode 的 mode 标志位是不是 Socket
-        if (stat.mode & 0o170000) == 0o140000 {
-            return EINVAL.as_isize(); // EINVAL: 是没有 listen 的 Socket
-        } else {
-            return ENOTSOCK.as_isize(); // ENOTSOCK: 是普通文件/目录
-        }
-    } else {
-        return EBADF.as_isize(); // EBADF: 已经被 close 或者本来就是空的
-    }
-}
+
 
 // ID 19: sys_eventfd2
 pub fn sys_eventfd2(initval: u32, _flags: i32) -> isize {
@@ -1349,17 +1320,8 @@ pub fn sys_setitimer(_which: usize, _new_value: *const u8, _old_value: *mut u8) 
     0
 }
 
-// ID 200
-pub fn sys_bind(_fd: usize, _addr: usize, _addr_len: usize) -> isize {
-    // 假装绑定成功
-    0 
-}
 
-// ID 201
-pub fn sys_listen(_fd: usize, _backlog: i32) -> isize {
-    // 假装开始监听
-    0 
-}
+
 pub fn sys_ftruncate(fd: usize, _len: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
@@ -1568,47 +1530,7 @@ pub fn sys_pselect6(
     }
 }
 
-/// 网络相关，socket套接字创建，返回一个代表此socket的文件描述符，后续的网络相关操作通过这个文件描述符进行
-/// domain: 协议族，AF_INET=2（IPV4），AF_UNIX=1（本地进程间通信）
-/// type: 套接字类型，SOCK_STREAM=1（稳定传输，常用于TCP），SOCK_DGRAM=2（数据报传输，常用于UDP）
-/// protocol: 具体协议，通常为0表示默认协议
-/// 返回值：成功返回新创建的 socket 的文件描述符，失败返回 -1 并设置 errno
-pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
-    // 1. 获取当前进程
-    let task = current_task().unwrap();
-    let process = task.process(); 
-    let mut inner = process.inner_exclusive_access();
-    
-    // 2. 寻找空闲 FD 坑位
-    let mut allocated_fd = None;
-    for (i, fd_desc) in inner.fd_table.iter().enumerate() {
-        if fd_desc.file.is_none() {
-            allocated_fd = Some(i);
-            break;
-        }
-    }
-    
-    // 3. 包装真正的 TCP Socket 文件！
-    // 🌟 这里换成我们写好的 TcpSocket
-    let socket_file = Arc::new(TcpSocket::new()); 
-    let fd_desc = FileDescriptor {
-        file: Some(socket_file),
-        cloexec: false, // 默认不开启
-        status: 0,
-    };
-    
-    // 4. 插入到 fd_table 并返回 fd
-    let fd = if let Some(idx) = allocated_fd {
-        inner.fd_table[idx] = fd_desc;
-        idx
-    } else {
-        let idx = inner.fd_table.len();
-        inner.fd_table.push(fd_desc);
-        idx
-    };
-    
-    fd as isize
-}
+
 
 pub fn sys_add_key(_type: *const u8, _desc: *const u8, _payload: *const u8, _plen: usize, _ringid: i32) -> isize {
     // 假装成功生成了一个密钥，返回一个随机的密钥序列号 (比如 9999)
