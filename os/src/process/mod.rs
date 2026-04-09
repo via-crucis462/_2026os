@@ -276,13 +276,30 @@ fn call_kernel_signal_handler(signal: SignalFlags) {
 pub fn handle_signals() {
     let task = current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
-    
+    //--------------------调试信息----------------
+    let raw_signals = task_inner.signals.bits();
+    let raw_mask = task_inner.signal_mask.bits();
+    /*println!(
+        "[SIG_DEBUG] PID: {} | Pending: {:#x} | Mask: {:#x}", 
+        task.getpid(), 
+        raw_signals, 
+        raw_mask
+    );*/
+    //--------------------调试信息----------------
     
     // 2. 检查是否有未屏蔽的信号 (或者不可屏蔽的 SIGKILL/SIGSTOP)
     let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
     let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18));
     let final_pending = pending | unmaskable;
-    
+    //--------------------调试信息----------------
+   /*  if raw_signals != 0 {
+        println!(
+            "[SIG_DEBUG] Final Pending: {:#x} (Unmaskable: {:#x})", 
+            final_pending, 
+            unmaskable
+        );
+    }*/
+    //--------------------调试信息----------------
     if final_pending != 0 {
         // 3. 取出第一个需要处理的信号编号 (1-based)
        
@@ -294,11 +311,10 @@ pub fn handle_signals() {
         //  核心：必须先放锁，再调用你写好的处理函数！
         drop(task_inner); 
 
-        // 4. 呼叫你之前写好的神级函数，它会篡改 sepc 和 ra
+       
         call_user_signal_handler(sig, flag);
     }else {
-        //  探针 3：走到了这里但没有信号要处理
-        // 注意：如果你看到大量探针3，说明有奇怪的系统调用唤醒，但信号已经被清空或完全被屏蔽。
+
         let raw_signals = task_inner.signals.bits();
         let raw_mask = task_inner.signal_mask.bits();
         if raw_signals != 0 {
@@ -326,8 +342,8 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
     task_inner.signals.remove(signal); // 把信号从 pending 队列中拿走
     let after_bits = task_inner.signals.bits(); 
     info!(
-        "[SIG_CLEAN] Signal:{:?}({:?}) | Bits: {:#x} -> {:#x}", 
-        signal, sig, before_bits, after_bits
+        "[SIG_EVENT] Process: {} | Signal: {:?}({}) | Pending: {:#x} -> {:#x}", 
+        task.getpid(), signal, sig, before_bits, after_bits
     );
 
 
@@ -336,7 +352,7 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
     } 
 
     else if handler != SIG_DFL {
-        // --- 👇 只有确定要跳转用户态了，才能修改状态和备份 👇 ---
+
         
         let trap_ctx = task_inner.get_trap_cx();
         task_inner.trap_ctx_backup = Some(*trap_ctx);
@@ -373,6 +389,12 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
             SignalFlags::SIGCHLD | SignalFlags::SIGURG | SignalFlags::SIGWINCH => {
                 // 默认忽略的信号，直接打个日志就行
                 // trace!("[K] ignore default signal {:?}", signal);
+            }
+             SignalFlags::SIGSTOP => {
+                task_inner.frozen = true;
+            }
+            SignalFlags::SIGCONT => {
+                task_inner.frozen = false;
             }
             _ => {
                 // 默认终止进程的信号
