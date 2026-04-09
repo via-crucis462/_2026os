@@ -286,14 +286,17 @@ pub fn sys_rt_sigreturn() -> isize {
     // 1. 清除当前正在处理的信号标记
     inner.handling_sig = -1;
     
-    // 2. 还原被打断时的生死时刻 (比如当时 ppoll 刚返回的 -4)
+    // 2. 还原被打断时的上下文
     if let Some(backup) = inner.trap_ctx_backup.take() {
         *inner.get_trap_cx() = backup;
     }
     
-    //   3. 极其关键！因为 sys_rt_sigreturn 返回 isize，调度器会把它强行写入 a0 寄存器。
-    // 为了不破坏刚刚还原出来的 a0（里面存着 ppoll 的 EINTR -4），
-    // 我们必须返回还原后 trap_context 里的 a0 值！
+    // 3. 还原被打断前原有的信号掩码屏蔽集
+    if let Some(mask_backup) = inner.signal_mask_backup.take() {
+        inner.signal_mask = mask_backup;
+    }
+    
+    // 返回原有的 a0
     inner.get_trap_cx().get_a0() as isize
 }
 pub fn sys_getuid() -> isize {
@@ -840,6 +843,17 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
             // --- B. 孩子还活着，睡眠等待 ---
             info!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
             drop(proc_inner);
+            // 新增：检查是否被信号打断 
+            let task_inner = task.inner_exclusive_access();
+            let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
+            let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18)); // SIGKILL(9), SIGSTOP(19)
+            drop(task_inner);
+
+            if pending != 0 || unmaskable != 0 {
+                info!("[wait4] Interrupted by signal! Returning EINTR.");
+                return -4; // -4 对应 EINTR (Interrupted system call)
+            }
+            
             crate::process::current_task_to_sleep(proc.wait_queue.lock());
         }
     }
@@ -1690,14 +1704,12 @@ pub fn sys_rt_sigtimedwait(
 ) -> isize {
     let token = current_user_token();
 
-
     if sigsetsize != 8 {
         return Errno::EINVAL.as_isize();
     }
 
     let target_set_bits = *translated_ref(token, set_ptr);
     let target_set = SignalFlags::from_bits_truncate(target_set_bits as u64);
-
 
     let mut deadline_us: Option<usize> = None;
     if !timeout_ptr.is_null() {
@@ -1706,7 +1718,6 @@ pub fn sys_rt_sigtimedwait(
             deadline_us = Some(0); // 纯轮询，立刻超时
         } else {
             let current_us = get_time_us(); 
-            // tv_sec 转微秒 + tv_nsec 转微秒
             let wait_us = (timeout.tv_sec as usize) * 1_000_000 + (timeout.tv_nsec as usize) / 1000;
             deadline_us = Some(current_us + wait_us);
         }
@@ -1739,7 +1750,16 @@ pub fn sys_rt_sigtimedwait(
                 }
                 return sig_num as isize;
             }
+            
+            // 【新增】：如果在等待期间收到了非目标集合中且未屏蔽的信号
+            // 则应当中断等待并返回 EINTR，给外层 trap_handler 执行收尸（call_user_signal_handler）的机会。
+            let unmasked_pending = pending.bits() & !inner.signal_mask.bits();
+            let unmaskable = pending.bits() & ((1 << 8) | (1 << 18));
+            if (unmasked_pending | unmaskable) != 0 {
+                return Errno::EINTR.as_isize();
+            }
         } 
+        
         if let Some(deadline) = deadline_us {
             // 【带超时的等待】
             let current_us = get_time_us();
@@ -1747,15 +1767,11 @@ pub fn sys_rt_sigtimedwait(
                 return Errno::EAGAIN.as_isize(); 
             }
             
-
             suspend_current_and_run_next();
             
         } else {
-          
             let sig_queue_guard = SIGNAL_WAIT_QUEUE.lock();
             current_task_to_sleep(sig_queue_guard);
-
-       
         }
     }
 }

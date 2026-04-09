@@ -28,6 +28,16 @@ impl File for Stdin {
         // busy loop
         let mut c: usize;
         loop {
+            //  新增：检查是否被信号打断
+            let task = crate::task::current_task().unwrap();
+            let task_inner = task.inner_exclusive_access();
+            let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
+            let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18));
+            drop(task_inner);
+
+            if pending != 0 || unmaskable != 0 {
+                return 0; 
+            }
             c = console_getchar();
             if c == 13 || c == '\r' as usize {
                 c = 10;

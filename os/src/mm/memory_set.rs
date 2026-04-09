@@ -255,7 +255,7 @@ impl MemorySet {
     /// Include sections in elf and trampoline and TrapContext and user stack,
     /// also returns user_sp_base and entry point.
 
-    pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, usize, usize) {
+    pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, usize, usize, usize) {
         let mut memory_set = Self::new_bare();
         // map trampoline
         #[cfg(target_arch = "riscv64")]
@@ -333,7 +333,18 @@ impl MemorySet {
             None,
             user_stack_top,
         );
-        memory_set.brk_index = memory_set.areas.len() - 1;// 此时brk在最后一个区域
+      let heap_bottom = user_stack_top; 
+        memory_set.push(
+            MapArea::new(
+                heap_bottom.into(),
+                heap_bottom.into(),
+                MapType::Framed,
+                MapPermission::R | MapPermission::W | MapPermission::U,
+            ),
+            None,
+            heap_bottom,
+        );
+        memory_set.brk_index = memory_set.areas.len() - 1;
         // map TrapContext
         // la64下不需要映射
         // 对于riscv，需要在创建进程时再映射
@@ -355,6 +366,7 @@ impl MemorySet {
         (
             memory_set,
             user_stack_top,
+            heap_bottom,
             elf.header.pt2.entry_point() as *const () as usize + OFFSET_FOR_USER_APP,
             phdr_addr,
             phnum,

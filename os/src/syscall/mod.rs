@@ -176,6 +176,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
        println!("[kernel] >>> Ready to enter Syscall ID: {}", syscall_id);
    }*/
 
+
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),

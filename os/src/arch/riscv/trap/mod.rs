@@ -153,11 +153,11 @@ pub fn trap_handler() -> ! {
     //let cause = scause::read().cause();
     //println!("[PROBE 2] trap_handler ending (cause: {:?}), preparing to handle_signals", cause);
 
-    crate::process::handle_signals();
+    /*crate::process::handle_signals();
     if current_task().unwrap().inner_exclusive_access().killed {
         exit_current_and_run_next(-1); 
-    }
-    
+    }*/
+
     trap_return();
     
 }
@@ -179,6 +179,12 @@ pub fn trap_cx_va_by_kernel_stack(kernel_stack: &KernelStack) -> usize {
 #[no_mangle]
 /// return to user space
 pub fn trap_return() -> ! {
+
+    crate::process::handle_signals();
+    if current_task().unwrap().inner_exclusive_access().killed {
+        info!("[SIG PROBE] EXECUTING DEATH SENTENCE FOR PID!");
+        exit_current_and_run_next(-1); 
+    }
     set_user_trap_entry();
     let trap_cx_ptr = current_trap_cx_user_va();
     let user_satp = current_user_token();
