@@ -750,21 +750,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             }
         }
 
-        let file_size = app_inode.inode.get_size() as usize;
-        
-        // 【关键增量修改】：一次性精准分配，杜绝 Vec 动态扩容导致的内存碎裂和 24MB 峰值
-        let mut all_data = vec![0u8; file_size];
-        
-        // 分块读取数据，直接填入已分配好的空间
-        let mut offset = 0;
-        while offset < file_size {
-            // 👇 注意：这里需要根据你项目中实际的读文件 API 进行替换！
-            // 常见的实现比如 app_inode.read_at(...) 或 app_inode.read(...)
-            let read_len = app_inode.inode.read_at(offset, &mut all_data[offset..]);
-            
-            if read_len == 0 { break; } // 文件读完或异常
-            offset += read_len;
-        }
+        let all_data = app_inode.read_all();
         // 验证 ELF 签名
         if all_data.len() < 4 || &all_data[0..4] != &[0x7f, 0x45, 0x4c, 0x46] {
             return ENOEXEC.as_isize(); // ENOEXEC

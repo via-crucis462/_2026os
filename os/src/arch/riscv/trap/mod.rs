@@ -115,14 +115,14 @@ pub fn trap_handler() -> ! {
                 drop(process);
                 drop(task);
                 
-                error!(
+                /*error!(
                     "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}, sp={:#x}",
                     crate::task::current_task().unwrap().process().pid.0,
                     scause.cause(),
                     current_trap_cx().get_rt(),
                     stval,
                     sp
-                );
+                );*/
                 
                 // 取消原来的 current_add_signal(SignalFlags::SIGSEGV);
                 // 发信号压栈死循环。
