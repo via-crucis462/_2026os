@@ -11,6 +11,8 @@ use crate::fs::file_tree::*;
 use super::VfsInode;
 use spin::Mutex;
 use crate::mm::UserBuffer;
+use crate::fs::TimeSpec;
+
 
 pub struct OSInode {
     readable: bool,
@@ -33,6 +35,9 @@ impl OSInode {
             inode,
             dentry,
         }
+    }
+    pub fn set_time(&self, atime: &TimeSpec, mtime: &TimeSpec) -> isize {
+        self.inode.set_time(atime, mtime)
     }
     pub fn read_all(&self) -> alloc::vec::Vec<u8> {
         // 1. 获取文件总大小

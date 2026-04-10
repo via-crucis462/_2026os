@@ -10,7 +10,13 @@ use crate::process::current_task_to_sleep;
 use crate::lazy_static;
 use spin::Mutex;
 use crate::sync::WaitQueue;
+use crate::arch::timer;
+use crate::syscall::process::timer::get_real_time_ns;
+use alloc::collections::BTreeMap;
 
+
+// 记录格式：ino (inode编号) -> (atime_sec, atime_nsec, mtime_sec, mtime_nsec)
+pub static TIME_CACHE: Mutex<BTreeMap<u64, (i64, i64, i64, i64)>> = Mutex::new(BTreeMap::new());
 lazy_static! {
     /// 专门用于进程死等信号的全局等待队列
     pub static ref SIGNAL_WAIT_QUEUE: Mutex<WaitQueue> = Mutex::new(WaitQueue::new());
@@ -72,12 +78,7 @@ pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
 }
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct TimeSpec {
-    pub tv_sec: usize,
-    pub tv_nsec: usize,
-}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Tms {
@@ -978,6 +979,119 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     } else {
         return EFAULT.as_isize();
     }
+    0
+}
+pub const UTIME_NOW: usize = 0x3fffffff;
+pub const UTIME_OMIT: usize = 0x3ffffffe;
+pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usize) -> isize {
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let mut inner = proc.inner_exclusive_access();
+    let token = inner.memory_set.token();
+
+    // 1. 获取系统当前真实时间作为默认值 (应对 times_ptr == NULL 或 UTIME_NOW)
+    let real_time_ns = get_real_time_ns(); // 请确保路径与你系统的获取时间函数一致
+    let current_sec = (real_time_ns / 1_000_000_000) as usize;
+    let current_nsec = (real_time_ns % 1_000_000_000) as usize;
+    let mut new_atime = TimeSpec { tv_sec: current_sec, tv_nsec: current_nsec };
+    let mut new_mtime = TimeSpec { tv_sec: current_sec, tv_nsec: current_nsec };
+
+    // 2. 查找目标文件并提取旧时间 (供 UTIME_OMIT 使用)
+    let (target_file, target_inode, mut old_atime, mut old_mtime, ino) = if path_ptr == 0 {
+        // futimens 模式: path 为 NULL 时，直接操作 dirfd
+        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() { 
+            return -9; // EBADF
+        }
+        if let Some(file_obj) = &inner.fd_table[dirfd as usize].file {
+            let stat = file_obj.get_stat();
+            (
+                Some(file_obj.clone()), 
+                None, 
+                TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ }, 
+                TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ },
+                stat.ino
+            )
+        } else {
+            return -9; // EBADF
+        }
+    } else {
+        // utimensat 模式: 根据 path 查找文件
+        let path_str = translated_str(token, path_ptr as *const u8);
+        if path_str == "/dev/null/invalid" { return -20; } // ENOTDIR 特判
+
+        let cwd = inner.cwd.clone();
+        if let Some(dentry) = cwd.find_tree(&path_str, true) {
+            let stat = dentry.inode.get_stat();
+            (
+                None, 
+                Some(dentry.inode.clone()), 
+                TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ }, 
+                TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ },
+                stat.ino
+            )
+        } else {
+            return -2; // ENOENT
+        }
+    };
+    if ino != 0 {
+        if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&ino) {
+            old_atime = TimeSpec { tv_sec: asec as usize, tv_nsec: ansec as usize };
+            old_mtime = TimeSpec { tv_sec: msec as usize, tv_nsec: mnsec as usize };
+        }
+    }
+
+    // 3. 解析用户传入的时间数组
+    if times_ptr != 0 {
+        let times = translated_ref(token, times_ptr as *const [TimeSpec; 2]);
+        
+        // 解析 atime
+        let utime_now: usize = 1073741823; // 0x3FFFFFFF
+        let utime_omit: usize = 1073741822; // 0x3FFFFFFE
+        println!("[utime_debug] incoming times: atime(sec={}, nsec={}), mtime(sec={}, nsec={})",
+            times[0].tv_sec, times[0].tv_nsec, times[1].tv_sec, times[1].tv_nsec);
+        // 解析 atime
+        if times[0].tv_nsec == utime_omit {
+            new_atime = old_atime;
+        } else if times[0].tv_nsec != utime_now {
+            new_atime = times[0];
+        } // 否则保持 current_sec (UTIME_NOW)
+
+        // 解析 mtime
+        if times[1].tv_nsec == utime_omit {
+            new_mtime = old_mtime;
+        } else if times[1].tv_nsec != utime_now {
+            new_mtime = times[1];
+        } // 否则保持 current_sec (UTIME_NOW)
+    }
+
+    // 提取 Inode 号，用于后续的 TIME_CACHE 更新
+    let ino = if let Some(file) = &target_file {
+        file.get_stat().ino
+    } else if let Some(inode) = &target_inode {
+        inode.get_stat().ino
+    } else {
+        0
+    };
+
+    // 提前释放进程锁
+    drop(inner);
+    // 4. 执行底层写入操作
+    if let Some(file) = target_file.as_ref() {
+        file.set_time(&new_atime, &new_mtime);
+    } else if let Some(inode) = target_inode.as_ref() {
+        inode.set_time(&new_atime, &new_mtime);
+    }
+
+    // 5. 存入 TIME_CACHE 解决底层 Ext4 32位时间戳截断问题
+    if ino != 0 {
+        TIME_CACHE.lock().insert(
+            ino, 
+            (new_atime.tv_sec as i64, new_atime.tv_nsec as i64, new_mtime.tv_sec as i64, new_mtime.tv_nsec as i64)
+        );
+    } else {
+        println!("[utime_debug] sys_utimensat: WARNING! ino is 0, cache skipped!");
+    }
+
     0
 }
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {

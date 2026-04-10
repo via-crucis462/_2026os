@@ -5,6 +5,7 @@ use super::block_cache::get_block_cache;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::string::String;
+use crate::fs::TimeSpec;
 use crate::fs::VfsInode;
 impl VfsInode for Ext4Inode {
      fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
@@ -376,4 +377,22 @@ impl VfsInode for Ext4Inode {
     }
     false
 }
+fn set_time(&self, atime: &TimeSpec, mtime: &TimeSpec) -> isize {
+        // 1. 获取当前 Inode 在磁盘上的具体位置 (块号和块内偏移)
+        let (block_id, offset) = self.fs.get_inode_pos(self.inode_id);
+        
+        // 2. 获取该块的缓存
+        let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
+        
+        // 3. 修改磁盘 Inode 的数据。
+        // 注意：modify 闭包内部的操作会自动把这个块标记为 dirty，之后会被写回磁盘
+        block_cache.lock().modify(offset, |disk_inode: &mut Ext4InodeDisk| {
+            disk_inode.i_atime = atime.tv_sec as u32;
+            disk_inode.i_mtime = mtime.tv_sec as u32;
+            
+
+        });
+
+        0
+    }
 }
