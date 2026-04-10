@@ -274,35 +274,39 @@ pub fn handle_signals() {
     let task = current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     
-    
-    // 2. 检查是否有未屏蔽的信号 (或者不可屏蔽的 SIGKILL/SIGSTOP)
     let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
-    let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18));
+    let unmaskable = SignalFlags::SIGKILL.bits() | SignalFlags::SIGSTOP.bits();
     let final_pending = pending | unmaskable;
     
+    // 如过有未处理的信号
     if final_pending != 0 {
-        // 3. 取出第一个需要处理的信号编号 (1-based)
-        let process = task.process(); // 拿到所属进程
-        let mut proc_inner = process.inner_exclusive_access(); // 锁住进程
-        let sig = final_pending.trailing_zeros() as usize + 1;
-        let flag = SignalFlags::from_bits(1 << (sig - 1)).unwrap();
-        let handler_addr = proc_inner.signal_actions.table[sig].handler;
+        let process = task.process();
+        let mut proc_inner = process.inner_exclusive_access();
+        // 取出最编码最低的一个信号开始处理
+        let pos = final_pending.trailing_zeros() as usize;
+        let flag = SignalFlags::from_bits(1 << pos).unwrap();
+        let handler_addr = proc_inner.signal_actions.table[pos].handler;
+
         if handler_addr == 0 || handler_addr == 1 {
             // println!("[SIG PROBE] Ignore or Default action for sig {}. Clearing it.", sig);
-            
             // 直接把信号从信箱里抹掉，当作没发生过（或者按需直接杀死进程）
             task_inner.signals.remove(flag); 
-            return; // 直接返回，千万不要调用 call_user_signal_handler！
+            // 返回，正常trap_return
+            return;
         }
-        info!("[SIG PROBE] Calling handler for sig: {}, final_pending: {:#x}", sig, final_pending);
-        // 🚩 核心：必须先放锁，再调用你写好的处理函数！
+        
+        // 释放锁
         drop(task_inner); 
+        drop(task);
         drop(proc_inner);
-        // 4. 呼叫你之前写好的神级函数，它会篡改 sepc 和 ra
+        drop(process);
+
+        // 返回到用户态的处理函数
+        let sig = pos + 1; // 用户态规范是1-based、
+        info!("[SIG PROBE] Calling handler for sig: {}, final_pending: {:#x}", sig, final_pending);
         call_user_signal_handler(sig, flag);
     }else {
-        // 🛑 探针 3：走到了这里但没有信号要处理
-        // 注意：如果你看到大量探针3，说明有奇怪的系统调用唤醒，但信号已经被清空或完全被屏蔽。
+        // 无未决信号（被屏蔽）
         let raw_signals = task_inner.signals.bits();
         let raw_mask = task_inner.signal_mask.bits();
         if raw_signals != 0 {

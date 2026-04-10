@@ -522,7 +522,6 @@ impl ProcessControlBlock {
         //println!("brk: change from {:#x} to {:#x}", _old_break, new_brk);
         if result {
             inner.program_brk = new_brk as *const () as usize;
-            
             Ok(addr)
         } else {
             Err(-1)

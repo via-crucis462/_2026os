@@ -1,5 +1,6 @@
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
+# 低部分留给qemu硬件等
 BASE_ADDRESS = 0x80200000;
 
 SECTIONS
