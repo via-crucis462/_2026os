@@ -429,13 +429,25 @@ pub fn sys_setsid() -> isize {
     
     pid as isize // 成功时返回新的会话 ID
 }
-pub fn sys_clock_gettime(_clock_id: usize, tp: *mut TimeSpec) -> isize {
-    let total_us = get_time_us();
-    let sec = total_us / 1_000_000;
-    let nsec = (total_us % 1_000_000) * 1_000;
+const CLOCK_REALTIME: usize = 0;
+const CLOCK_MONOTONIC: usize = 1;
+pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
     if tp as usize == 0 {
         return EFAULT.as_isize();
     }
+    let (sec, nsec) = match clock_id {
+        CLOCK_REALTIME => {
+            // 
+            let total_ns = crate::arch::riscv::timer::get_real_time_ns() as usize; 
+            (total_ns / 1_000_000_000, total_ns % 1_000_000_000)
+            
+        }
+        CLOCK_MONOTONIC | _ => {
+            // 默认：返回系统运行时间 (Uptime)
+            let total_us = get_time_us();
+            (total_us / 1_000_000, (total_us % 1_000_000) * 1_000)
+        }
+    };
     let token = current_user_token();
     let time_spec = translated_refmut(token, tp);
     time_spec.tv_sec = sec;
