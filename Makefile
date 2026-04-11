@@ -1,5 +1,5 @@
 MODE ?= debug
-RV_SMP ?= 4
+RV_SMP ?= 1
 LA_SMP ?= 1
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235

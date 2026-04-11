@@ -1636,7 +1636,7 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> isize {
     for (i, buf) in user_buf.iter_mut().enumerate() {
         let seed = get_timer_ticks() + buf.as_ptr() as usize + i;
         // 类LGC算法，时间滴答作种
-        buf[0] = (((25214903917usize * seed) & ((1 << 48) - 1)) >> (8 * (i % 6))) as u8;
+        buf[0] = (((25214903917usize.wrapping_mul(seed)) & ((1 << 48) - 1)) >> (8 * (i % 6))) as u8;
     }
     len as isize
 }

@@ -147,7 +147,11 @@ fn main_init(hart_id: usize) {
     mm::remap_test();
     arch::trap::init();
     #[cfg(target_arch = "loongarch64")]
-    info!("drivers::search_pci"); drivers::search_pci(); info!("done drivers");
+    {
+    info!("searching pci...");
+    drivers::search_pci();
+    info!("done drivers");
+    }
     //#[cfg(target_arch = "riscv64")]
     {
         lazy_static::initialize(&NET_DEVICE);
@@ -213,6 +217,7 @@ fn other_init() {
     } */
     #[cfg(target_arch = "riscv64")]
     KERNEL_SPACE.exclusive_access().activate();
+    #[cfg(target_arch = "loongarch64")]
     la::mm::la_kernel_init_mem();// 设置映射窗口
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
