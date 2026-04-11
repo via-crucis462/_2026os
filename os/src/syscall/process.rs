@@ -10,8 +10,8 @@ use crate::process::current_task_to_sleep;
 use crate::lazy_static;
 use spin::Mutex;
 use crate::sync::WaitQueue;
-use crate::arch::timer;
-use crate::syscall::process::timer::get_real_time_ns;
+use crate::arch::riscv::timer::get_real_time_ns;
+
 use alloc::collections::BTreeMap;
 
 
@@ -439,7 +439,7 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
     let (sec, nsec) = match clock_id {
         CLOCK_REALTIME => {
             // 
-            let total_ns = crate::arch::riscv::timer::get_real_time_ns() as usize; 
+            let total_ns = get_real_time_ns() as usize; 
             (total_ns / 1_000_000_000, total_ns % 1_000_000_000)
             
         }
