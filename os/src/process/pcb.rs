@@ -70,7 +70,7 @@ impl ProcessControlBlock {
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
     pub fn new(elf_data: &[u8]) -> (Arc<Self>, Arc<TaskControlBlock>) {
         println!("[kernel] TaskControlBlock::new: start creating a new process");
-        let (mut memory_set, user_sp,heap_bottom,  entry_point, _phdr, _phnum, _phent)
+        let (mut memory_set, user_sp, entry_point, _phdr, _phnum, _phent)
             = MemorySet::from_elf(elf_data);
         debug!(
             "TaskControlBlock::new: entry_point={:#x}, user_sp={:#x}",
@@ -119,12 +119,12 @@ impl ProcessControlBlock {
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: true, // initproc和shell默认在主核运行
                 pname: String::from("initproc"),
-                base_size: heap_bottom,
+                base_size: user_sp,
                 memory_set,
                 parent: None,
                 children: Vec::new(),
-                heap_bottom: heap_bottom,
-                program_brk: heap_bottom,
+                heap_bottom: user_sp,
+                program_brk: user_sp,
                 // 初始化 fd_table，预先放入 stdin 和 stdout
                 fd_table: vec![
                     FileDescriptor::new(Arc::new(Stdin), false, 0),
@@ -194,7 +194,7 @@ impl ProcessControlBlock {
     /// 待修改
     pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8],interp_data: Option<&[u8]>, args: Vec<String>, on_main_hart: bool) {
         // 生成新地址空间
-        let (mut memory_set, mut user_sp,heap_bottom,  entry_point, phdr_addr, phnum, phent) = MemorySet::from_elf(elf_data);
+        let (mut memory_set, mut user_sp,  entry_point, phdr_addr, phnum, phent) = MemorySet::from_elf(elf_data);
         let mut final_entry_point = entry_point; // 默认入口为主程序入口
         const INTERP_BASE: usize = 0x40000000;   // 给解释器找一个宽敞的基地址（避开主程序）
         const AT_BASE: usize = 7;                // 辅助向量里代表解释器基址的 ID
@@ -301,9 +301,9 @@ impl ProcessControlBlock {
                 proc_inner.clear_fd(fd);
             }
         }
-        proc_inner.base_size = heap_bottom;
-        proc_inner.heap_bottom = heap_bottom;
-        proc_inner.program_brk = heap_bottom;
+        proc_inner.base_size = memory_top;
+        proc_inner.heap_bottom = memory_top;
+        proc_inner.program_brk = memory_top;
         proc_inner.on_main_hart = on_main_hart;
         proc_inner.signal_actions = SignalActions::default();
         if let Some(argv0) = args.first() {

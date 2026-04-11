@@ -255,7 +255,7 @@ impl MemorySet {
     /// Include sections in elf and trampoline and TrapContext and user stack,
     /// also returns user_sp_base and entry point.
 
-    pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, usize, usize, usize) {
+   pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, usize, usize)  {
         let mut memory_set = Self::new_bare();
         // map trampoline
         #[cfg(target_arch = "riscv64")]
@@ -333,17 +333,7 @@ impl MemorySet {
             None,
             user_stack_top,
         );
-      let heap_bottom = user_stack_top; 
-        memory_set.push(
-            MapArea::new(
-                heap_bottom.into(),
-                heap_bottom.into(),
-                MapType::Framed,
-                MapPermission::R | MapPermission::W | MapPermission::U,
-            ),
-            None,
-            heap_bottom,
-        );
+    
         memory_set.brk_index = memory_set.areas.len() - 1;
         // map TrapContext
         // la64下不需要映射
@@ -366,7 +356,6 @@ impl MemorySet {
         (
             memory_set,
             user_stack_top,
-            heap_bottom,
             elf.header.pt2.entry_point() as *const () as usize + OFFSET_FOR_USER_APP,
             phdr_addr,
             phnum,
@@ -383,9 +372,7 @@ impl MemorySet {
         // copy data sections/trap_context/user_stack
         for area in user_space.areas.iter() {
             if area.is_shared {
-                // ==========================================
-                // 🚀 黑魔法：共享内存！只拷页表，不拷数据！
-                // ==========================================
+
                 let mut new_area = MapArea::new(
                     VirtAddr::from(area.vpn_range.get_start().0 * PAGE_SIZE),
                     VirtAddr::from(area.vpn_range.get_end().0 * PAGE_SIZE),
@@ -404,13 +391,11 @@ impl MemorySet {
                         }
                     }
                 }
-                // 注意：没有 copy_data，也没有生成 FrameTracker，完美共享！
+                // 注意：没有 copy_data，也没有生成 FrameTracker
                 memory_set.areas.push(new_area);
 
             } else {
-                // ==========================================
-                // 🐢 传统流程：私有内存，走原来的深拷贝逻辑
-                // ==========================================
+
                 let mut new_area: MapArea = MapArea::from_another(area);
                 let start_va: VirtAddr = new_area.vpn_range.get_start().into();
                 memory_set.push(new_area, None, start_va.0);
