@@ -3,12 +3,18 @@
     .globl _start
     .align 4
 _start:
+    csrrd $tp, 0x20 # CSR_CPUNUM = 0x20
     la.global $sp, boot_stack_top
+    # 每个核分配自己的启动栈
+    li.d $t0, 4096 * 16
+    mul.d $t0, $t0, $tp
+    sub.d $sp, $sp, $t0
+    move $a0, $tp
     bl rust_main
 
     .section .bss.stack
     .globl boot_stack_lower_bound
 boot_stack_lower_bound:
-    .space 4096 * 16
+    .space 4096 * 16 * 4
     .globl boot_stack_top
 boot_stack_top:

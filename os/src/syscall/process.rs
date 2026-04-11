@@ -1141,6 +1141,15 @@ pub fn sys_mprotect(_start: usize, _len: usize, _prot: usize) -> isize {
 
 /// YOUR JOB: Implement mmap.
 pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: usize) -> isize {
+    debug!("[kernel] sys_mmap called with start={:#x}, len={:#x}, prot={:#x}, flags={:#x}, fd={}, off={:#x}", start, len, port, flags, fd, _off);
+    let task = current_task().unwrap();
+        let process = task.process();
+        let token = current_user_token();
+        let inner = process.inner_exclusive_access();
+        for i in inner.memory_set.areas().iter() {
+            debug!("after map: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+        }
+    drop(inner);
     let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
     let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
 
@@ -1171,6 +1180,13 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
                     file.read_at(_off, user_buf);
                 }
             }
+        }
+        let task = current_task().unwrap();
+        let process = task.process();
+        let token = current_user_token();
+        let inner = process.inner_exclusive_access();
+        for i in inner.memory_set.areas().iter() {
+            debug!("after map: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
         }
     //println!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
     ret as isize
