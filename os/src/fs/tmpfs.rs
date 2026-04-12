@@ -14,6 +14,48 @@ use crate::fs::devfs::TtyInode;
 // 全局唯一的 Inode 分配器
 static TMPFS_INO_COUNTER: AtomicUsize = AtomicUsize::new(10000);
 
+fn stat_to_statx(stat: super::Stat) -> super::Statx {
+    super::Statx {
+        stx_mask: 0,
+        stx_blksize: stat.blksize as u32,
+        stx_attributes: 0,
+        stx_nlink: stat.nlink,
+        stx_uid: stat.uid,
+        stx_gid: stat.gid,
+        stx_mode: stat.mode as u16,
+        __spare0: [0; 1],
+        stx_ino: stat.ino,
+        stx_size: stat.size as u64,
+        stx_blocks: stat.blocks as u64,
+        stx_attributes_mask: 0,
+        stx_atime: super::StatxTimestamp {
+            tv_sec: stat.atime_sec,
+            tv_nsec: stat.atime_nsec as u32,
+            __reserved: 0,
+        },
+        stx_btime: super::StatxTimestamp {
+            tv_sec: 0,
+            tv_nsec: 0,
+            __reserved: 0,
+        },
+        stx_ctime: super::StatxTimestamp {
+            tv_sec: stat.ctime_sec,
+            tv_nsec: stat.ctime_nsec as u32,
+            __reserved: 0,
+        },
+        stx_mtime: super::StatxTimestamp {
+            tv_sec: stat.mtime_sec,
+            tv_nsec: stat.mtime_nsec as u32,
+            __reserved: 0,
+        },
+        stx_rdev_major: 0,
+        stx_rdev_minor: 0,
+        stx_dev_major: 0,
+        stx_dev_minor: 0,
+        __spare2: [0; 14],
+    }
+}
+
 // ==========================================
 // 严谨的内存文件
 // ==========================================
@@ -69,7 +111,9 @@ impl super::VfsInode for TmpfsFileInode {
         }
     }
     
-    fn get_statx(&self) -> super::Statx { unimplemented!() }
+    fn get_statx(&self) -> super::Statx {
+        stat_to_statx(self.get_stat())
+    }
     fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
@@ -134,7 +178,9 @@ impl super::VfsInode for TmpfsDirInode {
     }
 
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { 0 }
-    fn get_statx(&self) -> super::Statx { unimplemented!() }
+    fn get_statx(&self) -> super::Statx {
+        stat_to_statx(self.get_stat())
+    }
 }
 
 pub fn setup_oscomp_env() {
