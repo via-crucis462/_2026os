@@ -100,7 +100,7 @@ fn set_kernel_trap_entry() {
             trap_handler = inout(reg) trap_handler => _,
         );
     }
-    debug!("[kernel] set_kernel_trap_entry: trap_handler address = {:#x}", trap_handler);
+    //debug!("[kernel] set_kernel_trap_entry: trap_handler address = {:#x}", trap_handler);
 }
 
 /// 插入__all_trap的地址

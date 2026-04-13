@@ -36,7 +36,43 @@ impl VfsInode for ProcDirInode {
             __unused: [0; 1],
         }
     }
-    fn get_statx(&self) -> Statx { unimplemented!() }
+    fn get_statx(&self) -> Statx { 
+        let stat = self.get_stat();
+        Statx{
+            stx_mask: 0,
+            stx_blksize: stat.blksize as u32,
+            stx_attributes: 0,
+            stx_nlink: stat.nlink,
+            stx_uid: stat.uid,
+            stx_gid: stat.gid,
+            stx_mode: stat.mode as u16,
+            stx_ino: stat.ino,
+            stx_size: stat.size as u64,
+            stx_blocks: stat.blocks as u64,
+            stx_attributes_mask: 0,
+            stx_atime: super::StatxTimestamp {
+                tv_sec: stat.atime_sec,
+                tv_nsec: stat.atime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_btime: Default::default(),
+            stx_ctime: super::StatxTimestamp {
+                tv_sec: stat.ctime_sec,
+                tv_nsec: stat.ctime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_mtime: super::StatxTimestamp {
+                tv_sec: stat.mtime_sec,
+                tv_nsec: stat.mtime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_rdev_major: 0,
+            stx_rdev_minor: 0,
+            stx_dev_major: 0,
+            stx_dev_minor: 0,
+            ..Default::default()
+        }
+    }
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
@@ -85,7 +121,43 @@ impl VfsInode for MemInfoInode {
             __unused:[0; 1],
         }
     }
-    fn get_statx(&self) -> Statx { unimplemented!() }
+    fn get_statx(&self) -> Statx { 
+        let stat = self.get_stat();
+        Statx{
+            stx_mask: 0,
+            stx_blksize: stat.blksize as u32,
+            stx_attributes: 0,
+            stx_nlink: stat.nlink,
+            stx_uid: stat.uid,
+            stx_gid: stat.gid,
+            stx_mode: stat.mode as u16,
+            stx_ino: stat.ino,
+            stx_size: stat.size as u64,
+            stx_blocks: stat.blocks as u64,
+            stx_attributes_mask: 0,
+            stx_atime: super::StatxTimestamp {
+                tv_sec: stat.atime_sec,
+                tv_nsec: stat.atime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_btime: Default::default(),
+            stx_ctime: super::StatxTimestamp {
+                tv_sec: stat.ctime_sec,
+                tv_nsec: stat.ctime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_mtime: super::StatxTimestamp {
+                tv_sec: stat.mtime_sec,
+                tv_nsec: stat.mtime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_rdev_major: 0,
+            stx_rdev_minor: 0,
+            stx_dev_major: 0,
+            stx_dev_minor: 0,
+            ..Default::default()
+        }
+    }
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
@@ -117,7 +189,43 @@ impl VfsInode for MountsInode {
         }
     }
     // 把底下那堆 unimplemented 或 None 补齐 (跟 MemInfoInode 一样)
-    fn get_statx(&self) -> Statx { unimplemented!() }
+    fn get_statx(&self) -> Statx { 
+        let stat = self.get_stat();
+        Statx{
+            stx_mask: 0,
+            stx_blksize: stat.blksize as u32,
+            stx_attributes: 0,
+            stx_nlink: stat.nlink,
+            stx_uid: stat.uid,
+            stx_gid: stat.gid,
+            stx_mode: stat.mode as u16,
+            stx_ino: stat.ino,
+            stx_size: stat.size as u64,
+            stx_blocks: stat.blocks as u64,
+            stx_attributes_mask: 0,
+            stx_atime: super::StatxTimestamp {
+                tv_sec: stat.atime_sec,
+                tv_nsec: stat.atime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_btime: Default::default(),
+            stx_ctime: super::StatxTimestamp {
+                tv_sec: stat.ctime_sec,
+                tv_nsec: stat.ctime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_mtime: super::StatxTimestamp {
+                tv_sec: stat.mtime_sec,
+                tv_nsec: stat.mtime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_rdev_major: 0,
+            stx_rdev_minor: 0,
+            stx_dev_major: 0,
+            stx_dev_minor: 0,
+            ..Default::default()
+        }
+    }
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
