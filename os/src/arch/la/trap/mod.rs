@@ -298,6 +298,7 @@ pub fn trap_handler() -> ! {
             Cause::Syscall => {
                 let mut cx = current_trap_cx();
                 let syscall_id = cx.r[11];
+                //println!("[kernel] trap_handler: syscall_id={}, pid={}, tid={}, hart_id={}, era={:#x} , ra={:#x}, sp={:#x}", syscall_id, current_task().unwrap().getpid(), current_tid(), get_hart_id(), cx.get_rt(), cx.r[1], cx.r[2]);
                 let should_trace = is_brk_process() && matches!(syscall_id, SYS_WRITE | SYS_BRK);
                 if should_trace {
                     //debug_dump_brk_snapshot("before_syscall", cx, current_user_token());
@@ -344,8 +345,10 @@ pub fn trap_handler() -> ! {
                         }
                         None => {
                             error!(
-                                "[kernel] user_fault_pte: badaddr={:#x}, vpn={:#x}, pte=<none>",
+                                "[kernel] user_fault_pte: current hart id={}, badaddr={:#x}, estat={:#x}, vpn={:#x}, pte=<none>",
+                                get_hart_id(),
                                 badv,
+                                estat,
                                 vpn.0,
                             );
                         }
@@ -422,7 +425,7 @@ pub fn trap_handler() -> ! {
                 } else {
                     error!("[kernel] trap_from_kernel: no current task");
                 }
-                error!("[kernel] trap_handler: {:?} in PID {}, estat={:#x}, era={:#x}, badv={:#x},badi={:#x}",
+                error!("[kernel] trap_handler: ready to add signal :{:?} in PID {}, estat={:#x}, era={:#x}, badv={:#x},badi={:#x}",
                     cause,
                     crate::task::current_task().unwrap().tid.0,
                     estat,
@@ -433,13 +436,30 @@ pub fn trap_handler() -> ! {
                 current_add_signal(SignalFlags::SIGSEGV);
             }
         }
+    /*println!(
+        "[trap_handler] before handle_signals: cause={:?}, estat={:#x}, era={:#x}, badv={:#x}, badi={:#x}",
+        cause, estat, era, badv, badi
+    );
     handle_signals();
-
+    println!(
+        "[trap_handler] after handle_signals: cause={:?}, estat={:#x}, era={:#x}, badv={:#x}, badi={:#x}",
+        cause, estat, era, badv, badi
+    );*/
     // check error signals (if error then exit)
     if let Some((errno, msg)) = check_signals_error_of_current() {
         trace!("[kernel] trap_handler: .. check signals {}", msg);
         exit_current_and_run_next(errno);
     }
+    /*println!(
+        "[trap_return] estat={:#x}, era_csr={:#x}, badv={:#x}, badi={:#x}, next_era={:#x}, ra={:#x}, sp={:#x}",
+        estat,
+        era,
+        badv,
+        badi,
+        current_trap_cx().get_rt(),
+        current_trap_cx().r[1],
+        current_trap_cx().r[3],
+    );*/
     trap_return();
 }
 

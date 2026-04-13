@@ -686,7 +686,6 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     
     let path_str = normalize_leading_dot_path(translated_str(token, path));//直接删除路径中的.，不进行其他处理
     let mut args_vec: Vec<String> = Vec::new();
-    info!("[kernel] sys_exec: called with path '{}'", path_str);
     // 提取原始参数数组
     loop {
         let arg_str_ptr = *translated_ref(token, args);
