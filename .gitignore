@@ -37,3 +37,4 @@ sdcard-rv-structure/*
 sdcard-rv/*
 syscall_posix_kernel.md
 *.txt
+initproc*
