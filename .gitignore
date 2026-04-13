@@ -37,10 +37,6 @@ sdcard-rv-structure/*
 sdcard-rv/*
 syscall_posix_kernel.md
 all_codes.txt
-Makefile
-.vscode/settings.json
-os/Makefile
 my_sdcard/*
 ins.txt
-os/src/arch/la/config.rs
 
