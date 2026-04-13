@@ -75,7 +75,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 ///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
 pub fn run_tasks() {
     //let mut counter: usize = 0;
-    
+        let hart_id = get_hart_id();
+        info!("[kernel] Hello from hart {}!", hart_id);
     loop {
         //counter += 1;
         //println!("run_tasks counter: {}", counter);

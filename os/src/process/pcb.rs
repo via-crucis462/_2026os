@@ -509,6 +509,7 @@ impl ProcessControlBlock {
         let size: isize = addr as isize - self.inner_exclusive_access().program_brk as isize;
         let mut inner = self.inner_exclusive_access();
         let heap_bottom = inner.memory_set.areas()[inner.memory_set.brk_index()].get_vpn_range().get_start().0 * PAGE_SIZE;
+        //let heap_bottom = inner.heap_bottom;
         debug!("change_program_brk: addr={:#x}, current_brk={:#x}, current_heap_bottom={:#x}, size={}", addr, inner.program_brk, heap_bottom, size);
         let _old_break = inner.program_brk;
         let new_brk = addr as isize;

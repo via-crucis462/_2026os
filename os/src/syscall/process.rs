@@ -751,7 +751,8 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             if let Some(interp_inode) = open_file(cwd.clone(), interp.as_str(), OpenFlags::RDONLY) {
                 interp_data = Some(interp_inode.read_all());
             } else {
-                //return ENOENT.as_isize(); 
+                /*error!("[kernel] sys_exec: failed to open interpreter '{}'", interp);
+                return ENOENT.as_isize(); */
             }
         }
         
@@ -768,7 +769,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             args_vec,
             false,
         );
-        info!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
+        //info!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
         argc as isize
     } else {
         error!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
