@@ -45,9 +45,23 @@ impl File for Stdin {
         false
     }
     fn read(&self, user_buf: UserBuffer) -> usize {
-        let ch = loop {
-            if let Some(ch) = STDIN_BUFFERED_CHAR.exclusive_access().take() {
-                break ch;
+        // assert_eq!(user_buf.len(), 1);
+        // busy loop
+        let mut c: usize;
+        loop {
+            //  新增：检查是否被信号打断
+            let task = crate::task::current_task().unwrap();
+            let task_inner = task.inner_exclusive_access();
+            let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
+            let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18));
+            drop(task_inner);
+
+            if pending != 0 || unmaskable != 0 {
+                return 0; 
+            }
+            c = console_getchar();
+            if c == 13 || c == '\r' as usize {
+                c = 10;
             }
             if let Some(ch) = normalize_console_char(console_getchar()) {
                 break ch;

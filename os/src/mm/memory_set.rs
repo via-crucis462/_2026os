@@ -261,7 +261,7 @@ impl MemorySet {
     /// Include sections in elf and trampoline and TrapContext and user stack,
     /// also returns user_sp_base and entry point.
 
-    pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, usize, usize) {
+   pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, usize, usize)  {
         let mut memory_set = Self::new_bare();
         // map trampoline
         #[cfg(target_arch = "riscv64")]
@@ -339,7 +339,8 @@ impl MemorySet {
             None,
             user_stack_top,
         );
-        memory_set.brk_index = memory_set.areas.len() - 1;// 此时brk在最后一个区域
+    
+        memory_set.brk_index = memory_set.areas.len() - 1;
         // map TrapContext
         // la64下不需要映射
         // 对于riscv，需要在创建进程时再映射
@@ -377,7 +378,7 @@ impl MemorySet {
         // copy data sections/trap_context/user_stack
         for area in user_space.areas.iter() {
             if area.is_shared {
-                // 黑魔法：共享内存！只拷页表，不拷数据！
+
                 let mut new_area = MapArea::new(
                     VirtAddr::from(area.vpn_range.get_start().0 * PAGE_SIZE),
                     VirtAddr::from(area.vpn_range.get_end().0 * PAGE_SIZE),
@@ -396,11 +397,13 @@ impl MemorySet {
                         }
                     }
                 }
-                // 注意：没有 copy_data，也没有生成 FrameTracker，完美共享！
+                // 注意：没有 copy_data，也没有生成 FrameTracker
                 memory_set.areas.push(new_area);
 
             } else {
-                // 传统流程：私有内存，走原来的深拷贝逻辑
+                // ==========================================
+                // 🐢 传统流程：私有内存，走原来的深拷贝逻辑
+                // ==========================================
                 let mut new_area: MapArea = MapArea::from_another(area);
                 let start_va: VirtAddr = new_area.vpn_range.get_start().into();
                 memory_set.push(new_area, None, start_va.0);

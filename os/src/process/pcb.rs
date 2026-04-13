@@ -129,6 +129,7 @@ impl ProcessControlBlock {
                 fd_table: vec![
                     FileDescriptor::new(Arc::new(Stdin), false, 0),
                     FileDescriptor::new(Arc::new(Stdout), false, 0),
+
                 ],
                 cwd: ROOT_DENTRY.clone(),
                 signals: SignalFlags::empty(),
@@ -194,7 +195,7 @@ impl ProcessControlBlock {
     /// 待修改
     pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8],interp_data: Option<&[u8]>, args: Vec<String>, on_main_hart: bool) {
         // 生成新地址空间
-        let (mut memory_set, mut user_sp, entry_point, phdr_addr, phnum, phent) = MemorySet::from_elf(elf_data);
+        let (mut memory_set, mut user_sp,  entry_point, phdr_addr, phnum, phent) = MemorySet::from_elf(elf_data);
         let mut final_entry_point = entry_point; // 默认入口为主程序入口
         const INTERP_BASE: usize = 0x40000000;   // 给解释器找一个宽敞的基地址（避开主程序）
         const AT_BASE: usize = 7;                // 辅助向量里代表解释器基址的 ID

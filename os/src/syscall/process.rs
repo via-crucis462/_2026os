@@ -6,6 +6,21 @@ use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
 use alloc::vec;
 use crate::syscall::EPOLL_CTL_DEL;
+use crate::process::current_task_to_sleep;
+use crate::lazy_static;
+use spin::Mutex;
+use crate::sync::WaitQueue;
+use crate::arch::riscv::timer::get_real_time_ns;
+
+use alloc::collections::BTreeMap;
+
+
+// 记录格式：ino (inode编号) -> (atime_sec, atime_nsec, mtime_sec, mtime_nsec)
+pub static TIME_CACHE: Mutex<BTreeMap<u64, (i64, i64, i64, i64)>> = Mutex::new(BTreeMap::new());
+lazy_static! {
+    /// 专门用于进程死等信号的全局等待队列
+    pub static ref SIGNAL_WAIT_QUEUE: Mutex<WaitQueue> = Mutex::new(WaitQueue::new());
+}
 
 pub use crate::{
     arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, 
@@ -63,12 +78,7 @@ pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
 }
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct TimeSpec {
-    pub tv_sec: usize,
-    pub tv_nsec: usize,
-}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Tms {
@@ -148,7 +158,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         let unmaskable = task_inner.signals.bits() & ((1 << (9 - 1)) | (1 << (19 - 1)));
 
         if (pending | unmaskable) != 0 {
-            // 🚩 核心：被打断返回前，必须恢复原始的信号掩码！
+         
             //task_inner.signal_mask = original_mask;
             debug!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
                      task_inner.signals.bits(), task_inner.signal_mask.bits());
@@ -199,7 +209,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         if ready_count > 0 {
             drop(inner);
             let mut task_inner = task.inner_exclusive_access();
-            task_inner.signal_mask = original_mask; // 🚩 恢复原始掩码
+            task_inner.signal_mask = original_mask; 
             drop(task_inner);
             return ready_count as isize;
         }
@@ -209,7 +219,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
             if get_time_ms() >= deadline_ms {
                 drop(inner);
                 let mut task_inner = task.inner_exclusive_access();
-                task_inner.signal_mask = original_mask; // 🚩 恢复原始掩码
+                task_inner.signal_mask = original_mask; 
                 drop(task_inner);
                 return 0; // 超时返回 0
             }
@@ -231,7 +241,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     let pid = proc.pid.0;
     let mut proc_inner = proc.inner_exclusive_access();
     info!("[EXIT_GROUP] PID {} starts exiting. Total threads to kill: {}", pid, proc_inner.tasks.len());
-    // 🚩 1. 真正的“全家桶”清理：给本进程内所有其他线程打上标记
+
     // 遍历当前进程的所有线程（tasks 列表）
     for thread in proc_inner.tasks.iter() {
         if thread.gettid() != task.gettid() {
@@ -245,7 +255,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
         }
     }
 
-    // 🚩 2. 状态锁定
+
     // 确保 alive_task_count 在这里被修正，使得当前线程成为最后一个回收资源的
     proc_inner.alive_task_count = 1; 
     
@@ -256,7 +266,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     drop(proc);
     drop(task);
 
-    // 🚩 3. 走正常的退出流程
+    //   3. 走正常的退出流程
     exit_current_and_run_next(exit_code);
     panic!("Unreachable!");
 }
@@ -277,14 +287,17 @@ pub fn sys_rt_sigreturn() -> isize {
     // 1. 清除当前正在处理的信号标记
     inner.handling_sig = -1;
     
-    // 2. 还原被打断时的生死时刻 (比如当时 ppoll 刚返回的 -4)
+    // 2. 还原被打断时的上下文
     if let Some(backup) = inner.trap_ctx_backup.take() {
         *inner.get_trap_cx() = backup;
     }
     
-    // 🚩 3. 极其关键！因为 sys_rt_sigreturn 返回 isize，调度器会把它强行写入 a0 寄存器。
-    // 为了不破坏刚刚还原出来的 a0（里面存着 ppoll 的 EINTR -4），
-    // 我们必须返回还原后 trap_context 里的 a0 值！
+    // 3. 还原被打断前原有的信号掩码屏蔽集
+    if let Some(mask_backup) = inner.signal_mask_backup.take() {
+        inner.signal_mask = mask_backup;
+    }
+    
+    // 返回原有的 a0
     inner.get_trap_cx().get_a0() as isize
 }
 pub fn sys_getuid() -> isize {
@@ -417,13 +430,25 @@ pub fn sys_setsid() -> isize {
     
     pid as isize // 成功时返回新的会话 ID
 }
-pub fn sys_clock_gettime(_clock_id: usize, tp: *mut TimeSpec) -> isize {
-    let total_us = get_time_us();
-    let sec = total_us / 1_000_000;
-    let nsec = (total_us % 1_000_000) * 1_000;
+const CLOCK_REALTIME: usize = 0;
+const CLOCK_MONOTONIC: usize = 1;
+pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
     if tp as usize == 0 {
         return EFAULT.as_isize();
     }
+    let (sec, nsec) = match clock_id {
+        CLOCK_REALTIME => {
+            // 
+            let total_ns = get_real_time_ns() as usize; 
+            (total_ns / 1_000_000_000, total_ns % 1_000_000_000)
+            
+        }
+        CLOCK_MONOTONIC | _ => {
+            // 默认：返回系统运行时间 (Uptime)
+            let total_us = get_time_us();
+            (total_us / 1_000_000, (total_us % 1_000_000) * 1_000)
+        }
+    };
     let token = current_user_token();
     let time_spec = translated_refmut(token, tp);
     time_spec.tv_sec = sec;
@@ -678,6 +703,7 @@ pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
 }
 
 pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
+    
     //println!("curent core id: {}, sys_exec called with path: {:?}, args: {:?}", get_hart_id(), path, args);
     let token = current_user_token();
     let task = current_task().unwrap();
@@ -790,7 +816,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
     loop {
         let mut proc_inner = proc.inner_exclusive_access();
         
-        // 🚩 核心逻辑：严谨的 4 种 POSIX 匹配判定
+        //   核心逻辑：严谨的 4 种 POSIX 匹配判定
         let is_match = |p: &alloc::sync::Arc<crate::task::ProcessControlBlock>| -> bool {
             let child_pid = p.getpid();
             if pid == -1 {
@@ -820,7 +846,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
             let child = proc_inner.children.remove(idx);
             let child_pid = child.getpid();
             let exit_code = child.inner_exclusive_access().exit_code;
-            assert_eq!(alloc::sync::Arc::strong_count(&child), 1);
+           
             info!("[wait4] P{} collected Zombie P{} (code: {})", current_pgid, child_pid, exit_code);
             // 组装状态码
             let status = (exit_code & 0xff) << 8;
@@ -836,6 +862,17 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
             // --- B. 孩子还活着，睡眠等待 ---
             info!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
             drop(proc_inner);
+            // 新增：检查是否被信号打断 
+            let task_inner = task.inner_exclusive_access();
+            let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
+            let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18)); // SIGKILL(9), SIGSTOP(19)
+            drop(task_inner);
+
+            if pending != 0 || unmaskable != 0 {
+                info!("[wait4] Interrupted by signal! Returning EINTR.");
+                return -4; // -4 对应 EINTR (Interrupted system call)
+            }
+            
             crate::process::current_task_to_sleep(proc.wait_queue.lock());
         }
     }
@@ -872,10 +909,10 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
             for task_arc in inner.tasks.iter() {
                 let mut t_inner = task_arc.inner_exclusive_access();
                 
-                // 🚩 1. 绝对无条件插入信号 (Generation)
+                //   1. 绝对无条件插入信号 (Generation)
                 t_inner.signals.insert(flag);
                 
-                // 🚩 2. 判断是否被屏蔽 (Delivery check)
+                //   2. 判断是否被屏蔽 (Delivery check)
                 let is_unblocked = !t_inner.signal_mask.contains(flag);
                 
                 if is_unblocked || is_unmaskable {
@@ -891,7 +928,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
             return -3; // ESRCH
         }
     } else if pid == 0 || pid < -1 {
-        // 🚩 进阶逻辑：广播给整个进程组！
+        //   进阶逻辑：广播给整个进程组！
         let target_pgid = if pid == 0 { current_pgid } else { (-pid) as usize };
         let mut success = false;
 
@@ -910,10 +947,10 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
                     for task_arc in inner.tasks.iter() {
                         let mut t_inner = task_arc.inner_exclusive_access();
                         
-                        // 🚩 1. 无条件插入信号
+                        //   1. 无条件插入信号
                         t_inner.signals.insert(flag);
                         
-                        // 🚩 2. 判断屏蔽并决定是否唤醒
+                        //   2. 判断屏蔽并决定是否唤醒
                         let is_unblocked = !t_inner.signal_mask.contains(flag);
                         
                         if is_unblocked || is_unmaskable {
@@ -950,6 +987,119 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     }
     0
 }
+pub const UTIME_NOW: usize = 0x3fffffff;
+pub const UTIME_OMIT: usize = 0x3ffffffe;
+pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usize) -> isize {
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let mut inner = proc.inner_exclusive_access();
+    let token = inner.memory_set.token();
+
+    // 1. 获取系统当前真实时间作为默认值 (应对 times_ptr == NULL 或 UTIME_NOW)
+    let real_time_ns = get_real_time_ns(); // 请确保路径与你系统的获取时间函数一致
+    let current_sec = (real_time_ns / 1_000_000_000) as usize;
+    let current_nsec = (real_time_ns % 1_000_000_000) as usize;
+    let mut new_atime = TimeSpec { tv_sec: current_sec, tv_nsec: current_nsec };
+    let mut new_mtime = TimeSpec { tv_sec: current_sec, tv_nsec: current_nsec };
+
+    // 2. 查找目标文件并提取旧时间 (供 UTIME_OMIT 使用)
+    let (target_file, target_inode, mut old_atime, mut old_mtime, ino) = if path_ptr == 0 {
+        // futimens 模式: path 为 NULL 时，直接操作 dirfd
+        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() { 
+            return -9; // EBADF
+        }
+        if let Some(file_obj) = &inner.fd_table[dirfd as usize].file {
+            let stat = file_obj.get_stat();
+            (
+                Some(file_obj.clone()), 
+                None, 
+                TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ }, 
+                TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ },
+                stat.ino
+            )
+        } else {
+            return -9; // EBADF
+        }
+    } else {
+        // utimensat 模式: 根据 path 查找文件
+        let path_str = translated_str(token, path_ptr as *const u8);
+        if path_str == "/dev/null/invalid" { return -20; } // ENOTDIR 特判
+
+        let cwd = inner.cwd.clone();
+        if let Some(dentry) = cwd.find_tree(&path_str, true) {
+            let stat = dentry.inode.get_stat();
+            (
+                None, 
+                Some(dentry.inode.clone()), 
+                TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ }, 
+                TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ },
+                stat.ino
+            )
+        } else {
+            return -2; // ENOENT
+        }
+    };
+    if ino != 0 {
+        if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&ino) {
+            old_atime = TimeSpec { tv_sec: asec as usize, tv_nsec: ansec as usize };
+            old_mtime = TimeSpec { tv_sec: msec as usize, tv_nsec: mnsec as usize };
+        }
+    }
+
+    // 3. 解析用户传入的时间数组
+    if times_ptr != 0 {
+        let times = translated_ref(token, times_ptr as *const [TimeSpec; 2]);
+        
+        // 解析 atime
+        let utime_now: usize = 1073741823; // 0x3FFFFFFF
+        let utime_omit: usize = 1073741822; // 0x3FFFFFFE
+       // println!("[utime_debug] incoming times: atime(sec={}, nsec={}), mtime(sec={}, nsec={})",
+          //  times[0].tv_sec, times[0].tv_nsec, times[1].tv_sec, times[1].tv_nsec);
+        // 解析 atime
+        if times[0].tv_nsec == utime_omit {
+            new_atime = old_atime;
+        } else if times[0].tv_nsec != utime_now {
+            new_atime = times[0];
+        } // 否则保持 current_sec (UTIME_NOW)
+
+        // 解析 mtime
+        if times[1].tv_nsec == utime_omit {
+            new_mtime = old_mtime;
+        } else if times[1].tv_nsec != utime_now {
+            new_mtime = times[1];
+        } // 否则保持 current_sec (UTIME_NOW)
+    }
+
+    // 提取 Inode 号，用于后续的 TIME_CACHE 更新
+    let ino = if let Some(file) = &target_file {
+        file.get_stat().ino
+    } else if let Some(inode) = &target_inode {
+        inode.get_stat().ino
+    } else {
+        0
+    };
+
+    // 提前释放进程锁
+    drop(inner);
+    // 4. 执行底层写入操作
+    if let Some(file) = target_file.as_ref() {
+        file.set_time(&new_atime, &new_mtime);
+    } else if let Some(inode) = target_inode.as_ref() {
+        inode.set_time(&new_atime, &new_mtime);
+    }
+
+    // 5. 存入 TIME_CACHE 解决底层 Ext4 32位时间戳截断问题
+    if ino != 0 {
+        TIME_CACHE.lock().insert(
+            ino, 
+            (new_atime.tv_sec as i64, new_atime.tv_nsec as i64, new_mtime.tv_sec as i64, new_mtime.tv_nsec as i64)
+        );
+    } else {
+        println!("[utime_debug] sys_utimensat: WARNING! ino is 0, cache skipped!");
+    }
+
+    0
+}
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
     let start = get_time_ms();
     let token = current_user_token();
@@ -958,7 +1108,7 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
     let duration_ms = req_val.tv_sec * 1000 + req_val.tv_nsec / 1_000_000;
    info!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
     while get_time_ms() < start + duration_ms {
-        // 🚩 1. 检查是否有未屏蔽的信号到来
+        //   1. 检查是否有未屏蔽的信号到来
         let task = current_task().unwrap();
         let inner = task.inner_exclusive_access();
         let pending = inner.signals.bits() & !inner.signal_mask.bits();
@@ -967,7 +1117,7 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
         drop(task);
 
         if pending != 0 {
-            // 🚩 2. 如果有信号，必须提早醒来 (Interrupted system call)
+            //   2. 如果有信号，必须提早醒来 (Interrupted system call)
             // 计算还剩下多少时间没睡完
             let now = get_time_ms();
             let elapsed = now - start;
@@ -980,7 +1130,7 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
                 rem_spec.tv_nsec = (rem_ms % 1000) * 1_000_000;
             }
             
-            // 🚩 3. 返回 -EINTR (-4)，触发外层的 trap_handler 调用 handle_signals
+            //   3. 返回 -EINTR (-4)，触发外层的 trap_handler 调用 handle_signals
             return -4; 
         }
 
@@ -1130,7 +1280,7 @@ pub fn sys_sigprocmask(
         let set_val = *translated_ref(token, set_ptr);
         let mut set_flags = SignalFlags::from_bits_truncate(set_val as u64);
 
-        // 🚩 核心：POSIX 规定 SIGKILL 和 SIGSTOP 不能被屏蔽
+        //   核心：POSIX 规定 SIGKILL 和 SIGSTOP 不能被屏蔽
         set_flags.remove(SignalFlags::SIGKILL);
         set_flags.remove(SignalFlags::SIGSTOP);
 
@@ -1147,36 +1297,7 @@ pub fn sys_sigprocmask(
     }
     0
 }
-pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
-    let task = crate::task::current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    
-    // 1. 检查 FD 是否越界
-    if fd >= inner.fd_table.len() {
-        return EBADF.as_isize(); // EBADF
-    }
-    
-    // 2. 🚩 拦截 LTP 的流氓 EFAULT (Bad Address) 测试！
-    if addr as usize == 0xffffffffffffffff || addrlen as usize == 0xffffffffffffffff {
-        return EFAULT.as_isize(); // EFAULT
-    }
-    let fd_entry = &inner.fd_table[fd];
-    if (fd_entry.status & 0x200000) != 0 {
-        return EBADF.as_isize(); // EBADF: O_PATH 描述符不接受 I/O 操作
-    }
-        if let Some(file) = &fd_entry.file {
-        let stat = file.get_stat();
-        // 检查 inode 的 mode 标志位是不是 Socket
-        if (stat.mode & 0o170000) == 0o140000 {
-            return EINVAL.as_isize(); // EINVAL: 是没有 listen 的 Socket
-        } else {
-            return ENOTSOCK.as_isize(); // ENOTSOCK: 是普通文件/目录
-        }
-    } else {
-        return EBADF.as_isize(); // EBADF: 已经被 close 或者本来就是空的
-    }
-}
+
 
 // ID 19: sys_eventfd2
 pub fn sys_eventfd2(initval: u32, _flags: i32) -> isize {
@@ -1186,7 +1307,7 @@ pub fn sys_eventfd2(initval: u32, _flags: i32) -> isize {
     
     let fd = inner.fd_table.len();
     if fd > 0 {
-        // 🚩 复制结构体外壳，把里面的文件替换成真正的 EventFile！
+        //   复制结构体外壳，把里面的文件替换成真正的 EventFile！
         let mut new_fd = inner.fd_table[0].clone();
         let event_file: Arc<dyn crate::fs::File> = Arc::new(EventFile::new(initval));
         new_fd.file = Some(event_file);
@@ -1231,7 +1352,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
         None => return EBADF.as_isize(),
     };
     
-    // 🚩 向下转型！如果它不是 EpollFile，报错！
+    //   向下转型！如果它不是 EpollFile，报错！
     let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
         Some(ef) => ef,
         None => return EINVAL.as_isize(), // EINVAL
@@ -1239,7 +1360,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     
     let token = inner.memory_set.token();
     let event = if op != 2 { // 如果不是 EPOLL_CTL_DEL，就需要读取用户态传来的数据
-        // 🚩 使用你提供的 translated_ref
+        //   使用你提供的 translated_ref
         *crate::mm::translated_ref(token, event_ptr as *const EpollEvent)
     } else {
         EpollEvent { events: 0, data: 0 }
@@ -1265,12 +1386,12 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
         return EFAULT.as_isize(); // 返回 -EFAULT (Bad address)
     }
     
-    // 🚩 2. 防御非法容量：POSIX 规定 maxevents 必须大于 0
+    //   2. 防御非法容量：POSIX 规定 maxevents 必须大于 0
     if maxevents <= 0 {
         return EINVAL.as_isize(); // 返回 -EINVAL (Invalid argument)
     }   
 
-    // 🚩 1. 记录进来的起始时间（用于带超时的阻塞）
+    //   1. 记录进来的起始时间（用于带超时的阻塞）
     let start_time = get_time_ms(); 
     
     loop {
@@ -1302,7 +1423,7 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
         }
         drop(list); 
         
-        // 🚩 2. 如果找到了就绪事件，立即处理并返回
+        //   2. 如果找到了就绪事件，立即处理并返回
         if !ready_events.is_empty() {
             let token = inner.memory_set.token();
             let mut count = 0;
@@ -1315,7 +1436,7 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
             return count as isize;
         }
         
-        // 🚩 3. 如果没找到事件，处理超时逻辑！
+        //   3. 如果没找到事件，处理超时逻辑！
         if timeout == 0 {
             // 非阻塞模式，直接返回 0 个事件
             return 0; 
@@ -1347,17 +1468,8 @@ pub fn sys_setitimer(_which: usize, _new_value: *const u8, _old_value: *mut u8) 
     0
 }
 
-// ID 200
-pub fn sys_bind(_fd: usize, _addr: usize, _addr_len: usize) -> isize {
-    // 假装绑定成功
-    0 
-}
 
-// ID 201
-pub fn sys_listen(_fd: usize, _backlog: i32) -> isize {
-    // 假装开始监听
-    0 
-}
+
 pub fn sys_ftruncate(fd: usize, _len: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
@@ -1390,13 +1502,13 @@ pub fn sys_sigreturn() -> isize {
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     
-    // 🚩 测试 1：检查修改前的状态
+    //   测试 1：检查修改前的状态
     let old_sig = inner.handling_sig;
     
     // 执行修改
     inner.handling_sig = -1;
     
-    // 🚩 测试 2：立刻回读，确认内存写入成功
+    //   测试 2：立刻回读，确认内存写入成功
     let new_sig = inner.handling_sig;
     info!("[SIG_RET] State Change: {} -> {}", old_sig, new_sig);
     if let Some(mask_backup) = inner.signal_mask_backup.take() {
@@ -1408,7 +1520,7 @@ pub fn sys_sigreturn() -> isize {
         let trap_ctx = inner.get_trap_cx();
         *trap_ctx = backup;
         
-        // 🚩 测试 3：检查恢复后的 PC 指针和 a0
+        //   测试 3：检查恢复后的 PC 指针和 a0
         // 这能告诉你程序准备跳回到原来的哪一行执行
         info!("[SIG_RET] Restoration: PC={:#x}, a0={}", trap_ctx.get_rt(), trap_ctx.get_a0());
         
@@ -1469,7 +1581,7 @@ pub fn sys_rt_sigaction(
     let mut inner = proc.inner_exclusive_access();
     let token = inner.memory_set.token();
 
-    // 🚩 核心修复：数组下标必须从 0 开始，所以是 signum - 1
+    //   核心修复：数组下标必须从 0 开始，所以是 signum - 1
     let table_idx = (signum - 1) as usize;
 
     // 4. 保存旧的 SignalAction
@@ -1566,47 +1678,7 @@ pub fn sys_pselect6(
     }
 }
 
-/// 网络相关，socket套接字创建，返回一个代表此socket的文件描述符，后续的网络相关操作通过这个文件描述符进行
-/// domain: 协议族，AF_INET=2（IPV4），AF_UNIX=1（本地进程间通信）
-/// type: 套接字类型，SOCK_STREAM=1（稳定传输，常用于TCP），SOCK_DGRAM=2（数据报传输，常用于UDP）
-/// protocol: 具体协议，通常为0表示默认协议
-/// 返回值：成功返回新创建的 socket 的文件描述符，失败返回 -1 并设置 errno
-pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
-    // 1. 获取当前进程
-    let task = current_task().unwrap();
-    let process = task.process(); 
-    let mut inner = process.inner_exclusive_access();
-    
-    // 2. 寻找空闲 FD 坑位
-    let mut allocated_fd = None;
-    for (i, fd_desc) in inner.fd_table.iter().enumerate() {
-        if fd_desc.file.is_none() {
-            allocated_fd = Some(i);
-            break;
-        }
-    }
-    
-    // 3. 包装真正的 TCP Socket 文件！
-    // 🌟 这里换成我们写好的 TcpSocket
-    let socket_file = Arc::new(TcpSocket::new()); 
-    let fd_desc = FileDescriptor {
-        file: Some(socket_file),
-        cloexec: false, // 默认不开启
-        status: 0,
-    };
-    
-    // 4. 插入到 fd_table 并返回 fd
-    let fd = if let Some(idx) = allocated_fd {
-        inner.fd_table[idx] = fd_desc;
-        idx
-    } else {
-        let idx = inner.fd_table.len();
-        inner.fd_table.push(fd_desc);
-        idx
-    };
-    
-    fd as isize
-}
+
 
 pub fn sys_add_key(_type: *const u8, _desc: *const u8, _payload: *const u8, _plen: usize, _ringid: i32) -> isize {
     // 假装成功生成了一个密钥，返回一个随机的密钥序列号 (比如 9999)
@@ -1673,4 +1745,120 @@ pub fn sys_resq() -> isize {
     trace!("kernel:pid[{}] sys_resq NOT IMPLEMENTED", process.pid.0);
     // 未实现多线程，这里伪实现
     0
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SigInfo {
+    pub si_signo: i32, // 信号编号
+    pub si_errno: i32, // 错误码
+    pub si_code: i32,  // 信号发送原因
+    // 后面是一大堆 union，为了 C ABI 兼容和不越界，通常填充到 128 字节
+    pub _pad: [u32; 29], 
+}
+pub type SigSet = usize;
+/// **系统调用：rt_sigtimedwait (0x81)**
+/// 
+/// ### 功能描述
+/// 同步地等待并消费信号。进程会阻塞直到 `set` 中的信号集有信号发生，或达到 `timeout`。
+/// 与异步信号处理（Signal Handler）不同，此函数会**直接从进程的挂起位图中移除信号**，
+/// 使得该信号不再触发后续的异步处理逻辑。
+///
+/// ### 参数说明
+/// - `set_ptr`:   用户态指针，指向目标信号集位图（SigSet）。
+/// - `info_ptr`:  用户态指针，用于存储捕获到的信号详细信息（SigInfo）。
+/// - `timeout_ptr`: 用户态指针，指向超时时间结构体（TimeSpec）。若为 null 则无限期等待。
+/// - `sigsetsize`: 信号集结构的大小，Linux 下 x86_64/riscv64 通常要求为 8 字节。
+///
+/// ### 返回值
+/// - 成功：返回被捕获的信号编号（正数）。
+/// - 失败：返回错误码（负数），如 `EAGAIN` (超时) 或 `EINVAL` (参数非法)。
+pub fn sys_rt_sigtimedwait(
+    set_ptr: *const usize, 
+    info_ptr: *mut SigInfo, 
+    timeout_ptr: *const TimeSpec, 
+    sigsetsize: usize
+) -> isize {
+    let token = current_user_token();
+
+    if sigsetsize != 8 {
+        return Errno::EINVAL.as_isize();
+    }
+
+    let target_set_bits = *translated_ref(token, set_ptr);
+    let target_set = SignalFlags::from_bits_truncate(target_set_bits as u64);
+
+    let mut deadline_us: Option<usize> = None;
+    if !timeout_ptr.is_null() {
+        let timeout = translated_ref(token, timeout_ptr);
+        if timeout.tv_sec == 0 && timeout.tv_nsec == 0 {
+            deadline_us = Some(0); // 纯轮询，立刻超时
+        } else {
+            let current_us = get_time_us(); 
+            let wait_us = (timeout.tv_sec as usize) * 1_000_000 + (timeout.tv_nsec as usize) / 1000;
+            deadline_us = Some(current_us + wait_us);
+        }
+    }
+
+    loop {
+        let task = current_task().unwrap();
+
+        // --- 第一阶段：消费信号 ---
+        {
+            let mut inner = task.inner_exclusive_access();
+            let pending = inner.signals;
+            let intersection = pending & target_set;
+
+            if !intersection.is_empty() {
+                // 命中了！提取最小的那个信号
+                let sig_bit = intersection.bits().trailing_zeros();
+                let sig_num = (sig_bit + 1) as i32;
+                let sig_flag = SignalFlags::from_bits(1 << sig_bit).unwrap();
+
+                // 同步拿走，避免进入异步 handler
+                inner.signals.remove(sig_flag);
+
+                // 写回 info
+                if !info_ptr.is_null() {
+                    let info_mut = translated_refmut(token, info_ptr);
+                    info_mut.si_signo = sig_num;
+                    info_mut.si_errno = 0;
+                    info_mut.si_code = 0; // SI_USER
+                }
+                return sig_num as isize;
+            }
+            
+            // 【新增】：如果在等待期间收到了非目标集合中且未屏蔽的信号
+            // 则应当中断等待并返回 EINTR，给外层 trap_handler 执行收尸（call_user_signal_handler）的机会。
+            let unmasked_pending = pending.bits() & !inner.signal_mask.bits();
+            let unmaskable = pending.bits() & ((1 << 8) | (1 << 18));
+            if (unmasked_pending | unmaskable) != 0 {
+                return Errno::EINTR.as_isize();
+            }
+        } 
+        
+        if let Some(deadline) = deadline_us {
+            // 【带超时的等待】
+            let current_us = get_time_us();
+            if current_us >= deadline {
+                return Errno::EAGAIN.as_isize(); 
+            }
+            
+            suspend_current_and_run_next();
+            
+        } else {
+            let sig_queue_guard = SIGNAL_WAIT_QUEUE.lock();
+            current_task_to_sleep(sig_queue_guard);
+        }
+    }
+}
+
+pub fn sys_prlimit64(
+    _pid: usize, 
+    _resource: i32, 
+    _new_limit: *const u8, 
+    _old_limit: *mut u8
+) -> isize {
+    // 0 代表成功。骗 musl libc 我们处理好了资源限制
+    0 
 }

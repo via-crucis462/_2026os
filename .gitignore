@@ -36,3 +36,7 @@ kernel-*
 sdcard-rv-structure/*
 sdcard-rv/*
 syscall_posix_kernel.md
+all_codes.txt
+my_sdcard/*
+ins.txt
+
