@@ -13,6 +13,11 @@ lazy_static! {
     pub static ref SCHEDULER: MPSafeCell<Scheduler> = MPSafeCell::new(Scheduler {
         task_pool: TaskPool::new(),
     });
+    pub static ref SCHED_DISPATCH_LOCK: MPSafeCell<()> = MPSafeCell::new(());
+}
+
+pub fn lock_dispatch() -> crate::sync::MPSafeGuard<'static, ()> {
+    SCHED_DISPATCH_LOCK.exclusive_access()
 }
 
 pub struct Scheduler {
@@ -66,6 +71,11 @@ impl TaskPool {
     pub fn count(&self) -> usize {
         self.inner.len()
     }
+
+    pub fn remove_task(&mut self, tid: usize) {
+        self.inner.retain(|task| task.gettid() != tid);
+    }
+
     pub fn add_task(&mut self, task: Arc<TaskControlBlock>) {
         let tid = task.gettid();
         if self.inner.iter().any(|t| t.gettid() == tid) {
@@ -102,13 +112,29 @@ impl TaskPool {
     }
 }
 
-pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
+pub(crate) fn add_task_into_pool_unlocked(task: Arc<TaskControlBlock>) {
     trace!("[kernel] Scheduler::add_task_into_pool: pid={}", task.getpid());
+    remove_task_from_all_local_queues_unlocked(task.gettid());
     let mut scheduler = SCHEDULER.exclusive_access();
+    scheduler.get_pool().remove_task(task.gettid());
     scheduler.get_pool().add_task(task);
     drop(scheduler);
     //sbi_wakeup_harts(0b1111);
     trace!("add into pool finised");
+}
+
+pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
+    let _dispatch = lock_dispatch();
+    add_task_into_pool_unlocked(task);
+}
+
+pub(crate) fn remove_task_from_global_pool_unlocked(tid: usize) {
+    SCHEDULER.exclusive_access().get_pool().remove_task(tid);
+}
+
+pub fn remove_task_from_global_pool(tid: usize) {
+    let _dispatch = lock_dispatch();
+    remove_task_from_global_pool_unlocked(tid);
 }
 
 pub fn ask_for_tasks() -> VecDeque<Arc<TaskControlBlock>> {
@@ -129,7 +155,7 @@ pub fn get_task_count() -> usize {
 
 pub fn wake_up_task(task: Arc<TaskControlBlock>) {
     trace!("[kernel] wake_up_task: pid={}", task.getpid());
-    
+    let _dispatch = lock_dispatch();
     let mut inner = task.inner_exclusive_access();
     // 只有处于阻塞状态的任务才需要被唤醒
     // (具体枚举名称请根据你项目里的定义替换，如 TaskStatus::Blocking)
@@ -138,7 +164,7 @@ pub fn wake_up_task(task: Arc<TaskControlBlock>) {
         drop(inner); 
         
         // 重新塞回你的全局就绪池！
-        crate::process::add_task_into_pool(task);
+        add_task_into_pool_unlocked(task);
     }
 }
 

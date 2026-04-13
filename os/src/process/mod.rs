@@ -102,6 +102,7 @@ pub fn wake_up_one(mut wait_queue: MutexGuard<WaitQueue>) {
     if let Some(task) = wait_queue.pop_front() {
         let mut task_inner = task.inner_exclusive_access();
         task_inner.task_status = TaskStatus::Ready;
+        task_inner.owner_hart = None;
         drop(task_inner);
         add_task_into_pool(task);
     }

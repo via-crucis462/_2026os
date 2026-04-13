@@ -246,21 +246,8 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
 /// Translate a ptr[u8] array through page table and return a mutable reference of T
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
     let page_table = PageTable::from_token(token);
-    let va = ptr as usize;
-    let vpn = crate::mm::address::VirtAddr::from(va).floor();
-    
-    // 2. 查页表得到物理页号
-    let ppn = page_table
-        .translate(vpn)
-        .expect("[translated_refmut] translation failed!")
-        .ppn();
-        
-    // 3. 计算出它在页内的偏移量 (va % 4096)
-    let page_offset = va % PAGE_SIZE;
-    
-    // 4. 物理页首地址 + 偏移量 = 真正的物理地址
-    let pa: usize = (usize::from(ppn) << 12) + page_offset;
-    
-    // 5. 强转为可变引用返回
-    unsafe { &mut *(pa as *mut T) }
+    page_table
+        .translate_va(VirtAddr::from(ptr as usize))
+        .unwrap()
+        .get_mut()
 }

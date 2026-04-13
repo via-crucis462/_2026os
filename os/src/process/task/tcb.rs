@@ -66,6 +66,9 @@ pub struct TaskControlBlockInner {
     /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
 
+    /// 当前由哪个 hart 持有运行所有权；None 表示可被调度领取。
+    pub owner_hart: Option<usize>,
+
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
     pub signals: SignalFlags,
@@ -83,9 +86,16 @@ pub struct TaskControlBlockInner {
 }
 
 impl TaskControlBlockInner {
+    #[cfg(target_arch = "riscv64")]
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
         PhysAddr(self.trap_cx_addr).get_mut()
     }
+
+    #[cfg(target_arch = "loongarch64")]
+    pub fn get_trap_cx(&self) -> &'static mut TrapContext {
+        unsafe { (self.trap_cx_addr as *mut TrapContext).as_mut().unwrap() }
+    }
+
     fn get_status(&self) -> TaskStatus {
         self.task_status
     }

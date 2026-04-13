@@ -156,6 +156,7 @@ impl ProcessControlBlock {
                 trap_cx_addr,
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
+                owner_hart: None,
                 signal_mask: SignalFlags::empty(),
                 handling_sig: -1,
                 killed: false,
@@ -411,7 +412,7 @@ impl ProcessControlBlock {
             pid: pid_handle.clone(),
             wait_queue: Mutex::new(WaitQueue::new()),
             inner: MPSafeCell::new(ProcessControlBlockInner {
-                on_main_hart: false, // fork出的子进程默认不在
+                on_main_hart: false, // LA 侧先固定到主核，避免未收敛的跨核执行路径
                 pname: parent_inner.pname.clone(),
                 base_size: parent_inner.base_size,
                 memory_set,
@@ -445,6 +446,7 @@ impl ProcessControlBlock {
                 signal_mask_backup: None,
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
+                owner_hart: None,
                 signal_mask: caller_inner.signal_mask,
                 handling_sig: caller_inner.handling_sig,
                 killed: false,
@@ -508,6 +510,7 @@ impl ProcessControlBlock {
         let size: isize = addr as isize - self.inner_exclusive_access().program_brk as isize;
         let mut inner = self.inner_exclusive_access();
         let heap_bottom = inner.memory_set.areas()[inner.memory_set.brk_index()].get_vpn_range().get_start().0 * PAGE_SIZE;
+        //let heap_bottom = inner.heap_bottom;
         debug!("change_program_brk: addr={:#x}, current_brk={:#x}, current_heap_bottom={:#x}, size={}", addr, inner.program_brk, heap_bottom, size);
         let _old_break = inner.program_brk;
         let new_brk = addr as isize;
