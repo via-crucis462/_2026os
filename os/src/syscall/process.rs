@@ -839,7 +839,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
             // --- B. 孩子还活着，睡眠等待 ---
             info!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
             drop(proc_inner);
-            crate::process::current_task_to_sleep(proc.wait_queue.lock());
+            crate::process::start_waiting_child();
         }
     }
 }
@@ -1000,6 +1000,8 @@ pub fn sys_mprotect(_start: usize, _len: usize, _prot: usize) -> isize {
 
 /// YOUR JOB: Implement mmap.
 pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: usize) -> isize {
+    trace!("kernel:pid[{}] sys_mmap called with start={:#x}, len={:#x}, prot={:#x}, flags={:#x}, fd={}, off={:#x}", 
+        current_task().unwrap().process().pid.0, start, len, port, flags, fd, _off);
     let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
     let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
 
@@ -1070,6 +1072,7 @@ pub fn sys_brk(addr: usize) -> isize {
         let mut inner = process.inner_exclusive_access();
         inner.program_brk = new_brk;
          */
+        // println!("sys_brk: successfully set brk to {:#x}", new_brk);
         new_brk as isize
     } else {
         /* 失败的话，返回原来的 brk

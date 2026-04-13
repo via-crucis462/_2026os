@@ -1,7 +1,7 @@
 use super::{VfsInode, Stat, Statx, ROOT_DENTRY};
 use alloc::sync::Arc;
 use alloc::string::String;
-use crate::fs::{TmpfsDirInode, TmpfsFileInode};
+use crate::fs::{TmpfsDirInode, TmpfsFileInode, stat_to_statx};
 
 
 //造一个“空目录” Inode，专门给 /proc 文件夹用
@@ -85,7 +85,9 @@ impl VfsInode for MemInfoInode {
             __unused:[0; 1],
         }
     }
-    fn get_statx(&self) -> Statx { unimplemented!() }
+    fn get_statx(&self) -> Statx {
+        super::stat_to_statx(self.get_stat())
+    }
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
@@ -117,7 +119,9 @@ impl VfsInode for MountsInode {
         }
     }
     // 把底下那堆 unimplemented 或 None 补齐 (跟 MemInfoInode 一样)
-    fn get_statx(&self) -> Statx { unimplemented!() }
+    fn get_statx(&self) -> Statx {
+        stat_to_statx(self.get_stat())
+    }
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }

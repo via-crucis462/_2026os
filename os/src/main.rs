@@ -148,9 +148,11 @@ fn main_init(hart_id: usize) {
     arch::trap::init();
     #[cfg(target_arch = "loongarch64")]
     {
-    info!("searching pci...");
-    drivers::search_pci();
-    info!("done drivers");
+        info!("searching pci...");
+        // 仅调试用，搜索，实例化并列出设备
+        // 和BLOCK是后续才实例化的
+        drivers::search_pci();
+        info!("done drivers");
     }
     //#[cfg(target_arch = "riscv64")]
     {
@@ -211,7 +213,7 @@ fn other_init() {
     // 调试用，先把其他核关了
     /*
     unsafe {
-         asm!(
+         asm!(/
             "wfi",
         );
     } */

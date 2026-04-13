@@ -87,11 +87,12 @@ pub fn run_tasks() {
                 error!("[kernel] run_tasks: task pid={} is on main hart, but current hart is {}, put it back into pool", task.getpid(), hart_id);
                 add_task_into_pool(task);
                 drop(processor);
-                
-                crate::arch::timer::set_next_trigger();
                 #[cfg(target_arch = "riscv64")]
-                unsafe {
-                    asm!("wfi");
+                {
+                    crate::arch::timer::set_next_trigger();
+                    unsafe {
+                        asm!("wfi");
+                    }
                 }
                 continue;
             } 
@@ -114,6 +115,7 @@ pub fn run_tasks() {
             // 释放锁
             drop(processor);
             unsafe {
+                // 切换到下一个任务执行流
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
             // suspend_current_and_run_next以及exit_current_and_run_next会跳到这里
@@ -128,15 +130,23 @@ pub fn run_tasks() {
                     } else {
                         add_task_into_pool(prev_task);
                     }
+                } else if status == TaskStatus::WaitSaving {
+                    // 调用了wait函数，在这里加入等待队列
+                    let process = prev_task.process();
+                    let mut wait_queue = process.wait_queue.lock();
+                    prev_task.inner_exclusive_access().task_status = TaskStatus::Blocked;
+                    wait_queue.push_back(prev_task);
+                    drop(wait_queue);
                 }
                 // 如果 status 是 Zombie 或 Blocked，什么都不做，自然销毁或等别人唤醒
             }
             drop(processor);
         } else {
+            #[cfg(target_arch = "riscv64")]{
             crate::arch::timer::set_next_trigger();
-            #[cfg(target_arch = "riscv64")]
-            unsafe {
-                asm!("wfi");
+                unsafe {
+                    asm!("wfi");
+                }
             }
             trace!("no tasks available in hart {}", hart_id);
         }

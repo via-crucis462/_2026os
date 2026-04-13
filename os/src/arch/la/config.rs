@@ -15,7 +15,7 @@ pub const USER_STACK_SIZE: usize = 0x400_0000;
 /// kernel stack size
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 2;
 /// kernel heap size
-pub const KERNEL_HEAP_SIZE: usize = 0x200_0000; //
+pub const KERNEL_HEAP_SIZE: usize = 0x800_0000; // 128MB
 
 /// the virtual addr of trampoline
 /// 由于映射窗口的存在，trampoline的地址不需要设置在高位了，直接放在内核空间的末尾就行
