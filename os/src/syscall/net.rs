@@ -8,7 +8,7 @@ use crate::syscall::errno::Errno;
 use alloc::vec;
 
 /// 获取指定 Socket 的本地地址和端口信息。
-/// 将内核中 Socket 的 local_endpoint 信息格式化为 sockaddr_in 结构并拷贝回用户空间。
+/// 将内核中 Socket 的 local_endpoint 信息格式化为 sockaddr_in 结构并拷贝回用户空间。 asd
 pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
