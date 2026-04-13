@@ -100,7 +100,7 @@ const POLLERR: i16 = 0x008;
 const POLLHUP: u16 = 0x0010;
 
 pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> isize {
-    info!("[kernel] sys_ppoll: ufds={:#x}, nfds={}, tmo_p={:#x}", ufds_ptr, nfds, tmo_p);
+    debug!("[kernel] sys_ppoll: ufds={:#x}, nfds={}, tmo_p={:#x}", ufds_ptr, nfds, tmo_p);
     if ufds_ptr == 0 && nfds > 0 {
         return EFAULT.as_isize(); // EFAULT
     }
@@ -150,7 +150,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         if (pending | unmaskable) != 0 {
             // 🚩 核心：被打断返回前，必须恢复原始的信号掩码！
             //task_inner.signal_mask = original_mask;
-            info!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
+            debug!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
                      task_inner.signals.bits(), task_inner.signal_mask.bits());
             drop(task_inner); // 放锁
             return EINTR.as_isize(); // EINTR
@@ -192,7 +192,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
                     ready_count += 1;
                 }
             }
-            info!("[kernel] ppoll fd={} target_events={:#x} ready_revents={:#x}", pollfd.fd, pollfd.events, pollfd.revents);
+            trace!("[kernel] ppoll fd={} target_events={:#x} ready_revents={:#x}", pollfd.fd, pollfd.events, pollfd.revents);
         }
         
         // 4. 如果找到了就绪事件，恢复掩码并返回！
@@ -686,7 +686,6 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     
     let path_str = normalize_leading_dot_path(translated_str(token, path));//直接删除路径中的.，不进行其他处理
     let mut args_vec: Vec<String> = Vec::new();
-    info!("[kernel] sys_exec: called with path '{}'", path_str);
     // 提取原始参数数组
     loop {
         let arg_str_ptr = *translated_ref(token, args);
@@ -751,7 +750,8 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             if let Some(interp_inode) = open_file(cwd.clone(), interp.as_str(), OpenFlags::RDONLY) {
                 interp_data = Some(interp_inode.read_all());
             } else {
-                //return ENOENT.as_isize(); 
+                /*error!("[kernel] sys_exec: failed to open interpreter '{}'", interp);
+                return ENOENT.as_isize(); */
             }
         }
         
@@ -761,8 +761,14 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             info!("[kernel] sys_exec: arg[{}] = '{}'", i, args_vec[i]);
         }
         // 真正开始替换进程空间
-        task.process().exec(task, all_data.as_slice(), interp_data.as_deref(), args_vec, false);
-        info!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
+        task.process().exec(
+            task,
+            all_data.as_slice(),
+            interp_data.as_deref(),
+            args_vec,
+            false,
+        );
+        //info!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
         argc as isize
     } else {
         error!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
@@ -1622,6 +1628,7 @@ pub fn sys_msync(_addr: usize, _len: usize, _flags: u32) -> isize {
     0
 }
 pub fn sys_times(tms_ptr: *mut usize) -> isize {
+    //println!("[kernel] sys_times called with tms_ptr={:#x}", tms_ptr as usize);
     let token = current_user_token();
     // 暂时伪实现，写0
     let tms_val = Tms {
@@ -1638,10 +1645,16 @@ pub fn sys_times(tms_ptr: *mut usize) -> isize {
 pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> isize {
     let token = current_user_token();
     let mut user_buf = translated_byte_buffer(token, buf, len);
+    const LCG_MULTIPLIER: usize = 25_214_903_917;
+    const LCG_MASK: usize = (1usize << 48) - 1;
+
     for (i, buf) in user_buf.iter_mut().enumerate() {
-        let seed = get_timer_ticks() + buf.as_ptr() as usize + i;
+        let seed = get_timer_ticks()
+            .wrapping_add(buf.as_ptr() as usize)
+            .wrapping_add(i);
         // 类LGC算法，时间滴答作种
-        buf[0] = (((25214903917usize * seed) & ((1 << 48) - 1)) >> (8 * (i % 6))) as u8;
+        let mixed = LCG_MULTIPLIER.wrapping_mul(seed) & LCG_MASK;
+        buf[0] = (mixed >> (8 * (i % 6))) as u8;
     }
     len as isize
 }

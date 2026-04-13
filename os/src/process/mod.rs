@@ -102,6 +102,7 @@ pub fn wake_up_one(mut wait_queue: MutexGuard<WaitQueue>) {
     if let Some(task) = wait_queue.pop_front() {
         let mut task_inner = task.inner_exclusive_access();
         task_inner.task_status = TaskStatus::Ready;
+        task_inner.owner_hart = None;
         drop(task_inner);
         add_task_into_pool(task);
     }
@@ -287,12 +288,15 @@ pub fn handle_signals() {
         let sig = final_pending.trailing_zeros() as usize + 1;
         let flag = SignalFlags::from_bits(1 << (sig - 1)).unwrap();
         let handler_addr = proc_inner.signal_actions.table[sig].handler;
-        if handler_addr == 0 || handler_addr == 1 {
-            // println!("[SIG PROBE] Ignore or Default action for sig {}. Clearing it.", sig);
-            
-            // 直接把信号从信箱里抹掉，当作没发生过（或者按需直接杀死进程）
-            task_inner.signals.remove(flag); 
-            return; // 直接返回，千万不要调用 call_user_signal_handler！
+        if handler_addr == 1 {
+            task_inner.signals.remove(flag);
+            return;
+        }
+        if handler_addr == 0 {
+            drop(proc_inner);
+            drop(task_inner);
+            call_kernel_signal_handler(flag);
+            return;
         }
         info!("[SIG PROBE] Calling handler for sig: {}, final_pending: {:#x}", sig, final_pending);
         // 🚩 核心：必须先放锁，再调用你写好的处理函数！

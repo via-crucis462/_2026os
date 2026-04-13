@@ -100,6 +100,10 @@ impl TaskManager {
     pub fn task_count(&self) -> usize {
         self.ready_queue.len()
     }
+
+    pub fn remove(&mut self, tid: usize) {
+        self.ready_queue.retain(|task| task.gettid() != tid);
+    }
 }
 
 lazy_static! {
@@ -146,7 +150,13 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
 }
 
 pub fn add_task_in_current_hart(task: Arc<TaskControlBlock>) {
-    //debug!("[kernel] TaskManager::add_task_in_current_hart: pid={}", task.getpid());
+    let _dispatch = lock_dispatch();
+    add_task_in_current_hart_unlocked(task);
+}
+
+pub(crate) fn add_task_in_current_hart_unlocked(task: Arc<TaskControlBlock>) {
+    remove_task_from_all_local_queues_unlocked(task.gettid());
+    remove_task_from_global_pool_unlocked(task.gettid());
     let mut manager = get_current_task_manager().exclusive_access();
     manager.add(task);
 }
@@ -154,8 +164,25 @@ pub fn add_task_in_current_hart(task: Arc<TaskControlBlock>) {
 /// Take a process out of the ready queue
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
 	//trace!("kernel: TaskManager::fetch_task");
+    let _dispatch = lock_dispatch();
     current_add_tasks();
-    get_current_task_manager().exclusive_access().fetch()
+    let hart_id = get_hart_id();
+    loop {
+        let task = get_current_task_manager().exclusive_access().fetch();
+        let Some(task) = task else {
+            return None;
+        };
+        let mut task_inner = task.inner_exclusive_access();
+        if task_inner.task_status != TaskStatus::Ready || task_inner.owner_hart.is_some() {
+            continue;
+        }
+        task_inner.task_status = TaskStatus::Running;
+        task_inner.owner_hart = Some(hart_id);
+        drop(task_inner);
+        remove_task_from_all_local_queues_unlocked(task.gettid());
+        remove_task_from_global_pool_unlocked(task.gettid());
+        return Some(task);
+    }
 }
 
 pub fn cores_fetch_task() {
@@ -186,4 +213,15 @@ pub fn remove_from_tid2task(tid: usize) {
 
 pub fn task_count_in_mng() -> usize {
     TID2TCB.exclusive_access().len()
+}
+
+pub(crate) fn remove_task_from_all_local_queues_unlocked(tid: usize) {
+    for hart_id in 0..CPU_CORE_NUM {
+        TASK_MANAGERS[hart_id].exclusive_access().remove(tid);
+    }
+}
+
+pub fn remove_task_from_all_local_queues(tid: usize) {
+    let _dispatch = lock_dispatch();
+    remove_task_from_all_local_queues_unlocked(tid);
 }
