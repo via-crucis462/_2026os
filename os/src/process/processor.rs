@@ -75,7 +75,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 ///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
 pub fn run_tasks() {
     //let mut counter: usize = 0;
-    
+        let hart_id = get_hart_id();
+        info!("[kernel] Hello from hart {}!", hart_id);
     loop {
         //counter += 1;
         //println!("run_tasks counter: {}", counter);
@@ -84,8 +85,13 @@ pub fn run_tasks() {
             let mut processor = current_processor();
             if (task.process().inner_exclusive_access().on_main_hart &&
                 hart_id != MAIN_HART_ID.load(Ordering::Acquire)) {
-                error!("[kernel] run_tasks: task pid={} is on main hart, but current hart is {}, put it back into pool", task.getpid(), hart_id);
-                add_task_into_pool(task);
+                let _dispatch = crate::task::lock_dispatch();
+                let mut task_inner = task.inner_exclusive_access();
+                task_inner.task_status = TaskStatus::Ready;
+                task_inner.owner_hart = None;
+                drop(task_inner);
+                info!("[kernel] run_tasks: task pid={} is on main hart, but current hart is {}, put it back into pool", task.getpid(), hart_id);
+                crate::task::add_task_into_pool_unlocked(task);
                 drop(processor);
                 #[cfg(target_arch = "riscv64")]
                 {
@@ -98,37 +104,37 @@ pub fn run_tasks() {
             } 
             //warn!("[kernel] hart {}, run_tasks: fetched tid={} of pid={}", hart_id, task.tid.0, task.getpid());
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
-            // access coming task TCB exclusively
-            let mut task_inner = task.inner_exclusive_access();
-            if task_inner.task_status != TaskStatus::Ready {
-                drop(task_inner);
-                drop(processor);
-                continue;
-            }
+            let task_inner = task.inner_exclusive_access();
             let next_task_cx_ptr = &task_inner.task_cx as *const TaskContext;
-            task_inner.task_status = TaskStatus::Running;
-            // release coming task_inner manually
             drop(task_inner);
             // release coming task TCB manually
             processor.current = Some(task);
             // release processor manually
             // 释放锁
             drop(processor);
+            //debug!("[kernel] hart {}, run_tasks: switching to tid={} of pid={}, main_hart={}", hart_id, current_task().unwrap().tid.0, current_task().unwrap().getpid(), MAIN_HART_ID.load(Ordering::Acquire));
             unsafe {
                 // 切换到下一个任务执行流
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
             // suspend_current_and_run_next以及exit_current_and_run_next会跳到这里
-            let mut processor = current_processor();
-            if let Some(prev_task) = processor.take_current() {
-                let status = prev_task.inner_exclusive_access().task_status;
+            let prev_task = {
+                let mut processor = current_processor();
+                processor.take_current()
+            };
+            if let Some(prev_task) = prev_task {
+                let _dispatch = crate::task::lock_dispatch();
+                let mut prev_inner = prev_task.inner_exclusive_access();
+                let status = prev_inner.task_status;
+                prev_inner.owner_hart = None;
+                drop(prev_inner);
                 if status == TaskStatus::Ready {
                     // 之前已经保存好了
                     let on_main_hart = prev_task.process().inner_exclusive_access().on_main_hart;
                     if on_main_hart {
-                        crate::task::manager::add_task_in_current_hart(prev_task);
+                        crate::task::manager::add_task_in_current_hart_unlocked(prev_task);
                     } else {
-                        add_task_into_pool(prev_task);
+                        crate::task::add_task_into_pool_unlocked(prev_task);
                     }
                 } else if status == TaskStatus::WaitSaving {
                     // 调用了wait函数，在这里加入等待队列
@@ -140,13 +146,16 @@ pub fn run_tasks() {
                 }
                 // 如果 status 是 Zombie 或 Blocked，什么都不做，自然销毁或等别人唤醒
             }
-            drop(processor);
         } else {
             #[cfg(target_arch = "riscv64")]{
             crate::arch::timer::set_next_trigger();
-                unsafe {
-                    asm!("wfi");
-                }
+            #[cfg(target_arch = "loongarch64")]
+            unsafe {
+                asm!("idle 0");
+            }
+            #[cfg(target_arch = "riscv64")]
+            unsafe {
+                asm!("wfi");
             }
             trace!("no tasks available in hart {}", hart_id);
         }

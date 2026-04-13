@@ -82,6 +82,16 @@ fn init_tlb() {
    debug!("[kernel] cfg01: {:#x}", cfg01);
 }
 
+pub fn flush_tlb_for_asid(asid: usize) {
+    unsafe {
+        asm!(
+            "invtlb 0x4, {asid}, $r0",
+            asid = in(reg) asid,
+        );
+        asm!("dbar 0");
+    }
+}
+
 // 修改根页表地址
 /*
 pub fn la_app_init_mem(token: usize) {

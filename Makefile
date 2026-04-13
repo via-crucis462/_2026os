@@ -9,10 +9,10 @@ LA_ELF ?= os/target/loongarch64-unknown-none/$(MODE)/os
 all: build
 
 build-rv:
-	cd os && make build MODE=$(MODE)
+	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG)
 
 build-la:
-	cd os && make build-la MODE=$(MODE)
+	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG)
 
 copy-rv:
 	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv
