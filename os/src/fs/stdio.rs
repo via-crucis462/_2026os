@@ -47,9 +47,7 @@ impl File for Stdin {
     fn read(&self, user_buf: UserBuffer) -> usize {
         // assert_eq!(user_buf.len(), 1);
         // busy loop
-        let mut c: usize;
-        loop {
-            //  新增：检查是否被信号打断
+        let ch = loop {
             let task = crate::task::current_task().unwrap();
             let task_inner = task.inner_exclusive_access();
             let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
@@ -59,24 +57,35 @@ impl File for Stdin {
             if pending != 0 || unmaskable != 0 {
                 return 0; 
             }
-            c = console_getchar();
+            
+            // 2. 只读取一次字符，避免吞掉输入
+            let mut c = console_getchar();
+            
+            // 转换回车键
             if c == 13 || c == '\r' as usize {
                 c = 10;
             }
-            if let Some(ch) = normalize_console_char(console_getchar()) {
-                break ch;
+            
+            // 3. 把刚才读取并处理过的 c 传给 normalize 函数
+            if let Some(valid_ch) = normalize_console_char(c) {
+                break valid_ch; // 跳出循环，并将 valid_ch 作为整个 loop 表达式的返回值
             }
+            
             suspend_current_and_run_next();
-        };
+        }; // 注意这里的最后要加分号
+
         let mut count = 0;
         for byte_ref in user_buf.into_iter() {
             unsafe {
-                *byte_ref = ch;
+                // 4. 此时 ch 在作用域内了。
+                // (如果 valid_ch 的类型是 usize，这里可能需要写成 ch as u8，取决于你之前设计的类型)
+                *byte_ref = ch; 
             }
             count += 1;
-            break; // Currently we only read 1 byte to match the busy loop logic
+            break; // 目前只读取 1 byte 以匹配忙等待逻辑
         }
         count
+    
     }
 
     fn read_at(&self, _offset: usize, user_buf: UserBuffer) -> usize {

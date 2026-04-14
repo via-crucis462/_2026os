@@ -189,7 +189,10 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
             return ENOTDIR.as_isize(); // 目标文件不是目录
         }
         let mut inner = proc.inner_exclusive_access();
-        let fd = inner.alloc_fd();
+        let fd = match inner.alloc_fd() {
+        Some(fd) => fd,
+        None => return EMFILE.as_isize(), // EMFILE (Too many open files) 的标准错误码是 24
+    };
         inner.set_fd(fd, inode, (flags & O_CLOEXEC) != 0, flags as usize);
         debug!("[kernel] sys_openat: success fd={} path={}", fd, path_str);
         fd as isize
@@ -263,9 +266,15 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
           return EFAULT.as_isize();
     }
     let (pipe_read, pipe_write) = make_pipe();
-    let read_fd = inner.alloc_fd();
+    let read_fd = match inner.alloc_fd() {
+        Some(fd) => fd,
+        None => return EMFILE.as_isize(), // EMFILE (Too many open files) 的标准错误码是 24
+    };
     inner.set_fd(read_fd, pipe_read, false, 0);
-    let write_fd = inner.alloc_fd();
+    let write_fd = match inner.alloc_fd() {
+        Some(fd) => fd,
+        None => return EMFILE.as_isize(), // EMFILE (Too many open files) 的标准错误码是 24
+    };
     inner.set_fd(write_fd, pipe_write, false, O_WRONLY);
     // User ABI for pipe is int pipefd[2], i.e. two 32-bit entries.
     let pipe_u32 = pipe as *mut u32;
@@ -274,7 +283,7 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     //println!("pipe done");
     0
 }
-
+const RLIMIT_NOFILE: usize = 1024;
 pub fn sys_dup(fd: usize) -> isize {
 	trace!("kernel:pid[{}] sys_dup", current_task().unwrap().process().pid.0);
     let task = current_task().unwrap();
@@ -286,7 +295,10 @@ pub fn sys_dup(fd: usize) -> isize {
     if inner.fd_table[fd].file.is_none() {
         return EBADF.as_isize();
     }
-    let new_fd = inner.alloc_fd();
+    let new_fd =match inner.alloc_fd() {
+        Some(fd) => fd,
+        None => return EMFILE.as_isize(), // EMFILE (Too many open files) 的标准错误码是 24
+    };
     let file = Arc::clone(inner.fd_table[fd].file.as_ref().unwrap());
     let old_status = inner.fd_table[fd].status;
     inner.set_fd(new_fd, file, false, old_status);
