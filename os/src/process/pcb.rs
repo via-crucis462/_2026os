@@ -6,7 +6,7 @@ use schedule::*;
 
 use crate::{
     arch::trap::{TrapContext, trap_handler, trap_cx_va_by_kernel_stack},
-    fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout},
+    fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout, Stderr},
     mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, 
         translated_refmut, MapArea, MapPermission, MapType},
     sync::{MPSafeCell, WaitQueue},
@@ -129,7 +129,7 @@ impl ProcessControlBlock {
                 fd_table: vec![
                     FileDescriptor::new(Arc::new(Stdin), false, 0),
                     FileDescriptor::new(Arc::new(Stdout), false, 0),
-
+                    FileDescriptor::new(Arc::new(Stderr), false, 0),
                 ],
                 cwd: ROOT_DENTRY.clone(),
                 signals: SignalFlags::empty(),

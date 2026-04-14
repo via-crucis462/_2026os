@@ -1,9 +1,5 @@
 MODE ?= debug
-<<<<<<< HEAD
-RV_SMP ?= 1
-=======
 RV_SMP ?= 4
->>>>>>> 5ea7c6cb73bfb1503d1896a242d30e445d775839
 LA_SMP ?= 4
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
