@@ -10,7 +10,6 @@ use crate::process::current_task_to_sleep;
 use crate::lazy_static;
 use spin::Mutex;
 use crate::sync::WaitQueue;
-use crate::arch::riscv::timer::get_real_time_ns;
 
 use alloc::collections::BTreeMap;
 
@@ -23,7 +22,7 @@ lazy_static! {
 }
 
 pub use crate::{
-    arch::timer::{get_time_ms,get_time_us, get_timer_ticks}, 
+    arch::timer::{get_real_time_ns, get_time_ms, get_time_us, get_timer_ticks}, 
     fs::*, 
     mm::{UserBuffer, mmap, translated_byte_buffer, translated_ref, translated_refmut, translated_str}, 
     process::{
@@ -1098,6 +1097,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
         println!("[utime_debug] sys_utimensat: WARNING! ino is 0, cache skipped!");
     }
 
+    println!("unimplemented sys_utimensat");
     0
 }
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {

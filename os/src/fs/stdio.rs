@@ -63,7 +63,7 @@ impl File for Stdin {
             if c == 13 || c == '\r' as usize {
                 c = 10;
             }
-            if let Some(ch) = normalize_console_char(console_getchar()) {
+            if let Some(ch) = normalize_console_char(c) {
                 break ch;
             }
             suspend_current_and_run_next();
@@ -71,7 +71,7 @@ impl File for Stdin {
         let mut count = 0;
         for byte_ref in user_buf.into_iter() {
             unsafe {
-                *byte_ref = ch;
+                *byte_ref = c as u8;
             }
             count += 1;
             break; // Currently we only read 1 byte to match the busy loop logic

@@ -183,7 +183,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
        println!("[kernel] >>> Ready to enter Syscall ID: {}", syscall_id);
    }*/
 
-
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
@@ -309,7 +308,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             Errno::ENOSYS.as_isize()}
     };
     if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
-        debug!(
+        println!(
             "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], ret
         );
