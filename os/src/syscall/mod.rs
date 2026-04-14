@@ -308,7 +308,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             Errno::ENOSYS.as_isize()}
     };
     if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
-        println!(
+        debug!(
             "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], ret
         );
