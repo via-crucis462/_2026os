@@ -60,12 +60,12 @@ pub fn trap_handler() -> ! {
     let sepc = riscv::register::sepc::read();
     let stval = riscv::register::stval::read();
 
-   /*  println!(
+     debug!(
         "trap_handler: cause: {:?}, sepc: {:#x}, stval: {:#x}", 
         scause.cause(), 
         sepc, 
         stval
-    );*/
+    );
     set_kernel_trap_entry();
     let scause = scause::read();
     let stval = stval::read();
@@ -115,14 +115,14 @@ pub fn trap_handler() -> ! {
                 drop(process);
                 drop(task);
                 
-                error!(
+                /*error!(
                     "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}, sp={:#x}",
                     crate::task::current_task().unwrap().process().pid.0,
                     scause.cause(),
                     current_trap_cx().get_rt(),
                     stval,
                     sp
-                );
+                );*/
                 
                 // 取消原来的 current_add_signal(SignalFlags::SIGSEGV);
                 // 发信号压栈死循环。
@@ -153,11 +153,11 @@ pub fn trap_handler() -> ! {
     //let cause = scause::read().cause();
     //println!("[PROBE 2] trap_handler ending (cause: {:?}), preparing to handle_signals", cause);
 
-    crate::process::handle_signals();
+    /*crate::process::handle_signals();
     if current_task().unwrap().inner_exclusive_access().killed {
         exit_current_and_run_next(-1); 
-    }
-    
+    }*/
+
     trap_return();
     
 }
@@ -179,6 +179,12 @@ pub fn trap_cx_va_by_kernel_stack(kernel_stack: &KernelStack) -> usize {
 #[no_mangle]
 /// return to user space
 pub fn trap_return() -> ! {
+
+    crate::process::handle_signals();
+    if current_task().unwrap().inner_exclusive_access().killed {
+        info!("[SIG PROBE] EXECUTING DEATH SENTENCE FOR PID!");
+        exit_current_and_run_next(-1); 
+    }
     set_user_trap_entry();
     let trap_cx_ptr = current_trap_cx_user_va();
     let user_satp = current_user_token();

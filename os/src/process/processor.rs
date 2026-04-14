@@ -136,18 +136,14 @@ pub fn run_tasks() {
                     } else {
                         crate::task::add_task_into_pool_unlocked(prev_task);
                     }
-                } else if status == TaskStatus::WaitSaving {
-                    // 调用了wait函数，在这里加入等待队列
-                    let process = prev_task.process();
-                    let mut wait_queue = process.wait_queue.lock();
+                } /*else if status == TaskStatus::WaitSaving {
+                    // 调用了wait函数
                     prev_task.inner_exclusive_access().task_status = TaskStatus::Blocked;
-                    wait_queue.push_back(prev_task);
-                    drop(wait_queue);
-                }
+                }*/
                 // 如果 status 是 Zombie 或 Blocked，什么都不做，自然销毁或等别人唤醒
             }
         } else {
-            #[cfg(target_arch = "riscv64")]{
+            #[cfg(target_arch = "riscv64")]
             crate::arch::timer::set_next_trigger();
             #[cfg(target_arch = "loongarch64")]
             unsafe {

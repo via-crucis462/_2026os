@@ -6,7 +6,7 @@ use alloc::vec;
 use alloc::sync::Arc;
 use alloc::string::ToString;
 use crate::syscall::translated_ref;
-
+use crate::syscall::TIME_CACHE;
 use super::{errno::Errno::*, normalize_leading_dot_path};
 
 const F_DUPFD: usize = 0;
@@ -191,7 +191,6 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
         let mut inner = proc.inner_exclusive_access();
         let fd = inner.alloc_fd();
         inner.set_fd(fd, inode, (flags & O_CLOEXEC) != 0, flags as usize);
-        debug!("[kernel] sys_openat: success fd={} path={}", fd, path_str);
         fd as isize
     } else {
         trace!("VFS: File '{}' not found", path_str);
@@ -335,7 +334,16 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     if let Some(file) = &inner.fd_table[fd].file {
         let file = file.clone();
         drop(inner);
-        let stat = file.get_stat();
+        let mut stat = file.get_stat();
+        if let Some(&(asec, ansec, msec, mnsec)) = crate::syscall::fs::TIME_CACHE.lock().get(&stat.ino) {
+            stat.atime_sec = asec;
+            stat.atime_nsec = ansec;
+            stat.mtime_sec = msec;
+            stat.mtime_nsec = mnsec;
+        }
+        let inner = proc.inner_exclusive_access();
+        let token = inner.memory_set.token();
+         drop(inner);
         *translated_refmut(token, st) = stat;
         0
     } else {
@@ -581,21 +589,9 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
         _ => ENOSYS.as_isize(),
     }
 }
-pub fn sys_utimensat(_dirfd: i32, path_ptr: usize, _times_ptr: usize, _flags: usize) -> isize {
-    let task = current_task().unwrap();
-    let proc = task.process();
-    let token = proc.inner_exclusive_access().memory_set.token();
-    let path_str = translated_str(token, path_ptr as *const u8);
 
-    let cwd = proc.inner_exclusive_access().cwd.clone();
-    
 
-    if cwd.find_tree(&path_str, true).is_some() {
-        return 0; 
-    } else {
-        return ENOENT.as_isize();
-    }
-}
+
 /// YOUR JOB: Implement unlinkat.
 pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
     let token = current_user_token();

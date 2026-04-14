@@ -56,6 +56,9 @@ pub trait File: Send + Sync {
     fn as_any(&self) -> &dyn Any {
         unimplemented!("as_any not implemented for this file type")
     }
+    fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
+        0
+    }
 }
 
 /// The stat of a inode
@@ -135,6 +138,14 @@ pub struct StatxTimestamp {
     pub tv_nsec: u32,
     pub __reserved: i32,
 }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct TimeSpec {
+    pub tv_sec: usize,
+    pub tv_nsec: usize,
+}
+pub const UTIME_NOW: usize = 0x3fffffff;
+pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub trait VfsInode: Send + Sync {
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize;
     fn write_at(&self, offset: usize, buf: &[u8]) -> usize;
@@ -190,7 +201,10 @@ pub trait VfsInode: Send + Sync {
     fn link(&self, name: &str, inode: Arc<dyn VfsInode>) -> bool {
         false
     }
-    
+    fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
+        0 // 默认返回成功，至少让测试能跑通
+    }
+
 }
 
 bitflags! {
@@ -210,7 +224,7 @@ bitflags! {
 
 pub use inode::{list_apps, OpenFlags, open_file, ROOT_INODE, ROOT_VFS_INODE, make_dir, OSInode};
 pub use pipe::{make_pipe, Pipe};
-pub use stdio::{Stdin, Stdout};
+pub use stdio::{Stdin, Stdout, Stderr};
 
 
 

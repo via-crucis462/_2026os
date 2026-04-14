@@ -161,8 +161,7 @@ pub fn wake_up_task(task: Arc<TaskControlBlock>) {
     // (具体枚举名称请根据你项目里的定义替换，如 TaskStatus::Blocking)
     if matches!(inner.task_status, TaskStatus::Blocked) {
         inner.task_status = TaskStatus::Ready;
-        inner.owner_hart = None;
-        drop(inner); // 🚩 极其重要：在调用 add_task_into_pool 前必须释放 task inner 的锁！
+        drop(inner); 
         
         // 重新塞回你的全局就绪池！
         add_task_into_pool_unlocked(task);

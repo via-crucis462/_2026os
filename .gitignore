@@ -38,3 +38,6 @@ sdcard-rv/*
 syscall_posix_kernel.md
 *.txt
 initproc*
+all_codes.txt
+my_sdcard/*
+ins.txt
