@@ -4,11 +4,11 @@
 pub const CPU_CORE_NUM: usize = 4;
 
 /// user app's stack size
-pub const USER_STACK_SIZE: usize = 0x40_0000;
+pub const USER_STACK_SIZE: usize = 0x80_0000; // 8MB
 /// kernel stack size
 pub const KERNEL_STACK_SIZE: usize = 4096 * 2;
 /// kernel heap size
-pub const KERNEL_HEAP_SIZE: usize = 0x600_0000;
+pub const KERNEL_HEAP_SIZE: usize = 0x800_0000; // 128MB
 
 /// page size : 4KB
 pub const PAGE_SIZE: usize = 0x1000;
