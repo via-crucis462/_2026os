@@ -1,6 +1,9 @@
 //! Process management syscalls
 //! 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
 //! 内存管理也暂时放在此处
+
+use core::error;
+
 use crate::get_hart_id;
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
@@ -27,7 +30,8 @@ pub use crate::{
     mm::{UserBuffer, mmap, translated_byte_buffer, translated_ref, translated_refmut, translated_str}, 
     process::{
         task::{
-            MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_token, exit_current_and_run_next, suspend_current_and_run_next
+            MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_token, exit_current_and_run_next, suspend_current_and_run_next, 
+                TaskControlBlock, ProcessControlBlock
         },
         clone::*,
         manager::*
@@ -815,7 +819,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
     loop {
         let mut proc_inner = proc.inner_exclusive_access();
         
-        //   核心逻辑：严谨的 4 种 POSIX 匹配判定
+        // 核心逻辑：严谨的 4 种 POSIX 匹配判定
         let is_match = |p: &alloc::sync::Arc<crate::task::ProcessControlBlock>| -> bool {
             let child_pid = p.getpid();
             if pid == -1 {
@@ -829,10 +833,15 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
             }
         };
 
+        if (proc_inner.children.is_empty()) {
+            info!("[wait4] P{} has no children at all", current_pgid);
+            return ECHILD.as_isize(); // 没有任何子进程
+        }
+
         // 1. 检查是否存在符合要求的子进程
         if !proc_inner.children.iter().any(|p| is_match(p)) {
             info!("[wait4] P{} has no matching children for filter {}", current_pgid, pid);
-            return -1; // 真的是一个匹配的都没有，才返回 ECHILD
+            return ECHILD.as_isize(); // 真的是一个匹配的都没有，才返回 ECHILD
         }
     
         // 2. 尝试找一个“已经死掉”的僵尸孩子
@@ -1147,15 +1156,8 @@ pub fn sys_mprotect(_start: usize, _len: usize, _prot: usize) -> isize {
 
 /// YOUR JOB: Implement mmap.
 pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: usize) -> isize {
-    debug!("[kernel] sys_mmap called with start={:#x}, len={:#x}, prot={:#x}, flags={:#x}, fd={}, off={:#x}", start, len, port, flags, fd, _off);
-    let task = current_task().unwrap();
-        let process = task.process();
-        let token = current_user_token();
-        let inner = process.inner_exclusive_access();
-        for i in inner.memory_set.areas().iter() {
-            debug!("after map: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
-        }
-    drop(inner);
+    trace!("kernel:pid[{}] sys_mmap called with start={:#x}, len={:#x}, prot={:#x}, flags={:#x}, fd={}, off={:#x}", 
+        current_task().unwrap().process().pid.0, start, len, port, flags, fd, _off);
     let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
     let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
 
@@ -1210,34 +1212,37 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
     }
 }
 
-/// change data segment size
+/// 修改断点（调整堆空间）
+/// addr如果为0表示查询当前断点
 pub fn sys_brk(addr: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
     
-    // 1. 先拿到当前的 brk 位置
+    // 
     let mut inner = process.inner_exclusive_access();
     let current_brk = inner.program_brk;
     
     trace!("kernel:pid[{}] sys_brk: request addr={:#x}, current_brk={:#x}", process.pid.0, addr, current_brk);
 
-    // 2. 按照 Linux 规范，如果传入 0，意思是“查询当前 brk 在哪”
     if addr == 0 {
+        info!("sys_brk: query current brk, returning {:#x}", current_brk);
         return current_brk as isize;
     }
 
-    // 3. 释放 inner 锁，防止 mmap::do_brk 内部再次获取 process 锁导致死锁！
     drop(inner); 
-
-    // 4. 调用底层的 brk 处理逻辑
     if let Ok(new_brk) = mmap::do_brk(addr) {
-        // 成功的话，记得一定要把进程的 program_brk 更新掉
+        /* do_brk内部有修改了
         let mut inner = process.inner_exclusive_access();
         inner.program_brk = new_brk;
+         */
+        // println!("sys_brk: successfully set brk to {:#x}", new_brk);
         new_brk as isize
     } else {
-        // 失败的话，返回原来的 brk
+        /* 失败的话，返回原来的 brk
         current_brk as isize
+        */
+        error!("sys_brk: failed to set brk to {:#x}, current_brk remains at {:#x}", addr, current_brk);
+        EINVAL.as_isize() // 请求的地址不合法
     }
 }
 /// YOUR JOB: Implement spawn.
@@ -1245,16 +1250,16 @@ pub fn sys_brk(addr: usize) -> isize {
 pub fn sys_spawn(_path: *const u8) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
-    trace!("kernel:pid[{}] sys_spawn NOT IMPLEMENTED", process.pid.0);
-    -1
+    warn!("kernel:pid[{}] sys_spawn NOT IMPLEMENTED", process.pid.0);
+    ENOSYS.as_isize()
 }
 
 // YOUR JOB: Set task priority.
 pub fn sys_set_priority(_prio: isize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
-    trace!("kernel:pid[{}] sys_set_priority NOT IMPLEMENTED", process.pid.0);
-    -1
+    warn!("kernel:pid[{}] sys_set_priority NOT IMPLEMENTED", process.pid.0);
+    ENOSYS.as_isize()
 }
 
 #[allow(dead_code)]

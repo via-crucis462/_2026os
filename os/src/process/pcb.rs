@@ -200,7 +200,7 @@ impl ProcessControlBlock {
         const INTERP_BASE: usize = 0x40000000;   // 给解释器找一个宽敞的基地址（避开主程序）
         const AT_BASE: usize = 7;                // 辅助向量里代表解释器基址的 ID
         
-
+        
         if let Some(interp) = interp_data {
             // 解析解释器的 ELF
             let elf = xmas_elf::ElfFile::new(interp).unwrap();
@@ -234,6 +234,7 @@ impl ProcessControlBlock {
                 }
             }
         }
+        
         debug!(
             "[kernel] task::exec: entry_point={:#x}, user_sp={:#x}",
             entry_point, user_sp
@@ -539,7 +540,6 @@ impl ProcessControlBlock {
         //println!("brk: change from {:#x} to {:#x}", _old_break, new_brk);
         if result {
             inner.program_brk = new_brk as *const () as usize;
-            
             Ok(addr)
         } else {
             Err(-1)

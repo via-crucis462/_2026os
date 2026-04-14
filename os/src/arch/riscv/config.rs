@@ -4,11 +4,11 @@
 pub const CPU_CORE_NUM: usize = 4;
 
 /// user app's stack size
-pub const USER_STACK_SIZE: usize = 4096 * 2;
+pub const USER_STACK_SIZE: usize = 0x80_0000; // 8MB
 /// kernel stack size
 pub const KERNEL_STACK_SIZE: usize = 4096 * 2;
 /// kernel heap size
-pub const KERNEL_HEAP_SIZE: usize = 0x600_0000;
+pub const KERNEL_HEAP_SIZE: usize = 0x800_0000; // 128MB
 
 /// page size : 4KB
 pub const PAGE_SIZE: usize = 0x1000;
@@ -21,7 +21,7 @@ pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
 /// clock frequency
 pub const CLOCK_FREQ: usize = 12500000;
 /// the physical memory end
-pub const MEMORY_END: usize = 0x88000000;
+pub const MEMORY_END: usize = 0x4_0000_0000;
 /// 这里也定义一个
 pub const DMA_SIZE: usize = 0;
 /// The base address of control registers in Virtio_Block device
@@ -32,5 +32,5 @@ pub const MMIO: &[(usize, usize)] = &[
 
 /// 和la同步这个变量不过不设值
 pub const OFFSET_FOR_USER_APP: usize = 0;
-pub const USER_APP_BASE: usize = 0x40000000;
+pub const USER_APP_BASE: usize = 0x4000_0000;
 pub const USER_APP_MAX_SIZE: usize = 0x40_0000_0000; // 1GB
