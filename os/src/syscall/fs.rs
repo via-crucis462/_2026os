@@ -8,7 +8,11 @@ use alloc::string::ToString;
 use crate::syscall::translated_ref;
 use crate::syscall::TIME_CACHE;
 use super::{errno::Errno::*, normalize_leading_dot_path};
+use crate::syscall::TmpfsFileInode;
+use crate::syscall::OSInode;
+use crate::syscall::Dentry;
 
+use alloc::string::String;
 const F_DUPFD: usize = 0;
 const F_GETFD: usize = 1;
 const F_SETFD: usize = 2;
@@ -161,7 +165,50 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
     let token = current_user_token();
     let path_str = normalize_leading_dot_path(translated_str(token, path));
     //debug!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
+    const O_TMPFILE: u32 = 0x400000;
+    let (readable, writable) = match flags & 0x3 {
+    0x0 => (true, false), // O_RDONLY
+    0x1 => (false, true), // O_WRONLY
+    0x2 => (true, true),  // O_RDWR
+    _ => (true, true),
+    };
+    if (flags & O_TMPFILE) != 0 {
+        let target_dentry = if let Some(dentry) = ROOT_DENTRY.find_tree(&path_str, true) {
+        dentry
+        } else {
+            return ENOENT.as_isize(); // 路径不存在
+        };
+        
+        let stat = target_dentry.inode.get_stat();
+        if (stat.mode & 0o170000) != 0o040000 { 
+            return ENOTDIR.as_isize(); // 不是目录，报错
+        }
+        // 3. 将 VfsInode 包装成你的 OSInode / File 结构
+        let anon_vfs_inode = Arc::new(TmpfsFileInode::new());
+        let anon_dentry =Dentry::new(
+        String::from(""), 
+        anon_vfs_inode.clone(), 
+        Arc::downgrade(&target_dentry), // 不挂载到全局树
+        );
+        let anon_file = Arc::new(OSInode::new(
+        readable,
+        writable,
+        anon_vfs_inode,
+        anon_dentry,
+        ));
 
+        let mut inner = proc.inner_exclusive_access();
+        let fd = match inner.alloc_fd() {
+            Some(fd) => fd,
+            None => return EMFILE.as_isize(),
+        };
+        
+        // 4. 塞入进程的文件描述符表
+        inner.set_fd(fd, anon_file, (flags & O_CLOEXEC) != 0, flags as usize);
+        debug!("[kernel] sys_openat: O_TMPFILE success fd={}", fd);
+        
+        return fd as isize;
+    }
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {

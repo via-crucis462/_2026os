@@ -525,14 +525,14 @@ impl ProcessControlBlock {
         } else {
             debug!("change_program_brk: before append_to, heap_bottom={:#x}, new_brk={:#x}", heap_bottom, new_brk);
             for i in inner.memory_set.areas().iter() {
-                debug!("change_program_brk: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+                trace!("change_program_brk: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
             }
             inner
                 .memory_set
                 .append_to(VirtAddr(heap_bottom), VirtAddr(new_brk as *const () as usize));
             
             for i in inner.memory_set.areas().iter() {
-                debug!("change_program_brk: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+                trace!("change_program_brk: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
             }
              true
         };
