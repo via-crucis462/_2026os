@@ -54,7 +54,6 @@ impl FileDescriptor {
 
 pub struct ProcessControlBlock {
     pub pid: Arc<PidHandle>,
-    pub wait_queue: Mutex<WaitQueue>,
     pub inner: MPSafeCell<ProcessControlBlockInner>,
 }
 
@@ -115,7 +114,6 @@ impl ProcessControlBlock {
         // 进程控制块
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),// 注意：实际上只克隆了指针
-            wait_queue: Mutex::new(WaitQueue::new()),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: true, // initproc和shell默认在主核运行
                 pname: String::from("initproc"),
@@ -411,7 +409,6 @@ impl ProcessControlBlock {
         let new_fd_table = parent_inner.fd_table.clone();
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
-            wait_queue: Mutex::new(WaitQueue::new()),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: false, // LA 侧先固定到主核，避免未收敛的跨核执行路径
                 pname: parent_inner.pname.clone(),

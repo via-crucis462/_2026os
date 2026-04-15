@@ -813,13 +813,12 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
     let current_pgid = proc.inner_exclusive_access().pgid; 
     
     const WNOHANG: usize = 0x1;
-    let nohang = (options & WNOHANG) != 0;
+    let nohang = (options & WNOHANG) != 0;//是否开启了非阻塞选项
     info!("[wait4] P{} waiting for PID/PGID: {}, options: {}", current_pgid, pid, options);
 
-    loop {
         let mut proc_inner = proc.inner_exclusive_access();
         
-        // 核心逻辑：严谨的 4 种 POSIX 匹配判定
+        // 严谨的 4 种 POSIX 匹配判定
         let is_match = |p: &alloc::sync::Arc<crate::task::ProcessControlBlock>| -> bool {
             let child_pid = p.getpid();
             if pid == -1 {
@@ -850,7 +849,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
         });
     
         if let Some((idx, _)) = pair {
-            // --- A. 收尸成功 ---
+            // 收尸成功，拿到孩子的 PID 和退出码
             let child = proc_inner.children.remove(idx);
             let child_pid = child.getpid();
             let exit_code = child.inner_exclusive_access().exit_code;
@@ -865,9 +864,9 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
             return child_pid as isize; 
         } else {
             if nohang {
-                return 0; 
-            }
-            // --- B. 孩子还活着，睡眠等待 ---
+                return 0; // 没有僵尸孩子但开启了非阻塞选项，直接返回 0
+            }else{
+                // --- B. 孩子还活着，睡眠等待 ---
             info!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
             drop(proc_inner);
             // 新增：检查是否被信号打断 
@@ -880,8 +879,31 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                 info!("[wait4] Interrupted by signal! Returning EINTR.");
                 return -4; // -4 对应 EINTR (Interrupted system call)
             }
-            
-            crate::process::current_task_to_sleep(proc.wait_queue.lock());
+            loop{
+                // 继续睡眠等待，直到被调度器唤醒
+                suspend_current_and_run_next();
+                
+                // 每次被唤醒后都检查一次是否有符合条件的僵尸孩子
+                let mut proc_inner = proc.inner_exclusive_access();
+                let pair = proc_inner.children.iter().enumerate().find(|(_, p)| {
+                    p.inner_exclusive_access().is_zombie && is_match(p)
+                });
+                if let Some((idx, _)) = pair {
+                    // 收尸成功，拿到孩子的 PID 和退出码
+                    let child = proc_inner.children.remove(idx);
+                    let child_pid = child.getpid();
+                    let exit_code = child.inner_exclusive_access().exit_code;
+                    
+                    info!("[wait4] P{} collected Zombie P{} (code: {}) after waking up", current_pgid, child_pid, exit_code);
+                    // 组装状态码
+                    let status = (exit_code & 0xff) << 8;
+                    if exit_code_ptr as usize != 0 {
+                        *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
+                    }
+                    
+                    return child_pid as isize; 
+                }
+            }
         }
     }
 }
@@ -904,7 +926,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
     };
 
     if pid > 0 {
-        // 🔵 正常逻辑：发送给单个指定 PID 的进程
+        // 正常逻辑：发送给单个指定 PID 的进程
         if let Some(proc) = get_process(pid as usize) {
             if signum == 0 { return 0; } // 探测成功
             

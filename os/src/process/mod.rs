@@ -186,13 +186,13 @@ pub const IDLE_PID: usize = 0;
 
         
         // 4. 唤醒父进程并发送 SIGCHLD 信号
-        if let Some(parent) = parent_to_wake {
+        /*if let Some(parent) = parent_to_wake {
             let mut parent_inner = parent.inner_exclusive_access();
             parent_inner.signals.insert(SignalFlags::SIGCHLD);
             drop(parent_inner); 
             
             wake_up_one(parent.wait_queue.lock());
-        }
+        }*/
     }
     
     // **** release current PCB
