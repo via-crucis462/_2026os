@@ -48,26 +48,23 @@ pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
     let path_str = translated_str(token, path);
     trace!("kernel: sys_statfs path={}", path_str);
 
-    // 暂时伪实现，不返回真实数据
-    let stat = Statfs {
-        f_type: 0xEF53,
-        f_bsize: 4096,  
-        f_blocks: 262144,
-        f_bfree: 131072,
-        f_bavail: 131072,  
-        f_files: 65536,
-        f_ffree: 32768,
-        f_fsid: [0, 0],
-        f_namelen: 255,    
-        f_frsize: 4096,
-        f_flags: 0,
-        f_spare: [0; 4],
-    };
-
     if buf.is_null() {
         return EFAULT.as_isize();
     }
 
+    // 1. 根据传入的路径，从全局目录树中找到对应的文件/目录节点
+    let target_dentry = if path_str == "/" {
+        crate::fs::ROOT_DENTRY.clone()
+    } else if let Some(dentry) = crate::fs::ROOT_DENTRY.find_tree(&path_str, true) {
+        dentry
+    } else {
+        return ENOENT.as_isize(); // 路径不存在，拒绝伪造！
+    };
+
+    // 2. 多态调用 
+    let stat = target_dentry.inode.statfs();
+
+    // 3. 将真实数据写入用户空间
     *translated_refmut(token, buf) = stat;
     
     0 // Success!

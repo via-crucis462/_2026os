@@ -11,6 +11,8 @@ use crate::fs::devfs::ZeroInode;
 use crate::fs::devfs::RtcInode;
 use crate::fs::devfs::TtyInode;
 use super::{VfsInode, Stat, Statx};
+use crate::syscall::fs::Statfs;
+
 // 全局唯一的 Inode 分配器
 static TMPFS_INO_COUNTER: AtomicUsize = AtomicUsize::new(10000);
 
@@ -56,6 +58,7 @@ impl super::VfsInode for TmpfsFileInode {
     fn get_size(&self) -> usize { self.data.lock().len() }
 
     fn get_stat(&self) -> super::Stat {
+        let data_len = self.data.lock().len();
         super::Stat {
             dev: 0, 
             ino: self.ino as u64,
@@ -208,6 +211,16 @@ impl super::VfsInode for TmpfsDirInode {
     }
 
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { 0 }
+    fn statfs(&self) -> Statfs {
+        Statfs {
+            f_type: 0x01021994, // Tmpfs 的魔数
+            f_bsize: 4096,
+            f_blocks: 0, // 内存文件系统，块数为 0 即可
+            f_bfree: 0, f_bavail: 0, f_files: 0, f_ffree: 0,
+            f_fsid: [0, 0], f_namelen: 255, f_frsize: 4096,
+            f_flags: 0, f_spare: [0; 4],
+        }
+    }
 }
 
 pub fn setup_oscomp_env() {

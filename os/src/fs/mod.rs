@@ -22,6 +22,7 @@ use alloc::collections::VecDeque;
 use core::any::Any;
 pub mod epoll; 
 pub use epoll::{EpollFile, EpollEvent}; 
+use crate::syscall::fs::Statfs;
 /// trait File for all file types
 pub trait File: Send + Sync {
     /// the file readable?
@@ -203,6 +204,15 @@ pub trait VfsInode: Send + Sync {
     }
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
         0 // 默认返回成功，至少让测试能跑通
+    }
+    fn statfs(&self) -> Statfs {
+        // 默认实现：返回全 0 或者一个安全的默认值
+        // 
+        Statfs {
+            f_type: 0, f_bsize: 0, f_blocks: 0, f_bfree: 0,
+            f_bavail: 0, f_files: 0, f_ffree: 0, f_fsid: [0, 0],
+            f_namelen: 255, f_frsize: 0, f_flags: 0, f_spare: [0; 4],
+        }
     }
 
 }

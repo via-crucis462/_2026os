@@ -144,7 +144,7 @@ const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_RESQ: usize = 293;
 /// accessat syscall
 const SYSCALL_ACCESSAT: usize = 48;
-mod fs;
+pub mod fs;
 mod process;
 mod prctl;
 pub mod errno;
