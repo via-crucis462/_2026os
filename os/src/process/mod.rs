@@ -186,13 +186,13 @@ pub const IDLE_PID: usize = 0;
 
         
         // 4. 唤醒父进程并发送 SIGCHLD 信号
-        if let Some(parent) = parent_to_wake {
+        /*if let Some(parent) = parent_to_wake {
             let mut parent_inner = parent.inner_exclusive_access();
             parent_inner.signals.insert(SignalFlags::SIGCHLD);
             drop(parent_inner); 
             
             wake_up_one(parent.wait_queue.lock());
-        }
+        }*/
     }
     
     // **** release current PCB
@@ -312,7 +312,8 @@ pub fn handle_signals() {
     
     // 2. 检查是否有未屏蔽的信号 (或者不可屏蔽的 SIGKILL/SIGSTOP)
     let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
-    let unmaskable = SignalFlags::SIGKILL.bits() | SignalFlags::SIGSTOP.bits();
+    let unmaskable = task_inner.signals.bits()
+        & (SignalFlags::SIGKILL.bits() | SignalFlags::SIGSTOP.bits());
     let final_pending = pending | unmaskable;
     //--------------------调试信息----------------
    /*  if raw_signals != 0 {

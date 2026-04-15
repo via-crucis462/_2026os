@@ -287,7 +287,7 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
     page_table
         .translate_va(VirtAddr::from(ptr as usize))
         .unwrap();
-    debug!("translated_refmut: start_pa = {:#x}, end_pa = {:#x}, len = {:#x}", pa.0, pa.0 + len - 1, len);
+    //debug!("translated_refmut: start_pa = {:#x}, end_pa = {:#x}, len = {:#x}", pa.0, pa.0 + len - 1, len);
     // 确保访问的物理地址范围内没有跨页
     assert!(pa.floor() == PhysAddr(pa.0 + len - 1).floor(), "translated_refmut: access crosses page boundary");
 
