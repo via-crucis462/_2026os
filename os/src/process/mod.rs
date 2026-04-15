@@ -312,7 +312,8 @@ pub fn handle_signals() {
     
     // 2. 检查是否有未屏蔽的信号 (或者不可屏蔽的 SIGKILL/SIGSTOP)
     let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
-    let unmaskable = SignalFlags::SIGKILL.bits() | SignalFlags::SIGSTOP.bits();
+    let unmaskable = task_inner.signals.bits()
+        & (SignalFlags::SIGKILL.bits() | SignalFlags::SIGSTOP.bits());
     let final_pending = pending | unmaskable;
     //--------------------调试信息----------------
    /*  if raw_signals != 0 {

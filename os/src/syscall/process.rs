@@ -714,6 +714,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     drop(task);
     
     let path_str = normalize_leading_dot_path(translated_str(token, path));//直接删除路径中的.，不进行其他处理
+    //println!("exec: normalized path: '{}'", path_str);
     let mut args_vec: Vec<String> = Vec::new();
     // 提取原始参数数组
     loop {
