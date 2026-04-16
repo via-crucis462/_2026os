@@ -80,6 +80,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
     let inner = proc.inner_exclusive_access();
+    info!("[sys_write] ENTER fd={}, buf={:#x}, len={}", fd, buf as usize, len);
     // 检查 FD 是否越界或未打开
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return EBADF.as_isize(); // 注意引入正确的 EBADF 路径
@@ -92,7 +93,11 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let user_buffer = UserBuffer::new(crate::mm::translated_byte_buffer(token, buf, len));
   
     let ax = file.write(user_buffer) as isize;
-    
+    if ax == 0 && len > 0 {
+        warn!("🚨 [sys_write] FATAL: Underlying file returned 0 on write! fd={}", fd);
+    } else {
+        info!("[sys_write] LEAVE written={}", ax);
+    }
   
     ax
 }
@@ -417,37 +422,30 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
     let inner = proc.inner_exclusive_access();
-
+    info!("[sys_writev] ENTER fd={}, iov_ptr={:#x}, iovcnt={}", fd, iov_ptr, iovcnt);
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return EBADF.as_isize();
     }
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
-
     let token = inner.memory_set.token();
-    
-
     drop(inner);
-    
     let mut total_written = 0;
-
     for i in 0..iovcnt {
-
         let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
-
-        let iovec: &IoVec = translated_ref(token, iov_addr as *const IoVec);
-        
+        let iovec: &IoVec = translated_ref(token, iov_addr as *const IoVec);      
         if iovec.len == 0 {
             continue; 
         }
         let user_buffer = UserBuffer {
             buffers: translated_byte_buffer(token, iovec.base as *const u8, iovec.len),
         };
-
-
         let written = file.write(user_buffer);
+        if written == 0 && iovec.len > 0 {
+            warn!(" [sys_writev] FATAL: Underlying file returned 0 on write! fd={}", fd);
+        }
         total_written += written;
     }
-
+    info!("[sys_writev] LEAVE total_written={}", total_written);
     total_written as isize
 }
 pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut Statx) -> isize {
