@@ -1,7 +1,7 @@
 use super::{VfsInode, Stat, Statx, ROOT_DENTRY};
 use alloc::sync::Arc;
 use alloc::string::String;
-use crate::fs::{TmpfsDirInode, TmpfsFileInode};
+use crate::fs::{TmpfsDirInode, TmpfsFileInode, stat_to_statx};
 
 
 //造一个“空目录” Inode，专门给 /proc 文件夹用

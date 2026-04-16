@@ -24,7 +24,8 @@ pub struct Stdin;
 
 /// stdout file for putting chars to console
 pub struct Stdout;
-
+/// stderr file for putting chars to console
+pub struct Stderr;
 impl File for Stdin {
     fn readable(&self) -> bool {
         true
@@ -65,10 +66,8 @@ impl File for Stdin {
             if c == 13 || c == '\r' as usize {
                 c = 10;
             }
-            
-            // 3. 把刚才读取并处理过的 c 传给 normalize 函数
-            if let Some(valid_ch) = normalize_console_char(c) {
-                break valid_ch; // 跳出循环，并将 valid_ch 作为整个 loop 表达式的返回值
+            if let Some(ch) = normalize_console_char(c) {
+                break ch;
             }
             
             suspend_current_and_run_next();
@@ -77,9 +76,7 @@ impl File for Stdin {
         let mut count = 0;
         for byte_ref in user_buf.into_iter() {
             unsafe {
-                // 4. 此时 ch 在作用域内了。
-                // (如果 valid_ch 的类型是 usize，这里可能需要写成 ch as u8，取决于你之前设计的类型)
-                *byte_ref = ch; 
+                *byte_ref = c as u8;
             }
             count += 1;
             break; // 目前只读取 1 byte 以匹配忙等待逻辑
@@ -147,6 +144,41 @@ impl File for Stdout {
     }
     fn getdents(&self, _buf: &mut [u8]) -> isize {
         trace!("Stdout: getdents called on stdout, returning -1");
+        -1
+    }
+}
+
+impl File for Stderr {
+    fn readable(&self) -> bool {
+        false
+    }
+    fn writable(&self) -> bool {
+        true
+    }
+    fn read(&self, _user_buf: UserBuffer) -> usize {
+        panic!("Cannot read from stderr!");
+    }
+    fn write(&self, user_buf: UserBuffer) -> usize {
+        for buffer in user_buf.buffers.iter() {
+            println!("{}", core::str::from_utf8(*buffer).unwrap());
+        }
+        user_buf.len()
+    }
+    fn read_at(&self, _offset: usize, buf: UserBuffer) -> usize {
+        self.read(buf)
+    }
+    fn write_at(&self, _offset: usize, buf: UserBuffer) -> usize {
+        self.write(buf)
+    }
+    fn get_stat(&self) -> super::Stat {
+        super::Stat {
+            mode: 0o020000,
+            blksize: 4096,
+            ..Default::default()
+        }
+    }
+    fn getdents(&self, _buf: &mut [u8]) -> isize {
+        trace!("Stderr: getdents called on stderr, returning -1");
         -1
     }
 }

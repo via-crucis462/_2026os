@@ -237,17 +237,59 @@ pub fn translated_str(token: usize, ptr: *const u8) -> String {
 
 /// Translate a ptr[u8] array through page table and return a reference of T
 pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
+    let len = core::mem::size_of::<T>();
     let page_table = PageTable::from_token(token);
-    page_table
+    let pa = page_table
         .translate_va(VirtAddr::from(ptr as usize))
-        .unwrap()
-        .get_ref()
+        .unwrap();
+    debug!("translated_ref: start_pa = {:#x}, end_pa = {:#x}, len = {:#x}", pa.0, pa.0 + len - 1, len);
+    // 确保访问的物理地址范围内没有跨页
+    assert!(pa.floor() == PhysAddr(pa.0 + len - 1).floor(), "translated_refmut: access crosses page boundary");
+    pa.get_ref()
 }
+
+/// 从给定地址读取数据并返回T
+pub fn translated_read<T>(token: usize, ptr: *const T) -> T {
+    let len = core::mem::size_of::<T>();
+    let page_table = PageTable::from_token(token);
+    let pa = page_table
+        .translate_va(VirtAddr::from(ptr as usize))
+        .unwrap();
+    let start = pa.0;
+    let end = start + len;
+    let mut data = vec![0u8; len];
+    for (addr, idx) in (start..end).enumerate() {
+        data[idx] = unsafe { *(addr as *const u8) };
+    }
+    unsafe { core::ptr::read(data.as_ptr() as *const T) }
+}
+
+/// 将用户空间的T写入给定地址
+pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
+    let len = core::mem::size_of::<T>();
+    let page_table = PageTable::from_token(token);
+    let pa = page_table
+        .translate_va(VirtAddr::from(ptr as usize))
+        .unwrap();
+    let start = pa.0;
+    let end = start + len;
+    let data = unsafe { core::slice::from_raw_parts((&value as *const T) as *const u8, len) };
+    for (addr, idx) in (start..end).enumerate() {
+        unsafe { *(addr as *mut u8) = data[idx] };
+    }
+}
+
 /// Translate a ptr[u8] array through page table and return a mutable reference of T
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
+    let len = core::mem::size_of::<T>();
     let page_table = PageTable::from_token(token);
+    let pa = 
     page_table
         .translate_va(VirtAddr::from(ptr as usize))
-        .unwrap()
-        .get_mut()
+        .unwrap();
+    //debug!("translated_refmut: start_pa = {:#x}, end_pa = {:#x}, len = {:#x}", pa.0, pa.0 + len - 1, len);
+    // 确保访问的物理地址范围内没有跨页
+    assert!(pa.floor() == PhysAddr(pa.0 + len - 1).floor(), "translated_refmut: access crosses page boundary");
+
+    pa.get_mut()
 }

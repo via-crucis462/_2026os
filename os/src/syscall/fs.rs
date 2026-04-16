@@ -243,7 +243,6 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
         None => return EMFILE.as_isize(), //   
     };
         inner.set_fd(fd, inode, (flags & O_CLOEXEC) != 0, flags as usize);
-        debug!("[kernel] sys_openat: success fd={} path={}", fd, path_str);
         fd as isize
     } else {
         trace!("VFS: File '{}' not found", path_str);

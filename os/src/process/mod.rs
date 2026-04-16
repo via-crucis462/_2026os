@@ -83,8 +83,23 @@ pub fn suspend_current_and_run_next() {
     schedule(task_cx_ptr);
 }
 
+/*
+pub fn start_waiting_child() {
+    let task = current_task().unwrap();
+    // ---- access current TCB exclusively
+    let mut task_inner = task.inner_exclusive_access();
+    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
+    // Change status to Ready
+    task_inner.task_status = TaskStatus::WaitSaving;
+    drop(task_inner);
+    drop(task);
+    // 切换到下一个任务
+    schedule(task_cx_ptr);
+} */
+
 // 让被阻塞的线程睡眠，加入等待队列
 pub fn current_task_to_sleep(mut wait_queue: MutexGuard<WaitQueue>) {
+    error!("DO NOT CALL THIS FUNC, it's wrong");
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
@@ -100,13 +115,20 @@ pub fn current_task_to_sleep(mut wait_queue: MutexGuard<WaitQueue>) {
 // 从等待队列中唤醒一个线程到全局池
 pub fn wake_up_one(mut wait_queue: MutexGuard<WaitQueue>) {
     if let Some(task) = wait_queue.pop_front() {
+        drop(wait_queue);
+        while task.inner_exclusive_access().task_status == TaskStatus::WaitSaving {
+            // 希望唤醒的任务还没保存好,将执行流保存后让出cpu
+            suspend_current_and_run_next();
+        }
         let mut task_inner = task.inner_exclusive_access();
         task_inner.task_status = TaskStatus::Ready;
         task_inner.owner_hart = None;
         drop(task_inner);
         add_task_into_pool(task);
+    } else {
+        drop(wait_queue);
     }
-    drop(wait_queue);
+    
 }
 
 /// pid of usertests app in make run TEST=1
@@ -164,13 +186,13 @@ pub const IDLE_PID: usize = 0;
 
         
         // 4. 唤醒父进程并发送 SIGCHLD 信号
-        if let Some(parent) = parent_to_wake {
+        /*if let Some(parent) = parent_to_wake {
             let mut parent_inner = parent.inner_exclusive_access();
             parent_inner.signals.insert(SignalFlags::SIGCHLD);
             drop(parent_inner); 
             
             wake_up_one(parent.wait_queue.lock());
-        }
+        }*/
     }
     
     // **** release current PCB
@@ -290,7 +312,8 @@ pub fn handle_signals() {
     
     // 2. 检查是否有未屏蔽的信号 (或者不可屏蔽的 SIGKILL/SIGSTOP)
     let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
-    let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18));
+    let unmaskable = task_inner.signals.bits()
+        & (SignalFlags::SIGKILL.bits() | SignalFlags::SIGSTOP.bits());
     let final_pending = pending | unmaskable;
     //--------------------调试信息----------------
    /*  if raw_signals != 0 {

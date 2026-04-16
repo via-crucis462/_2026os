@@ -4,10 +4,10 @@ use bitflags::*;
 pub const MAX_SIG: usize = 64;
 
 bitflags! {
-    /// Linux 信号完整定义 (基于 RISC-V 架构规范)
-    /// 包含标准信号 (1-31) 与 实时信号 (32-64)
+    /// Linux 信号定义
+    /// 补充：用户传入的是1based的整数编号，内核使用0-based的位图，所以定义时都减1
     pub struct SignalFlags: u64 {
-        /* --- 标准信号 (Standard Signals) --- */
+        //                      * 星号一列是用户传入的值
         const SIGHUP    = 1 << (1 - 1);   // 终端挂断
         const SIGINT    = 1 << (2 - 1);   // 键盘中断 (Ctrl+C)
         const SIGQUIT   = 1 << (3 - 1);   // 键盘退出 (Ctrl+\)

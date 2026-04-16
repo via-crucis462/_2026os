@@ -6,7 +6,7 @@ KERNEL_BIN := $(KERNEL_ELF).bin
 FS ?= EXT4
 ARCH ?= riscv64
 # Log level: ERROR, WARN, INFO, DEBUG, TRACE, OFF
-LOG ?= ERROR
+LOG ?= OFF
 # BOARD
 BOARD := qemu
 SBI ?= rustsbi
@@ -57,7 +57,7 @@ $(KERNEL_BIN): kernel
 
 kernel:
 	@echo Platform: $(BOARD)
-	@LOG=$(LOG) cargo build --target $(TARGET) $(MODE_ARG)
+	@LOG=$(LOG) cargo build --target riscv64gc-unknown-none-elf $(MODE_ARG)
 
 clean:
 	@cargo clean

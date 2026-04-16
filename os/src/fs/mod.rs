@@ -234,7 +234,7 @@ bitflags! {
 
 pub use inode::{list_apps, OpenFlags, open_file, ROOT_INODE, ROOT_VFS_INODE, make_dir, OSInode};
 pub use pipe::{make_pipe, Pipe};
-pub use stdio::{Stdin, Stdout};
+pub use stdio::{Stdin, Stdout, Stderr};
 
 
 
@@ -246,6 +246,47 @@ pub fn init_test_env() {
 
 const MAX_SYMLINK_DEPTH: usize = 8; // 地雷1：防止无限递归导致内核栈溢出
 
+pub fn stat_to_statx(stat: Stat) -> Statx {
+    Statx {
+        stx_mask: 0,
+        stx_blksize: stat.blksize as u32,
+        stx_attributes: 0,
+        stx_nlink: stat.nlink,
+        stx_uid: stat.uid,
+        stx_gid: stat.gid,
+        stx_mode: stat.mode as u16,
+        __spare0: [0; 1],
+        stx_ino: stat.ino,
+        stx_size: stat.size as u64,
+        stx_blocks: stat.blocks as u64,
+        stx_attributes_mask: 0,
+        stx_atime: StatxTimestamp {
+            tv_sec: stat.atime_sec,
+            tv_nsec: stat.atime_nsec as u32,
+            __reserved: 0,
+        },
+        stx_btime: StatxTimestamp {
+            tv_sec: 0,
+            tv_nsec: 0,
+            __reserved: 0,
+        },
+        stx_ctime: StatxTimestamp {
+            tv_sec: stat.ctime_sec,
+            tv_nsec: stat.ctime_nsec as u32,
+            __reserved: 0,
+        },
+        stx_mtime: StatxTimestamp {
+            tv_sec: stat.mtime_sec,
+            tv_nsec: stat.mtime_nsec as u32,
+            __reserved: 0,
+        },
+        stx_rdev_major: 0,
+        stx_rdev_minor: 0,
+        stx_dev_major: 0,
+        stx_dev_minor: 0,
+        __spare2: [0; 14],
+    }
+}
 
 /*
 pub struct DummySocket;
