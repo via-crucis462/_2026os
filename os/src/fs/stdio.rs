@@ -76,7 +76,7 @@ impl File for Stdin {
         let mut count = 0;
         for byte_ref in user_buf.into_iter() {
             unsafe {
-                *byte_ref = c as u8;
+                *byte_ref = ch as u8;
             }
             count += 1;
             break; // 目前只读取 1 byte 以匹配忙等待逻辑
