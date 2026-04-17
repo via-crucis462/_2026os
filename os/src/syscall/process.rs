@@ -2,8 +2,6 @@
 //! 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
 //! 内存管理也暂时放在此处
 
-use core::error;
-
 use crate::get_hart_id;
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
@@ -1037,7 +1035,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
     let (target_file, target_inode, mut old_atime, mut old_mtime, ino) = if path_ptr == 0 {
         // futimens 模式: path 为 NULL 时，直接操作 dirfd
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() { 
-            return -9; // EBADF
+            return EBADF.as_isize();
         }
         if let Some(file_obj) = &inner.fd_table[dirfd as usize].file {
             let stat = file_obj.get_stat();
@@ -1049,12 +1047,12 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
                 stat.ino
             )
         } else {
-            return -9; // EBADF
+            return EBADF.as_isize();
         }
     } else {
         // utimensat 模式: 根据 path 查找文件
         let path_str = translated_str(token, path_ptr as *const u8);
-        if path_str == "/dev/null/invalid" { return -20; } // ENOTDIR 特判
+        if path_str == "/dev/null/invalid" { return ENOTDIR.as_isize(); } // ENOTDIR 特判
 
         let cwd = inner.cwd.clone();
         if let Some(dentry) = cwd.find_tree(&path_str, true) {
@@ -1067,7 +1065,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
                 stat.ino
             )
         } else {
-            return -2; // ENOENT
+            return ENOENT.as_isize();
         }
     };
     if ino != 0 {
@@ -1128,8 +1126,6 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
     } else {
         println!("[utime_debug] sys_utimensat: WARNING! ino is 0, cache skipped!");
     }
-
-    println!("unimplemented sys_utimensat");
     0
 }
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
