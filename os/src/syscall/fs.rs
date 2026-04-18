@@ -162,10 +162,12 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
 const AT_FDCWD: isize = -100;
 
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isize {
+    
     let task = current_task().unwrap();
     let proc = task.process();
     let token = current_user_token();
     let path_str = normalize_leading_dot_path(translated_str(token, path));
+    trace!("kernel:tid[{}] sys_openat, dirfd={}, path={}", task.gettid(), dirfd, path_str);
     //debug!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
     const O_TMPFILE: u32 = 0x400000;
     let (readable, writable) = match flags & 0x3 {
@@ -466,7 +468,14 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
 
         if let Some(file) = &inner.fd_table[dirfd as usize].file {
             if let Some(dentry) = file.get_dentry() {
-                let statx_data = dentry.inode.get_statx();
+                let mut statx_data = dentry.inode.get_statx();
+                // 检查是否有缓存的时间数据，如果有则覆盖 stat 中的时间字段
+                if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&statx_data.stx_ino) {
+                    statx_data.stx_atime.tv_sec = asec;
+                    statx_data.stx_atime.tv_nsec = ansec as u32;
+                    statx_data.stx_mtime.tv_sec = msec;
+                    statx_data.stx_mtime.tv_nsec = mnsec as u32;
+                }
                 *translated_refmut(token, st) = statx_data;
                 return 0;
             }
@@ -496,9 +505,15 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
 
     let follow_links = (flags & (1 << 8)) == 0; // AT_SYMLINK_NOFOLLOW (0x100)
     if let Some(target_dentry) = start_dentry.find_tree(&path_str, follow_links) {
-        let stat = target_dentry.inode.get_statx();
-        
-        
+        let mut stat = target_dentry.inode.get_statx();
+        // 检查是否有缓存的时间数据，如果有则覆盖 stat 中的时间字段
+        if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&stat.stx_ino) {
+            stat.stx_atime.tv_sec = asec;
+            stat.stx_atime.tv_nsec = ansec as u32;
+            stat.stx_mtime.tv_sec = msec;
+            stat.stx_mtime.tv_nsec = mnsec as u32;
+        }
+
         *translated_refmut(token, st) = stat;
         0
     } else {

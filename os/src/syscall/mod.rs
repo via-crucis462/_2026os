@@ -56,7 +56,10 @@ const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
+#[cfg(target_arch = "riscv64")]
 const SYSCALL_SET_ROBUST_LIST: usize = 99;// RISCV
+#[cfg(target_arch = "loongarch64")]
+const SYSCALL_SET_ROBUST_LIST: usize = 100;
 const SYSCALL_SLEEP:usize =101;
 const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_SYSLOG: usize = 116;
@@ -233,7 +236,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETSID => sys_getsid(args[0]),
         SYSCALL_SETSID => sys_setsid(),
         SYSCALL_GETTID => sys_gettid(),
-        
         SYSCALL_EVENTFD2 => sys_eventfd2(args[0] as u32, args[1] as i32),
         SYSCALL_EPOLL_CREATE1 => sys_epoll_create1(args[0] as i32),
         SYSCALL_EPOLL_CTL => sys_epoll_ctl(args[0], args[1] as i32, args[2], args[3]),
@@ -246,14 +248,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as i32, args[1] as *const usize, args[2] as *mut usize, args[3] as usize),
         SYSCALL_STATFS=> sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
         SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
-        SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
-        SYSCALL_SYSLOG => sys_syslog(args[0], args[1], args[2]),
-        SYSCALL_SYSINFO => sys_sysinfo(args[0]),
-        SYSCALL_RENAMEAT2 => sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], args[4]),
-        SYSCALL_UTIMENSAT => sys_utimensat(args[0] as i32, args[1], args[2], args[3]),
-        SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
-        SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
-        SYSCALL_STATFS=> sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
         SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
         SYSCALL_SYSLOG => sys_syslog(args[0], args[1], args[2]),
         SYSCALL_SYSINFO => sys_sysinfo(args[0]),
@@ -302,8 +296,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RESQ => sys_resq(),
         SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
-        _ => {error!(
-                "\x1b[31m[UNIMPLEMENTED SYSCALL] ID: {:3}\x1b[0m", 
+        _ => {warn!(
+                "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
                 syscall_id
             );
             Errno::ENOSYS.as_isize()}
