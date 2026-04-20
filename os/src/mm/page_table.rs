@@ -258,7 +258,7 @@ pub fn translated_read<T>(token: usize, ptr: *const T) -> T {
     let start = pa.0;
     let end = start + len;
     let mut data = vec![0u8; len];
-    for (addr, idx) in (start..end).enumerate() {
+    for (idx, addr) in (start..end).enumerate() {
         data[idx] = unsafe { *(addr as *const u8) };
     }
     unsafe { core::ptr::read(data.as_ptr() as *const T) }
@@ -274,7 +274,7 @@ pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
     let start = pa.0;
     let end = start + len;
     let data = unsafe { core::slice::from_raw_parts((&value as *const T) as *const u8, len) };
-    for (addr, idx) in (start..end).enumerate() {
+    for (idx, addr) in (start..end).enumerate() {
         unsafe { *(addr as *mut u8) = data[idx] };
     }
 }

@@ -2,7 +2,8 @@
 //! 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
 //! 内存管理也暂时放在此处
 
-use crate::get_hart_id;
+use crate::mm::translated_read;
+use crate::{get_hart_id, mm::translated_write};
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
 use alloc::vec;
@@ -1877,11 +1878,8 @@ pub fn sys_rt_sigtimedwait(
     }
 }
 
-pub struct Rlimit64 {
-    rlim_cur: usize, // 当前限制
-    rlim_max: usize, // 最大限制
-}
 
+use crate::process::Rlimit64;
 /// 修改打开的文件数限制
 pub fn sys_prlimit64(
     pid: usize, 
@@ -1897,15 +1895,15 @@ pub fn sys_prlimit64(
     match resource {
         RLIMIT_NOFILE => {
             let token = current_user_token();
-            let old_cur = current_task().unwrap().process().inner_exclusive_access().fd_table.len();
-            let old_max = current_task().unwrap().process().inner_exclusive_access().fd_rlmt;
-            if old_limit as usize != 0 {
-                *translated_refmut(token , old_limit) = Rlimit64 { rlim_cur: old_cur, rlim_max: old_max };
+            let task = current_task().unwrap();
+            let process = task.process();
+            let mut proc_inner = process.inner_exclusive_access();
+            let old = proc_inner.get_rlimit64();
+            if !old_limit.is_null() {
+                translated_write(token, old_limit, old);
             }
-            if new_limit as usize != 0 {
-                current_task().unwrap().process().inner_exclusive_access().fd_rlmt = 
-                (*translated_ref(token, new_limit)).rlim_cur;
-            }
+            let new = translated_read(token, new_limit);
+            proc_inner.set_rlimit64(new);
             0
         }
         // 其他请求暂不支持

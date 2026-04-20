@@ -264,7 +264,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as i32, args[4] as i32, args[5]
         ),
         
-        SYSCALL_PRLIMIT64 => {use process::Rlimit64; sys_prlimit64(args[0], args[1] as i32, args[2] as *const Rlimit64, args[3] as *mut Rlimit64)},
+        SYSCALL_PRLIMIT64 => {use crate::process::Rlimit64; sys_prlimit64(args[0], args[1] as i32, args[2] as *const Rlimit64, args[3] as *mut Rlimit64)},
         SYSCALL_FCNTL => sys_fcntl(args[0], args[1], args[2]),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),

@@ -27,6 +27,14 @@ const AT_PAGESZ: usize = 6;
 const AT_ENTRY: usize = 9;
 const AT_RANDOM: usize = 25;
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct  Rlimit64 {
+    pub cur_lmt: usize,
+    pub max_lmt: usize,
+}
+
+
 #[derive(Clone)]
 pub struct FileDescriptor {
     pub file: Option<Arc<dyn File + Send + Sync>>,
@@ -123,7 +131,7 @@ impl ProcessControlBlock {
                 children: Vec::new(),
                 heap_bottom: user_sp,
                 program_brk: user_sp,
-                fd_rlmt: 1024, // 默认允许打开的最大文件描述符数量
+                fd_rlmt: Rlimit64 { cur_lmt: 1024, max_lmt: 1024 }, // 默认允许打开的最大文件描述符数量
                 // 初始化 fd_table，预先放入 stdin 和 stdout
                 fd_table: vec![
                     FileDescriptor::new(Arc::new(Stdin), false, 0),
@@ -429,7 +437,7 @@ impl ProcessControlBlock {
                 sid:parent_inner.sid,
                 egid: parent_inner.egid,
                 pgid: parent_inner.pgid,
-                fd_rlmt: parent_inner.fd_rlmt,
+                fd_rlmt: parent_inner.fd_rlmt.clone(),
                 tasks: Vec::new(),
                 is_zombie: false,
                 alive_task_count: 1,
@@ -587,7 +595,7 @@ pub struct ProcessControlBlockInner {
     /// Program break
     pub program_brk: usize,// 注意需要在exec中维护，rcore忽略了这点，运行测例时brk失效，已修复
 
-    pub fd_rlmt: usize, // 进程最大允许打开的文件描述符数量，默认为1024
+    pub fd_rlmt: Rlimit64, // cur_lmt, max_lmt
 
     pub fd_table: Vec<FileDescriptor>,
     
@@ -631,7 +639,7 @@ impl ProcessControlBlockInner {
         } 
         
         // 2. 如果没有空闲坑位，检查是否已经达到上限
-        if self.fd_table.len() >= self.fd_rlmt {
+        if self.fd_table.len() >= self.fd_rlmt.cur_lmt {
             return None; // 拒绝分配，触发 EMFILE
         }
         
@@ -642,7 +650,6 @@ impl ProcessControlBlockInner {
     pub fn clear_fd(&mut self, fd: usize) {
         self.fd_table[fd] = FileDescriptor::empty();
     }
-
     pub fn set_fd(
         &mut self,
         fd: usize,
@@ -651,6 +658,12 @@ impl ProcessControlBlockInner {
         status: usize,
     ) {
         self.fd_table[fd] = FileDescriptor::new(file, cloexec, status);
+    }
+    pub fn get_rlimit64(&self) -> Rlimit64 {
+        self.fd_rlmt.clone()
+    }
+    pub fn set_rlimit64(&mut self, new_rlmt: Rlimit64) {
+        self.fd_rlmt = new_rlmt;
     }
     pub fn is_zombie(&self) -> bool {
         self.alive_task_count <= 0
