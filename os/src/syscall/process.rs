@@ -1877,12 +1877,38 @@ pub fn sys_rt_sigtimedwait(
     }
 }
 
+pub struct Rlimit64 {
+    rlim_cur: usize, // 当前限制
+    rlim_max: usize, // 最大限制
+}
+
+/// 修改打开的文件数限制
 pub fn sys_prlimit64(
-    _pid: usize, 
-    _resource: i32, 
-    _new_limit: *const u8, 
-    _old_limit: *mut u8
+    pid: usize, 
+    resource: i32, 
+    new_limit: *const Rlimit64, 
+    old_limit: *mut Rlimit64
 ) -> isize {
-    // 0 代表成功。骗 musl libc 我们处理好了资源限制
-    0 
+    const RLIMIT_NOFILE: i32 = 7;
+    info!("sys_prlimit64 called with pid={}, resource={}, new_limit={:#x}, old_limit={:#x}", pid, resource, new_limit as usize, old_limit as usize);
+    if pid != 0 {
+        return Errno::EPERM.as_isize(); // 不允许修改其他进程
+    }
+    match resource {
+        RLIMIT_NOFILE => {
+            let token = current_user_token();
+            let old_cur = current_task().unwrap().process().inner_exclusive_access().fd_table.len();
+            let old_max = current_task().unwrap().process().inner_exclusive_access().fd_rlmt;
+            if old_limit as usize != 0 {
+                *translated_refmut(token , old_limit) = Rlimit64 { rlim_cur: old_cur, rlim_max: old_max };
+            }
+            if new_limit as usize != 0 {
+                current_task().unwrap().process().inner_exclusive_access().fd_rlmt = 
+                (*translated_ref(token, new_limit)).rlim_cur;
+            }
+            0
+        }
+        // 其他请求暂不支持
+        _ => Errno::EINVAL.as_isize()
+    }
 }

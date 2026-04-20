@@ -123,6 +123,7 @@ impl ProcessControlBlock {
                 children: Vec::new(),
                 heap_bottom: user_sp,
                 program_brk: user_sp,
+                fd_rlmt: 1024, // 默认允许打开的最大文件描述符数量
                 // 初始化 fd_table，预先放入 stdin 和 stdout
                 fd_table: vec![
                     FileDescriptor::new(Arc::new(Stdin), false, 0),
@@ -139,7 +140,6 @@ impl ProcessControlBlock {
                 euid: 0,
                 is_zombie: false,
                 egid: 0,
-                
                 pgid: pid_handle.0,
                 alive_task_count: 0,
                 tasks: Vec::new(),
@@ -429,6 +429,7 @@ impl ProcessControlBlock {
                 sid:parent_inner.sid,
                 egid: parent_inner.egid,
                 pgid: parent_inner.pgid,
+                fd_rlmt: parent_inner.fd_rlmt,
                 tasks: Vec::new(),
                 is_zombie: false,
                 alive_task_count: 1,
@@ -585,7 +586,11 @@ pub struct ProcessControlBlockInner {
 
     /// Program break
     pub program_brk: usize,// 注意需要在exec中维护，rcore忽略了这点，运行测例时brk失效，已修复
+
+    pub fd_rlmt: usize, // 进程最大允许打开的文件描述符数量，默认为1024
+
     pub fd_table: Vec<FileDescriptor>,
+    
     pub cwd: Arc<Dentry>, // 当前工作目录
 
     // 进程收到的信号
@@ -618,9 +623,6 @@ impl ProcessControlBlockInner {
         self.memory_set.asid()
     }
     pub fn alloc_fd(&mut self) -> Option<usize> {
-        // 设定进程最大允许打开的文件描述符数量 (通常 Linux 默认是 1024)
-        const FD_LIMIT: usize = 1024; 
-
         // 1. 先尝试在现有的表中寻找被 close 空出来的坑位
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].file.is_none()) {
             self.fd_table[fd].cloexec = false;
@@ -629,7 +631,7 @@ impl ProcessControlBlockInner {
         } 
         
         // 2. 如果没有空闲坑位，检查是否已经达到上限
-        if self.fd_table.len() >= FD_LIMIT {
+        if self.fd_table.len() >= self.fd_rlmt {
             return None; // 拒绝分配，触发 EMFILE
         }
         
