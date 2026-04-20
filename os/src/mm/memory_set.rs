@@ -259,9 +259,19 @@ impl MemorySet {
         memory_set
     }
     /// Include sections in elf and trampoline and TrapContext and user stack,
-    /// also returns user_sp_base and entry point.
+    /// also returns heap_bottom and entry point.
+    pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, usize, usize) {
+        Self::from_elf_with_interp_loader(elf_data, |_| None)
+    }
 
-   pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, usize, usize)  {
+    /// Build address space from a main ELF and an optional interpreter loader.
+    pub fn from_elf_with_interp_loader<F>(
+        elf_data: &[u8],
+        mut load_interp: F,
+    ) -> (Self, usize, usize, usize, usize, usize)
+    where
+        F: FnMut(&str) -> Option<Vec<u8>>,
+    {
         let mut memory_set = Self::new_bare();
         // map trampoline
         #[cfg(target_arch = "riscv64")]
@@ -277,70 +287,102 @@ impl MemorySet {
         let mut phdr_addr = 0;
         let phnum = ph_count as usize;
         let phent = elf_header.pt2.ph_entry_size() as usize;
+        let mut final_entry = elf.header.pt2.entry_point() as *const () as usize + OFFSET_FOR_USER_APP;
+
+        //动态链接基地址
+        const INTERP_BASE: usize = 0x4000_0000;
 
         for i in 0..ph_count {
             let ph = elf.program_header(i).unwrap();
-            if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
-                let start_va: VirtAddr = (ph.virtual_addr() as usize 
-                    + OFFSET_FOR_USER_APP).into();
-                let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize
-                    + OFFSET_FOR_USER_APP).into();
-                let mut map_perm = MapPermission::U;
-                let ph_flags = ph.flags();
-                if ph_flags.is_read() {
-                    map_perm |= MapPermission::R;
+            match ph.get_type().unwrap() {
+                xmas_elf::program::Type::Load => {
+                    let start_va: VirtAddr = (ph.virtual_addr() as usize + OFFSET_FOR_USER_APP).into();
+                    let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize + OFFSET_FOR_USER_APP).into();
+                    let mut map_perm = MapPermission::U;
+                    let ph_flags = ph.flags();
+                    if ph_flags.is_read() {
+                        map_perm |= MapPermission::R;
+                    }
+                    if ph_flags.is_write() {
+                        map_perm |= MapPermission::W;
+                    }
+                    if ph_flags.is_execute() {
+                        map_perm |= MapPermission::X;
+                    }
+                    let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
+                    max_end_vpn = map_area.vpn_range.get_end();
+                    memory_set.push(
+                        map_area,
+                        Some(&elf.input[ph.offset() as *const () as usize..(ph.offset() + ph.file_size()) as *const () as usize]),
+                        ph.virtual_addr() as usize + OFFSET_FOR_USER_APP,
+                    );
+                    if ph.offset() <= elf_header.pt2.ph_offset()
+                        && elf_header.pt2.ph_offset() < ph.offset() + ph.file_size()
+                    {
+                        phdr_addr =
+                            (ph.virtual_addr() + (elf_header.pt2.ph_offset() - ph.offset())) as usize;
+                    }
                 }
-                if ph_flags.is_write() {
-                    map_perm |= MapPermission::W;
+                xmas_elf::program::Type::Interp => {
+                    let offset = ph.offset() as usize;
+                    let size = ph.file_size() as usize;
+                    let interp_path = core::str::from_utf8(&elf.input[offset..offset + size])
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    if let Some(interp_data) = load_interp(interp_path) {
+                        let interp_elf = xmas_elf::ElfFile::new(interp_data.as_slice()).unwrap();
+                        final_entry = INTERP_BASE + interp_elf.header.pt2.entry_point() as usize;
+                        for interp_ph in interp_elf.program_iter() {
+                            if interp_ph.get_type() == Ok(xmas_elf::program::Type::Load) {
+                                let start_va = INTERP_BASE + interp_ph.virtual_addr() as usize;
+                                let end_va = start_va + interp_ph.mem_size() as usize;
+                                let mut map_perm = MapPermission::U;
+                                let interp_flags = interp_ph.flags();
+                                if interp_flags.is_read() {
+                                    map_perm |= MapPermission::R;
+                                }
+                                if interp_flags.is_write() {
+                                    map_perm |= MapPermission::W;
+                                }
+                                if interp_flags.is_execute() {
+                                    map_perm |= MapPermission::X;
+                                }
+                                let offset = interp_ph.offset() as usize;
+                                let file_size = interp_ph.file_size() as usize;
+                                let data = &interp_data[offset..offset + file_size];
+                                memory_set.push(
+                                    MapArea::new(
+                                        start_va.into(),
+                                        end_va.into(),
+                                        MapType::Framed,
+                                        map_perm,
+                                    ),
+                                    Some(data),
+                                    start_va,
+                                );
+                            }
+                        }
+                    }
                 }
-                if ph_flags.is_execute() {
-                    map_perm |= MapPermission::X;
-                }
-                let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
-                max_end_vpn = map_area.vpn_range.get_end();
-                memory_set.push(
-                    map_area,
-                    Some(&elf.input[ph.offset() as *const () as usize..(ph.offset() + ph.file_size()) as *const () as usize]),
-                    ph.virtual_addr() as usize + OFFSET_FOR_USER_APP,
-                );
-                // 如果该 LOAD 段包含了程序头表，则记录其虚拟地址
-                if ph.offset() <= elf_header.pt2.ph_offset() && 
-                   elf_header.pt2.ph_offset() < ph.offset() + ph.file_size() {
-                    phdr_addr = (ph.virtual_addr() + (elf_header.pt2.ph_offset() - ph.offset())) as usize;
-                }
+                _ => {}
             }
         }
         debug!("MemorySet::from_elf: mapped common areas");
         // map user stack with U flags
-        let max_end_va: VirtAddr = max_end_vpn.into();
-        let mut user_stack_bottom: usize = max_end_va.into();
-        // guard page
-        user_stack_bottom += PAGE_SIZE;
-        let user_stack_top = user_stack_bottom + USER_STACK_SIZE;
-        memory_set.push(
-            MapArea::new(
-                user_stack_bottom.into(),
-                user_stack_top.into(),
-                MapType::Framed,
-                MapPermission::R | MapPermission::W | MapPermission::U,
-            ),
-            None,
-            user_stack_bottom,
-        );
-        // used in sbrk
         // 堆区空间设置在栈区之后
+        let heap_bottom = max_end_vpn.0 * PAGE_SIZE;
         memory_set.push(
             MapArea::new(
-                user_stack_top.into(),
-                user_stack_top.into(),
+                max_end_vpn.into(),
+                max_end_vpn.into(),
                 MapType::Framed,
                 MapPermission::R | MapPermission::W | MapPermission::U,
             ),
             None,
-            user_stack_top,
+            max_end_vpn.into(),
         );
     
-        memory_set.brk_index = memory_set.areas.len() - 1;
+        memory_set.brk_index = memory_set.areas.len() - 1;//初始化堆索引
         // map TrapContext
         // la64下不需要映射
         // 对于riscv，需要在创建进程时再映射
@@ -361,8 +403,8 @@ impl MemorySet {
         debug!("MemorySet::from_elf: mapped all areas");
         (
             memory_set,
-            user_stack_top,
-            elf.header.pt2.entry_point() as *const () as usize + OFFSET_FOR_USER_APP,
+            heap_bottom,
+            final_entry,
             phdr_addr,
             phnum,
             phent,
@@ -579,15 +621,12 @@ impl MemorySet {
         // 将长度向上对齐到页
         let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-        let mut current_addr: usize = USER_APP_BASE;
-        // 搜索终点：用户虚拟空间上限 (39位宽下为 512GB)
-        let limit_addr: usize = USER_APP_MAX_SIZE; 
-
-        // 获取按起始虚拟页号排序后的区域列表
-        
-        // 搜索起点：LoongArch 推荐的用户基址 0x1_2000_0000
-        let mut current_addr: usize = USER_APP_BASE;
-        // 搜索终点：用户虚拟空间上限 (39位宽下为 512GB)
+        let mut current_addr: usize = USER_APP_BASE + (USER_APP_MAX_SIZE - USER_APP_BASE) / 2;
+        // 为高地址用户栈预留顶部空间，避免 mmap 和初始栈冲突。
+        // loongarch的栈位置固定，所以上限可以直接计算
+        #[cfg(target_arch = "loongarch64")]
+        let limit_addr: usize = USER_STACK_TOP - USER_STACK_SIZE;
+        #[cfg(target_arch = "riscv64")]
         let limit_addr: usize = USER_APP_MAX_SIZE; 
         
         // 获取按起始虚拟页号排序后的区域列表
