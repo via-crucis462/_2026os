@@ -1793,7 +1793,7 @@ pub type SigSet = usize;
 /// - `set_ptr`:   用户态指针，指向目标信号集位图（SigSet）。
 /// - `info_ptr`:  用户态指针，用于存储捕获到的信号详细信息（SigInfo）。
 /// - `timeout_ptr`: 用户态指针，指向超时时间结构体（TimeSpec）。若为 null 则无限期等待。
-/// - `sigsetsize`: 信号集结构的大小，Linux 下 x86_64/riscv64 通常要求为 8 字节。
+/// - `sigsetsize`: 信号集结构的大小，Linux 下 x，86_64/riscv64 通常要求为 8 字节。
 ///
 /// ### 返回值
 /// - 成功：返回被捕获的信号编号（正数）。
@@ -1887,14 +1887,23 @@ pub fn sys_prlimit64(
     new_limit: *const Rlimit64, 
     old_limit: *mut Rlimit64
 ) -> isize {
+    const RLIMIT_NPROC: i32 = 3;
     const RLIMIT_NOFILE: i32 = 7;
     info!("sys_prlimit64 called with pid={}, resource={}, new_limit={:#x}, old_limit={:#x}", pid, resource, new_limit as usize, old_limit as usize);
     if pid != 0 {
         return Errno::EPERM.as_isize(); // 不允许修改其他进程
     }
+    let token = current_user_token();
     match resource {
+        RLIMIT_NPROC => {
+            // 伪实现，返回一个固定值
+            if !old_limit.is_null() {
+                translated_write(token, old_limit, Rlimit64 { cur_lmt: 4096, max_lmt: 4096 });
+            }
+            0
+        }
         RLIMIT_NOFILE => {
-            let token = current_user_token();
+            // 打开的文件数限制
             let task = current_task().unwrap();
             let process = task.process();
             let mut proc_inner = process.inner_exclusive_access();
@@ -1902,8 +1911,10 @@ pub fn sys_prlimit64(
             if !old_limit.is_null() {
                 translated_write(token, old_limit, old);
             }
-            let new = translated_read(token, new_limit);
-            proc_inner.set_rlimit64(new);
+            if !new_limit.is_null() {
+                let new = translated_read(token, new_limit);
+                proc_inner.set_rlimit64(new); 
+            }
             0
         }
         // 其他请求暂不支持
