@@ -389,10 +389,9 @@ pub fn sys_setgid(gid: u32) -> isize {
 
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
     let task = current_task().unwrap();
-    let proc = task.process();
     let mut inner = task.inner_exclusive_access();
     inner.clear_child_tid = tidptr;
-    proc.pid.0 as isize 
+    task.tid.0 as isize 
 }
 
 pub fn sys_getsid(pid: usize) -> isize {
