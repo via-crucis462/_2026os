@@ -206,7 +206,8 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
             Some(fd) => fd,
             None => return EMFILE.as_isize(),
         };
-        
+        println!("[kernel] sys_openat: fd allocated for O_TMPFILE: {}", fd);
+
         // 4. 塞入进程的文件描述符表
         inner.set_fd(fd, anon_file, (flags & O_CLOEXEC) != 0, flags as usize);
         debug!("[kernel] sys_openat: O_TMPFILE success fd={}", fd);
@@ -333,12 +334,14 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     //println!("pipe done");
     0
 }
-const RLIMIT_NOFILE: usize = 1024;
+
 pub fn sys_dup(fd: usize) -> isize {
-	trace!("kernel:pid[{}] sys_dup", current_task().unwrap().process().pid.0);
+	trace!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().process().pid.0, fd);
+    // println!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().process().pid.0, fd);
     let task = current_task().unwrap();
     let proc = task.process();
     let mut inner = proc.inner_exclusive_access();
+    // println!("table len = {}", inner.fd_table.len());
     if fd >= inner.fd_table.len() {
         return EBADF.as_isize();
     }
@@ -349,11 +352,13 @@ pub fn sys_dup(fd: usize) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
+    // println!("[kernel] sys_dup: new fd allocated: {}", new_fd);
     let file = Arc::clone(inner.fd_table[fd].file.as_ref().unwrap());
     let old_status = inner.fd_table[fd].status;
     inner.set_fd(new_fd, file, false, old_status);
     new_fd as isize
 }
+
 pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> isize {
     // println!("[DEBUG VFS] sys_lseek: fd={}, offset={}, whence={}", fd, offset, whence);
     let token = current_user_token();

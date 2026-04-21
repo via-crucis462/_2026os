@@ -1907,6 +1907,7 @@ pub fn sys_prlimit64(
             let task = current_task().unwrap();
             let process = task.process();
             let mut proc_inner = process.inner_exclusive_access();
+            proc_inner.recycle_fd();
             let old = proc_inner.get_rlimit64();
             if !old_limit.is_null() {
                 translated_write(token, old_limit, old);

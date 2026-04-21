@@ -365,7 +365,7 @@ impl ProcessControlBlock {
         *task_inner.get_trap_cx() = trap_cx;
 
         // 删除其他线程（如果有）
-        proc_inner.tasks.retain(|t| Arc::ptr_eq(t, &caller_task));
+        proc_inner.tasks.retain(|t: &Arc<TaskControlBlock>| Arc::ptr_eq(t, &caller_task));
         proc_inner.alive_task_count = 1;
         for i in proc_inner.memory_set.areas().iter() {
             debug!("exec: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
@@ -415,6 +415,7 @@ impl ProcessControlBlock {
 
         // copy fd table
         let new_fd_table = parent_inner.fd_table.clone();
+        // println!("[kernel] ProcessControlBlock::fork: copied fd_table with {} entries", new_fd_table.len());
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
             inner: MPSafeCell::new(ProcessControlBlockInner {
@@ -658,6 +659,10 @@ impl ProcessControlBlockInner {
         status: usize,
     ) {
         self.fd_table[fd] = FileDescriptor::new(file, cloexec, status);
+    }
+    /// 回收被close的fd，压缩fd_table
+    pub fn recycle_fd(&mut self) {
+        self.fd_table.retain(|fd| fd.file.is_some());
     }
     pub fn get_rlimit64(&self) -> Rlimit64 {
         self.fd_rlmt.clone()
