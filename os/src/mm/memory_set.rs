@@ -10,6 +10,7 @@ use crate::arch::trap::current_trap_cx_user_va;
 use crate::mm::mmap;
 use crate::sync::MPSafeCell;
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::asm;
@@ -131,6 +132,14 @@ impl MemorySet {
         }
         trace!("map area: [{:#x}, {:#x}), {:?}", map_area.vpn_range.get_start().0 * PAGE_SIZE, map_area.vpn_range.get_end().0 * PAGE_SIZE, map_area.map_perm);
         self.areas.push(map_area);
+    }
+    fn push_guard_area(&mut self, guard_start: usize, guard_pages: usize) {
+        self.areas.push(MapArea::new(
+            guard_start.into(),
+            (guard_start + guard_pages * PAGE_SIZE).into(),
+            MapType::Guard,
+            MapPermission::empty(),
+        ));
     }
     /// Mention that trampoline is not collected by areas.
     #[allow(unused)]
@@ -259,8 +268,9 @@ impl MemorySet {
         memory_set
     }
     /// Include sections in elf and trampoline and TrapContext and user stack,
-    /// also returns heap_bottom and entry point.
-    pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, usize, usize) {
+    /// and return heap_bottom/user_sp/final_entry/main_entry metadata.
+    /// Memoryset//堆底//用户栈顶//最终入口点（可能是解释器）//主程序入口点//程序头表地址//程序头表数量//程序头表项大小//解释器加载基址（如果有）
+    pub fn from_elf(elf_data: &[u8]) -> Option<(Self, usize, usize, usize, usize, usize, usize, usize, Option<usize>)> {
         Self::from_elf_with_interp_loader(elf_data, |_| None)
     }
 
@@ -268,34 +278,55 @@ impl MemorySet {
     pub fn from_elf_with_interp_loader<F>(
         elf_data: &[u8],
         mut load_interp: F,
-    ) -> (Self, usize, usize, usize, usize, usize)
+    ) -> Option<(Self, usize, usize, usize, usize, usize, usize, usize, Option<usize>)>
     where
         F: FnMut(&str) -> Option<Vec<u8>>,
     {
         let mut memory_set = Self::new_bare();
-        // map trampoline
+
+        // riscv映射跳板
         #[cfg(target_arch = "riscv64")]
         memory_set.map_trampoline();
-        // map program headers of elf, with U flag
+        
+        //读取elf头部，获取程序头表等信息
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
         let elf_header = elf.header;
+
+        //校验魔数是否相等
         let magic = elf_header.pt1.magic;
-        assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
+        if magic != [0x7f, 0x45, 0x4c, 0x46] {
+            println!("invalid ELF magic: {:x?}", magic);
+            return None;
+        }
+
+        //获取段数
         let ph_count = elf_header.pt2.ph_count();
+
         let mut max_end_vpn = VirtPageNum(0);
+        let mut main_max_end_vpn = VirtPageNum(0);
         
         let mut phdr_addr = 0;
         let phnum = ph_count as usize;
         let phent = elf_header.pt2.ph_entry_size() as usize;
         let mut final_entry = elf.header.pt2.entry_point() as *const () as usize + OFFSET_FOR_USER_APP;
+        let main_entry = final_entry;
+        let mut saw_interp = false;
+        let mut loaded_interp = false;
+        let mut interp_path = None;
 
-        //动态链接基地址
-        const INTERP_BASE: usize = 0x4000_0000;
+        let mut interp_base = None;
 
+        //遍历程序头表，根据类型进行处理
         for i in 0..ph_count {
+
+            //获取实例化的段
             let ph = elf.program_header(i).unwrap();
-            match ph.get_type().unwrap() {
-                xmas_elf::program::Type::Load => {
+            match ph.get_type() {
+                
+                //如果是Load段
+                Ok(xmas_elf::program::Type::Load) => {
+
+                    //获取加载段的虚拟地址范围与权限
                     let start_va: VirtAddr = (ph.virtual_addr() as usize + OFFSET_FOR_USER_APP).into();
                     let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize + OFFSET_FOR_USER_APP).into();
                     let mut map_perm = MapPermission::U;
@@ -309,8 +340,17 @@ impl MemorySet {
                     if ph_flags.is_execute() {
                         map_perm |= MapPermission::X;
                     }
+                    
+                    //新建逻辑段实例并更新结尾的最大虚拟页号
                     let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
-                    max_end_vpn = map_area.vpn_range.get_end();
+                    let area_end_vpn = map_area.vpn_range.get_end();
+                    if area_end_vpn > max_end_vpn {
+                        max_end_vpn = area_end_vpn;
+                    }
+                    if area_end_vpn > main_max_end_vpn {
+                        main_max_end_vpn = area_end_vpn;
+                    }
+                    //将文件数据复制到逻辑段中
                     memory_set.push(
                         map_area,
                         Some(&elf.input[ph.offset() as *const () as usize..(ph.offset() + ph.file_size()) as *const () as usize]),
@@ -323,63 +363,142 @@ impl MemorySet {
                             (ph.virtual_addr() + (elf_header.pt2.ph_offset() - ph.offset())) as usize;
                     }
                 }
-                xmas_elf::program::Type::Interp => {
+                Ok(xmas_elf::program::Type::Interp) => {
+                    saw_interp = true;
                     let offset = ph.offset() as usize;
                     let size = ph.file_size() as usize;
-                    let interp_path = core::str::from_utf8(&elf.input[offset..offset + size])
-                        .unwrap_or("")
-                        .trim_end_matches('\0');
-                    if let Some(interp_data) = load_interp(interp_path) {
-                        let interp_elf = xmas_elf::ElfFile::new(interp_data.as_slice()).unwrap();
-                        final_entry = INTERP_BASE + interp_elf.header.pt2.entry_point() as usize;
-                        for interp_ph in interp_elf.program_iter() {
-                            if interp_ph.get_type() == Ok(xmas_elf::program::Type::Load) {
-                                let start_va = INTERP_BASE + interp_ph.virtual_addr() as usize;
-                                let end_va = start_va + interp_ph.mem_size() as usize;
-                                let mut map_perm = MapPermission::U;
-                                let interp_flags = interp_ph.flags();
-                                if interp_flags.is_read() {
-                                    map_perm |= MapPermission::R;
-                                }
-                                if interp_flags.is_write() {
-                                    map_perm |= MapPermission::W;
-                                }
-                                if interp_flags.is_execute() {
-                                    map_perm |= MapPermission::X;
-                                }
-                                let offset = interp_ph.offset() as usize;
-                                let file_size = interp_ph.file_size() as usize;
-                                let data = &interp_data[offset..offset + file_size];
-                                memory_set.push(
-                                    MapArea::new(
-                                        start_va.into(),
-                                        end_va.into(),
-                                        MapType::Framed,
-                                        map_perm,
-                                    ),
-                                    Some(data),
-                                    start_va,
-                                );
-                            }
-                        }
+                    interp_path = Some(String::from(
+                        core::str::from_utf8(&elf.input[offset..offset + size])
+                            .unwrap_or("")
+                            .trim_end_matches('\0'),
+                    ));
+                }
+                // PHDR 可用于更稳定地提供 AT_PHDR。
+                Ok(xmas_elf::program::Type::Phdr) => {
+                    if phdr_addr == 0 {
+                        phdr_addr = ph.virtual_addr() as usize + OFFSET_FOR_USER_APP;
                     }
                 }
-                _ => {}
+                // 这些段通常由 LOAD 段覆盖或仅提供元信息，不需要单独映射。
+                Ok(_other) => {
+                    trace!("ignoring ELF program header of type {:?}", _other);
+                    // ignored intentionally
+                }
+                // 架构私有段（例如 RISCV_ATTRIBUTES）会走这里，安全忽略即可。
+                Err(_raw_type) => {
+                    trace!("ignoring ELF program header of unknown type");
+                    // ignored intentionally
+                }
             }
         }
+        if let Some(interp_path) = interp_path.as_deref() {
+            if let Some(interp_data) = load_interp(interp_path) {
+                let interp_elf = xmas_elf::ElfFile::new(interp_data.as_slice()).unwrap();
+                const GUARD_PAGES: usize = 10;
+                let interp_runtime_base = main_max_end_vpn.0 * PAGE_SIZE + GUARD_PAGES * PAGE_SIZE;
+                memory_set.push_guard_area(main_max_end_vpn.0 * PAGE_SIZE, GUARD_PAGES);
+                let interp_image_base = interp_elf
+                    .program_iter()
+                    .filter_map(|segment| {
+                        if let Ok(xmas_elf::program::Type::Load) = segment.get_type() {
+                            Some(VirtAddr::from(segment.virtual_addr() as usize).floor().0 * PAGE_SIZE)
+                        } else {
+                            None
+                        }
+                    })
+                    .min()
+                    .unwrap_or(0);
+                let interp_load_bias = interp_runtime_base.saturating_sub(interp_image_base);
+                interp_base = Some(interp_load_bias);
+                final_entry = interp_load_bias + interp_elf.header.pt2.entry_point() as usize;
+                loaded_interp = true;
+                info!(
+                    "MemorySet::from_elf: PT_INTERP loaded '{}', entry switched {:#x} -> {:#x}",
+                    interp_path,
+                    main_entry,
+                    final_entry
+                );
+                for interp_ph in interp_elf.program_iter() {
+                    if let Ok(xmas_elf::program::Type::Load) = interp_ph.get_type() {
+                        let start_va = interp_load_bias + interp_ph.virtual_addr() as usize;
+                        let end_va = start_va + interp_ph.mem_size() as usize;
+                        let mut map_perm = MapPermission::U;
+                        let interp_flags = interp_ph.flags();
+                        if interp_flags.is_read() {
+                            map_perm |= MapPermission::R;
+                        }
+                        if interp_flags.is_write() {
+                            map_perm |= MapPermission::W;
+                        }
+                        if interp_flags.is_execute() {
+                            map_perm |= MapPermission::X;
+                        }
+                        let offset = interp_ph.offset() as usize;
+                        let file_size = interp_ph.file_size() as usize;
+                        let data = &interp_data[offset..offset + file_size];
+                        let interp_end_vpn: VirtPageNum = VirtAddr::from(end_va).ceil();
+                        if interp_end_vpn > max_end_vpn {
+                            max_end_vpn = interp_end_vpn;
+                        }
+                        memory_set.push(
+                            MapArea::new(
+                                start_va.into(),
+                                end_va.into(),
+                                MapType::Framed,
+                                map_perm,
+                            ),
+                            Some(data),
+                            start_va,
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    "MemorySet::from_elf: PT_INTERP present but loader '{}' not found; fallback to main entry",
+                    interp_path
+                );
+            }
+        }
+        if saw_interp && !loaded_interp {
+            info!(
+                "MemorySet::from_elf: PT_INTERP present but unresolved, using main entry {:#x}",
+                final_entry
+            );
+        }
+        if !saw_interp {
+            info!(
+                "MemorySet::from_elf: no PT_INTERP, using main entry {:#x}",
+                final_entry
+            );
+        }
         debug!("MemorySet::from_elf: mapped common areas");
-        // map user stack with U flags
-        // 堆区空间设置在栈区之后
-        let heap_bottom = max_end_vpn.0 * PAGE_SIZE;
+        // 按顺序布局：主程序/解释器段 -> guard -> 用户栈 -> guard -> 堆。
+        const GUARD_PAGES: usize = 10;
+        let user_stack_bottom = max_end_vpn.0 * PAGE_SIZE + GUARD_PAGES * PAGE_SIZE;
+        memory_set.push_guard_area(max_end_vpn.0 * PAGE_SIZE, GUARD_PAGES);
+        let user_stack_top = user_stack_bottom + USER_STACK_SIZE;
         memory_set.push(
             MapArea::new(
-                max_end_vpn.into(),
-                max_end_vpn.into(),
+                user_stack_bottom.into(),
+                user_stack_top.into(),
                 MapType::Framed,
                 MapPermission::R | MapPermission::W | MapPermission::U,
             ),
             None,
-            max_end_vpn.into(),
+            user_stack_bottom,
+        );
+        let heap_bottom = user_stack_top + GUARD_PAGES * PAGE_SIZE;
+        memory_set.push_guard_area(user_stack_top, GUARD_PAGES);
+        let heap_bottom_vpn = VirtAddr::from(heap_bottom).ceil();
+        memory_set.push(
+            MapArea::new(
+                heap_bottom_vpn.into(),
+                heap_bottom_vpn.into(),
+                MapType::Framed,
+                MapPermission::R | MapPermission::W | MapPermission::U,
+            ),
+            None,
+            heap_bottom,
         );
     
         memory_set.brk_index = memory_set.areas.len() - 1;//初始化堆索引
@@ -401,14 +520,17 @@ impl MemorySet {
             TRAP_CONTEXT_BASE,
         ); */
         debug!("MemorySet::from_elf: mapped all areas");
-        (
+        Some((
             memory_set,
             heap_bottom,
+            user_stack_top,
             final_entry,
+            main_entry,
             phdr_addr,
             phnum,
             phent,
-        )
+            interp_base,
+        ))
     }
     /// Create a new address space by copy code&data from a exited process's address space.
     pub fn from_existed_user(user_space: &Self) -> Self {
@@ -752,6 +874,9 @@ impl MemorySet {
         if let Some(area) = self.areas.iter_mut().find(|a| {
             vpn >= a.vpn_range.get_start() && vpn < a.vpn_range.get_end()
         }) {
+            if area.map_type == MapType::Guard {
+                return false;
+            }
             // 2. 检查该页是否已经在页表中映射
             if let Some(pte) = page_table.translate(vpn) {
                 if pte.is_valid() {
@@ -779,6 +904,9 @@ impl MemorySet {
 
         let mut expand_idx = None;
         for (idx, area) in self.areas.iter().enumerate() {
+            if area.map_type == MapType::Guard {
+                continue;
+            }
             let start_vpn = area.vpn_range.get_start();
             
             // 检查缺页地址(vpn)是否紧贴着该段的下方，且距离不超过限制
@@ -895,6 +1023,9 @@ impl MapArea {
                 ppn = frame.ppn;
                 self.data_frames.insert(vpn, frame);
             }
+            MapType::Guard => {
+                return;
+            }
         }
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         #[cfg(target_arch = "loongarch64")]
@@ -921,6 +1052,7 @@ impl MapArea {
             MapType::Identical => {
                 page_table.unmap(vpn);
             }
+            MapType::Guard => {}
         }
     }
     pub fn map(&mut self, page_table: &mut PageTable) {
@@ -1000,6 +1132,7 @@ pub enum MapType {
     Identical,
     Framed,
     File,
+    Guard,
 }
 
 bitflags! {

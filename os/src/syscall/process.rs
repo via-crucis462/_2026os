@@ -772,10 +772,10 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             args_vec,
             false,
         );
-        //info!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
+        //println!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
         argc as isize
     } else {
-        error!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
+        //println!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
         ENOENT.as_isize()
     }
 }

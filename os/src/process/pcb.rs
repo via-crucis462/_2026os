@@ -71,8 +71,10 @@ impl ProcessControlBlock {
         println!("[kernel] TaskControlBlock::new: start creating a new process");
 
         //处理 ELF 文件，创建内存空间，返回的memory_set中已经包含了用户程序的代码段、数据段、bss段以及长度为1的堆段
-        let (mut memory_set, heap_bottom, entry_point, _phdr, _phnum, _phent)
-            = MemorySet::from_elf(elf_data);
+        let Some((mut memory_set, heap_bottom, user_sp, entry_point, _main_entry, _phdr, _phnum, _phent, _interp_base))
+            = MemorySet::from_elf(elf_data) else {
+                panic!("TaskControlBlock::new: invalid ELF for init process");
+            };
         debug!(
             "TaskControlBlock::new: entry_point={:#x}",
             entry_point
@@ -86,7 +88,7 @@ impl ProcessControlBlock {
         let trap_cx_va: VirtAddr;
         let trap_cx_addr: usize;
         let kernel_stack_top: usize;
-        let user_sp: usize;
+        let initial_user_sp = user_sp;
         #[cfg(target_arch = "riscv64")]{
             // 异常上下文映射页，riscv会在进入跳板前将上下文压入用户地址空间，所以要在用户地址空间写入
             // 将用户空间的上下文与内核栈唯一映射的原因是：这样可以为每一个线程分配唯一的上下文栈
@@ -111,17 +113,7 @@ impl ProcessControlBlock {
 
             // 内核栈顶地址，即切换到内核任务流后内核执行栈的初始值（内核sp）
             kernel_stack_top = kernel_stack.get_top();
-            user_sp = trap_cx_va.0 - USER_STACK_SIZE; // 用户栈顶地址
-            memory_set.push(
-                MapArea::new(
-                    VirtAddr::from(user_sp),
-                    VirtAddr::from(trap_cx_va.0),
-                    MapType::Framed,
-                    MapPermission::R | MapPermission::W | MapPermission::U,
-                ),
-                None,
-                user_sp,
-            );
+            println!("TaskControlBlock::new: calculated trap_cx_addr = {:#x}, kernel_stack_top = {:#x}, user_sp = {:#x}", trap_cx_addr, kernel_stack_top, initial_user_sp);
         }
 
        
@@ -131,19 +123,6 @@ impl ProcessControlBlock {
             trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
             // 由于loongarch会把异常上下文压入内核地址空间，所以会比riscv少一个trap_cx的映射页，因此内核栈顶地址即为trap_cx_addr
             kernel_stack_top = trap_cx_addr;
-            let user_stack_top = USER_STACK_TOP;
-            let user_stack_bottom = user_stack_top - USER_STACK_SIZE;
-            user_sp = user_stack_top;
-            memory_set.push(
-                MapArea::new(
-                    VirtAddr::from(user_stack_bottom),
-                    VirtAddr::from(user_stack_top),
-                    MapType::Framed,
-                    MapPermission::R | MapPermission::W | MapPermission::U,
-                ),
-                None,
-                user_stack_bottom,
-             );
         }
 
         debug!("TaskControlBlock::new: kernel_stack_top={:#x}", kernel_stack.get_top());
@@ -153,7 +132,7 @@ impl ProcessControlBlock {
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: true, // initproc和shell默认在主核运行
                 pname: String::from("initproc"),
-                base_size: user_sp,
+                base_size: initial_user_sp,
                 memory_set,
                 parent: None,
                 children: Vec::new(),
@@ -210,7 +189,7 @@ impl ProcessControlBlock {
         // 已解决：只分配了256MB内存，之前的实现写到了有效区之外
         *trap_cx = TrapContext::app_init_context(
             entry_point,
-            user_sp,
+            initial_user_sp,
             KERNEL_SPACE.exclusive_access().token(),
             kernel_stack_top,
             trap_handler as *const () as usize,
@@ -230,33 +209,24 @@ impl ProcessControlBlock {
     pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8], args: Vec<String>, on_main_hart: bool) {
         let cwd = self.inner_exclusive_access().cwd.clone();
         let mut has_interp = false;
-        let (mut memory_set, heap_bottom, final_entry_point, phdr_addr, phnum, phent) =
+        let Some((mut memory_set, heap_bottom, mut user_sp, final_entry_point, main_entry_point, phdr_addr, phnum, phent, interp_base)) =
             MemorySet::from_elf_with_interp_loader(elf_data, |interp_path| {
-                has_interp = true;
                 debug!("[kernel] sys_exec: loading interpreter at '{}'", interp_path);
-                open_file(cwd.clone(), interp_path, OpenFlags::RDONLY).map(|inode| inode.read_all())
-            });
-        const INTERP_BASE: usize = 0x40000000;   // 给解释器找一个宽敞的基地址（避开主程序）
+                open_file(cwd.clone(), interp_path, OpenFlags::RDONLY).map(|inode| {
+                    has_interp = true;
+                    inode.read_all()
+                })
+            }) else {
+                return;
+            };
         const AT_BASE: usize = 7;                // 辅助向量里代表解释器基址的 ID
 
         let trap_cx_addr: usize;
         let kernel_stack_top: usize;
-        let mut user_sp: usize;
 
         #[cfg(target_arch = "riscv64")]
         {
             let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(&caller_task.kernel_stack).into();
-            let user_stack_bottom = trap_cx_va.0 - USER_STACK_SIZE;
-            memory_set.push(
-                MapArea::new(
-                    VirtAddr::from(user_stack_bottom),
-                    trap_cx_va,
-                    MapType::Framed,
-                    MapPermission::R | MapPermission::W | MapPermission::U,
-                ),
-                None,
-                user_stack_bottom,
-            );
             memory_set.push(
                 MapArea::new(
                     trap_cx_va,
@@ -273,32 +243,20 @@ impl ProcessControlBlock {
                 trap_cx_pa.into()
             };
             kernel_stack_top = caller_task.kernel_stack.get_top();
-            user_sp = trap_cx_va.0;
         }
 
         #[cfg(target_arch = "loongarch64")]
         {
-            let user_stack_top = USER_STACK_TOP;
-            let user_stack_bottom = user_stack_top - USER_STACK_SIZE;
-            memory_set.push(
-                MapArea::new(
-                    VirtAddr::from(user_stack_bottom),
-                    VirtAddr::from(user_stack_top),
-                    MapType::Framed,
-                    MapPermission::R | MapPermission::W | MapPermission::U,
-                ),
-                None,
-                user_stack_bottom,
-            );
             trap_cx_addr = caller_task.inner_exclusive_access().trap_cx_addr;
             kernel_stack_top = trap_cx_addr;
-            user_sp = user_stack_top;
         }
         
         debug!(
             "[kernel] task::exec: entry_point={:#x}, user_sp={:#x}",
             final_entry_point, user_sp
         );
+
+        
         let memory_top = heap_bottom;
         // 压入具体的字符串内容（高地址）
         let mut argv_ptrs: Vec<usize> = Vec::new();
@@ -326,12 +284,26 @@ impl ProcessControlBlock {
         auxv.push((AT_PHENT, phent));
         auxv.push((AT_PHNUM, phnum));
         auxv.push((AT_PAGESZ, 4096));
-        auxv.push((AT_ENTRY, final_entry_point));
+        auxv.push((AT_ENTRY, main_entry_point));
         auxv.push((AT_RANDOM, random_at));
          // AT_NULL
         // 压入 AUXV
         if has_interp {
-            auxv.push((AT_BASE, INTERP_BASE));
+            if let Some(interp_base) = interp_base {
+                auxv.push((AT_BASE, interp_base));
+            }
+            info!(
+                "exec: dynamic-link branch, injected AT_BASE={:#x}, first_jump={:#x}, file_entry={:#x}",
+                interp_base.unwrap_or(0),
+                final_entry_point,
+                main_entry_point
+            );
+        } else {
+            info!(
+                "exec: fallback branch, no AT_BASE, first_jump={:#x}, file_entry={:#x}",
+                final_entry_point,
+                main_entry_point
+            );
         }
         auxv.push((0, 0));
         for (id, val) in auxv.iter().rev() {

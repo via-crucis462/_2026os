@@ -473,7 +473,7 @@ pub fn trap_return() -> ! {
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
     let id = current_user_asid();
-
+    //println!("[kernel] trap_return: user_satp={:#x}, id={:#x}, trap_cx_ptr={:#x}", user_satp, id, trap_cx_ptr as usize);
     unsafe {
         let mut euen: usize;
         asm!("csrrd {}, 0x2", out(reg) euen);
