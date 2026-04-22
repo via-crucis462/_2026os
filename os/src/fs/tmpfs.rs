@@ -286,6 +286,7 @@ pub fn setup_oscomp_env() {
             #[cfg(target_arch = "loongarch64")]
             {
                 lib64_dentry.insert("ld-musl-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
+                // 待修复：这里需要改inode为glibc的
                 lib64_dentry.insert("ld-linux-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
                 lib_dentry.insert("ld-musl-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
                 lib_dentry.insert("ld-linux-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
