@@ -199,7 +199,7 @@ impl ProcessControlBlock {
 
     /// Load a new elf to replace the original application address space and 
     /// 待修改
-    pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8],interp_data: Option<&[u8]>, args: Vec<String>, on_main_hart: bool) {
+    pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8],interp_data: Option<&[u8]>, args: Vec<String>, envs: Vec<String>, on_main_hart: bool) {
         // 生成新地址空间
         let (mut memory_set, mut user_sp,  entry_point, phdr_addr, phnum, phent) = MemorySet::from_elf(elf_data);
         let mut final_entry_point = entry_point; // 默认入口为主程序入口
@@ -258,6 +258,18 @@ impl ProcessControlBlock {
             *translated_refmut(memory_set.token(), p as *mut u8) = 0; // 写入结尾 0
             argv_ptrs.push(user_sp);
         }
+        // 环境变量字符串也放在高地址区域，后续在指针区单独压入 envp[]
+        let mut envp_ptrs: Vec<usize> = Vec::new();
+        for env in envs.iter() {
+            user_sp -= env.len() + 1; // +1 是为了结尾的 '\0'
+            let mut p = user_sp;
+            for c in env.as_bytes() {
+                *translated_refmut(memory_set.token(), p as *mut u8) = *c;
+                p += 1;
+            }
+            *translated_refmut(memory_set.token(), p as *mut u8) = 0; // 写入结尾 0
+            envp_ptrs.push(user_sp);
+        }
         // 随机字符串 (AT_RANDOM 使用) 16 字节
         user_sp -= 16;
         let random_at = user_sp;
@@ -286,9 +298,14 @@ impl ProcessControlBlock {
             user_sp -= core::mem::size_of::<usize>();
             *translated_refmut(memory_set.token(), user_sp as *mut usize) = *id;
         }
-        // 压入 envp 数组：目前只压入一个 NULL (0)
+        // 压入 envp 数组：压入一个 NULL (0) 作为结尾
         user_sp -= core::mem::size_of::<usize>();
         *translated_refmut(memory_set.token(), user_sp as *mut usize) = 0;
+        // 逆序压入 envp 的指针
+        for env_ptr in envp_ptrs.iter().rev() {
+            user_sp -= core::mem::size_of::<usize>();
+            *translated_refmut(memory_set.token(), user_sp as *mut usize) = *env_ptr;
+        }
         // 压入 argv 数组：先压入一个 NULL (0) 作为结尾
         user_sp -= core::mem::size_of::<usize>();
         *translated_refmut(memory_set.token(), user_sp as *mut usize) = 0;

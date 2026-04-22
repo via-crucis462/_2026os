@@ -206,7 +206,6 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
             Some(fd) => fd,
             None => return EMFILE.as_isize(),
         };
-        println!("[kernel] sys_openat: fd allocated for O_TMPFILE: {}", fd);
 
         // 4. 塞入进程的文件描述符表
         inner.set_fd(fd, anon_file, (flags & O_CLOEXEC) != 0, flags as usize);

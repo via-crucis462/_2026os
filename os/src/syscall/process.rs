@@ -706,7 +706,7 @@ pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
 // path elf路径
 // args 参数数组，必须以0结尾
 // envp 环境变量数组，必须以0结尾
-pub fn sys_exec(path: *const u8, mut args: *const usize, mut envp: *const usize) -> isize {
+pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize) -> isize {
     
     //println!("curent core id: {}, sys_exec called with path: {:?}, args: {:?}", get_hart_id(), path, args);
     let token = current_user_token();
@@ -718,23 +718,27 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envp: *const usize)
     //println!("exec: normalized path: '{}'", path_str);
     let mut args_vec: Vec<String> = Vec::new();
     // 提取原始参数数组
-    loop {
-        let arg_str_ptr = *translated_ref(token, args);
-        if arg_str_ptr == 0 { break; }
-        let arg_str = translated_str(token, arg_str_ptr as *const u8);
-        args_vec.push(arg_str);
-        unsafe { args = args.add(1); }
+    if args as usize != 0 {
+        loop {
+            let arg_str_ptr = *translated_ref(token, args);
+            if arg_str_ptr == 0 { break; }
+            let arg_str = translated_str(token, arg_str_ptr as *const u8);
+            args_vec.push(arg_str);
+            unsafe { args = args.add(1); }
+        }
     }
 
     // 提取环境变量数组
-    // TODO: 实现环境变量向用户态的传递
-    let mut env_vec: Vec<String> = Vec::new();
-    loop {
-        let env_str_ptr = *translated_ref(token, envp);
-        if env_str_ptr == 0 { break; }
-        let env_str = translated_str(token, env_str_ptr as *const u8);
-        env_vec.push(env_str);
-        unsafe { envp = envp.add(1); }
+    let mut envs_vec: Vec<String> = Vec::new();
+    /* */
+    if envs as usize != 0 {
+        loop {
+            let env_str_ptr = *translated_ref(token, envs);
+            if env_str_ptr == 0 { break; }
+            let env_str = translated_str(token, env_str_ptr as *const u8);
+            envs_vec.push(env_str);
+            unsafe { envs = envs.add(1); }
+        }
     }
 
     trace!("[kernel] sys_exec: before open_file");
@@ -808,6 +812,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envp: *const usize)
             all_data.as_slice(),
             interp_data.as_deref(),
             args_vec,
+            envs_vec,
             false,
         );
         //info!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
