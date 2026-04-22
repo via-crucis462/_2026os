@@ -389,10 +389,9 @@ pub fn sys_setgid(gid: u32) -> isize {
 
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
     let task = current_task().unwrap();
-    let proc = task.process();
     let mut inner = task.inner_exclusive_access();
     inner.clear_child_tid = tidptr;
-    proc.pid.0 as isize 
+    task.tid.0 as isize 
 }
 
 pub fn sys_getsid(pid: usize) -> isize {
@@ -715,6 +714,8 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     
     let path_str = normalize_leading_dot_path(translated_str(token, path));//直接删除路径中的.，不进行其他处理
     //println!("exec: normalized path: '{}'", path_str);
+
+
     let mut args_vec: Vec<String> = Vec::new();
     // 提取原始参数数组
     loop {
@@ -730,7 +731,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
     // 1. 尝试正常打开主程序
     let mut app_inode_opt = open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY);
 
-    // 3. 继续执行逻辑
+    // 2. 继续执行逻辑
     if let Some(mut app_inode) = app_inode_opt {
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         
@@ -759,32 +760,6 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             return ENOEXEC.as_isize(); // ENOEXEC
         }
         
-        let elf = xmas_elf::ElfFile::new(&all_data).unwrap();
-        let mut interp_path: Option<String> = None;
-
-        // 寻找动态链接器 (Interp)
-        for ph in elf.program_iter() {
-            if ph.get_type() == Ok(xmas_elf::program::Type::Interp) {
-                let offset = ph.offset() as usize;
-                let size = ph.file_size() as usize;
-                let interp_str = core::str::from_utf8(&all_data[offset..offset + size])
-                    .unwrap_or("").trim_end_matches('\0'); 
-                interp_path = Some(interp_str.to_string());
-                break;
-            }
-        }
-        
-        let mut interp_data: Option<Vec<u8>> = None;
-        if let Some(ref interp) = interp_path {
-            debug!("[kernel] sys_exec: loading interpreter at '{}'", interp);
-            if let Some(interp_inode) = open_file(cwd.clone(), interp.as_str(), OpenFlags::RDONLY) {
-                interp_data = Some(interp_inode.read_all());
-            } else {
-                /*error!("[kernel] sys_exec: failed to open interpreter '{}'", interp);
-                return ENOENT.as_isize(); */
-            }
-        }
-        
         let task = current_task().unwrap();
         let argc = args_vec.len();
         for i in 0..argc {
@@ -794,14 +769,13 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
         task.process().exec(
             task,
             all_data.as_slice(),
-            interp_data.as_deref(),
             args_vec,
             false,
         );
-        //info!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
+        //println!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
         argc as isize
     } else {
-        error!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
+        //println!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
         ENOENT.as_isize()
     }
 }

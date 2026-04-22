@@ -45,5 +45,6 @@ pub const MMIO: &[(usize, usize)] = &[
 pub const OFFSET_FOR_USER_APP: usize = 0;
 pub const USER_APP_BASE: usize = 0x1_2000_0000;
 pub const USER_APP_MAX_SIZE: usize = 0x40_0000_0000;
+pub const USER_STACK_TOP: usize = USER_APP_MAX_SIZE;
 
 pub const CPU_CORE_NUM: usize = 4;

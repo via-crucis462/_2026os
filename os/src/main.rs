@@ -202,6 +202,7 @@ fn init_other_hart(hart_id: usize) {
         if i == current_hart {
             continue;
         }
+        //参考2025年RocketOS的实现，先把启动地址写入目标核的csr_mail，然后发ipi唤醒
         arch::la::ipi::csr_mail_send(start_addr as u64, i, 0);
         arch::la::ipi::send_ipi_single(i, 1);
         info!("[kernel][la] wakeup hart {} with start={:#x}", i, start_addr);
@@ -233,7 +234,7 @@ pub fn get_hart_id() -> usize {
     let hart_id: usize;
     unsafe {
          asm!(
-            "move {}, $tp",
+            "csrrd {}, 0x20",
             out(reg) hart_id
         );
     }

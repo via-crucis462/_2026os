@@ -182,7 +182,29 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     /*if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
       
    }*/
-   debug!("[kernel] >>> Ready to enter Syscall ID: {}", syscall_id);
+    /*if syscall_id == SYSCALL_MMAP || syscall_id == SYSCALL_MUNMAP || syscall_id == SYSCALL_BRK {
+        
+        /*match syscall_id {
+            SYSCALL_MMAP => {
+                println!("mmap called with addr: {:#x}, length: {:#x}, prot: {:#x}, flags: {:#x}, fd: {:#x}, offset: {:#x}", 
+                    args[0], args[1], args[2], args[3], args[4], args[5]
+                );
+            },
+            SYSCALL_MUNMAP => {
+                println!("munmap called with addr: {:#x}, length: {:#x}", args[0], args[1]);
+            },
+            SYSCALL_BRK => {
+                println!("brk called with addr: {:#x}", args[0]);
+            },
+            _ => {}
+        }*/
+        let proc = current_task().unwrap().process();
+        let inner = proc.inner_exclusive_access();
+        for i in inner.memory_set.areas().iter() {
+            println!("before exec memory syscall mmap area: {:#x} - {:#x} ", i.get_vpn_range().get_start().0 << 12, i.get_vpn_range().get_end().0 << 12);
+        }
+    }*/
+   //println!("[kernel] >>> Ready to enter Syscall ID: {}", syscall_id);
 
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
@@ -308,11 +330,18 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             );
             Errno::ENOSYS.as_isize()}
     };
-    if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
+    /*if syscall_id == SYSCALL_MMAP || syscall_id == SYSCALL_MUNMAP || syscall_id == SYSCALL_BRK {
+        let proc = current_task().unwrap().process();
+        let inner = proc.inner_exclusive_access();
+        for i in inner.memory_set.areas().iter() {
+            println!("after exec memory syscall mmap area: {:#x} - {:#x} ", i.get_vpn_range().get_start().0 << 12, i.get_vpn_range().get_end().0 << 12);
+        }
+    }*/
+    /*if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
         debug!(
             "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], ret
         );
-    }
+    }*/
     ret
 }
