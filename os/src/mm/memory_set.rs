@@ -885,7 +885,7 @@ impl MemorySet {
                 }
             }
             
-            // 3. 确认为合法的未映射页（惰性分配触发），立刻分配物理帧并映射！
+            // 3. 确认为合法的未映射页（惰性分配触发），执行分配和映射
             area.map_one(page_table, vpn);
             
             #[cfg(target_arch = "loongarch64")]
@@ -894,9 +894,7 @@ impl MemorySet {
             return true; // 惰性分配修复成功！
         }
         
-        // ==========================================================
         // 4. 【新增】：动态扩张用户栈 (Dynamic Stack Growth)
-        // ==========================================================
         let sp_vpn = VirtAddr::from(sp).floor();
         
         // 设定一个栈最大允许单次/总共扩张的大小，比如 32 页 (128KB)，防止恶意程序耗尽内存
@@ -944,7 +942,7 @@ impl MemorySet {
     }
 
     pub fn debug_dump_areas(&self, badv: Option<usize>, era: Option<usize>) {
-        error!(
+        println!(
             "[kernel] memory_set: asid={}, brk_index={}, area_count={}",
             self.asid.0,
             self.brk_index,
@@ -955,7 +953,7 @@ impl MemorySet {
             let end = area.vpn_range.get_end().0 * PAGE_SIZE;
             let badv_hit = badv.map(|addr| addr >= start && addr < end).unwrap_or(false);
             let era_hit = era.map(|addr| addr >= start && addr < end).unwrap_or(false);
-            error!(
+            println!(
                 "[kernel] area[{}] [{:#x}, {:#x}) {:?}{}{}{}",
                 idx,
                 start,
