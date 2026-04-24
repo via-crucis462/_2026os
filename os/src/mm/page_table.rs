@@ -166,8 +166,8 @@ impl PageTable {
     }
     /// get the token from the page table
     #[cfg(target_arch = "riscv64")]
-    pub fn token(&self) -> usize {
-        8usize << 60 | self.root_ppn.0
+    pub fn token(&self, asid: usize) -> usize {
+        8usize << 60 | ((asid & 0xffff) << 44) | self.root_ppn.0
     }
     #[cfg(target_arch = "loongarch64")]
     pub fn token(&self) -> usize {

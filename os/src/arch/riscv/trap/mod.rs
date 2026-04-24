@@ -111,19 +111,18 @@ pub fn trap_handler() -> ! {
                 drop(process);
                 drop(task);
             } else {
-                drop(process_inner);
-                drop(process);
-                drop(task);
-                
-                /*error!(
+                println!(
                     "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}, sp={:#x}",
                     crate::task::current_task().unwrap().process().pid.0,
                     scause.cause(),
                     current_trap_cx().get_rt(),
                     stval,
                     sp
-                );*/
-                
+                );
+                process_inner.info_map_areas();
+                drop(process_inner);
+                drop(process);
+                drop(task);
                 // 取消原来的 current_add_signal(SignalFlags::SIGSEGV);
                 // 发信号压栈死循环。
                 // 直接以 11 (SIGSEGV的默认信号值) 退出码击毙当前进程！
@@ -131,7 +130,7 @@ pub fn trap_handler() -> ! {
             }
         }
         _ => {
-            error!(
+            println!(
                 "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
                 crate::task::current_task().unwrap().process().pid.0,
                 scause.cause(),

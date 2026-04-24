@@ -73,7 +73,14 @@ impl MemorySet {
     }
     /// Get the page table token
     pub fn token(&self) -> usize {
-        self.page_table.token()
+        #[cfg(target_arch = "riscv64")]
+        {
+            return self.page_table.token(self.asid());
+        }
+        #[cfg(target_arch = "loongarch64")]
+        {
+            self.page_table.token()
+        }
     }
     pub fn asid(&self) -> usize {
         self.asid.0
@@ -596,10 +603,11 @@ impl MemorySet {
     /// Change page table by writing satp CSR Register.
     #[cfg(target_arch = "riscv64")]
     pub fn activate(&self) {
-        let satp = self.page_table.token();
+        let satp = self.token();
+        let asid = self.asid();
         unsafe {
             satp::write(satp);
-            asm!("sfence.vma");
+            asm!("sfence.vma x0, {asid}", asid = in(reg) asid);
         }
     }
     /// 对于龙芯，修改PGDL/H寄器
@@ -885,7 +893,7 @@ impl MemorySet {
                 }
             }
             
-            // 3. 确认为合法的未映射页（惰性分配触发），立刻分配物理帧并映射！
+            // 3. 确认为合法的未映射页（惰性分配触发），执行分配和映射
             area.map_one(page_table, vpn);
             
             #[cfg(target_arch = "loongarch64")]
@@ -894,9 +902,7 @@ impl MemorySet {
             return true; // 惰性分配修复成功！
         }
         
-        // ==========================================================
         // 4. 【新增】：动态扩张用户栈 (Dynamic Stack Growth)
-        // ==========================================================
         let sp_vpn = VirtAddr::from(sp).floor();
         
         // 设定一个栈最大允许单次/总共扩张的大小，比如 32 页 (128KB)，防止恶意程序耗尽内存
@@ -944,7 +950,7 @@ impl MemorySet {
     }
 
     pub fn debug_dump_areas(&self, badv: Option<usize>, era: Option<usize>) {
-        error!(
+        println!(
             "[kernel] memory_set: asid={}, brk_index={}, area_count={}",
             self.asid.0,
             self.brk_index,
@@ -955,7 +961,7 @@ impl MemorySet {
             let end = area.vpn_range.get_end().0 * PAGE_SIZE;
             let badv_hit = badv.map(|addr| addr >= start && addr < end).unwrap_or(false);
             let era_hit = era.map(|addr| addr >= start && addr < end).unwrap_or(false);
-            error!(
+            println!(
                 "[kernel] area[{}] [{:#x}, {:#x}) {:?}{}{}{}",
                 idx,
                 start,
@@ -1123,6 +1129,9 @@ impl MapArea {
             }
             Some(data)
         }
+    }
+    pub fn get_map_permission(&self) -> MapPermission {
+        self.map_perm
     }
 }
 
