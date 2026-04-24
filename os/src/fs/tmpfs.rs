@@ -280,23 +280,51 @@ pub fn setup_oscomp_env() {
             error!("DEBUG: /dev/shm path is BROKEN!");
         }
         // --- 挂载动态链接库 ---
+        // musl
         if let Some(libc_node) = root.find_tree("/musl/libc.so", true).or_else(|| root.find_tree("/musl/lib/libc.so", true)) {
             #[cfg(target_arch = "riscv64")]
             lib_dentry.insert("ld-musl-riscv64.so.1".to_string(), libc_node.inode.clone());
+            
             #[cfg(target_arch = "loongarch64")]
-            {
-                lib64_dentry.insert("ld-musl-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
-                // 待修复：这里需要改inode为glibc的
-                lib64_dentry.insert("ld-linux-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
-                lib_dentry.insert("ld-musl-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
-                lib_dentry.insert("ld-linux-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
-            }
+            lib_dentry.insert("ld-musl-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
+            
             lib_dentry.insert("libc.so".to_string(), libc_node.inode.clone());
             info!("[VFS] Populated libc.so symlinks");
         }
+        
     } else {
         warn!("[VFS] WARNING: /musl not found, skipped busybox mapping.");
     }
+    // mount glibc ld
+    if let Some(glibc_dir) = root.find_tree("/glibc", true) {
+        #[cfg(target_arch = "loongarch64")]
+        {
+            if let Some(libc_node) = root.find_tree("/glibc/lib/ld-linux-loongarch-lp64d.so.1", true) {
+                lib_dentry.insert("ld-linux-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
+            }
+            if let Some(libc_node) = root.find_tree("/glibc/lib/libc.so.6", true) {
+                lib_dentry.insert("libc.so.6".to_string(), libc_node.inode.clone());
+            }
+            if let Some(libc_node) = root.find_tree("/glibc/lib/libm.so.6", true) {
+                lib_dentry.insert("libm.so.6".to_string(), libc_node.inode.clone());
+            }
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            if let Some(libc_node) = root.find_tree("/glibc/lib/ld-linux-riscv64-lp64d.so.1", true) {
+                lib_dentry.insert("ld-linux-riscv64-lp64d.so.1".to_string(), libc_node.inode.clone());
+            }
+            if let Some(libc_node) = root.find_tree("/glibc/lib/libc.so.6", true) {
+                lib_dentry.insert("libc.so.6".to_string(), libc_node.inode.clone());
+            }
+            if let Some(libc_node) = root.find_tree("/glibc/lib/libm.so.6", true) {
+                lib_dentry.insert("libm.so.6".to_string(), libc_node.inode.clone());
+            }
+        }
+    } else {
+        warn!("[VFS] WARNING: /glibc not found, skipped glibc mapping.");
+    }
+
     if root.find_tree("/dev/shm", true).is_some() {
         info!("DEBUG: /dev/shm path is VALID");
     } else {
