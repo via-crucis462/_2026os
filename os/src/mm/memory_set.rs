@@ -73,7 +73,14 @@ impl MemorySet {
     }
     /// Get the page table token
     pub fn token(&self) -> usize {
-        self.page_table.token()
+        #[cfg(target_arch = "riscv64")]
+        {
+            return self.page_table.token(self.asid());
+        }
+        #[cfg(target_arch = "loongarch64")]
+        {
+            self.page_table.token()
+        }
     }
     pub fn asid(&self) -> usize {
         self.asid.0
@@ -596,10 +603,11 @@ impl MemorySet {
     /// Change page table by writing satp CSR Register.
     #[cfg(target_arch = "riscv64")]
     pub fn activate(&self) {
-        let satp = self.page_table.token();
+        let satp = self.token();
+        let asid = self.asid();
         unsafe {
             satp::write(satp);
-            asm!("sfence.vma");
+            asm!("sfence.vma x0, {asid}", asid = in(reg) asid);
         }
     }
     /// 对于龙芯，修改PGDL/H寄器
@@ -1121,6 +1129,9 @@ impl MapArea {
             }
             Some(data)
         }
+    }
+    pub fn get_map_permission(&self) -> MapPermission {
+        self.map_perm
     }
 }
 

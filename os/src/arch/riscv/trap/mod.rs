@@ -119,9 +119,7 @@ pub fn trap_handler() -> ! {
                     stval,
                     sp
                 );
-                for i in task.inner_exclusive_access().memory_set.areas.iter() {
-                    println!("Mapped area: {:#x} - {:#x}", i.vpn_range.start.0, i.vpn_range.end.0);
-                }
+                process_inner.info_map_areas();
                 drop(process_inner);
                 drop(process);
                 drop(task);

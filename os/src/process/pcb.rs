@@ -661,5 +661,11 @@ impl ProcessControlBlockInner {
     pub fn is_zombie(&self) -> bool {
         self.alive_task_count <= 0
     }
+    pub fn info_map_areas(&self) {
+            println!("mapping asid {}:", self.get_asid());
+        for i in self.memory_set.areas().iter() {
+            println!("mapping: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
+        }
+    }
 }
 
