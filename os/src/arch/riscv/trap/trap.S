@@ -40,16 +40,20 @@ __alltraps:
     # move to kernel_sp
     ld sp, 35*8(sp)
     # switch to kernel space
+    slli t2, t0, 4
+    srli t2, t2, 48
     csrw satp, t0
-    sfence.vma
+    sfence.vma zero, t2
     # jump to trap_handler
     jr t1
 
 __restore:
     # a0: *TrapContext in user space(Constant); a1: user space token
     # switch to user space
+    slli t2, a1, 4
+    srli t2, t2, 48
     csrw   satp, a1
-    sfence.vma
+    sfence.vma zero, t2
     csrw sscratch, a0
     mv sp, a0
     # now sp points to TrapContext in user space, start restoring based on it

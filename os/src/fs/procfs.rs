@@ -244,7 +244,6 @@ pub fn mount_procfs() {
     let self_dentry = proc_dentry.insert(String::from("self"), Arc::new(TmpfsDirInode::new()));
     
     // 4. 在 /proc/self 下创建 maps 空文件
-    // 直接用你写好的 TmpfsFileInode，它默认就是一个合法的、可读写的空文件！
     self_dentry.insert(String::from("maps"), Arc::new(TmpfsFileInode::new()));
     
     info!("[VFS] /proc/meminfo, mounts, and /proc/self/maps mounted successfully!");

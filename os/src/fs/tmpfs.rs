@@ -227,7 +227,7 @@ pub fn setup_oscomp_env() {
     info!("[VFS] INFO: Start setup_oscomp_env...");
     let root = ROOT_DENTRY.clone();
 
-    // 1. 挂载 /tmp (解决嫌疑一，LTP 刚需！)
+    // 1. 挂载 /tmp 
     root.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new()));
     info!("[VFS] Mounted /tmp");
 

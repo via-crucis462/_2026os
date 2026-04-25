@@ -242,7 +242,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     let proc = task.process();
     let pid = proc.pid.0;
     let mut proc_inner = proc.inner_exclusive_access();
-    info!("[EXIT_GROUP] PID {} starts exiting. Total threads to kill: {}", pid, proc_inner.tasks.len());
+    trace!("[EXIT_GROUP] PID {} starts exiting. Total threads to kill: {}", pid, proc_inner.tasks.len());
 
     // 遍历当前进程的所有线程（tasks 列表）
     for thread in proc_inner.tasks.iter() {
@@ -388,10 +388,9 @@ pub fn sys_setgid(gid: u32) -> isize {
 
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
     let task = current_task().unwrap();
-    let proc = task.process();
     let mut inner = task.inner_exclusive_access();
     inner.clear_child_tid = tidptr;
-    proc.pid.0 as isize 
+    task.tid.0 as isize 
 }
 
 pub fn sys_getsid(pid: usize) -> isize {
@@ -716,6 +715,8 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     
     let path_str = normalize_leading_dot_path(translated_str(token, path));//直接删除路径中的.，不进行其他处理
     //println!("exec: normalized path: '{}'", path_str);
+
+
     let mut args_vec: Vec<String> = Vec::new();
     // 提取原始参数数组
     if args as usize != 0 {
@@ -746,7 +747,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     // 1. 尝试正常打开主程序
     let mut app_inode_opt = open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY);
 
-    // 3. 继续执行逻辑
+    // 2. 继续执行逻辑
     if let Some(mut app_inode) = app_inode_opt {
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         
@@ -775,32 +776,6 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             return ENOEXEC.as_isize(); // ENOEXEC
         }
         
-        let elf = xmas_elf::ElfFile::new(&all_data).unwrap();
-        let mut interp_path: Option<String> = None;
-
-        // 寻找动态链接器 (Interp)
-        for ph in elf.program_iter() {
-            if ph.get_type() == Ok(xmas_elf::program::Type::Interp) {
-                let offset = ph.offset() as usize;
-                let size = ph.file_size() as usize;
-                let interp_str = core::str::from_utf8(&all_data[offset..offset + size])
-                    .unwrap_or("").trim_end_matches('\0'); 
-                interp_path = Some(interp_str.to_string());
-                break;
-            }
-        }
-        
-        let mut interp_data: Option<Vec<u8>> = None;
-        if let Some(ref interp) = interp_path {
-            debug!("[kernel] sys_exec: loading interpreter at '{}'", interp);
-            if let Some(interp_inode) = open_file(cwd.clone(), interp.as_str(), OpenFlags::RDONLY) {
-                interp_data = Some(interp_inode.read_all());
-            } else {
-                /*error!("[kernel] sys_exec: failed to open interpreter '{}'", interp);
-                return ENOENT.as_isize(); */
-            }
-        }
-        
         let task = current_task().unwrap();
         let argc = args_vec.len();
         for i in 0..argc {
@@ -810,15 +785,14 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         task.process().exec(
             task,
             all_data.as_slice(),
-            interp_data.as_deref(),
             args_vec,
             envs_vec,
             false,
         );
-        //info!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
+        //println!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
         argc as isize
     } else {
-        error!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
+        //println!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
         ENOENT.as_isize()
     }
 }
@@ -834,59 +808,74 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
     let nohang = (options & WNOHANG) != 0;//是否开启了非阻塞选项
     info!("[wait4] P{} waiting for PID/PGID: {}, options: {}", current_pgid, pid, options);
 
-        let mut proc_inner = proc.inner_exclusive_access();
-        
-        // 严谨的 4 种 POSIX 匹配判定
-        let is_match = |p: &alloc::sync::Arc<crate::task::ProcessControlBlock>| -> bool {
-            let child_pid = p.getpid();
-            if pid == -1 {
-                true // 任意子进程
-            } else if pid > 0 {
-                child_pid == pid as usize // 特定 PID
-            } else if pid == 0 {
-                p.inner_exclusive_access().pgid == current_pgid // 同进程组
-            } else { // pid < -1
-                p.inner_exclusive_access().pgid == (-pid) as usize // 特定进程组
-            }
+        let children_snapshot = {
+            let proc_inner = proc.inner_exclusive_access();
+            proc_inner.children.clone()
         };
 
-        if (proc_inner.children.is_empty()) {
+        if children_snapshot.is_empty() {
             info!("[wait4] P{} has no children at all", current_pgid);
             return ECHILD.as_isize(); // 没有任何子进程
         }
 
+        let mut has_match = false;
+        let mut zombie_child: Option<(usize, i32)> = None;
+        for child in children_snapshot.iter() {
+            let child_pid = child.getpid();
+            let matches = if pid == -1 {
+                true
+            } else if pid > 0 {
+                child_pid == pid as usize
+            } else {
+                let child_pgid = child.inner_exclusive_access().pgid;
+                if pid == 0 {
+                    child_pgid == current_pgid
+                } else {
+                    child_pgid == (-pid) as usize
+                }
+            };
+
+            if !matches {
+                continue;
+            }
+
+            has_match = true;
+            let child_inner = child.inner_exclusive_access();
+            if child_inner.is_zombie {
+                zombie_child = Some((child_pid, child_inner.exit_code));
+                break;
+            }
+        }
+
         // 1. 检查是否存在符合要求的子进程
-        if !proc_inner.children.iter().any(|p| is_match(p)) {
+        if !has_match {
             info!("[wait4] P{} has no matching children for filter {}", current_pgid, pid);
             return ECHILD.as_isize(); // 真的是一个匹配的都没有，才返回 ECHILD
         }
     
         // 2. 尝试找一个“已经死掉”的僵尸孩子
-        let pair = proc_inner.children.iter().enumerate().find(|(_, p)| {
-            p.inner_exclusive_access().is_zombie && is_match(p)
-        });
-    
-        if let Some((idx, _)) = pair {
-            // 收尸成功，拿到孩子的 PID 和退出码
-            let child = proc_inner.children.remove(idx);
-            let child_pid = child.getpid();
-            let exit_code = child.inner_exclusive_access().exit_code;
+        if let Some((zombie_pid, exit_code)) = zombie_child {
+            let mut proc_inner = proc.inner_exclusive_access();
+            if let Some(idx) = proc_inner.children.iter().position(|child| child.getpid() == zombie_pid) {
+                let child = proc_inner.children.remove(idx);
+                let child_pid = child.getpid();
            
-            info!("[wait4] P{} collected Zombie P{} (code: {})", current_pgid, child_pid, exit_code);
-            // 组装状态码
-            let status = (exit_code & 0xff) << 8;
-            if exit_code_ptr as usize != 0 {
-                *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
+                info!("[wait4] P{} collected Zombie P{} (code: {})", current_pgid, child_pid, exit_code);
+                // 组装状态码
+                let status = (exit_code & 0xff) << 8;
+                if exit_code_ptr as usize != 0 {
+                    *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
+                }
+                
+                return child_pid as isize;
             }
-            
-            return child_pid as isize; 
-        } else {
-            if nohang {
-                return 0; // 没有僵尸孩子但开启了非阻塞选项，直接返回 0
-            }else{
-                // --- B. 孩子还活着，睡眠等待 ---
+        }
+
+        if nohang {
+            return 0; // 没有僵尸孩子但开启了非阻塞选项，直接返回 0
+        }else{
+            // B. 孩子还活着，睡眠等待
             info!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
-            drop(proc_inner);
             // 新增：检查是否被信号打断 
             let task_inner = task.inner_exclusive_access();
             let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
@@ -902,26 +891,51 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                 suspend_current_and_run_next();
                 
                 // 每次被唤醒后都检查一次是否有符合条件的僵尸孩子
-                let mut proc_inner = proc.inner_exclusive_access();
-                let pair = proc_inner.children.iter().enumerate().find(|(_, p)| {
-                    p.inner_exclusive_access().is_zombie && is_match(p)
-                });
-                if let Some((idx, _)) = pair {
-                    // 收尸成功，拿到孩子的 PID 和退出码
-                    let child = proc_inner.children.remove(idx);
+                let children_snapshot = {
+                    let proc_inner = proc.inner_exclusive_access();
+                    proc_inner.children.clone()
+                };
+                let mut zombie_child: Option<(usize, i32)> = None;
+                for child in children_snapshot.iter() {
                     let child_pid = child.getpid();
-                    let exit_code = child.inner_exclusive_access().exit_code;
-                    
-                    info!("[wait4] P{} collected Zombie P{} (code: {}) after waking up", current_pgid, child_pid, exit_code);
-                    // 组装状态码
-                    let status = (exit_code & 0xff) << 8;
-                    if exit_code_ptr as usize != 0 {
-                        *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
+                    let matches = if pid == -1 {
+                        true
+                    } else if pid > 0 {
+                        child_pid == pid as usize
+                    } else {
+                        let child_pgid = child.inner_exclusive_access().pgid;
+                        if pid == 0 {
+                            child_pgid == current_pgid
+                        } else {
+                            child_pgid == (-pid) as usize
+                        }
+                    };
+                    if !matches {
+                        continue;
                     }
-                    
-                    return child_pid as isize; 
+                    let child_inner = child.inner_exclusive_access();
+                    if child_inner.is_zombie {
+                        zombie_child = Some((child_pid, child_inner.exit_code));
+                        break;
+                    }
                 }
-            }
+                if let Some((zombie_pid, exit_code)) = zombie_child {
+                    let mut proc_inner = proc.inner_exclusive_access();
+                    if let Some(idx) = proc_inner.children.iter().position(|child| child.getpid() == zombie_pid) {
+                        // 收尸成功，拿到孩子的 PID 和退出码
+                        let child = proc_inner.children.remove(idx);
+                        let child_pid = child.getpid();
+                        
+                        info!("[wait4] P{} collected Zombie P{} (code: {}) after waking up", current_pgid, child_pid, exit_code);
+                        // 组装状态码
+                        let status = (exit_code & 0xff) << 8;
+                        if exit_code_ptr as usize != 0 {
+                            *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
+                        }
+                        
+                        return child_pid as isize;
+                    }
+                }
         }
     }
 }

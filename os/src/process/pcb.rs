@@ -6,7 +6,7 @@ use schedule::*;
 
 use crate::{
     arch::trap::{TrapContext, trap_handler, trap_cx_va_by_kernel_stack},
-    fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout, Stderr},
+    fs::{open_file, Dentry, File, OpenFlags, ROOT_DENTRY,Stdin, Stdout, Stderr},
     mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, 
         translated_refmut, MapArea, MapPermission, MapType},
     sync::{MPSafeCell, WaitQueue},
@@ -77,60 +77,77 @@ impl ProcessControlBlock {
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
     pub fn new(elf_data: &[u8]) -> (Arc<Self>, Arc<TaskControlBlock>) {
         println!("[kernel] TaskControlBlock::new: start creating a new process");
-        let (mut memory_set, user_sp, entry_point, _phdr, _phnum, _phent)
-            = MemorySet::from_elf(elf_data);
+
+        //处理 ELF 文件，创建内存空间，返回的memory_set中已经包含了用户程序的代码段、数据段、bss段以及长度为1的堆段
+        let Some((mut memory_set, heap_bottom, user_sp, entry_point, _main_entry, _phdr, _phnum, _phent, _interp_base))
+            = MemorySet::from_elf(elf_data) else {
+                panic!("TaskControlBlock::new: invalid ELF for init process");
+            };
         debug!(
-            "TaskControlBlock::new: entry_point={:#x}, user_sp={:#x}",
-            entry_point, user_sp
+            "TaskControlBlock::new: entry_point={:#x}",
+            entry_point
         );
         
-        // alloc a pid and a kernel stack in kernel space
-        // 注意：push_on_top已经被修改，请及时改回！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
+        //pid ，tid 和内核栈的分配
         let pid_handle = Arc::new(pid_alloc());
+        //println!("[kernel] TaskControlBlock::new: allocated PID {}", pid_handle.0);
         let tid_handle = Arc::new(tid_alloc());
+        //println!("[kernel] TaskControlBlock::new: allocated TID {}", tid_handle.0);
         let kernel_stack = kstack_alloc();
+        
+        let trap_cx_va: VirtAddr;
+        let trap_cx_addr: usize;
+        let kernel_stack_top: usize;
+        let initial_user_sp = user_sp;
+        #[cfg(target_arch = "riscv64")]{
+            // 异常上下文映射页，riscv会在进入跳板前将上下文压入用户地址空间，所以要在用户地址空间写入
+            // 将用户空间的上下文与内核栈唯一映射的原因是：这样可以为每一个线程分配唯一的上下文栈
+            // 什么？你说你问为什么不同的进程明明独立，但唯一标识符的异常上下文栈位置也一定不相同，这样做是不是有些粗糙
+            // 答案是确实粗糙
+            trap_cx_va = trap_cx_va_by_kernel_stack(&kernel_stack).into();
+            info!("TaskControlBlock::new: calculated trap_cx_va = {:#x}", trap_cx_va.0);
+            memory_set.push(
+                MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
+                    MapType::Framed, MapPermission::R | MapPermission::W),
+                None,
+                trap_cx_va.0,
+            );
+            trap_cx_addr = {
+                let trap_cx_ppn = memory_set
+                    .translate(trap_cx_va.into())
+                    .unwrap()
+                    .ppn();
+                let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
+                trap_cx_pa.into()
+            };
 
-        let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(&kernel_stack).into();
-        info!("TaskControlBlock::new: calculated trap_cx_va = {:#x}", trap_cx_va.0);
-        memory_set.push(
-            MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
-                MapType::Framed, MapPermission::R | MapPermission::W),
-            None,
-            trap_cx_va.0,
-        );
+            // 内核栈顶地址，即切换到内核任务流后内核执行栈的初始值（内核sp）
+            kernel_stack_top = kernel_stack.get_top();
+            println!("TaskControlBlock::new: calculated trap_cx_addr = {:#x}, kernel_stack_top = {:#x}, user_sp = {:#x}", trap_cx_addr, kernel_stack_top, initial_user_sp);
+        }
 
-        #[cfg(target_arch = "riscv64")]
-        let trap_cx_addr = {
-            let trap_cx_ppn = memory_set
-                .translate(trap_cx_va.into())
-                .unwrap()
-                .ppn();
-            let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
-            trap_cx_pa.into()
-        };
+       
         //info!("TaskControlBlock::new: translated trap_cx_addr = {:#x}", trap_cx_addr);
-        #[cfg(target_arch = "loongarch64")]
-        let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
+        #[cfg(target_arch = "loongarch64")]{
+            // loongarch在进入跳板前会将上下文压入内核地址空间的内核栈，所以直接在内核栈上分配TrapContext即可
+            trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
+            // 由于loongarch会把异常上下文压入内核地址空间，所以会比riscv少一个trap_cx的映射页，因此内核栈顶地址即为trap_cx_addr
+            kernel_stack_top = trap_cx_addr;
+        }
 
         debug!("TaskControlBlock::new: kernel_stack_top={:#x}", kernel_stack.get_top());
-
-        #[cfg(target_arch = "riscv64")]
-        let kernel_stack_top = kernel_stack.get_top();
-        #[cfg(target_arch = "loongarch64")]
-        let kernel_stack_top = trap_cx_addr;
-
         // 进程控制块
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),// 注意：实际上只克隆了指针
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: true, // initproc和shell默认在主核运行
                 pname: String::from("initproc"),
-                base_size: user_sp,
+                base_size: initial_user_sp,
                 memory_set,
                 parent: None,
                 children: Vec::new(),
-                heap_bottom: user_sp,
-                program_brk: user_sp,
+                heap_bottom: heap_bottom,
+                program_brk: heap_bottom,
                 fd_rlmt: Rlimit64 { cur_lmt: 1024, max_lmt: 1024 }, // 默认允许打开的最大文件描述符数量
                 // 初始化 fd_table，预先放入 stdin 和 stdout
                 fd_table: vec![
@@ -182,7 +199,7 @@ impl ProcessControlBlock {
         // 已解决：只分配了256MB内存，之前的实现写到了有效区之外
         *trap_cx = TrapContext::app_init_context(
             entry_point,
-            user_sp,
+            initial_user_sp,
             KERNEL_SPACE.exclusive_access().token(),
             kernel_stack_top,
             trap_handler as *const () as usize,
@@ -199,53 +216,58 @@ impl ProcessControlBlock {
 
     /// Load a new elf to replace the original application address space and 
     /// 待修改
-    pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8],interp_data: Option<&[u8]>, args: Vec<String>, envs: Vec<String>, on_main_hart: bool) {
-        // 生成新地址空间
-        let (mut memory_set, mut user_sp,  entry_point, phdr_addr, phnum, phent) = MemorySet::from_elf(elf_data);
-        let mut final_entry_point = entry_point; // 默认入口为主程序入口
-        const INTERP_BASE: usize = 0x40000000;   // 给解释器找一个宽敞的基地址（避开主程序）
+    pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8], args: Vec<String>, envs: Vec<String>, on_main_hart: bool) {
+        let cwd = self.inner_exclusive_access().cwd.clone();
+        let mut has_interp = false;
+        let Some((mut memory_set, heap_bottom, mut user_sp, final_entry_point, main_entry_point, phdr_addr, phnum, phent, interp_base)) =
+            MemorySet::from_elf_with_interp_loader(elf_data, |interp_path| {
+                debug!("[kernel] sys_exec: loading interpreter at '{}'", interp_path);
+                open_file(cwd.clone(), interp_path, OpenFlags::RDONLY).map(|inode| {
+                    has_interp = true;
+                    inode.read_all()
+                })
+            }) else {
+                return;
+            };
         const AT_BASE: usize = 7;                // 辅助向量里代表解释器基址的 ID
-        
-        
-        if let Some(interp) = interp_data {
-            // 解析解释器的 ELF
-            let elf = xmas_elf::ElfFile::new(interp).unwrap();
-            // 新的入口点 = 解释器的基地址 + 解释器 ELF 里的偏移
-            final_entry_point = INTERP_BASE + elf.header.pt2.entry_point() as usize;
 
-            // 遍历解释器的所有段，把 LOAD 段映射进当前进程的页表
-            for ph in elf.program_iter() {
-                if ph.get_type() == Ok(xmas_elf::program::Type::Load) {
-                    let start_va = INTERP_BASE + ph.virtual_addr() as usize;
-                    let end_va = start_va + ph.mem_size() as usize;
-                    
-                    let mut map_perm = crate::mm::MapPermission::U; // 记得确认你的 MapPermission 路径
-                    let ph_flags = ph.flags();
-                    if ph_flags.is_read() { map_perm |= crate::mm::MapPermission::R; }
-                    if ph_flags.is_write() { map_perm |= crate::mm::MapPermission::W; }
-                    if ph_flags.is_execute() { map_perm |= crate::mm::MapPermission::X; }
-                    
-                    let map_area = crate::mm::MapArea::new(
-                        start_va.into(),
-                        end_va.into(),
-                        crate::mm::MapType::Framed,
-                        map_perm,
-                    );
-                    
-                    let offset = ph.offset() as usize;
-                    let file_size = ph.file_size() as usize;
-                    let data = &interp[offset..offset + file_size];
-                    debug!("[kernel] task::exec: mapping interp segment: [{:#x}, {:#x}), offset={:#x}, file_size={:#x}", start_va, end_va, offset, file_size);
-                    memory_set.push(map_area, Some(data),start_va); 
-                }
-            }
+        let trap_cx_addr: usize;
+        let kernel_stack_top: usize;
+
+        #[cfg(target_arch = "riscv64")]
+        {
+            let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(&caller_task.kernel_stack).into();
+            memory_set.push(
+                MapArea::new(
+                    trap_cx_va,
+                    VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
+                    MapType::Framed,
+                    MapPermission::R | MapPermission::W,
+                ),
+                None,
+                trap_cx_va.0,
+            );
+            trap_cx_addr = {
+                let trap_cx_ppn = memory_set.translate(trap_cx_va.into()).unwrap().ppn();
+                let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
+                trap_cx_pa.into()
+            };
+            kernel_stack_top = caller_task.kernel_stack.get_top();
+        }
+
+        #[cfg(target_arch = "loongarch64")]
+        {
+            trap_cx_addr = caller_task.inner_exclusive_access().trap_cx_addr;
+            kernel_stack_top = trap_cx_addr;
         }
         
         debug!(
             "[kernel] task::exec: entry_point={:#x}, user_sp={:#x}",
-            entry_point, user_sp
+            final_entry_point, user_sp
         );
-        let memory_top = user_sp;
+
+        
+        let memory_top = heap_bottom;
         // 压入具体的字符串内容（高地址）
         let mut argv_ptrs: Vec<usize> = Vec::new();
         for arg in args.iter() {
@@ -284,12 +306,26 @@ impl ProcessControlBlock {
         auxv.push((AT_PHENT, phent));
         auxv.push((AT_PHNUM, phnum));
         auxv.push((AT_PAGESZ, 4096));
-        auxv.push((AT_ENTRY, entry_point));
+        auxv.push((AT_ENTRY, main_entry_point));
         auxv.push((AT_RANDOM, random_at));
          // AT_NULL
         // 压入 AUXV
-        if interp_data.is_some() {
-            auxv.push((AT_BASE, INTERP_BASE));
+        if has_interp {
+            if let Some(interp_base) = interp_base {
+                auxv.push((AT_BASE, interp_base));
+            }
+            info!(
+                "exec: dynamic-link branch, injected AT_BASE={:#x}, first_jump={:#x}, file_entry={:#x}",
+                interp_base.unwrap_or(0),
+                final_entry_point,
+                main_entry_point
+            );
+        } else {
+            info!(
+                "exec: fallback branch, no AT_BASE, first_jump={:#x}, file_entry={:#x}",
+                final_entry_point,
+                main_entry_point
+            );
         }
         auxv.push((0, 0));
         for (id, val) in auxv.iter().rev() {
@@ -335,33 +371,7 @@ impl ProcessControlBlock {
             proc_inner.pname = argv0.clone();
         }
         // 内核栈无须改变（fork时已经分配了新的）但需要重新映射
-        let kernel_stack = &caller_task.kernel_stack;
-        let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(kernel_stack).into();
-        memory_set.push(
-            MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
-                MapType::Framed, MapPermission::R | MapPermission::W),
-            None,
-            trap_cx_va.0,
-        );
-        #[cfg(target_arch = "riscv64")]
-        // 重新获取一次trap_cx_addr，因为原内存空间将被销毁
-        let trap_cx_addr: usize = {
-            {
-                let trap_cx_ppn = memory_set
-                    .translate(trap_cx_va.into())
-                    .unwrap()
-                    .ppn();
-                let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
-                trap_cx_pa.into()
-            }
-        };
-        #[cfg(target_arch = "loongarch64")]
-        let trap_cx_addr: usize = caller_task.inner_exclusive_access().trap_cx_addr;
         proc_inner.memory_set = memory_set;
-        #[cfg(target_arch = "riscv64")]
-        let kernel_stack_top = caller_task.kernel_stack.get_top();
-        #[cfg(target_arch = "loongarch64")]
-        let kernel_stack_top = trap_cx_addr;
 
         // 修改trap上下文
         let mut trap_cx = TrapContext::app_init_context(
@@ -402,7 +412,9 @@ impl ProcessControlBlock {
     
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = Arc::new(pid_alloc());
+        //println!("[kernel] TaskControlBlock::fork: allocated PID {}", pid_handle.0);
         let tid_handle = Arc::new(tid_alloc());
+        //println!("[kernel] TaskControlBlock::fork: allocated TID {}", tid_handle.0);
         let kernel_stack = kstack_alloc();
 
         let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(&kernel_stack).into();
@@ -436,7 +448,7 @@ impl ProcessControlBlock {
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
             inner: MPSafeCell::new(ProcessControlBlockInner {
-                on_main_hart: false, // LA 侧先固定到主核，避免未收敛的跨核执行路径
+                on_main_hart: false, 
                 pname: parent_inner.pname.clone(),
                 base_size: parent_inner.base_size,
                 memory_set,
@@ -689,6 +701,12 @@ impl ProcessControlBlockInner {
     }
     pub fn is_zombie(&self) -> bool {
         self.alive_task_count <= 0
+    }
+    pub fn info_map_areas(&self) {
+            println!("mapping asid {}:", self.get_asid());
+        for i in self.memory_set.areas().iter() {
+            println!("mapping: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
+        }
     }
 }
 

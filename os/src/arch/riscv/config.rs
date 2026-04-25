@@ -32,5 +32,5 @@ pub const MMIO: &[(usize, usize)] = &[
 
 /// 和la同步这个变量不过不设值
 pub const OFFSET_FOR_USER_APP: usize = 0;
-pub const MMAP_BASE: usize = 0x20_0000_0000;
-pub const USER_APP_MAX_END: usize = 0x40_0000_0000;
+pub const USER_APP_BASE: usize = 0x4000_0000;
+pub const USER_APP_MAX_SIZE: usize = 0x40_0000_0000; // 1GB

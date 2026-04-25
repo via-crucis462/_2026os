@@ -294,67 +294,67 @@ pub fn trap_handler() -> ! {
         Cause::Other
     };
         // 目前实现还不完善
-        match cause {
-            Cause::Syscall => {
-                let mut cx = current_trap_cx();
-                let syscall_id = cx.r[11];
-                //println!("[kernel] trap_handler: syscall_id={}, pid={}, tid={}, hart_id={}, era={:#x} , ra={:#x}, sp={:#x}", syscall_id, current_task().unwrap().getpid(), current_tid(), get_hart_id(), cx.get_rt(), cx.r[1], cx.r[2]);
-                let should_trace = is_brk_process() && matches!(syscall_id, SYS_WRITE | SYS_BRK);
-                if should_trace {
-                    //debug_dump_brk_snapshot("before_syscall", cx, current_user_token());
-                }
-                cx.set_rt(cx.get_rt() + 4);
-                // get system call return value
-                let result = syscall(
-                    syscall_id,
-                    [cx.r[4], cx.r[5], cx.r[6], cx.r[7], cx.r[8], cx.r[9]]
-                );
-                // cx is changed during sys_exec, so we have to call it again
-                cx = current_trap_cx();
-                cx.r[4] = result as usize;
-                if should_trace {
-                    //debug_dump_brk_snapshot("after_syscall", cx, current_user_token());
-                }
+    match cause {
+        Cause::Syscall => {
+            let mut cx = current_trap_cx();
+            let syscall_id = cx.r[11];
+            //println!("[kernel] trap_handler: syscall_id={}, pid={}, tid={}, hart_id={}, era={:#x} , ra={:#x}, sp={:#x}", syscall_id, current_task().unwrap().getpid(), current_tid(), get_hart_id(), cx.get_rt(), cx.r[1], cx.r[2]);
+            let should_trace = is_brk_process() && matches!(syscall_id, SYS_WRITE | SYS_BRK);
+            if should_trace {
+                 //debug_dump_brk_snapshot("before_syscall", cx, current_user_token());
             }
-            Cause::TimeInterrupt => {
-                unsafe {
-                    asm!("csrwr {}, 0x44", in(reg) 1);// 清除定时器中断
-                }
-                net_poll();
-                suspend_current_and_run_next();
+            cx.set_rt(cx.get_rt() + 4);
+            // get system call return value
+            let result = syscall(
+                syscall_id,
+                [cx.r[4], cx.r[5], cx.r[6], cx.r[7], cx.r[8], cx.r[9]]
+            );
+            // cx is changed during sys_exec, so we have to call it again
+            cx = current_trap_cx();
+            cx.r[4] = result as usize;
+            if should_trace {
+                //debug_dump_brk_snapshot("after_syscall", cx, current_user_token());
             }
-            _ => {
-                  let ecode = (estat >> 16) & 0x3f;
-                if let Some(task) = current_task() {
-                    let proc = task.process();
-                    let inner = proc.inner_exclusive_access();
-                    let vpn = VirtAddr::from(badv).floor();
-                    match inner.memory_set.translate(vpn) {
-                        Some(pte) => {
-                            error!(
-                                "[kernel] user_fault_pte: current hart id={}, badaddr={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
-                                get_hart_id(),
-                                badv,
-                                vpn.0,
-                                pte.bits,
-                                pte.is_valid(),
-                                pte.readable(),
-                                pte.writable(),
-                                pte.executable(),
-                            );
-                        }
-                        None => {
-                            error!(
-                                "[kernel] user_fault_pte: current hart id={}, badaddr={:#x}, estat={:#x}, vpn={:#x}, pte=<none>",
-                                get_hart_id(),
-                                badv,
-                                estat,
-                                vpn.0,
-                            );
-                        }
+        }
+        Cause::TimeInterrupt => {
+            unsafe {
+                asm!("csrwr {}, 0x44", in(reg) 1);// 清除定时器中断
+            }
+            net_poll();
+            suspend_current_and_run_next();
+        }
+        _ => {
+            let ecode = (estat >> 16) & 0x3f;
+            if let Some(task) = current_task() {
+                let proc = task.process();
+                let inner = proc.inner_exclusive_access();
+                let vpn = VirtAddr::from(badv).floor();
+                match inner.memory_set.translate(vpn) {
+                    Some(pte) => {
+                        println!(
+                            "[kernel] user_fault_pte: current hart id={}, badaddr={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
+                            get_hart_id(),
+                            badv,
+                            vpn.0,
+                            pte.bits,
+                            pte.is_valid(),
+                            pte.readable(),
+                            pte.writable(),
+                            pte.executable(),
+                        );
                     }
-                    // BRK(ecode=0xc): 验证 ERA 处物理页内容
-                    if ecode == 0xc {
+                    None => {
+                        println!(
+                            "[kernel] user_fault_pte: current hart id={}, badaddr={:#x}, estat={:#x}, vpn={:#x}, pte=<none>",
+                            get_hart_id(),
+                            badv,
+                            estat,
+                            vpn.0,
+                        );
+                    }
+                }
+                        // BRK(ecode=0xc): 验证 ERA 处物理页内容
+                    /*if ecode == 0xc {
                         let era_vpn = VirtAddr::from(era).floor();
                         let era_offset = era & 0xFFF;
                         // 读取硬件CSR中实际的PGDL值
@@ -399,43 +399,35 @@ pub fn trap_handler() -> ! {
                                 error!("[BRK诊断] era={:#x}, era_vpn={:#x}, 软件页表无PTE!", era, era_vpn.0);
                             }
                         }
-                    }
-                }
-                if is_brk_process() && (BRK_PRINTF_START..BRK_PRINTF_END).contains(&era) {
-                    let cx = current_trap_cx();
-                    debug_dump_brk_snapshot("fault_window", cx, current_user_token());
-                    debug_dump_user_stack_window(
-                        "fault_window_varargs",
-                        current_user_token(),
-                        cx.r[3] + 120,
-                        8,
-                    );
-                }
-                if let Some(task) = current_task() {
-                    let proc = task.process();
-                    let inner = proc.inner_exclusive_access();
-                    error!(
-                        "[kernel] trap_from_kernel: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
-                        task.getpid(),
-                        task.gettid(),
-                        inner.heap_bottom,
-                        inner.program_brk,
-                    );
-                    inner.memory_set.debug_dump_areas(Some(badv), Some(era));
-                } else {
-                    error!("[kernel] trap_from_kernel: no current task");
-                }
-                error!("[kernel] trap_handler: ready to add signal :{:?} in PID {}, estat={:#x}, era={:#x}, badv={:#x},badi={:#x}",
-                    cause,
-                    crate::task::current_task().unwrap().tid.0,
-                    estat,
-                    era,
-                    badv,
-                    badi
-                );
-                current_add_signal(SignalFlags::SIGSEGV);
+                    }*/
             }
+            /*if is_brk_process() && (BRK_PRINTF_START..BRK_PRINTF_END).contains(&era) {
+                let cx = current_trap_cx();
+                debug_dump_brk_snapshot("fault_window", cx, current_user_token());
+                debug_dump_user_stack_window(
+                 "fault_window_varargs",
+                    current_user_token(),
+                cx.r[3] + 120,
+                8,
+                );
+            }*/
+            if let Some(task) = current_task() {
+                let proc = task.process();
+                let inner = proc.inner_exclusive_access();
+                println!(
+                    "[kernel] trap_handler: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
+                    task.getpid(),
+                    task.gettid(),
+                    inner.heap_bottom,
+                    inner.program_brk,
+                );
+                inner.memory_set.debug_dump_areas(Some(badv), Some(era));
+            } else {
+                println!("[kernel] trap_handler: no current task");
+            }
+            current_add_signal(SignalFlags::SIGSEGV);
         }
+    }
     /*println!(
         "[trap_handler] before handle_signals: cause={:?}, estat={:#x}, era={:#x}, badv={:#x}, badi={:#x}",
         cause, estat, era, badv, badi
@@ -473,7 +465,7 @@ pub fn trap_return() -> ! {
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
     let id = current_user_asid();
-
+    //println!("[kernel] trap_return: user_satp={:#x}, id={:#x}, trap_cx_ptr={:#x}", user_satp, id, trap_cx_ptr as usize);
     unsafe {
         let mut euen: usize;
         asm!("csrrd {}, 0x2", out(reg) euen);
