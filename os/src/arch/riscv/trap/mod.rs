@@ -60,7 +60,7 @@ pub fn trap_handler() -> ! {
     let sepc = riscv::register::sepc::read();
     let stval = riscv::register::stval::read();
 
-     debug!(
+    debug!(
         "trap_handler: cause: {:?}, sepc: {:#x}, stval: {:#x}", 
         scause.cause(), 
         sepc, 

@@ -82,14 +82,15 @@ debug-la: build-la copy-la
 	| tee kernel_output.log
 
 gdb-rv:
-	@gdb-multiarch $(RV_ELF) \
+	@gdb $(RV_ELF) \
 	-ex "set confirm off" \
 	-ex "set pagination off" \
 	-ex "set print thread-events off" \
 	-ex "set scheduler-locking off" \
 	-ex "set schedule-multiple on" \
 	-ex "target extended-remote :$(RV_GDB_PORT)" \
-	-ex "info threads"
+	-ex "info threads" \
+	-ex "b os::syscall::fs::sys_write"
 
 gdb-la:
 	@gdb-multiarch $(LA_ELF) \

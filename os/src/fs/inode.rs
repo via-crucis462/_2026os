@@ -12,6 +12,7 @@ use super::VfsInode;
 use spin::Mutex;
 use crate::mm::UserBuffer;
 use crate::fs::TimeSpec;
+use core::any::Any;
 
 
 pub struct OSInode {
@@ -152,6 +153,8 @@ impl File for OSInode {
         // 5. 成功返回新的偏移量
         new_offset as isize
     }
+
+    fn as_any(&self) -> &dyn Any { self }
 }
 bitflags! {
     ///  The flags argument to the open() system call is constructed by ORing together zero or more of the following values:

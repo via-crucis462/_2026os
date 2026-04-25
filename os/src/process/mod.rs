@@ -142,7 +142,7 @@ pub const IDLE_PID: usize = 1;
     remove_from_tid2task(task.gettid());
 
     let pid = task.getpid();
-    println!("[kernel] Process {} is exiting with code {} ...", pid, exit_code);
+    info!("[kernel] Process {} is exiting with code {} ...", pid, exit_code);
     if pid == IDLE_PID {
         println!("[kernel] Idle process exit with exit_code {} ...", exit_code);
         panic!("All applications completed!");
