@@ -746,8 +746,7 @@ impl MemorySet {
 
     /// 在当前地址空间中寻找一个长度为 length 的空闲连续区域
     pub fn find_free_area(&self, length: usize) -> Option<usize> {
-        // 从用户空间的 0x4000_0000 开始往上找
-         //println!("[kernel] find_free_area: finding free area for length {:#x}", length);
+        //println!("[kernel] find_free_area: finding free area for length {:#x}", length);
         // 将长度向上对齐到页
         let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 

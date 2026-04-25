@@ -162,10 +162,12 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
 const AT_FDCWD: isize = -100;
 
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isize {
+    
     let task = current_task().unwrap();
     let proc = task.process();
     let token = current_user_token();
     let path_str = normalize_leading_dot_path(translated_str(token, path));
+    trace!("kernel:tid[{}] sys_openat, dirfd={}, path={}", task.gettid(), dirfd, path_str);
     //debug!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
     const O_TMPFILE: u32 = 0x400000;
     let (readable, writable) = match flags & 0x3 {
@@ -204,7 +206,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
             Some(fd) => fd,
             None => return EMFILE.as_isize(),
         };
-        
+
         // 4. 塞入进程的文件描述符表
         inner.set_fd(fd, anon_file, (flags & O_CLOEXEC) != 0, flags as usize);
         debug!("[kernel] sys_openat: O_TMPFILE success fd={}", fd);
@@ -331,12 +333,14 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     //println!("pipe done");
     0
 }
-const RLIMIT_NOFILE: usize = 1024;
+
 pub fn sys_dup(fd: usize) -> isize {
-	trace!("kernel:pid[{}] sys_dup", current_task().unwrap().process().pid.0);
+	trace!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().process().pid.0, fd);
+    // println!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().process().pid.0, fd);
     let task = current_task().unwrap();
     let proc = task.process();
     let mut inner = proc.inner_exclusive_access();
+    // println!("table len = {}", inner.fd_table.len());
     if fd >= inner.fd_table.len() {
         return EBADF.as_isize();
     }
@@ -347,11 +351,13 @@ pub fn sys_dup(fd: usize) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
+    // println!("[kernel] sys_dup: new fd allocated: {}", new_fd);
     let file = Arc::clone(inner.fd_table[fd].file.as_ref().unwrap());
     let old_status = inner.fd_table[fd].status;
     inner.set_fd(new_fd, file, false, old_status);
     new_fd as isize
 }
+
 pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> isize {
     // println!("[DEBUG VFS] sys_lseek: fd={}, offset={}, whence={}", fd, offset, whence);
     let token = current_user_token();
@@ -466,7 +472,14 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
 
         if let Some(file) = &inner.fd_table[dirfd as usize].file {
             if let Some(dentry) = file.get_dentry() {
-                let statx_data = dentry.inode.get_statx();
+                let mut statx_data = dentry.inode.get_statx();
+                // 检查是否有缓存的时间数据，如果有则覆盖 stat 中的时间字段
+                if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&statx_data.stx_ino) {
+                    statx_data.stx_atime.tv_sec = asec;
+                    statx_data.stx_atime.tv_nsec = ansec as u32;
+                    statx_data.stx_mtime.tv_sec = msec;
+                    statx_data.stx_mtime.tv_nsec = mnsec as u32;
+                }
                 *translated_refmut(token, st) = statx_data;
                 return 0;
             }
@@ -496,9 +509,15 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
 
     let follow_links = (flags & (1 << 8)) == 0; // AT_SYMLINK_NOFOLLOW (0x100)
     if let Some(target_dentry) = start_dentry.find_tree(&path_str, follow_links) {
-        let stat = target_dentry.inode.get_statx();
-        
-        
+        let mut stat = target_dentry.inode.get_statx();
+        // 检查是否有缓存的时间数据，如果有则覆盖 stat 中的时间字段
+        if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&stat.stx_ino) {
+            stat.stx_atime.tv_sec = asec;
+            stat.stx_atime.tv_nsec = ansec as u32;
+            stat.stx_mtime.tv_sec = msec;
+            stat.stx_mtime.tv_nsec = mnsec as u32;
+        }
+
         *translated_refmut(token, st) = stat;
         0
     } else {

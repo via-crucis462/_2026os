@@ -30,7 +30,7 @@ impl Scheduler {
         self.task_pool.add_task(task);
     }
     pub fn get_pool(&mut self) -> &mut TaskPool {
-        trace!("[kernel] Scheduler::get_pool");
+        //trace!("[kernel] Scheduler::get_pool");
         &mut self.task_pool
     }
     pub fn auto_get_task(&mut self) -> VecDeque<Arc<TaskControlBlock>> {
@@ -113,14 +113,14 @@ impl TaskPool {
 }
 
 pub(crate) fn add_task_into_pool_unlocked(task: Arc<TaskControlBlock>) {
-    trace!("[kernel] Scheduler::add_task_into_pool: pid={}", task.getpid());
+    //trace!("[kernel] Scheduler::add_task_into_pool: pid={}", task.getpid());
     remove_task_from_all_local_queues_unlocked(task.gettid());
     let mut scheduler = SCHEDULER.exclusive_access();
     scheduler.get_pool().remove_task(task.gettid());
     scheduler.get_pool().add_task(task);
     drop(scheduler);
     //sbi_wakeup_harts(0b1111);
-    trace!("add into pool finised");
+    //trace!("add into pool finised");
 }
 
 pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {

@@ -1,4 +1,4 @@
-use super::{VfsInode, Stat, Statx, ROOT_DENTRY};
+use super::{VfsInode, Stat, Statx, StatxTimestamp, ROOT_DENTRY};
 use alloc::sync::Arc;
 use alloc::string::String;
 use crate::fs::tmpfs::TmpfsDirInode;
@@ -60,7 +60,7 @@ impl super::VfsInode for TtyInode {
     }
     
     // 下面全部保持默认/空实现
-    fn get_statx(&self) -> super::Statx { unimplemented!() }
+    fn get_statx(&self) -> super::Statx { stat_to_statx(&self.get_stat()) }
     fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
@@ -90,7 +90,7 @@ impl VfsInode for NullInode {
             ctime_sec: 0, ctime_nsec: 0, __unused: [0;1],
         }
     }
-    fn get_statx(&self) -> Statx { unimplemented!() }
+    fn get_statx(&self) -> Statx { stat_to_statx(&self.get_stat()) }
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
@@ -124,7 +124,7 @@ impl VfsInode for ZeroInode {
             ctime_sec: 0, ctime_nsec: 0, __unused: [0;1],
         }
     }
-    fn get_statx(&self) -> Statx { unimplemented!() }
+    fn get_statx(&self) -> Statx { stat_to_statx(&self.get_stat()) }
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
@@ -147,7 +147,7 @@ impl VfsInode for RtcInode {
             ctime_sec: 0, ctime_nsec: 0, __unused: [0;1],
         }
     }
-    fn get_statx(&self) -> Statx { unimplemented!() }
+    fn get_statx(&self) -> Statx { stat_to_statx(&self.get_stat()) }
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
@@ -172,6 +172,33 @@ pub fn mount_devfs() {
 impl NullInode {
     pub fn new() -> Self {
         Self
+    }
+}
+
+// Convert a `Stat` to `Statx` for VFS implementations.
+fn stat_to_statx(stat: &Stat) -> Statx {
+    Statx {
+        stx_mask: 0,
+        stx_blksize: stat.blksize as u32,
+        stx_attributes: 0,
+        stx_nlink: stat.nlink,
+        stx_uid: stat.uid,
+        stx_gid: stat.gid,
+        stx_mode: stat.mode as u16,
+        __spare0: [0u16; 1],
+        stx_ino: stat.ino,
+        stx_size: stat.size as u64,
+        stx_blocks: stat.blocks as u64,
+        stx_attributes_mask: 0,
+        stx_atime: StatxTimestamp { tv_sec: stat.atime_sec, tv_nsec: stat.atime_nsec as u32, __reserved: 0 },
+        stx_btime: StatxTimestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 },
+        stx_ctime: StatxTimestamp { tv_sec: stat.ctime_sec, tv_nsec: stat.ctime_nsec as u32, __reserved: 0 },
+        stx_mtime: StatxTimestamp { tv_sec: stat.mtime_sec, tv_nsec: stat.mtime_nsec as u32, __reserved: 0 },
+        stx_rdev_major: (stat.rdev >> 32) as u32,
+        stx_rdev_minor: stat.rdev as u32,
+        stx_dev_major: (stat.dev >> 32) as u32,
+        stx_dev_minor: stat.dev as u32,
+        __spare2: [0u64; 14],
     }
 }
 

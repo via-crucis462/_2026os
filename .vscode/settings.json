@@ -10,6 +10,8 @@
     "rust-analyzer.check.allTargets": false,
     
     "makefile.configureOnOpen": false,
+    // 取消忽略 .gitignore 中的文件，以便在资源管理器和搜索中显示它们
+    "explorer.excludeGitIgnore": false,
     "search.useIgnoreFiles": false,
     "search.useGlobalIgnoreFiles": false,
     

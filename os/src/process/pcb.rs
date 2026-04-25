@@ -27,6 +27,14 @@ const AT_PAGESZ: usize = 6;
 const AT_ENTRY: usize = 9;
 const AT_RANDOM: usize = 25;
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct  Rlimit64 {
+    pub cur_lmt: usize,
+    pub max_lmt: usize,
+}
+
+
 #[derive(Clone)]
 pub struct FileDescriptor {
     pub file: Option<Arc<dyn File + Send + Sync>>,
@@ -140,6 +148,7 @@ impl ProcessControlBlock {
                 children: Vec::new(),
                 heap_bottom: heap_bottom,
                 program_brk: heap_bottom,
+                fd_rlmt: Rlimit64 { cur_lmt: 1024, max_lmt: 1024 }, // 默认允许打开的最大文件描述符数量
                 // 初始化 fd_table，预先放入 stdin 和 stdout
                 fd_table: vec![
                     FileDescriptor::new(Arc::new(Stdin), false, 0),
@@ -156,7 +165,6 @@ impl ProcessControlBlock {
                 euid: 0,
                 is_zombie: false,
                 egid: 0,
-                
                 pgid: pid_handle.0,
                 alive_task_count: 0,
                 tasks: Vec::new(),
@@ -208,7 +216,7 @@ impl ProcessControlBlock {
 
     /// Load a new elf to replace the original application address space and 
     /// 待修改
-    pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8], args: Vec<String>, on_main_hart: bool) {
+    pub fn exec(self: &Arc<ProcessControlBlock>, caller_task: Arc<TaskControlBlock>, elf_data: &[u8], args: Vec<String>, envs: Vec<String>, on_main_hart: bool) {
         let cwd = self.inner_exclusive_access().cwd.clone();
         let mut has_interp = false;
         let Some((mut memory_set, heap_bottom, mut user_sp, final_entry_point, main_entry_point, phdr_addr, phnum, phent, interp_base)) =
@@ -272,6 +280,18 @@ impl ProcessControlBlock {
             *translated_refmut(memory_set.token(), p as *mut u8) = 0; // 写入结尾 0
             argv_ptrs.push(user_sp);
         }
+        // 环境变量字符串也放在高地址区域，后续在指针区单独压入 envp[]
+        let mut envp_ptrs: Vec<usize> = Vec::new();
+        for env in envs.iter() {
+            user_sp -= env.len() + 1; // +1 是为了结尾的 '\0'
+            let mut p = user_sp;
+            for c in env.as_bytes() {
+                *translated_refmut(memory_set.token(), p as *mut u8) = *c;
+                p += 1;
+            }
+            *translated_refmut(memory_set.token(), p as *mut u8) = 0; // 写入结尾 0
+            envp_ptrs.push(user_sp);
+        }
         // 随机字符串 (AT_RANDOM 使用) 16 字节
         user_sp -= 16;
         let random_at = user_sp;
@@ -314,9 +334,14 @@ impl ProcessControlBlock {
             user_sp -= core::mem::size_of::<usize>();
             *translated_refmut(memory_set.token(), user_sp as *mut usize) = *id;
         }
-        // 压入 envp 数组：目前只压入一个 NULL (0)
+        // 压入 envp 数组：压入一个 NULL (0) 作为结尾
         user_sp -= core::mem::size_of::<usize>();
         *translated_refmut(memory_set.token(), user_sp as *mut usize) = 0;
+        // 逆序压入 envp 的指针
+        for env_ptr in envp_ptrs.iter().rev() {
+            user_sp -= core::mem::size_of::<usize>();
+            *translated_refmut(memory_set.token(), user_sp as *mut usize) = *env_ptr;
+        }
         // 压入 argv 数组：先压入一个 NULL (0) 作为结尾
         user_sp -= core::mem::size_of::<usize>();
         *translated_refmut(memory_set.token(), user_sp as *mut usize) = 0;
@@ -367,7 +392,7 @@ impl ProcessControlBlock {
         *task_inner.get_trap_cx() = trap_cx;
 
         // 删除其他线程（如果有）
-        proc_inner.tasks.retain(|t| Arc::ptr_eq(t, &caller_task));
+        proc_inner.tasks.retain(|t: &Arc<TaskControlBlock>| Arc::ptr_eq(t, &caller_task));
         proc_inner.alive_task_count = 1;
         for i in proc_inner.memory_set.areas().iter() {
             debug!("exec: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
@@ -419,6 +444,7 @@ impl ProcessControlBlock {
 
         // copy fd table
         let new_fd_table = parent_inner.fd_table.clone();
+        // println!("[kernel] ProcessControlBlock::fork: copied fd_table with {} entries", new_fd_table.len());
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
             inner: MPSafeCell::new(ProcessControlBlockInner {
@@ -441,6 +467,7 @@ impl ProcessControlBlock {
                 sid:parent_inner.sid,
                 egid: parent_inner.egid,
                 pgid: parent_inner.pgid,
+                fd_rlmt: parent_inner.fd_rlmt.clone(),
                 tasks: Vec::new(),
                 is_zombie: false,
                 alive_task_count: 1,
@@ -597,7 +624,11 @@ pub struct ProcessControlBlockInner {
 
     /// Program break
     pub program_brk: usize,// 注意需要在exec中维护，rcore忽略了这点，运行测例时brk失效，已修复
+
+    pub fd_rlmt: Rlimit64, // cur_lmt, max_lmt
+
     pub fd_table: Vec<FileDescriptor>,
+    
     pub cwd: Arc<Dentry>, // 当前工作目录
 
     // 进程收到的信号
@@ -630,9 +661,6 @@ impl ProcessControlBlockInner {
         self.memory_set.asid()
     }
     pub fn alloc_fd(&mut self) -> Option<usize> {
-        // 设定进程最大允许打开的文件描述符数量 (通常 Linux 默认是 1024)
-        const FD_LIMIT: usize = 1024; 
-
         // 1. 先尝试在现有的表中寻找被 close 空出来的坑位
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].file.is_none()) {
             self.fd_table[fd].cloexec = false;
@@ -641,7 +669,7 @@ impl ProcessControlBlockInner {
         } 
         
         // 2. 如果没有空闲坑位，检查是否已经达到上限
-        if self.fd_table.len() >= FD_LIMIT {
+        if self.fd_table.len() >= self.fd_rlmt.cur_lmt {
             return None; // 拒绝分配，触发 EMFILE
         }
         
@@ -652,7 +680,6 @@ impl ProcessControlBlockInner {
     pub fn clear_fd(&mut self, fd: usize) {
         self.fd_table[fd] = FileDescriptor::empty();
     }
-
     pub fn set_fd(
         &mut self,
         fd: usize,
@@ -661,6 +688,16 @@ impl ProcessControlBlockInner {
         status: usize,
     ) {
         self.fd_table[fd] = FileDescriptor::new(file, cloexec, status);
+    }
+    /// 回收被close的fd，压缩fd_table
+    pub fn recycle_fd(&mut self) {
+        self.fd_table.retain(|fd| fd.file.is_some());
+    }
+    pub fn get_rlimit64(&self) -> Rlimit64 {
+        self.fd_rlmt.clone()
+    }
+    pub fn set_rlimit64(&mut self, new_rlmt: Rlimit64) {
+        self.fd_rlmt = new_rlmt;
     }
     pub fn is_zombie(&self) -> bool {
         self.alive_task_count <= 0

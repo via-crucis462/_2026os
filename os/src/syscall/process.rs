@@ -2,9 +2,8 @@
 //! 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
 //! 内存管理也暂时放在此处
 
-use core::error;
-
-use crate::get_hart_id;
+use crate::mm::translated_read;
+use crate::{get_hart_id, mm::translated_write};
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
 use alloc::vec;
@@ -205,7 +204,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
                     ready_count += 1;
                 }
             }
-            trace!("[kernel] ppoll fd={} target_events={:#x} ready_revents={:#x}", pollfd.fd, pollfd.events, pollfd.revents);
+            //trace!("[kernel] ppoll fd={} target_events={:#x} ready_revents={:#x}", pollfd.fd, pollfd.events, pollfd.revents);
         }
         
         // 4. 如果找到了就绪事件，恢复掩码并返回！
@@ -703,8 +702,10 @@ pub fn sys_clone(func: usize, stack: usize, flags: usize) -> isize {
         }
     }
 }
-
-pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
+// path elf路径
+// args 参数数组，必须以0结尾
+// envp 环境变量数组，必须以0结尾
+pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize) -> isize {
     
     //println!("curent core id: {}, sys_exec called with path: {:?}, args: {:?}", get_hart_id(), path, args);
     let token = current_user_token();
@@ -718,14 +719,29 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
 
     let mut args_vec: Vec<String> = Vec::new();
     // 提取原始参数数组
-    loop {
-        let arg_str_ptr = *translated_ref(token, args);
-        if arg_str_ptr == 0 { break; }
-        let arg_str = translated_str(token, arg_str_ptr as *const u8);
-        args_vec.push(arg_str);
-        unsafe { args = args.add(1); }
+    if args as usize != 0 {
+        loop {
+            let arg_str_ptr = *translated_ref(token, args);
+            if arg_str_ptr == 0 { break; }
+            let arg_str = translated_str(token, arg_str_ptr as *const u8);
+            args_vec.push(arg_str);
+            unsafe { args = args.add(1); }
+        }
     }
-    
+
+    // 提取环境变量数组
+    let mut envs_vec: Vec<String> = Vec::new();
+    /* */
+    if envs as usize != 0 {
+        loop {
+            let env_str_ptr = *translated_ref(token, envs);
+            if env_str_ptr == 0 { break; }
+            let env_str = translated_str(token, env_str_ptr as *const u8);
+            envs_vec.push(env_str);
+            unsafe { envs = envs.add(1); }
+        }
+    }
+
     trace!("[kernel] sys_exec: before open_file");
     
     // 1. 尝试正常打开主程序
@@ -770,6 +786,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
             task,
             all_data.as_slice(),
             args_vec,
+            envs_vec,
             false,
         );
         //println!("[kernel] sys_exec: successfully executed '{}', argc={}", path_str, argc);
@@ -1051,7 +1068,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
     let (target_file, target_inode, mut old_atime, mut old_mtime, ino) = if path_ptr == 0 {
         // futimens 模式: path 为 NULL 时，直接操作 dirfd
         if dirfd < 0 || dirfd as usize >= inner.fd_table.len() { 
-            return -9; // EBADF
+            return EBADF.as_isize();
         }
         if let Some(file_obj) = &inner.fd_table[dirfd as usize].file {
             let stat = file_obj.get_stat();
@@ -1063,12 +1080,12 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
                 stat.ino
             )
         } else {
-            return -9; // EBADF
+            return EBADF.as_isize();
         }
     } else {
         // utimensat 模式: 根据 path 查找文件
         let path_str = translated_str(token, path_ptr as *const u8);
-        if path_str == "/dev/null/invalid" { return -20; } // ENOTDIR 特判
+        if path_str == "/dev/null/invalid" { return ENOTDIR.as_isize(); } // ENOTDIR 特判
 
         let cwd = inner.cwd.clone();
         if let Some(dentry) = cwd.find_tree(&path_str, true) {
@@ -1081,7 +1098,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
                 stat.ino
             )
         } else {
-            return -2; // ENOENT
+            return ENOENT.as_isize();
         }
     };
     if ino != 0 {
@@ -1142,8 +1159,6 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
     } else {
         println!("[utime_debug] sys_utimensat: WARNING! ino is 0, cache skipped!");
     }
-
-    println!("unimplemented sys_utimensat");
     0
 }
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
@@ -1781,6 +1796,13 @@ pub fn sys_robust_list() -> isize {
     0
 }
 
+pub fn sys_get_robust_list() -> isize {
+    let task = current_task().unwrap();
+    let process = task.process();
+    trace!("kernel:pid[{}] sys_get_robust_list NOT IMPLEMENTED", process.pid.0);
+    0
+}
+
 pub fn sys_resq() -> isize {
     let task = current_task().unwrap();
     let process = task.process();
@@ -1810,7 +1832,7 @@ pub type SigSet = usize;
 /// - `set_ptr`:   用户态指针，指向目标信号集位图（SigSet）。
 /// - `info_ptr`:  用户态指针，用于存储捕获到的信号详细信息（SigInfo）。
 /// - `timeout_ptr`: 用户态指针，指向超时时间结构体（TimeSpec）。若为 null 则无限期等待。
-/// - `sigsetsize`: 信号集结构的大小，Linux 下 x86_64/riscv64 通常要求为 8 字节。
+/// - `sigsetsize`: 信号集结构的大小，Linux 下 x，86_64/riscv64 通常要求为 8 字节。
 ///
 /// ### 返回值
 /// - 成功：返回被捕获的信号编号（正数）。
@@ -1895,12 +1917,47 @@ pub fn sys_rt_sigtimedwait(
     }
 }
 
+
+use crate::process::Rlimit64;
+/// 修改打开的文件数限制
 pub fn sys_prlimit64(
-    _pid: usize, 
-    _resource: i32, 
-    _new_limit: *const u8, 
-    _old_limit: *mut u8
+    pid: usize, 
+    resource: i32, 
+    new_limit: *const Rlimit64, 
+    old_limit: *mut Rlimit64
 ) -> isize {
-    // 0 代表成功。骗 musl libc 我们处理好了资源限制
-    0 
+    const RLIMIT_NPROC: i32 = 3;
+    const RLIMIT_NOFILE: i32 = 7;
+    info!("sys_prlimit64 called with pid={}, resource={}, new_limit={:#x}, old_limit={:#x}", pid, resource, new_limit as usize, old_limit as usize);
+    if pid != 0 {
+        return Errno::EPERM.as_isize(); // 不允许修改其他进程
+    }
+    let token = current_user_token();
+    match resource {
+        RLIMIT_NPROC => {
+            // 伪实现，返回一个固定值
+            if !old_limit.is_null() {
+                translated_write(token, old_limit, Rlimit64 { cur_lmt: 4096, max_lmt: 4096 });
+            }
+            0
+        }
+        RLIMIT_NOFILE => {
+            // 打开的文件数限制
+            let task = current_task().unwrap();
+            let process = task.process();
+            let mut proc_inner = process.inner_exclusive_access();
+            proc_inner.recycle_fd();
+            let old = proc_inner.get_rlimit64();
+            if !old_limit.is_null() {
+                translated_write(token, old_limit, old);
+            }
+            if !new_limit.is_null() {
+                let new = translated_read(token, new_limit);
+                proc_inner.set_rlimit64(new); 
+            }
+            0
+        }
+        // 其他请求暂不支持
+        _ => Errno::EINVAL.as_isize()
+    }
 }
