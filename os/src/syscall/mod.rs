@@ -55,6 +55,7 @@ const SYSCALL_UTIMENSAT: usize = 88;
 /// exit syscall
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
+const SYSCALL_SET_TID_ADDRESS: usize = 96;
 
 const SYSCALL_SET_ROBUST_LIST: usize = 99;
 const SYSCALL_GET_ROBUST_LIST: usize = 100;
