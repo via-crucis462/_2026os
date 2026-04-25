@@ -132,7 +132,7 @@ pub fn wake_up_one(mut wait_queue: MutexGuard<WaitQueue>) {
 }
 
 /// pid of usertests app in make run TEST=1
-pub const IDLE_PID: usize = 0;
+pub const IDLE_PID: usize = 1;
 
 /// Exit the current 'Running' task and run the next task in task list.
     pub fn exit_current_and_run_next(exit_code: i32) {
@@ -142,6 +142,7 @@ pub const IDLE_PID: usize = 0;
     remove_from_tid2task(task.gettid());
 
     let pid = task.getpid();
+    println!("[kernel] Process {} is exiting with code {} ...", pid, exit_code);
     if pid == IDLE_PID {
         println!("[kernel] Idle process exit with exit_code {} ...", exit_code);
         panic!("All applications completed!");
@@ -159,6 +160,7 @@ pub const IDLE_PID: usize = 0;
     // Decrease the number of alive tasks
     proc_inner.alive_task_count -= 1;
     let parent_to_wake = proc_inner.parent.as_ref().and_then(|p| p.upgrade());
+    let mut orphan_children = alloc::vec::Vec::new();
     
 
     if proc_inner.alive_task_count == 0 || proc_inner.is_zombie {
@@ -167,20 +169,12 @@ pub const IDLE_PID: usize = 0;
         // 注意：如果是单线程程序，alive_task_count 减到 0 时，is_zombie 之前是 false，
         // 这里会把它变成 true，正式宣告进程进入僵尸态。
 
-        let initproc = INITTASK.process();
-        let mut initproc_inner = initproc.inner_exclusive_access();
-        if !proc_inner.children.is_empty() {
-            warn!("[kernel] Process {} orphans {} children to initproc", pid, proc_inner.children.len());
+        orphan_children = core::mem::take(&mut proc_inner.children);
+        if !orphan_children.is_empty() {
+            warn!("[kernel] Process {} orphans {} children to initproc", pid, orphan_children.len());
         }
-        // 2. 托孤：把所有未退出的子进程交给 initproc
-        for child in proc_inner.children.iter() {
-            child.inner_exclusive_access().parent = Some(Arc::downgrade(&initproc));
-            initproc_inner.children.push(child.clone());
-        }
-        drop(initproc_inner);
         
         // 3. 清理当前进程持有的资源
-        proc_inner.children.clear();
         proc_inner.memory_set.recycle_data_pages();
         proc_inner.fd_table.clear();
 
@@ -199,6 +193,16 @@ pub const IDLE_PID: usize = 0;
     drop(proc_inner);
     drop(proc);
     drop(task_inner);
+
+    if !orphan_children.is_empty() {
+        let initproc = INITTASK.process();
+        for child in orphan_children.iter() {
+            child.inner_exclusive_access().parent = Some(Arc::downgrade(&initproc));
+        }
+        let mut initproc_inner = initproc.inner_exclusive_access();
+        initproc_inner.children.extend(orphan_children);
+    }
+
     // drop task manually to maintain rc correctly
     drop(task); 
     

@@ -82,7 +82,9 @@ impl ProcessControlBlock {
         
         //pid ，tid 和内核栈的分配
         let pid_handle = Arc::new(pid_alloc());
+        //println!("[kernel] TaskControlBlock::new: allocated PID {}", pid_handle.0);
         let tid_handle = Arc::new(tid_alloc());
+        //println!("[kernel] TaskControlBlock::new: allocated TID {}", tid_handle.0);
         let kernel_stack = kstack_alloc();
         
         let trap_cx_va: VirtAddr;
@@ -385,7 +387,9 @@ impl ProcessControlBlock {
     
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = Arc::new(pid_alloc());
+        //println!("[kernel] TaskControlBlock::fork: allocated PID {}", pid_handle.0);
         let tid_handle = Arc::new(tid_alloc());
+        //println!("[kernel] TaskControlBlock::fork: allocated TID {}", tid_handle.0);
         let kernel_stack = kstack_alloc();
 
         let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(&kernel_stack).into();
