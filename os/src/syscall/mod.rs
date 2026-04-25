@@ -55,11 +55,10 @@ const SYSCALL_UTIMENSAT: usize = 88;
 /// exit syscall
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
-const SYSCALL_SET_TID_ADDRESS: usize = 96;
-#[cfg(target_arch = "riscv64")]
-const SYSCALL_SET_ROBUST_LIST: usize = 99;// RISCV
-#[cfg(target_arch = "loongarch64")]
-const SYSCALL_SET_ROBUST_LIST: usize = 100;
+
+const SYSCALL_SET_ROBUST_LIST: usize = 99;
+const SYSCALL_GET_ROBUST_LIST: usize = 100;
+
 const SYSCALL_SLEEP:usize =101;
 const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_SYSLOG: usize = 116;
@@ -294,6 +293,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2] as u32),
         SYSCALL_PRCTL => sys_prctl(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_SET_ROBUST_LIST => sys_robust_list(),
+        SYSCALL_GET_ROBUST_LIST => sys_get_robust_list(),
         SYSCALL_RESQ => sys_resq(),
         SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),

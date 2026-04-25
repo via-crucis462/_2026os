@@ -1782,6 +1782,13 @@ pub fn sys_robust_list() -> isize {
     0
 }
 
+pub fn sys_get_robust_list() -> isize {
+    let task = current_task().unwrap();
+    let process = task.process();
+    trace!("kernel:pid[{}] sys_get_robust_list NOT IMPLEMENTED", process.pid.0);
+    0
+}
+
 pub fn sys_resq() -> isize {
     let task = current_task().unwrap();
     let process = task.process();
