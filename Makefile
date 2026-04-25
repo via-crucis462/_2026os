@@ -1,5 +1,5 @@
 MODE ?= debug
-RV_SMP ?= 1
+RV_SMP ?= 4
 LA_SMP ?= 4
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
@@ -100,7 +100,8 @@ gdb-rv:
 	-ex "set scheduler-locking off" \
 	-ex "set schedule-multiple on" \
 	-ex "target extended-remote :$(RV_GDB_PORT)" \
-	-ex "info threads"
+	-ex "info threads" \
+	-ex "b os::syscall::fs::sys_dup2"
 
 gdb-la:
 	@$(GDB) $(LA_ELF) \

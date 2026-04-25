@@ -379,10 +379,16 @@ pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return EBADF.as_isize();
     }
+    
+    // 不能超过限制
+    if new_fd >= inner.fd_rlmt.cur_lmt {
+        return EBADF.as_isize();
+    }
 
     if fd == new_fd {
         return new_fd as isize;
     }
+    
     ensure_fd_slots(&mut inner, new_fd + 1);
     let file = Arc::clone(inner.fd_table[fd].file.as_ref().unwrap());
     let old_status = inner.fd_table[fd].status;
