@@ -1,10 +1,19 @@
 MODE ?= debug
-RV_SMP ?= 1
+RV_SMP ?= 4
 LA_SMP ?= 4
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
 RV_ELF ?= os/target/riscv64gc-unknown-none-elf/$(MODE)/os
 LA_ELF ?= os/target/loongarch64-unknown-none/$(MODE)/os
+
+GDB_MUL_EXITS = $(shell command -v gdb-multiarch)
+
+ifneq ($(GDB_MUL_EXITS),)
+	GDB = gdb-multiarch
+else
+	GDB = gdb
+endif
+
 
 all: build
 
@@ -24,6 +33,7 @@ copy: copy-rv copy-la
 
 build: build-rv build-la copy
 
+test-rv: MODE = release
 test-rv: build-rv copy-rv
 	@rm -f kernel_output.log
 	@qemu-system-riscv64 -machine virt \
@@ -37,6 +47,7 @@ test-rv: build-rv copy-rv
 	-rtc base=utc \
 	| tee kernel_output.log
 
+test-la: MODE = release
 test-la: build-la copy-la
 	@rm -f kernel_output.log
 	@qemu-system-loongarch64 \
@@ -82,17 +93,18 @@ debug-la: build-la copy-la
 	| tee kernel_output.log
 
 gdb-rv:
-	@gdb-multiarch $(RV_ELF) \
+	@$(GDB) $(RV_ELF) \
 	-ex "set confirm off" \
 	-ex "set pagination off" \
 	-ex "set print thread-events off" \
 	-ex "set scheduler-locking off" \
 	-ex "set schedule-multiple on" \
 	-ex "target extended-remote :$(RV_GDB_PORT)" \
-	-ex "info threads"
+	-ex "info threads" \
+	-ex "b os::syscall::fs::sys_dup2"
 
 gdb-la:
-	@gdb-multiarch $(LA_ELF) \
+	@$(GDB) $(LA_ELF) \
 	-ex "set confirm off" \
 	-ex "set pagination off" \
 	-ex "set print thread-events off" \

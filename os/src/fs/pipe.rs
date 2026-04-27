@@ -4,6 +4,7 @@ use crate::sync::MPSafeCell;
 use alloc::sync::{Arc, Weak};
 use crate::mm::{frame_alloc, FrameTracker}; 
 use crate::arch::config::PAGE_SIZE;
+use core::any::Any;
 
 use crate::task::suspend_current_and_run_next;
 
@@ -270,4 +271,6 @@ impl File for Pipe {
         trace!("Pipe: getdents called on a pipe, returning -1");
         -1
     }
+
+    fn as_any(&self) -> &dyn Any { self }
 }

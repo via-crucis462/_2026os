@@ -5,6 +5,7 @@ use crate::arch::sbi::console_getchar;
 use crate::task::suspend_current_and_run_next;
 use lazy_static::*;
 use crate::sync::MPSafeCell;
+use core::any::Any;
 
 lazy_static! {
     pub static ref STDOUT_LOCK: MPSafeCell<()> = MPSafeCell::new(());
@@ -109,6 +110,8 @@ impl File for Stdin {
         trace!("Stdin: getdents called on stdin, returning -1");
         -1
     }
+
+    fn as_any(&self) -> &dyn Any { self }
 }
 
 impl File for Stdout {
@@ -146,6 +149,8 @@ impl File for Stdout {
         trace!("Stdout: getdents called on stdout, returning -1");
         -1
     }
+
+    fn as_any(&self) -> &dyn Any { self }
 }
 
 impl File for Stderr {
@@ -181,4 +186,6 @@ impl File for Stderr {
         trace!("Stderr: getdents called on stderr, returning -1");
         -1
     }
+
+    fn as_any(&self) -> &dyn Any { self }
 }
