@@ -22,6 +22,8 @@ const F_DUPFD_CLOEXEC: usize = 1030;
 
 const FD_CLOEXEC: usize = 1;
 const O_ACCMODE: usize = 0o3;
+const O_NONBLOCK: usize = 0o4000;
+const O_NDELAY: usize = O_NONBLOCK;
 const O_WRONLY: usize = 0o1;
 const O_CLOEXEC: u32 = 0o2000000;
 use super::errno::Errno::*;
@@ -86,8 +88,12 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         return EBADF.as_isize(); // 注意引入正确的 EBADF 路径
     }
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let status = inner.fd_table[fd].status;
     if !file.writable() {
         return EACCES.as_isize(); 
+    }
+    if (status & (O_NONBLOCK | O_NDELAY)) != 0 && !file.ready_to_write() {
+        return EAGAIN.as_isize();
     }
     drop(inner); 
     let user_buffer = UserBuffer::new(crate::mm::translated_byte_buffer(token, buf, len));
@@ -113,8 +119,12 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     }
     if let Some(file) = &inner.fd_table[fd].file {
         let file = file.clone();
+        let status = inner.fd_table[fd].status;
         if !file.readable() {
             return EACCES.as_isize(); // 权限不足
+        }
+        if (status & (O_NONBLOCK | O_NDELAY)) != 0 && !file.ready_to_read() {
+            return EAGAIN.as_isize();
         }
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
