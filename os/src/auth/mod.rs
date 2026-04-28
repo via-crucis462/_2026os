@@ -14,6 +14,9 @@ impl PermStat {
             gid: 0,      // root 组
         }
     }
+    pub fn new(mode: u32, uid: u32, gid: u32) -> Self {
+        Self { mode, uid, gid }
+    }
     pub fn set_uid(&mut self, uid: u32) {
         self.uid = uid;
     }
@@ -24,7 +27,7 @@ impl PermStat {
         self.mode = mode;
     }
     pub fn can_read(&self, uid: u32, gid: u32) -> bool {
-        if self.uid == uid {
+        if uid == 0 || self.uid == uid {
             self.mode & 0o400 != 0
         } else if self.gid == gid {
             self.mode & 0o040 != 0
@@ -33,7 +36,7 @@ impl PermStat {
         }
     }
     pub fn can_write(&self, uid: u32, gid: u32) -> bool {
-        if self.uid == uid {
+        if uid == 0 || self.uid == uid {
             self.mode & 0o200 != 0
         } else if self.gid == gid {
             self.mode & 0o020 != 0
@@ -42,7 +45,7 @@ impl PermStat {
         }
     }
     pub fn can_execute(&self, uid: u32, gid: u32) -> bool {
-        if self.uid == uid {
+        if uid == 0 || self.uid == uid {
             self.mode & 0o100 != 0
         } else if self.gid == gid {
             self.mode & 0o010 != 0
