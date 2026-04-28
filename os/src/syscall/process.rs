@@ -1928,6 +1928,7 @@ pub fn sys_prlimit64(
 ) -> isize {
     const RLIMIT_NPROC: i32 = 3;
     const RLIMIT_NOFILE: i32 = 7;
+    const RLIMIT_MEMLOCK: i32 = 8;
     info!("sys_prlimit64 called with pid={}, resource={}, new_limit={:#x}, old_limit={:#x}", pid, resource, new_limit as usize, old_limit as usize);
     if pid != 0 {
         return Errno::EPERM.as_isize(); // 不允许修改其他进程
@@ -1954,6 +1955,13 @@ pub fn sys_prlimit64(
             if !new_limit.is_null() {
                 let new = translated_read(token, new_limit);
                 proc_inner.set_rlimit64(new); 
+            }
+            0
+        }
+        RLIMIT_MEMLOCK => {
+            // 锁定内存限制，伪实现
+            if !old_limit.is_null() {
+                translated_write(token, old_limit, Rlimit64 { cur_lmt: 0x40_0000, max_lmt: 0x40_0000 });
             }
             0
         }
