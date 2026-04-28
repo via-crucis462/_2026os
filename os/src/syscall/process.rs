@@ -1399,7 +1399,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     let process = task.process();
     let inner = process.inner_exclusive_access();
     if op != EPOLL_CTL_DEL && event_ptr == 0 {
-        return EFAULT.as_isize(); // 返回 -EFAULT
+        return EFAULT.as_isize();
     }
     
     if epfd >= inner.fd_table.len() || fd >= inner.fd_table.len() { return EBADF.as_isize(); } // EBADF
@@ -1412,7 +1412,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     //   向下转型！如果它不是 EpollFile，报错！
     let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
         Some(ef) => ef,
-        None => return EINVAL.as_isize(), // EINVAL
+        None => return EINVAL.as_isize(),
     };
     
     let token = inner.memory_set.token();

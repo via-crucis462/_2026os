@@ -425,7 +425,9 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let process = task.process();
     let mut inner = process.inner_exclusive_access();
 
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+
+    const O_PATH: usize = 0o10000000;
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() || (inner.fd_table[fd].status & O_PATH) != 0{
         return Errno::EBADF.as_isize();
     }
 
