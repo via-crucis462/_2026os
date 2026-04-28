@@ -12,12 +12,14 @@ use super::VfsInode;
 use spin::Mutex;
 use crate::mm::UserBuffer;
 use crate::fs::TimeSpec;
+use crate::auth::PermStat;
 use core::any::Any;
 
 
 pub struct OSInode {
     readable: bool,
     writable: bool,
+    perm: PermStat,
     inner: Mutex<OSInodeInner>,
     pub inode: Arc<dyn VfsInode>,   //实现了VfsInode trait的具体文件系统的inode
     pub dentry: Arc<Dentry>, 
@@ -32,6 +34,7 @@ impl OSInode {
         Self {
             readable,
             writable,
+            perm: PermStat::init_all_perm(),
             inner: Mutex::new(OSInodeInner { offset: 0 }),
             inode,
             dentry,
