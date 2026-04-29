@@ -31,6 +31,12 @@ impl TmpfsFileInode {
             data: Mutex::new(alloc::vec::Vec::new()),
         }
     }
+    pub fn new_with_data(data: &[u8]) -> Self {
+        Self {
+            ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
+            data: Mutex::new(data.to_vec()), // 直接把传进来的切片转成 Vec 存起来
+        }
+    }
 }
 
 impl super::VfsInode for TmpfsFileInode {
@@ -130,6 +136,7 @@ impl TmpfsDirInode {
             entries: Mutex::new(BTreeMap::new()),
         }
     }
+    
 }
 
 impl super::VfsInode for TmpfsDirInode {
@@ -232,6 +239,12 @@ pub fn setup_oscomp_env() {
     info!("[VFS] Mounted /tmp");
 
     // 2. 挂载 bin, sbin, usr 等虚拟目录
+    let etc_dentry = root.insert("etc".to_string(), Arc::new(TmpfsDirInode::new()));
+    let passwd_content = "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
+    let group_content = "root:x:0:\nnobody:x:65534:\n";
+    
+    etc_dentry.insert("passwd".to_string(), Arc::new(TmpfsFileInode::new_with_data(passwd_content.as_bytes())));
+    etc_dentry.insert("group".to_string(), Arc::new(TmpfsFileInode::new_with_data(group_content.as_bytes())));
     let bin_dentry = root.insert("bin".to_string(), Arc::new(TmpfsDirInode::new()));
     let sbin_dentry = root.insert("sbin".to_string(), Arc::new(TmpfsDirInode::new()));
     let usr_dentry = root.insert("usr".to_string(), Arc::new(TmpfsDirInode::new()));
@@ -272,7 +285,7 @@ pub fn setup_oscomp_env() {
         dev_dentry.insert("rtc".to_string(), Arc::new(RtcInode::new()));
         dev_dentry.insert("tty".to_string(), Arc::new(TtyInode::new()));
         // 2. 挂载 shm
-        dev_dentry.insert("shm".to_string(), Arc::new(TmpfsDirInode::new()));
+ 
         info!("[VFS] Mounted /dev/shm safely");
         if root.find_tree("/dev/shm", true).is_some() {
         info!("DEBUG: /dev/shm path is VALID");
