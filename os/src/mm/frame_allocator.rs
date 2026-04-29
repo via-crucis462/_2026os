@@ -57,6 +57,13 @@ impl StackFrameAllocator {
         self.end = r.0;
         // trace!("last {} Physical Frames.", self.end - self.current);
     }
+    pub fn free_frames(&self) -> usize {
+        // 未曾分配过的页框数 (end - current) + 已经被释放回收的页框数
+        self.end - self.current + self.recycled.len()
+    }
+}
+pub fn get_free_frames() -> usize {
+    FRAME_ALLOCATOR.exclusive_access().free_frames()
 }
 impl FrameAllocator for StackFrameAllocator {
     fn new() -> Self {

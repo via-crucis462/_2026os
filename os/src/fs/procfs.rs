@@ -2,12 +2,29 @@ use super::{VfsInode, Stat, Statx, ROOT_DENTRY};
 use alloc::sync::Arc;
 use alloc::string::String;
 use crate::fs::{TmpfsDirInode, TmpfsFileInode, stat_to_statx};
+use core::fmt::{self, Write};
+use crate::mm::get_free_frames;
 
 
 //造一个“空目录” Inode，专门给 /proc 文件夹用
 
 pub struct ProcDirInode;
-
+struct StackBuffer<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+impl<'a> Write for StackBuffer<'a> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let bytes = s.as_bytes();
+        let remain = self.buf.len() - self.len;
+        if remain < bytes.len() {
+            return Err(fmt::Error);
+        }
+        self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+        Ok(())
+    }
+}
 impl VfsInode for ProcDirInode {
     fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
     fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
@@ -84,17 +101,29 @@ impl VfsInode for ProcDirInode {
 pub struct MemInfoInode;
 
 impl VfsInode for MemInfoInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        if offset > 0 { return 0; }
+   fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        let free_frames = get_free_frames(); 
+        let free_kb = free_frames * 4;
+        let total_kb = 128 * 1024; 
+        let mut local_buf = [0u8; 128];
+        let mut writer = StackBuffer { buf: &mut local_buf, len: 0 };
+        let _ = write!(
+            writer,
+            "MemTotal:        {} kB\nMemFree:         {} kB\nMemAvailable:    {} kB\n",
+            total_kb, free_kb, free_kb
+        );
 
-        let meminfo_str = "MemTotal:        8192 kB\nMemFree:         4096 kB\nMemAvailable:    4096 kB\n";
+        let output_bytes = &writer.buf[..writer.len];
+
+        if offset >= output_bytes.len() {
+            return 0; // 读到文件末尾
+        }
+
+        let read_len = core::cmp::min(buf.len(), output_bytes.len() - offset);
+        buf[..read_len].copy_from_slice(&output_bytes[offset..offset + read_len]);
         
-        let bytes = meminfo_str.as_bytes();
-        let len = bytes.len().min(buf.len());
-        buf[..len].copy_from_slice(&bytes[..len]);
-        len
+        read_len
     }
-
     fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     fn get_stat(&self) -> Stat {

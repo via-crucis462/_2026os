@@ -245,6 +245,10 @@ pub fn setup_oscomp_env() {
     
     etc_dentry.insert("passwd".to_string(), Arc::new(TmpfsFileInode::new_with_data(passwd_content.as_bytes())));
     etc_dentry.insert("group".to_string(), Arc::new(TmpfsFileInode::new_with_data(group_content.as_bytes())));
+
+    let var_dentry = root.insert("var".to_string(), Arc::new(TmpfsDirInode::new()));
+    var_dentry.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new()));
+    var_dentry.insert("run".to_string(), Arc::new(TmpfsDirInode::new()));
     let bin_dentry = root.insert("bin".to_string(), Arc::new(TmpfsDirInode::new()));
     let sbin_dentry = root.insert("sbin".to_string(), Arc::new(TmpfsDirInode::new()));
     let usr_dentry = root.insert("usr".to_string(), Arc::new(TmpfsDirInode::new()));
