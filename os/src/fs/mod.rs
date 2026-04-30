@@ -23,6 +23,7 @@ use core::any::Any;
 pub mod epoll; 
 pub use epoll::{EpollFile, EpollEvent}; 
 use crate::syscall::fs::Statfs;
+use crate::auth::PermSet;
 /// trait File for all file types
 pub trait File: Send + Sync {
     /// the file readable?
@@ -38,6 +39,11 @@ pub trait File: Send + Sync {
     fn read_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
     /// write to the file from buf at a given offset, return the number of bytes written
     fn write_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
+    /// 获取当前用户的权限集
+    fn current_get_perm(&self) -> PermSet {
+        // 默认有全部权限
+        PermSet { r: true, w: true, x: true }
+    }
     /// get the stat of the file
     fn get_stat(&self) -> Stat;
     /// 获取目录下的所有目录项
@@ -164,6 +170,10 @@ pub trait VfsInode: Send + Sync {
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize;
     fn rename_dir_entry(&self, _old_name: &str, _new_name: &str) -> bool{
         false
+    }
+    fn current_get_perm(&self) -> PermSet {
+        // 默认有全部权限
+        PermSet { r: true, w: true, x: true }
     }
     /// 1. 创建软链接
     /// 在当前目录下创建一个名为 `name` 的软链接，指向 `target`

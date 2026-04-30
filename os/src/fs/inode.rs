@@ -12,14 +12,13 @@ use super::VfsInode;
 use spin::Mutex;
 use crate::mm::UserBuffer;
 use crate::fs::TimeSpec;
-use crate::auth::PermStat;
+use crate::auth::PermSet;
 use core::any::Any;
 
 
 pub struct OSInode {
     readable: bool,
     writable: bool,
-    perm: PermStat,
     inner: Mutex<OSInodeInner>,
     pub inode: Arc<dyn VfsInode>,   //实现了VfsInode trait的具体文件系统的inode
     pub dentry: Arc<Dentry>, 
@@ -34,7 +33,6 @@ impl OSInode {
         Self {
             readable,
             writable,
-            perm: PermStat::init_all_perm(),
             inner: Mutex::new(OSInodeInner { offset: 0 }),
             inode,
             dentry,
@@ -121,10 +119,16 @@ impl File for OSInode {
     fn get_dentry(&self) -> Option<Arc<super::Dentry>> {
         Some(self.dentry.clone())
     }
+
     fn pread(&self, offset: usize, buf: UserBuffer) -> usize {
         let read_len = self.read_at(offset, buf);
         read_len
     }
+
+    fn current_get_perm(&self) -> PermSet {
+        self.inode.current_get_perm()
+    }
+
     fn lseek(&self, offset: isize, whence: i32) -> isize {
         const SEEK_SET: i32 = 0; // 从文件开头算起
         const SEEK_CUR: i32 = 1; // 从当前位置算起

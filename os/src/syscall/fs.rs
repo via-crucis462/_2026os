@@ -92,6 +92,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     if !file.writable() {
         return EACCES.as_isize(); 
     }
+    // if !can_write(&file) { return EACCES.as_isize(); } // 权限不足
     if (status & (O_NONBLOCK | O_NDELAY)) != 0 && !file.ready_to_write() {
         return EAGAIN.as_isize();
     }

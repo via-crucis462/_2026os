@@ -3,17 +3,19 @@
 #[allow(unused)]
 pub const CPU_CORE_NUM: usize = 4;
 
-/// user app's stack size
-pub const USER_STACK_SIZE: usize = 0x80_0000; // 8MB
-/// kernel stack size
-pub const KERNEL_STACK_SIZE: usize = 4096 * 2;
-/// kernel heap size
-pub const KERNEL_HEAP_SIZE: usize = 0x800_0000; // 128MB
-
 /// page size : 4KB
 pub const PAGE_SIZE: usize = 0x1000;
 /// page size bits: 12
 pub const PAGE_SIZE_BITS: usize = 0xc;
+
+/// user app's stack size
+pub const USER_STACK_SIZE: usize = 0x80_0000; // 8MB
+/// kernel stack size
+pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 16;
+/// kernel heap size
+pub const KERNEL_HEAP_SIZE: usize = 0x800_0000; // 128MB
+
+
 /// the virtual addr of trapoline
 pub const TRAMPOLINE: usize = usize::MAX - PAGE_SIZE + 1;
 /// the virtual addr of trap context
