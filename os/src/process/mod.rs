@@ -22,6 +22,7 @@ pub use pcb::*;
 use crate::mm::translated_byte_buffer;
 
 use manager::*;
+pub use manager::get_process;
 use crate::sync::*;
 
 /// 任务处理器，改为pub供外部调用

@@ -3,6 +3,7 @@
 use super::*;
 use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
 use schedule::*;
+use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::{
     arch::trap::{TrapContext, trap_handler, trap_cx_va_by_kernel_stack},
@@ -62,6 +63,7 @@ impl FileDescriptor {
 
 pub struct ProcessControlBlock {
     pub pid: Arc<PidHandle>,
+    pub oom_score_adj: AtomicI32,
     pub inner: MPSafeCell<ProcessControlBlockInner>,
 }
 
@@ -139,6 +141,7 @@ impl ProcessControlBlock {
         // 进程控制块
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),// 注意：实际上只克隆了指针
+            oom_score_adj: AtomicI32::new(0),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: true, // initproc和shell默认在主核运行
                 pname: String::from("initproc"),
@@ -447,6 +450,7 @@ impl ProcessControlBlock {
         // println!("[kernel] ProcessControlBlock::fork: copied fd_table with {} entries", new_fd_table.len());
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
+            oom_score_adj: AtomicI32::new(self.oom_score_adj.load(Ordering::SeqCst)),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: false, 
                 pname: parent_inner.pname.clone(),

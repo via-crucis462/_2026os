@@ -136,7 +136,10 @@ impl TmpfsDirInode {
             entries: Mutex::new(BTreeMap::new()),
         }
     }
-    
+    pub fn insert(&self, name: String, inode: Arc<dyn VfsInode>) -> Arc<dyn VfsInode> {
+        self.entries.lock().insert(name, inode.clone());
+        inode
+    }
 }
 
 impl super::VfsInode for TmpfsDirInode {
