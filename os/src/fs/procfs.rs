@@ -1,6 +1,6 @@
 use super::{VfsInode, Stat, Statx, ROOT_DENTRY};
 use alloc::sync::Arc;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use crate::fs::{TmpfsDirInode, TmpfsFileInode, stat_to_statx};
 use core::fmt::{self, Write};
 use crate::mm::get_free_frames;
@@ -481,6 +481,101 @@ impl VfsInode for ProcStatusInode {
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { 0 }
 }
+pub struct ProcSelfSymlinkInode;
+
+impl VfsInode for ProcSelfSymlinkInode {
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+ 
+        let current_task = crate::task::current_task().unwrap();
+        let pid = current_task.getpid();
+        
+
+        let target = pid.to_string();
+        let data = target.as_bytes();
+
+
+        if offset >= data.len() {
+            return 0;
+        }
+        let read_len = core::cmp::min(buf.len(), data.len() - offset);
+        buf[..read_len].copy_from_slice(&data[offset..offset + read_len]);
+        read_len
+    }
+
+    fn get_stat(&self) -> Stat {
+
+        let pid = crate::task::current_task().unwrap().getpid();
+        let target_len = pid.to_string().len();
+
+        Stat {
+            dev: 0,
+            ino: 1,        
+            mode: 0o120777, 
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            __pad: 0,
+            size: target_len as i64, 
+            blksize: 512,
+            __pad2: 0,
+            blocks: 0,
+            atime_sec: 0,
+            atime_nsec: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            __unused: [0; 1], 
+        }
+    }
+
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn get_size(&self) -> usize { 0 }
+    
+    fn get_statx(&self) -> Statx { 
+        let stat = self.get_stat();
+        Statx{
+            stx_mask: 0,
+            stx_blksize: stat.blksize as u32,
+            stx_attributes: 0,
+            stx_nlink: stat.nlink,
+            stx_uid: stat.uid,
+            stx_gid: stat.gid,
+            stx_mode: stat.mode as u16,
+            stx_ino: stat.ino,
+            stx_size: stat.size as u64,
+            stx_blocks: stat.blocks as u64,
+            stx_attributes_mask: 0,
+            stx_atime: super::StatxTimestamp {
+                tv_sec: stat.atime_sec,
+                tv_nsec: stat.atime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_btime: Default::default(),
+            stx_ctime: super::StatxTimestamp {
+                tv_sec: stat.ctime_sec,
+                tv_nsec: stat.ctime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_mtime: super::StatxTimestamp {
+                tv_sec: stat.mtime_sec,
+                tv_nsec: stat.mtime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_rdev_major: 0,
+            stx_rdev_minor: 0,
+            stx_dev_major: 0,
+            stx_dev_minor: 0,
+            ..Default::default()
+        }
+    }
+    fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
+    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
+    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
+}
 pub struct MemInfoInode;
 
 impl VfsInode for MemInfoInode {
@@ -644,6 +739,7 @@ impl VfsInode for MountsInode {
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
+
 pub fn mount_procfs() {
     // 1. 创建 /proc 目录
     let proc_root = Arc::new(ProcRootInode::new());
@@ -657,7 +753,7 @@ pub fn mount_procfs() {
     self_dentry.insert(String::from("maps"), Arc::new(TmpfsFileInode::new()));
     
     proc_root.insert_static(String::from("self"), self_dentry);
-
+    proc_root.insert_static(String::from("self"), Arc::new(ProcSelfSymlinkInode));
     // 4. 正式把完整的动态 /proc 挂载到操作系统的 ROOT_DENTRY！
     ROOT_DENTRY.insert(String::from("proc"), proc_root);
    
