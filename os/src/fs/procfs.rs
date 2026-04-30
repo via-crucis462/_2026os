@@ -8,7 +8,57 @@ use crate::task::get_process;
 use crate::syscall::fs::Statfs;
 use core::sync::atomic::Ordering;
 use alloc::format;
-//造一个“空目录” Inode，专门给 /proc 文件夹用
+macro_rules! impl_default_statx {
+    () => {
+        fn get_statx(&self) -> Statx { 
+            let stat = self.get_stat();
+            Statx {
+                stx_mask: 0,
+                stx_blksize: stat.blksize as u32,
+                stx_attributes: 0,
+                stx_nlink: stat.nlink,
+                stx_uid: stat.uid,
+                stx_gid: stat.gid,
+                stx_mode: stat.mode as u16,
+                stx_ino: stat.ino,
+                stx_size: stat.size as u64,
+                stx_blocks: stat.blocks as u64,
+                stx_attributes_mask: 0,
+                stx_atime: super::StatxTimestamp {
+                    tv_sec: stat.atime_sec,
+                    tv_nsec: stat.atime_nsec as u32,
+                    __reserved: 0,
+                },
+                stx_btime: Default::default(),
+                stx_ctime: super::StatxTimestamp {
+                    tv_sec: stat.ctime_sec,
+                    tv_nsec: stat.ctime_nsec as u32,
+                    __reserved: 0,
+                },
+                stx_mtime: super::StatxTimestamp {
+                    tv_sec: stat.mtime_sec,
+                    tv_nsec: stat.mtime_nsec as u32,
+                    __reserved: 0,
+                },
+                stx_rdev_major: 0, 
+                stx_rdev_minor: 0, 
+                stx_dev_major: 0, 
+                stx_dev_minor: 0, 
+                ..Default::default()
+            }
+        }
+    };
+}
+
+/// 统一实现不支持的目录操作（带 getdents 返回值参数，文件传 -1，目录传 0）
+macro_rules! impl_unsupported_ops {
+    ($getdents_ret:expr) => {
+        fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+        fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+        fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
+        fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { $getdents_ret }
+    };
+}
 pub struct ProcPidDirInode {
     pub pid: usize,
 }
@@ -21,6 +71,7 @@ impl VfsInode for ProcPidDirInode {
             
 
             "status" => Some(Arc::new(ProcStatusInode { pid: self.pid })),
+            "ns" => Some(Arc::new(ProcNsDirInode { pid: self.pid })),
             // "maps" => Some(Arc::new(ProcMapsInode { pid: self.pid })),
             
             _ => None,
@@ -43,49 +94,7 @@ impl VfsInode for ProcPidDirInode {
         }
     }
     
-    fn get_statx(&self) -> super::Statx { 
-        let stat = self.get_stat();
-        Statx{
-            stx_mask: 0,
-            stx_blksize: stat.blksize as u32,
-            stx_attributes: 0,
-            stx_nlink: stat.nlink,
-            stx_uid: stat.uid,
-            stx_gid: stat.gid,
-            stx_mode: stat.mode as u16,
-            __spare0: [0; 1],
-            stx_ino: stat.ino,
-            stx_size: stat.size as u64,
-            stx_blocks: stat.blocks as u64,
-            stx_attributes_mask: 0,
-            stx_atime: super::StatxTimestamp {
-                tv_sec: stat.atime_sec,
-                tv_nsec: stat.atime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_btime: super::StatxTimestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 },
-            stx_ctime: super::StatxTimestamp {
-                tv_sec: stat.ctime_sec,
-                tv_nsec: stat.ctime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_mtime: super::StatxTimestamp {
-                tv_sec: stat.mtime_sec,
-                tv_nsec: stat.mtime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_rdev_major: 0, 
-            stx_rdev_minor: 0, 
-            stx_dev_major: 0, 
-            stx_dev_minor: 0, 
-            __spare2: [0; 14],
-        }
-    }
-
-    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
-    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
-    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
-    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { 0 }
+   
     fn statfs(&self) -> Statfs {
         Statfs {
             f_type: 0x01021994, f_bsize: 4096, f_blocks: 0, 
@@ -93,6 +102,8 @@ impl VfsInode for ProcPidDirInode {
             f_fsid: [0, 0], f_namelen: 255, f_frsize: 4096, f_flags: 0, f_spare: [0; 4],
         }
     }
+    impl_default_statx!();
+    impl_unsupported_ops!(0);
 }
 pub struct OomScoreAdjInode {
     pub pid: usize,
@@ -136,6 +147,7 @@ impl VfsInode for OomScoreAdjInode {
         // 返回写入长度，告知系统调用成功
         buf.len()
     }
+    fn get_size(&self) -> usize { 0 }
 fn get_stat(&self) -> super::Stat {
         super::Stat {
             dev: 0, 
@@ -147,49 +159,8 @@ fn get_stat(&self) -> super::Stat {
             blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
         }
     }
-    fn get_statx(&self) -> super::Statx { 
-        let stat = self.get_stat();
-        Statx{
-            stx_mask: 0,
-            stx_blksize: stat.blksize as u32,
-            stx_attributes: 0,
-            stx_nlink: stat.nlink,
-            stx_uid: stat.uid,
-            stx_gid: stat.gid,
-            stx_mode: stat.mode as u16,
-            __spare0: [0; 1],
-            stx_ino: stat.ino,
-            stx_size: stat.size as u64,
-            stx_blocks: stat.blocks as u64,
-            stx_attributes_mask: 0,
-            stx_atime: super::StatxTimestamp {
-                tv_sec: stat.atime_sec,
-                tv_nsec: stat.atime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_btime: super::StatxTimestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 },
-            stx_ctime: super::StatxTimestamp {
-                tv_sec: stat.ctime_sec,
-                tv_nsec: stat.ctime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_mtime: super::StatxTimestamp {
-                tv_sec: stat.mtime_sec,
-                tv_nsec: stat.mtime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_rdev_major: 0, 
-            stx_rdev_minor: 0, 
-            stx_dev_major: 0, 
-            stx_dev_minor: 0, 
-            __spare2: [0; 14],
-        }
-    }
-    fn get_size(&self) -> usize { 0 } 
-    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
-    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
-    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
-    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { 0 }
+   impl_default_statx!();
+    impl_unsupported_ops!(0);
     
     fn statfs(&self) -> Statfs {
         Statfs {
@@ -249,48 +220,8 @@ impl VfsInode for ProcRootInode {
         }
     }
     
-    fn get_statx(&self) -> super::Statx { 
-        let stat = self.get_stat();
-        Statx{
-            stx_mask: 0,
-            stx_blksize: stat.blksize as u32,
-            stx_attributes: 0,
-            stx_nlink: stat.nlink,
-            stx_uid: stat.uid,
-            stx_gid: stat.gid,
-            stx_mode: stat.mode as u16,
-            __spare0: [0; 1],
-            stx_ino: stat.ino,
-            stx_size: stat.size as u64,
-            stx_blocks: stat.blocks as u64,
-            stx_attributes_mask: 0,
-            stx_atime: super::StatxTimestamp {
-                tv_sec: stat.atime_sec,
-                tv_nsec: stat.atime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_btime: super::StatxTimestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 },
-            stx_ctime: super::StatxTimestamp {
-                tv_sec: stat.ctime_sec,
-                tv_nsec: stat.ctime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_mtime: super::StatxTimestamp {
-                tv_sec: stat.mtime_sec,
-                tv_nsec: stat.mtime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_rdev_major: 0, 
-            stx_rdev_minor: 0, 
-            stx_dev_major: 0, 
-            stx_dev_minor: 0, 
-            __spare2: [0; 14],
-        }
-    }
-    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
-    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
-    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
-    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { 0 }
+    impl_default_statx!();
+    impl_unsupported_ops!(0);
     
     fn statfs(&self) -> Statfs {
         Statfs {
@@ -340,48 +271,10 @@ impl VfsInode for ProcDirInode {
             __unused: [0; 1],
         }
     }
-    fn get_statx(&self) -> Statx { 
-        let stat = self.get_stat();
-        Statx{
-            stx_mask: 0,
-            stx_blksize: stat.blksize as u32,
-            stx_attributes: 0,
-            stx_nlink: stat.nlink,
-            stx_uid: stat.uid,
-            stx_gid: stat.gid,
-            stx_mode: stat.mode as u16,
-            stx_ino: stat.ino,
-            stx_size: stat.size as u64,
-            stx_blocks: stat.blocks as u64,
-            stx_attributes_mask: 0,
-            stx_atime: super::StatxTimestamp {
-                tv_sec: stat.atime_sec,
-                tv_nsec: stat.atime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_btime: Default::default(),
-            stx_ctime: super::StatxTimestamp {
-                tv_sec: stat.ctime_sec,
-                tv_nsec: stat.ctime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_mtime: super::StatxTimestamp {
-                tv_sec: stat.mtime_sec,
-                tv_nsec: stat.mtime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_rdev_major: 0,
-            stx_rdev_minor: 0,
-            stx_dev_major: 0,
-            stx_dev_minor: 0,
-            ..Default::default()
-        }
-    }
+   
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
-    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
-    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
-    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
-    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { 0 }
+    impl_default_statx!();
+    impl_unsupported_ops!(0);
 }
 
 pub struct ProcStatusInode {
@@ -439,47 +332,8 @@ impl VfsInode for ProcStatusInode {
         }
     }
     
-   fn get_statx(&self) -> Statx { 
-        let stat = self.get_stat();
-        Statx{
-            stx_mask: 0,
-            stx_blksize: stat.blksize as u32,
-            stx_attributes: 0,
-            stx_nlink: stat.nlink,
-            stx_uid: stat.uid,
-            stx_gid: stat.gid,
-            stx_mode: stat.mode as u16,
-            stx_ino: stat.ino,
-            stx_size: stat.size as u64,
-            stx_blocks: stat.blocks as u64,
-            stx_attributes_mask: 0,
-            stx_atime: super::StatxTimestamp {
-                tv_sec: stat.atime_sec,
-                tv_nsec: stat.atime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_btime: Default::default(),
-            stx_ctime: super::StatxTimestamp {
-                tv_sec: stat.ctime_sec,
-                tv_nsec: stat.ctime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_mtime: super::StatxTimestamp {
-                tv_sec: stat.mtime_sec,
-                tv_nsec: stat.mtime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_rdev_major: 0,
-            stx_rdev_minor: 0,
-            stx_dev_major: 0,
-            stx_dev_minor: 0,
-            ..Default::default()
-        }
-    }
-    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
-    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
-    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
-    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { 0 }
+   impl_default_statx!();
+    impl_unsupported_ops!(0);
 }
 pub struct ProcSelfSymlinkInode;
 
@@ -533,48 +387,77 @@ impl VfsInode for ProcSelfSymlinkInode {
     fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     
-    fn get_statx(&self) -> Statx { 
-        let stat = self.get_stat();
-        Statx{
-            stx_mask: 0,
-            stx_blksize: stat.blksize as u32,
-            stx_attributes: 0,
-            stx_nlink: stat.nlink,
-            stx_uid: stat.uid,
-            stx_gid: stat.gid,
-            stx_mode: stat.mode as u16,
-            stx_ino: stat.ino,
-            stx_size: stat.size as u64,
-            stx_blocks: stat.blocks as u64,
-            stx_attributes_mask: 0,
-            stx_atime: super::StatxTimestamp {
-                tv_sec: stat.atime_sec,
-                tv_nsec: stat.atime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_btime: Default::default(),
-            stx_ctime: super::StatxTimestamp {
-                tv_sec: stat.ctime_sec,
-                tv_nsec: stat.ctime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_mtime: super::StatxTimestamp {
-                tv_sec: stat.mtime_sec,
-                tv_nsec: stat.mtime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_rdev_major: 0,
-            stx_rdev_minor: 0,
-            stx_dev_major: 0,
-            stx_dev_minor: 0,
-            ..Default::default()
+    
+    fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
+    impl_default_statx!();
+    impl_unsupported_ops!(-1);
+}
+pub struct ProcNsDirInode {
+    pub pid: usize,
+}
+impl VfsInode for ProcNsDirInode {
+    fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
+        match name {
+            "pid" | "net" | "mnt" | "uts" | "ipc" | "user" | "cgroup" => {
+                Some(Arc::new(ProcNsFileInode {
+                    _pid: self.pid,
+                    ns_type: String::from(name),
+                }))
+            }
+            _ => None,
         }
     }
+
+    fn get_stat(&self) -> Stat {
+        Stat {
+            dev: 0, ino: 2, 
+            mode: 0o040555, // S_IFDIR (0o040000) | r-xr-xr-x (0o555) 目录权限
+            nlink: 2, uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+        }
+    }
+
+    
+    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn get_size(&self) -> usize { 0 }
+    impl_default_statx!();
+    impl_unsupported_ops!(0);
+}
+pub struct ProcNsFileInode {
+    pub _pid: usize,
+    pub ns_type: String,
+}
+
+impl VfsInode for ProcNsFileInode {
+    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+
+    fn get_stat(&self) -> Stat {
+        // 给不同的 ns 类型分配真实的 Linux 默认 Inode 编号
+        let ino = match self.ns_type.as_str() {
+            "pid" => 4026531836,
+            "mnt" => 4026531840,
+            "net" => 4026531992,
+            "uts" => 4026531838,
+            "ipc" => 4026531839,
+            "user" => 4026531837,
+            "cgroup" => 4026531835,
+            _ => 9999,
+        };
+
+        Stat {
+            dev: 0, 
+            ino, 
+            mode: 0o100444, 
+            nlink: 1, uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+        }
+    }
+    fn get_size(&self) -> usize { 0 }
+    impl_default_statx!();
+    impl_unsupported_ops!(0);
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
-    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
-    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
-    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
-    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
 pub struct MemInfoInode;
 
@@ -752,7 +635,6 @@ pub fn mount_procfs() {
     );
     self_dentry.insert(String::from("maps"), Arc::new(TmpfsFileInode::new()));
     
-    proc_root.insert_static(String::from("self"), self_dentry);
     proc_root.insert_static(String::from("self"), Arc::new(ProcSelfSymlinkInode));
     // 4. 正式把完整的动态 /proc 挂载到操作系统的 ROOT_DENTRY！
     ROOT_DENTRY.insert(String::from("proc"), proc_root);
