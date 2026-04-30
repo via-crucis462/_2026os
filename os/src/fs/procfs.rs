@@ -624,8 +624,19 @@ impl VfsInode for MountsInode {
 }
 
 pub fn mount_procfs() {
-    // 1. 创建 /proc 目录
     let proc_root = Arc::new(ProcRootInode::new());
+    let sys_dir = Arc::new(TmpfsDirInode::new());
+    let kernel_dir = Arc::new(TmpfsDirInode::new());
+    kernel_dir.insert(
+        String::from("tainted"), 
+        Arc::new(TmpfsFileInode::new_with_data(b"0\n"))
+    );
+    kernel_dir.insert(
+        String::from("pid_max"), 
+        Arc::new(TmpfsFileInode::new_with_data(b"32768\n"))
+    );
+    sys_dir.insert(String::from("kernel"), kernel_dir);
+    proc_root.insert_static(String::from("sys"), sys_dir);
     proc_root.insert_static(String::from("meminfo"), Arc::new(MemInfoInode));
     proc_root.insert_static(String::from("mounts"), Arc::new(MountsInode));
     let self_dentry = Arc::new(TmpfsDirInode::new());
