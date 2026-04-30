@@ -19,8 +19,8 @@ impl VfsInode for ProcPidDirInode {
             // 当查找 oom_score_adj 时，返回一个绑定了该 PID 的特殊文件
             "oom_score_adj" => Some(Arc::new(OomScoreAdjInode { pid: self.pid })),
             
-            // 未来如果报缺少 /proc/19/stat 或 maps，加两行
-            // "stat" => Some(Arc::new(ProcStatInode { pid: self.pid })),
+
+            "status" => Some(Arc::new(ProcStatusInode { pid: self.pid })),
             // "maps" => Some(Arc::new(ProcMapsInode { pid: self.pid })),
             
             _ => None,
@@ -384,7 +384,103 @@ impl VfsInode for ProcDirInode {
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { 0 }
 }
 
+pub struct ProcStatusInode {
+    pub pid: usize,
+}
 
+impl VfsInode for ProcStatusInode {
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+
+        let process = match get_process(self.pid) {
+            Some(p) => p,
+            None => return 0, 
+        };
+
+        let (uid, euid, gid, egid) = {
+ 
+            let inner = process.inner.exclusive_access(); 
+            (inner.uid, inner.euid, inner.gid, inner.egid)
+        };
+
+
+        let status_str = format!(
+            "Name:\toscomp_proc\nState:\tR (running)\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t0\n",
+            uid, euid, uid, uid, 
+            gid, egid, gid, gid
+        );
+
+        let status_bytes = status_str.as_bytes();
+        
+
+        if offset >= status_bytes.len() {
+            return 0;
+        }
+        let read_len = core::cmp::min(buf.len(), status_bytes.len() - offset);
+        buf[..read_len].copy_from_slice(&status_bytes[offset..offset + read_len]);
+        read_len
+    }
+
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize {
+
+        0
+    }
+
+    fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
+    fn get_size(&self) -> usize { 0 } 
+
+    fn get_stat(&self) -> super::Stat {
+        super::Stat {
+            dev: 0, 
+            ino: 999, 
+            mode: 0o100444, 
+            nlink: 1,
+            uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+        }
+    }
+    
+   fn get_statx(&self) -> Statx { 
+        let stat = self.get_stat();
+        Statx{
+            stx_mask: 0,
+            stx_blksize: stat.blksize as u32,
+            stx_attributes: 0,
+            stx_nlink: stat.nlink,
+            stx_uid: stat.uid,
+            stx_gid: stat.gid,
+            stx_mode: stat.mode as u16,
+            stx_ino: stat.ino,
+            stx_size: stat.size as u64,
+            stx_blocks: stat.blocks as u64,
+            stx_attributes_mask: 0,
+            stx_atime: super::StatxTimestamp {
+                tv_sec: stat.atime_sec,
+                tv_nsec: stat.atime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_btime: Default::default(),
+            stx_ctime: super::StatxTimestamp {
+                tv_sec: stat.ctime_sec,
+                tv_nsec: stat.ctime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_mtime: super::StatxTimestamp {
+                tv_sec: stat.mtime_sec,
+                tv_nsec: stat.mtime_nsec as u32,
+                __reserved: 0,
+            },
+            stx_rdev_major: 0,
+            stx_rdev_minor: 0,
+            stx_dev_major: 0,
+            stx_dev_minor: 0,
+            ..Default::default()
+        }
+    }
+    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
+    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { 0 }
+}
 pub struct MemInfoInode;
 
 impl VfsInode for MemInfoInode {
