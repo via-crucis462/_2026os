@@ -8,6 +8,8 @@ use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
 use alloc::vec;
 use crate::syscall::EPOLL_CTL_DEL;
+use crate::syscall::EPOLL_CTL_ADD;
+use crate::syscall::EPOLL_CTL_MOD;
 use crate::process::current_task_to_sleep;
 use crate::lazy_static;
 use spin::Mutex;
@@ -1393,45 +1395,95 @@ pub fn sys_epoll_create1(_flags: i32) -> isize {
     }   
 }
 
-// ID 21: sys_epoll_ctl
+
 pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
+
     if op != EPOLL_CTL_DEL && event_ptr == 0 {
-        return EFAULT.as_isize(); // 返回 -EFAULT
+        return EFAULT.as_isize(); 
     }
     
-    if epfd >= inner.fd_table.len() || fd >= inner.fd_table.len() { return EBADF.as_isize(); } // EBADF
+
+    if epfd >= inner.fd_table.len() || fd >= inner.fd_table.len() { 
+        return EBADF.as_isize(); 
+    }
     
+
     let epoll_file_dyn = match &inner.fd_table[epfd].file {
         Some(f) => f.clone(),
         None => return EBADF.as_isize(),
     };
-    
-    //   向下转型！如果它不是 EpollFile，报错！
-    let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
-        Some(ef) => ef,
-        None => return EINVAL.as_isize(), // EINVAL
+    let target_file_dyn = match &inner.fd_table[fd].file {
+        Some(f) => f.clone(),
+        None => return EBADF.as_isize(), 
     };
     
+
+    let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
+        Some(ef) => ef,
+        None => return EINVAL.as_isize(), 
+    };
+
+
+    if epfd == fd {
+        return EINVAL.as_isize(); 
+    }
+
+
+    if target_file_dyn.as_any().is::<EpollFile>() {
+        return EINVAL.as_isize(); 
+    }
+
+
+    let stat = target_file_dyn.get_stat();
+    let mode = stat.mode;
+    let s_ifmt = 0o170000;
+    let s_ifreg = 0o100000; 
+    let s_ifdir = 0o040000;
+    if (mode & s_ifmt) == s_ifreg || (mode & s_ifmt) == s_ifdir {
+
+        return EPERM.as_isize(); 
+    }
+
+
+
     let token = inner.memory_set.token();
-    let event = if op != 2 { // 如果不是 EPOLL_CTL_DEL，就需要读取用户态传来的数据
-        //   使用你提供的 translated_ref
+    let event = if op != EPOLL_CTL_DEL { 
         *crate::mm::translated_ref(token, event_ptr as *const EpollEvent)
     } else {
         EpollEvent { events: 0, data: 0 }
     };
     
+
     let mut list = epoll_file.interest_list.lock();
     match op {
-        1 => { list.insert(fd, event); 0 } // EPOLL_CTL_ADD
-        2 => { list.remove(&fd); 0 }       // EPOLL_CTL_DEL
-        3 => { list.insert(fd, event); 0 } // EPOLL_CTL_MOD
-        _ => EINVAL.as_isize(), // EINVAL
+        EPOLL_CTL_ADD => {
+            if list.contains_key(&fd) {
+           
+                return EEXIST.as_isize(); 
+            }
+            list.insert(fd, event); 
+            0 
+        }
+        EPOLL_CTL_DEL => { 
+            if list.remove(&fd).is_none() {
+             
+                return ENOENT.as_isize(); 
+            }
+            0 
+        }
+        EPOLL_CTL_MOD => { 
+            if !list.contains_key(&fd) {
+                return ENOENT.as_isize(); 
+            }
+            list.insert(fd, event); 
+            0 
+        }
+        _ => EINVAL.as_isize(), 
     }
 }
-
 // ID 22: sys_epoll_wait
 pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i32) -> isize {
     info!(
