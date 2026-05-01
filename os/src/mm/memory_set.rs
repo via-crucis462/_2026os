@@ -540,51 +540,56 @@ impl MemorySet {
         ))
     }
     /// Create a new address space by copy code&data from a exited process's address space.
-    pub fn from_existed_user(user_space: &Self) -> Self {
+    pub fn from_existed_user(user_space: &mut Self) -> Self {
         let mut memory_set = Self::new_bare();
         // map trampoline
         #[cfg(target_arch = "riscv64")]
         memory_set.map_trampoline();
         
         // copy data sections/trap_context/user_stack
-        for area in user_space.areas.iter() {
-            if area.is_shared {
-
-                let mut new_area = MapArea::new(
-                    VirtAddr::from(area.vpn_range.get_start().0 * PAGE_SIZE),
-                    VirtAddr::from(area.vpn_range.get_end().0 * PAGE_SIZE),
-                    area.map_type,
-                    area.map_perm,
-                );
-                new_area.is_shared = true;
-
-                // 遍历父进程的虚拟页号
-                for vpn in area.vpn_range {
-                    if let Some(src_pte) = user_space.translate(vpn) {
-                        if src_pte.is_valid() {
-                            // 强行把子进程的虚拟页，映射到父进程的同一块物理页（PPN）上！
-                            let flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
-                            memory_set.page_table.map(vpn, src_pte.ppn(), flags);
-                        }
+        for idx in 0..user_space.areas.len() {
+            let map_type = user_space.areas[idx].map_type;
+            let map_perm = user_space.areas[idx].map_perm;
+            let is_shared = user_space.areas[idx].is_shared;
+            let vpn_range = VPNRange::new(
+                user_space.areas[idx].vpn_range.get_start(),
+                user_space.areas[idx].vpn_range.get_end(),
+            );
+            let share_user_pages = matches!(map_type, MapType::Framed | MapType::File)
+                && map_perm.contains(MapPermission::U);
+            if share_user_pages {
+                let mut new_area = MapArea::from_another(&user_space.areas[idx]);
+                for vpn in vpn_range {
+                    let Some(src_pte) = user_space.page_table.translate(vpn) else {
+                        continue;
+                    };
+                    if !src_pte.is_valid() {
+                        continue;
+                    }
+                    let writable_cow = map_perm.contains(MapPermission::W) && !is_shared;
+                    let child_perm = if writable_cow {
+                        map_perm & !MapPermission::W
+                    } else {
+                        map_perm
+                    };
+                    let child_flags = PTEFlags::from_bits(child_perm.bits).unwrap();
+                    memory_set.page_table.map(vpn, src_pte.ppn(), child_flags);
+                    new_area.data_frames.insert(vpn, FrameTracker::from_ppn(src_pte.ppn()));
+                    if writable_cow {
+                        let parent_perm = map_perm & !MapPermission::W;
+                        let parent_flags = PTEFlags::from_bits(parent_perm.bits).unwrap();
+                        user_space.page_table.set_flags(vpn, parent_flags);
                     }
                 }
-                // 注意：没有 copy_data，也没有生成 FrameTracker
                 memory_set.areas.push(new_area);
-
             } else {
-                // ==========================================
-                // 🐢 传统流程：私有内存，走原来的深拷贝逻辑
-                // ==========================================
-                let mut new_area: MapArea = MapArea::from_another(area);
+                let new_area: MapArea = MapArea::from_another(&user_space.areas[idx]);
                 let start_va: VirtAddr = new_area.vpn_range.get_start().into();
                 memory_set.push(new_area, None, start_va.0);
-                
-                // copy data from another space
-                for vpn in area.vpn_range {
+                for vpn in vpn_range {
                     if let Some(src_pte) = user_space.translate(vpn) {
                         if src_pte.is_valid() {
                             let src_ppn = src_pte.ppn();
-                            // 由于惰性分配，我们要确保目标页分配了再拷贝
                             if memory_set.translate(vpn).is_none() || !memory_set.translate(vpn).unwrap().is_valid() {
                                 memory_set.page_table.translate_create(vpn);
                             }
@@ -595,14 +600,108 @@ impl MemorySet {
                 }
             }
         }
-
         // 复制brk_index
         memory_set.brk_index = user_space.brk_index;
         memory_set
     }
+    pub fn handle_cow_fault(&mut self, bad_addr: usize) -> bool {
+        let vpn = VirtAddr::from(bad_addr).floor();
+        let page_table = &mut self.page_table;
+        if let Some(area) = self.areas.iter_mut().find(|a| {
+            vpn >= a.vpn_range.get_start() && vpn < a.vpn_range.get_end()
+        }) {
+            if area.map_type == MapType::Guard || area.is_shared || !area.map_perm.contains(MapPermission::W) {
+                return false;
+            }
+            if let Some(pte) = page_table.translate(vpn) {
+                if pte.is_valid() && !pte.writable() {
+                    let old_ppn = pte.ppn();
+                    let new_frame = frame_alloc().unwrap();
+                    let new_ppn = new_frame.ppn;
+                    new_ppn
+                        .get_bytes_array()
+                        .copy_from_slice(old_ppn.get_bytes_array());
+                    let pte_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
+                    page_table.set_entry(vpn, new_ppn, pte_flags);
+                    area.data_frames.insert(vpn, new_frame);
+                    #[cfg(target_arch = "loongarch64")]
+                    Self::flush_tlb_after_mapping_change();
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    //用于内核态给用户空间写入数据，判断是否是copy页时使用
+    pub fn ensure_writable_user_range(&mut self, start: usize, len: usize, sp: usize) -> bool {
+        if len == 0 {
+            return true;
+        }
+        let mut vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(start + len - 1).floor();
+        loop {
+            let page_start = vpn.0 * PAGE_SIZE;
+            match self.page_table.translate(vpn) {
+                Some(pte) if pte.is_valid() && pte.writable() => {}
+                Some(pte) if pte.is_valid() => {
+                    if !self.handle_cow_fault(page_start) {
+                        return false;
+                    }
+                }
+                _ => {
+                    if !self.handle_page_fault(page_start, sp) {
+                        return false;
+                    }
+                    match self.page_table.translate(vpn) {
+                        Some(pte) if pte.is_valid() && pte.writable() => {}
+                        Some(pte) if pte.is_valid() => {
+                            if !self.handle_cow_fault(page_start) {
+                                return false;
+                            }
+                        }
+                        _ => return false,
+                    }
+                }
+            }
+            if vpn == end_vpn {
+                break;
+            }
+            vpn.step();
+        }
+        true
+    }
+    pub fn ensure_readable_user_range(&mut self, start: usize, len: usize, sp: usize) -> bool {
+        if len == 0 {
+            return true;
+        }
+        let mut vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(start + len - 1).floor();
+        loop {
+            let page_start = vpn.0 * PAGE_SIZE;
+            match self.page_table.translate(vpn) {
+                Some(pte) if pte.is_valid() && pte.readable() => {}
+                Some(pte) if pte.is_valid() => return false,
+                _ => {
+                    if !self.handle_page_fault(page_start, sp) {
+                        return false;
+                    }
+                    match self.page_table.translate(vpn) {
+                        Some(pte) if pte.is_valid() && pte.readable() => {}
+                        _ => return false,
+                    }
+                }
+            }
+            if vpn == end_vpn {
+                break;
+            }
+            vpn.step();
+        }
+        true
+    }
     /// Change page table by writing satp CSR Register.
     #[cfg(target_arch = "riscv64")]
     pub fn activate(&self) {
+        //println!("Activating new page table with ASID {}", self.asid());
         let satp = self.token();
         let asid = self.asid();
         unsafe {
@@ -630,6 +729,9 @@ impl MemorySet {
     }
     /// Remove all `MapArea`
     pub fn recycle_data_pages(&mut self) {
+        for area in self.areas.iter_mut() {
+            area.unmap(&mut self.page_table);
+        }
         self.areas.clear();
     }
 
@@ -888,7 +990,7 @@ impl MemorySet {
             if let Some(pte) = page_table.translate(vpn) {
                 if pte.is_valid() {
                     // 已经映射却还报 Fault，通常是非法写只读段
-                    return false; 
+                    return false;
                 }
             }
             

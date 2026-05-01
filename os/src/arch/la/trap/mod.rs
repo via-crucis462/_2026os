@@ -324,10 +324,22 @@ pub fn trap_handler() -> ! {
             suspend_current_and_run_next();
         }
         _ => {
-            let ecode = (estat >> 16) & 0x3f;
             if let Some(task) = current_task() {
                 let proc = task.process();
-                let inner = proc.inner_exclusive_access();
+                let mut inner = proc.inner_exclusive_access();
+                let sp = current_trap_cx().r[3];
+                if inner.memory_set.handle_cow_fault(badv) {
+                    drop(inner);
+                    drop(proc);
+                    drop(task);
+                    trap_return();
+                }
+                if inner.memory_set.handle_page_fault(badv, sp) {
+                    drop(inner);
+                    drop(proc);
+                    drop(task);
+                    trap_return();
+                }
                 let vpn = VirtAddr::from(badv).floor();
                 match inner.memory_set.translate(vpn) {
                     Some(pte) => {

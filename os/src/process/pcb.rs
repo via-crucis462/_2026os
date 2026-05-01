@@ -8,7 +8,7 @@ use crate::{
     arch::trap::{TrapContext, trap_handler, trap_cx_va_by_kernel_stack},
     fs::{open_file, Dentry, File, OpenFlags, ROOT_DENTRY,Stdin, Stdout, Stderr},
     mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, 
-        translated_refmut, MapArea, MapPermission, MapType},
+        translated_write, MapArea, MapPermission, MapType},
     sync::{MPSafeCell, WaitQueue},
 };
 use alloc::{
@@ -18,6 +18,7 @@ use alloc::{
     vec::Vec,
 };
 use crate::arch::{config::*, trap};
+use crate::arch::mm::flush_tlb_for_asid;
 use spin::Mutex;
 
 const AT_PHDR: usize = 3;
@@ -76,7 +77,7 @@ impl ProcessControlBlock {
     /// At present, it is only used for the creation of initproc
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
     pub fn new(elf_data: &[u8]) -> (Arc<Self>, Arc<TaskControlBlock>) {
-        println!("[kernel] TaskControlBlock::new: start creating a new process");
+        //println!("[kernel] TaskControlBlock::new: start creating a new process");
 
         //处理 ELF 文件，创建内存空间，返回的memory_set中已经包含了用户程序的代码段、数据段、bss段以及长度为1的堆段
         let Some((mut memory_set, heap_bottom, user_sp, entry_point, _main_entry, _phdr, _phnum, _phent, _interp_base))
@@ -123,7 +124,7 @@ impl ProcessControlBlock {
 
             // 内核栈顶地址，即切换到内核任务流后内核执行栈的初始值（内核sp）
             kernel_stack_top = kernel_stack.get_top();
-            println!("TaskControlBlock::new: calculated trap_cx_addr = {:#x}, kernel_stack_top = {:#x}, user_sp = {:#x}", trap_cx_addr, kernel_stack_top, initial_user_sp);
+            //println!("TaskControlBlock::new: calculated trap_cx_addr = {:#x}, kernel_stack_top = {:#x}, user_sp = {:#x}", trap_cx_addr, kernel_stack_top, initial_user_sp);
         }
 
        
@@ -207,7 +208,7 @@ impl ProcessControlBlock {
         debug!("TaskControlBlock::new: finished creating a new process");
         
         proc_control_block.inner.exclusive_access().tasks.push(task_control_block.clone());
-
+        //println!("[kernel] TaskControlBlock::new: created init process with PID {}, main thread TID {}, entry_point={:#x}", proc_control_block.getpid(), task_control_block.gettid(), entry_point);
         // 返回PCB和主线程
         (proc_control_block, task_control_block)
     }
@@ -274,10 +275,10 @@ impl ProcessControlBlock {
             user_sp -= arg.len() + 1; // +1 是为了结尾的 '\0'
             let mut p = user_sp;
             for c in arg.as_bytes() {
-                *translated_refmut(memory_set.token(), p as *mut u8) = *c;
+                translated_write(memory_set.token(), p as *mut u8 , *c);
                 p += 1;
             }
-            *translated_refmut(memory_set.token(), p as *mut u8) = 0; // 写入结尾 0
+            translated_write(memory_set.token(), p as *mut u8, 0); // 写入结尾 0
             argv_ptrs.push(user_sp);
         }
         // 环境变量字符串也放在高地址区域，后续在指针区单独压入 envp[]
@@ -286,17 +287,17 @@ impl ProcessControlBlock {
             user_sp -= env.len() + 1; // +1 是为了结尾的 '\0'
             let mut p = user_sp;
             for c in env.as_bytes() {
-                *translated_refmut(memory_set.token(), p as *mut u8) = *c;
+                translated_write(memory_set.token(), p as *mut u8 , *c);
                 p += 1;
             }
-            *translated_refmut(memory_set.token(), p as *mut u8) = 0; // 写入结尾 0
+            translated_write(memory_set.token(), p as *mut u8, 0); // 写入结尾 0
             envp_ptrs.push(user_sp);
         }
         // 随机字符串 (AT_RANDOM 使用) 16 字节
         user_sp -= 16;
         let random_at = user_sp;
         for i in 0..16 {
-            *translated_refmut(memory_set.token(), (user_sp + i) as *mut u8) = 0x23; // 任意填充
+            translated_write(memory_set.token(), (user_sp + i) as *mut u8, 0x23); // 任意填充
         }
         // 对齐栈指针
         user_sp -= user_sp % core::mem::size_of::<usize>();
@@ -330,31 +331,31 @@ impl ProcessControlBlock {
         auxv.push((0, 0));
         for (id, val) in auxv.iter().rev() {
             user_sp -= core::mem::size_of::<usize>();
-            *translated_refmut(memory_set.token(), user_sp as *mut usize) = *val;
+            translated_write(memory_set.token(), user_sp as *mut usize, *val);
             user_sp -= core::mem::size_of::<usize>();
-            *translated_refmut(memory_set.token(), user_sp as *mut usize) = *id;
+            translated_write(memory_set.token(), user_sp as *mut usize, *id);
         }
         // 压入 envp 数组：压入一个 NULL (0) 作为结尾
         user_sp -= core::mem::size_of::<usize>();
-        *translated_refmut(memory_set.token(), user_sp as *mut usize) = 0;
+        translated_write(memory_set.token(), user_sp as *mut usize, 0usize);
         // 逆序压入 envp 的指针
         for env_ptr in envp_ptrs.iter().rev() {
             user_sp -= core::mem::size_of::<usize>();
-            *translated_refmut(memory_set.token(), user_sp as *mut usize) = *env_ptr;
+            translated_write(memory_set.token(), user_sp as *mut usize, *env_ptr);
         }
         // 压入 argv 数组：先压入一个 NULL (0) 作为结尾
         user_sp -= core::mem::size_of::<usize>();
-        *translated_refmut(memory_set.token(), user_sp as *mut usize) = 0;
+        translated_write(memory_set.token(), user_sp as *mut usize, 0usize);
         // 逆序压入 argv 的指针
         for arg_ptr in argv_ptrs.iter().rev() {
             user_sp -= core::mem::size_of::<usize>();
-            *translated_refmut(memory_set.token(), user_sp as *mut usize) = *arg_ptr;
+            translated_write(memory_set.token(), user_sp as *mut usize, *arg_ptr);
         }
         // 此时 user_sp 即为 argv[0] 的地址
         let argv_base = user_sp;
         // 压入 argc
         user_sp -= core::mem::size_of::<usize>();
-        *translated_refmut(memory_set.token(), user_sp as *mut usize) = args.len();
+        translated_write(memory_set.token(), user_sp as *mut usize, args.len());
         // 更新 PCB 内部信息
         let mut proc_inner = self.inner_exclusive_access();
         for fd in 0..proc_inner.fd_table.len() {
@@ -381,7 +382,7 @@ impl ProcessControlBlock {
             kernel_stack_top,
             trap_handler as *const () as usize,
         );
-        
+
         // 虽然 crt.S 会用 sp 覆盖 a0，但我们还是按照惯例填好 a0 和 a1
         trap_cx.set_a0(args.len());
         trap_cx.set_a1(argv_base);
@@ -394,9 +395,9 @@ impl ProcessControlBlock {
         // 删除其他线程（如果有）
         proc_inner.tasks.retain(|t: &Arc<TaskControlBlock>| Arc::ptr_eq(t, &caller_task));
         proc_inner.alive_task_count = 1;
-        for i in proc_inner.memory_set.areas().iter() {
-            debug!("exec: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
-        }
+        /*for i in proc_inner.memory_set.areas().iter() {
+            println!("exec: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+        }*/
         
     }
 
@@ -408,8 +409,8 @@ impl ProcessControlBlock {
         // ---- hold parent PCB lock
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
-        let mut memory_set = MemorySet::from_existed_user(&parent_inner.memory_set);
-    
+        let mut memory_set = MemorySet::from_existed_user(&mut parent_inner.memory_set);
+        flush_tlb_for_asid(parent_inner.memory_set.asid());
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = Arc::new(pid_alloc());
         //println!("[kernel] TaskControlBlock::fork: allocated PID {}", pid_handle.0);
@@ -444,7 +445,7 @@ impl ProcessControlBlock {
 
         // copy fd table
         let new_fd_table = parent_inner.fd_table.clone();
-        // println!("[kernel] ProcessControlBlock::fork: copied fd_table with {} entries", new_fd_table.len());
+        //println!("[kernel] ProcessControlBlock::fork: copied fd_table with {} entries", new_fd_table.len());
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
             inner: MPSafeCell::new(ProcessControlBlockInner {
@@ -494,7 +495,7 @@ impl ProcessControlBlock {
                 clear_child_tid: 0,
             }),
         });
-        info!("fork: created new task with tid {}", new_task.gettid());
+        //println!("fork: created new task with tid {}", new_task.gettid());
         // modify kernel_sp in trap_cx
         // **** access child PCB exclusively
         let trap_cx = new_task.inner_exclusive_access().get_trap_cx();

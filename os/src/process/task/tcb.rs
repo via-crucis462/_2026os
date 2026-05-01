@@ -4,7 +4,7 @@ use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, TIdHandl
 use crate::{
     arch::trap::{TrapContext, trap_handler},
     fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout},
-    mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, translated_refmut},
+    mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap},
     sync::MPSafeCell,
 };
 use alloc::{
