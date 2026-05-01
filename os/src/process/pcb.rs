@@ -383,7 +383,8 @@ impl ProcessControlBlock {
             trap_handler as *const () as usize,
         );
 
-        // 虽然 crt.S 会用 sp 覆盖 a0，但我们还是按照惯例填好 a0 和 a1
+        // 虽然简单用户库入口会直接使用 a0/a1，但标准 ELF 启动更依赖 sp 指向的初始栈。
+        // 这里先保留现有行为，并把最终交给用户态的入口现场打出来，便于对比 RV/LA。
         trap_cx.set_a0(args.len());
         trap_cx.set_a1(argv_base);
 

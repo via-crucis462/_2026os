@@ -39,8 +39,6 @@ __alltraps:
     csrrd $t2, 0x502 #读出用户栈指针
     st.d $t2, $sp, 8*3
 
-    # 恢复内核tp（hart id）
-    ld.d $tp, $sp, 8*34
 
     bl trap_handler
 
@@ -61,8 +59,6 @@ __restore:
 
     move $sp, $a0
     
-    # 在切回用户态前，先把当前内核tp（hart id）保存到TrapContext
-    st.d $tp, $sp, 8*34
     # 恢复之前保存的csr
     ld.d $t0, $sp, 8*32
     ld.d $t1, $sp, 8*33

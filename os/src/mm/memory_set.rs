@@ -727,6 +727,15 @@ impl MemorySet {
     pub fn translate_create(&mut self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.page_table.translate_create(vpn)
     }
+    #[cfg(target_arch = "loongarch64")]
+    pub fn set_pte_dirty(&mut self, vpn: VirtPageNum) -> bool {
+        if let Some(pte) = self.page_table.find_pte(vpn) {
+            pte.set_dirty();
+            true
+        } else {
+            false
+        }
+    }
     /// Remove all `MapArea`
     pub fn recycle_data_pages(&mut self) {
         for area in self.areas.iter_mut() {

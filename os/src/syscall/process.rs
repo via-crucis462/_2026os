@@ -666,12 +666,12 @@ pub fn sys_uname(uts: *mut UtsName) -> isize {
     0
 }
 
-pub fn _sys_fork() -> isize {
+pub fn _sys_fork(stack: Option<usize>) -> isize {
 	let current_task = current_task().unwrap();
     let current_process = current_task.process();
 	trace!("kernel:pid[{}] old_sys_fork", current_process.pid.0);
     let proc = current_task.process();
-    let (new_proc, new_task) = proc.fork(None, current_task);//此处添加了一个 None 参数
+    let (new_proc, new_task) = proc.fork(stack, current_task);//此处添加了一个 None 参数
     let new_pid = new_proc.pid.0;
     // modify trap context of new_task, because it returns immediately after switching
     let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
@@ -693,7 +693,7 @@ pub fn sys_clone(flags: usize, stack: usize, _ptid: usize) -> isize {
     if flags & CLONE_THREAD != 0 {
         do_clone_thread(0, stack)
     } else {
-        _sys_fork()
+        _sys_fork((stack != 0).then_some(stack))
     }
 }
 // path elf路径

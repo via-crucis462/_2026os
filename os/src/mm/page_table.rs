@@ -139,8 +139,9 @@ impl PageTable {
         assert!(pte.is_empty(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new_defualt(ppn);
         *pte = PageTableEntry { bits: pte.bits | from_riscv_flags(flags).bits() as usize};
-        // 直接设置为脏，后续可能需要修改
-        pte.set_dirty();
+        if (flags & PTEFlags::W) != PTEFlags::empty() {
+            pte.set_dirty();
+        }
     }
     /// remove the map between virtual page number and physical page number
     #[allow(unused)]
@@ -268,11 +269,16 @@ fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
     }
     let task = current_task().unwrap();
     let process = task.process();
-    let trap_cx_va = current_trap_cx_user_va();
-    let Some(trap_cx_pa) = page_table.translate_va(VirtAddr::from(trap_cx_va)) else {
-        return false;
+    #[cfg(target_arch = "riscv64")]
+    let sp = {
+        let trap_cx_va = current_trap_cx_user_va();
+        let Some(trap_cx_pa) = page_table.translate_va(VirtAddr::from(trap_cx_va)) else {
+            return false;
+        };
+        trap_cx_pa.get_ref::<TrapContext>().get_sp()
     };
-    let sp = trap_cx_pa.get_ref::<TrapContext>().get_sp();
+    #[cfg(target_arch = "loongarch64")]
+    let sp = crate::task::current_trap_cx().get_sp();
     let mut proc_inner = process.inner_exclusive_access();
     proc_inner.memory_set.ensure_readable_user_range(ptr, len, sp)
 }
@@ -309,12 +315,17 @@ fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
     }
     let task = current_task().unwrap();
     let process = task.process();
-    let trap_cx_va = current_trap_cx_user_va();
-    let Some(trap_cx_pa) = page_table.translate_va(VirtAddr::from(trap_cx_va)) else {
-        println!("prepare_user_write: failed to translate trap_cx_va {:#x}", trap_cx_va);
-        return false;
+    #[cfg(target_arch = "riscv64")]
+    let sp = {
+        let trap_cx_va = current_trap_cx_user_va();
+        let Some(trap_cx_pa) = page_table.translate_va(VirtAddr::from(trap_cx_va)) else {
+            println!("prepare_user_write: failed to translate trap_cx_va {:#x}", trap_cx_va);
+            return false;
+        };
+        trap_cx_pa.get_ref::<TrapContext>().get_sp()
     };
-    let sp = trap_cx_pa.get_ref::<TrapContext>().get_sp();
+    #[cfg(target_arch = "loongarch64")]
+    let sp = crate::task::current_trap_cx().get_sp();
     let mut proc_inner = process.inner_exclusive_access();
     proc_inner.memory_set.ensure_writable_user_range(ptr, len, sp)
 }

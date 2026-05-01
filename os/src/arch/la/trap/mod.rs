@@ -293,6 +293,7 @@ pub fn trap_handler() -> ! {
     } else {
         Cause::Other
     };
+    let (ecode_name, ecode, esubcode, _) = decode_estat(estat);
         // 目前实现还不完善
     match cause {
         Cause::Syscall => {
@@ -328,6 +329,17 @@ pub fn trap_handler() -> ! {
                 let proc = task.process();
                 let mut inner = proc.inner_exclusive_access();
                 let sp = current_trap_cx().r[3];
+                let vpn = VirtAddr::from(badv).floor();
+                if ecode == 4 {
+                    if let Some(pte) = inner.memory_set.translate(vpn) {
+                        if pte.is_valid() && pte.writable() && inner.memory_set.set_pte_dirty(vpn) {
+                            drop(inner);
+                            drop(proc);
+                            drop(task);
+                            trap_return();
+                        }
+                    }
+                }
                 if inner.memory_set.handle_cow_fault(badv) {
                     drop(inner);
                     drop(proc);
@@ -340,13 +352,20 @@ pub fn trap_handler() -> ! {
                     drop(task);
                     trap_return();
                 }
-                let vpn = VirtAddr::from(badv).floor();
                 match inner.memory_set.translate(vpn) {
                     Some(pte) => {
                         println!(
-                            "[kernel] user_fault_pte: current hart id={}, badaddr={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
+                            "[kernel] user_fault_pte: current hart id={}, estat={:#x}, ecode={}({:#x}), esubcode={:#x}, era={:#x}, badv={:#x}, badi={:#x}, ra={:#x}, sp={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
                             get_hart_id(),
+                            estat,
+                            ecode_name,
+                            ecode,
+                            esubcode,
+                            era,
                             badv,
+                            badi,
+                            current_trap_cx().r[1],
+                            current_trap_cx().r[3],
                             vpn.0,
                             pte.bits,
                             pte.is_valid(),
@@ -357,10 +376,17 @@ pub fn trap_handler() -> ! {
                     }
                     None => {
                         println!(
-                            "[kernel] user_fault_pte: current hart id={}, badaddr={:#x}, estat={:#x}, vpn={:#x}, pte=<none>",
+                            "[kernel] user_fault_pte: current hart id={}, estat={:#x}, ecode={}({:#x}), esubcode={:#x}, era={:#x}, badv={:#x}, badi={:#x}, ra={:#x}, sp={:#x}, vpn={:#x}, pte=<none>",
                             get_hart_id(),
-                            badv,
                             estat,
+                            ecode_name,
+                            ecode,
+                            esubcode,
+                            era,
+                            badv,
+                            badi,
+                            current_trap_cx().r[1],
+                            current_trap_cx().r[3],
                             vpn.0,
                         );
                     }
