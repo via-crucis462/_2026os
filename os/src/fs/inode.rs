@@ -125,8 +125,12 @@ impl File for OSInode {
         read_len
     }
 
-    fn current_get_perm(&self) -> PermSet {
-        self.inode.current_get_perm()
+    fn get_perm(&self) -> crate::auth::PermStat {
+        self.inode.get_perm()
+    }
+
+    fn set_perm(&self, perm: PermSet) -> bool {
+        self.inode.set_perm(perm)
     }
 
     fn lseek(&self, offset: isize, whence: i32) -> isize {

@@ -1,5 +1,6 @@
 use crate::fs::{File, Stat, Dentry};
 use crate::mm::UserBuffer;
+use crate::auth::{PermSet, PermStat, FileMode};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use spin::Mutex;
@@ -41,11 +42,15 @@ impl File for EpollFile {
             mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
         }
     }
-    fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
+    fn get_perm(&self) -> PermStat {
+        let stat = self.get_stat();
+        let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
+        let mode = FileMode::from_bits_truncate(mode);
+        PermStat { mode, uid, gid }
+    }
+        fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
     fn get_dentry(&self) -> Option<Arc<Dentry>> { None }
     fn lseek(&self, _offset: isize, _whence: i32) -> isize { -1 }
-
-
     fn as_any(&self) -> &dyn Any { self }
 }
 
@@ -75,10 +80,14 @@ impl File for EventFile {
             mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
         }
     }
-    fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
+    fn get_perm(&self) -> PermStat {
+        let stat = self.get_stat();
+        let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
+        let mode = FileMode::from_bits_truncate(mode);
+        PermStat { mode, uid, gid }
+    }
+        fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
     fn get_dentry(&self) -> Option<Arc<Dentry>> { None }
     fn lseek(&self, _offset: isize, _whence: i32) -> isize { -1 }
-    
-
     fn as_any(&self) -> &dyn Any { self }
 }

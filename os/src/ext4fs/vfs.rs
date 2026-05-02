@@ -66,7 +66,7 @@ impl VfsInode for Ext4Inode {
         crate::fs::Stat {
             dev: 0,
             ino: self.inode_id as u64,
-            mode: disk_inode.i_mode as u32,
+            mode: disk_inode.i_mode,
             nlink: disk_inode.i_links_count as u32,
             uid: disk_inode.i_uid as u32,
             gid: disk_inode.i_gid as u32,

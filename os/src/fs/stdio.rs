@@ -5,6 +5,7 @@ use crate::arch::sbi::console_getchar;
 use crate::task::suspend_current_and_run_next;
 use lazy_static::*;
 use crate::sync::MPSafeCell;
+use crate::auth::{PermStat, FileMode};
 use core::any::Any;
 
 lazy_static! {
@@ -106,6 +107,14 @@ impl File for Stdin {
         }
     }
 
+    fn get_perm(&self) -> crate::auth::PermStat {
+        let stat = self.get_stat();
+        let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
+        let mode = FileMode::from_bits_truncate(mode);
+        PermStat { mode, uid, gid }
+    }
+
+    
     fn getdents(&self, _buf: &mut [u8]) -> isize {
         trace!("Stdin: getdents called on stdin, returning -1");
         -1
@@ -145,11 +154,16 @@ impl File for Stdout {
             ..Default::default()
         }
     }
-    fn getdents(&self, _buf: &mut [u8]) -> isize {
+    fn get_perm(&self) -> PermStat {
+        let stat = self.get_stat();
+        let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
+        let mode = FileMode::from_bits_truncate(mode);
+        PermStat { mode, uid, gid }
+    }
+        fn getdents(&self, _buf: &mut [u8]) -> isize {
         trace!("Stdout: getdents called on stdout, returning -1");
         -1
     }
-
     fn as_any(&self) -> &dyn Any { self }
 }
 
@@ -182,10 +196,15 @@ impl File for Stderr {
             ..Default::default()
         }
     }
-    fn getdents(&self, _buf: &mut [u8]) -> isize {
+    fn get_perm(&self) -> PermStat {
+        let stat = self.get_stat();
+        let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
+        let mode = FileMode::from_bits_truncate(mode);
+        PermStat { mode, uid, gid }
+    }
+        fn getdents(&self, _buf: &mut [u8]) -> isize {
         trace!("Stderr: getdents called on stderr, returning -1");
         -1
     }
-
     fn as_any(&self) -> &dyn Any { self }
 }
