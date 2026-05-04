@@ -168,6 +168,7 @@ impl ProcessControlBlock {
                 euid: 0,
                 is_zombie: false,
                 egid: 0,
+                umask: 0o022,
                 pgid: pid_handle.0,
                 alive_task_count: 0,
                 tasks: Vec::new(),
@@ -467,8 +468,7 @@ impl ProcessControlBlock {
                 exit_code: 0,
                 uid: parent_inner.uid,
                 gid: parent_inner.gid,
-                euid: parent_inner.euid,
-                sid:parent_inner.sid,
+                euid: parent_inner.euid,                umask: parent_inner.umask,                sid:parent_inner.sid,
                 egid: parent_inner.egid,
                 pgid: parent_inner.pgid,
                 fd_rlmt: parent_inner.fd_rlmt.clone(),
@@ -647,6 +647,7 @@ pub struct ProcessControlBlockInner {
     pub gid: u32,  // 用户组 ID
     pub euid: u32, // 有效用户 ID
     pub egid: u32, // 有效用户组 ID
+    pub umask: u32, // 文件模式创建掩码
 
     pub sid: usize,
     pub pgid: usize, // 进程组 ID

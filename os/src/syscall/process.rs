@@ -388,6 +388,16 @@ pub fn sys_setgid(gid: u32) -> isize {
     0 
 }
 
+/// umask: 设置进程文件模式创建掩码，返回旧掩码
+pub fn sys_umask(mask: u32) -> isize {
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let mut proc_inner = proc.inner_exclusive_access();
+    let old = proc_inner.umask;
+    proc_inner.umask = mask & 0o777;
+    old as isize
+}
+
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
