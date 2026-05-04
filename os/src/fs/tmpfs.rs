@@ -36,6 +36,7 @@ impl TmpfsFileInode {
         Self {
             ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
             data: Mutex::new(data.to_vec()), // 直接把传进来的切片转成 Vec 存起来
+            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(0o100777), 0, 0)), // 默认权限
         }
     }
 }
