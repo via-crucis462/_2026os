@@ -24,8 +24,13 @@ const FD_CLOEXEC: usize = 1;
 const O_ACCMODE: usize = 0o3;
 const O_NONBLOCK: usize = 0o4000;
 const O_NDELAY: usize = O_NONBLOCK;
-const O_WRONLY: usize = 0o1;
 const O_CLOEXEC: u32 = 0o2000000;
+
+const O_RDONLY: u32 = 0;
+const O_WRONLY: u32 = 0o1;
+const O_RDWR: u32 = 0o2;
+
+
 use super::errno::Errno::*;
 
 const AT_REMOVEDIR: usize = 0x200;
@@ -92,7 +97,6 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     if !file.writable() {
         return EACCES.as_isize(); 
     }
-    // if !can_write(&file) { return EACCES.as_isize(); } // 权限不足
     if (status & (O_NONBLOCK | O_NDELAY)) != 0 && !file.ready_to_write() {
         return EAGAIN.as_isize();
     }
@@ -170,10 +174,10 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
 
     total_read as isize
 }
+
 const AT_FDCWD: isize = -100;
 
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isize {
-    
     let task = current_task().unwrap();
     let proc = task.process();
     let token = current_user_token();
@@ -297,6 +301,10 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> i
         }
         if let Some(file) = &inner.fd_table[dirfd as usize].file {
             if let Some(dentry) = file.get_dentry() {
+                // 检查 fd 是否指向目录
+                if (dentry.inode.get_stat().mode & 0o170000) != 0o040000 {
+                    return ENOTDIR.as_isize();
+                }
                 dentry
             } else {
                 return EBADF.as_isize();
@@ -336,7 +344,7 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
-    inner.set_fd(write_fd, pipe_write, false, O_WRONLY);
+    inner.set_fd(write_fd, pipe_write, false, O_WRONLY as usize);
     // User ABI for pipe is int pipefd[2], i.e. two 32-bit entries.
     let pipe_u32 = pipe as *mut u32;
     *translated_refmut(token, pipe_u32) = read_fd as u32;
@@ -982,4 +990,125 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isiz
     } else {
         EBADF.as_isize()
     }
+}
+
+/// 修改权限模式
+pub fn sys_fchmodat(dirfd: isize, path_ptr: *const u8, mode: u32) -> isize {
+    let task = current_task().unwrap();
+    let process = task.process(); 
+    let mut inner = process.inner_exclusive_access();
+    let token = inner.get_user_token();
+    let euid = inner.uid;
+    drop(inner);
+    
+    let path = translated_str(token, path_ptr);
+
+    match ROOT_DENTRY.find_tree(path.as_str(), true) {
+        Some(dentry) => {
+            let mut perm = dentry.inode.get_perm();
+            // 鉴权：仅root或所有者可以修改
+            if euid != 0 && perm.uid != euid {
+                return EPERM.as_isize();
+            }
+            
+            // 仅修改(特殊)权限位
+            let new_mode = (perm.mode.bits() & !0o7777) | (mode as u16 & 0o7777);
+            perm.set_mode(crate::auth::FileMode::from_bits_truncate(new_mode));
+            
+            if dentry.inode.set_perm(perm) {
+                0
+            } else {
+                EACCES.as_isize() 
+            }
+        }
+        None => {
+            ENOENT.as_isize()
+        }
+    }
+}
+
+/// 修改所有者/组
+pub fn sys_fchownat(dirfd: isize, path_ptr: *const u8, owner: u32, group: u32) -> isize {
+    let task = current_task().unwrap();
+    let process = task.process(); 
+    let mut inner = process.inner_exclusive_access();
+    let token = inner.get_user_token();
+    let euid = inner.uid;
+    drop(inner);
+
+    let path = translated_str(token, path_ptr);
+    
+    match ROOT_DENTRY.find_tree(path.as_str(), true) {
+        Some(dentry) => {
+            let mut perm = dentry.inode.get_perm();
+            // owner/group 参数为 0xffffffff 表示不修改对应项
+            let req_owner = if owner == 0xffffffff { None } else { Some(owner) };
+            let req_group = if group == 0xffffffff { None } else { Some(group) };
+            
+            // 鉴权
+            if euid != 0 { // root跳过鉴权
+                // 检查是否是所有者
+                if let Some(o) = req_owner {
+                    if o != perm.uid { return super::errno::Errno::EPERM.as_isize(); }
+                }
+                if req_group.is_some() && perm.uid != euid {
+                    return EPERM.as_isize();
+                }
+            }
+
+            if let Some(o) = req_owner { perm.set_uid(o); }
+            if let Some(g) = req_group { perm.set_gid(g); }
+
+            if dentry.inode.set_perm(perm) {
+                0
+            } else {
+                EACCES.as_isize()
+            }
+        }
+        None => {
+            ENOENT.as_isize()
+        }
+    }
+}
+
+/// 预分配文件空间
+/// Linux: int fallocate(int fd, int mode, off_t offset, off_t len)
+pub fn sys_fallocate(fd: usize, mode: usize, offset: i64, len: i64) -> isize {
+    const FALLOC_FL_KEEP_SIZE: usize = 0x01;
+
+    let task = current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+
+    if fd >= inner.fd_table.len() {
+        return EBADF.as_isize();
+    }
+
+    if let Some(file) = &inner.fd_table[fd].file {
+        if !file.writable() {
+            return EBADF.as_isize();
+        }
+        // 仅支持 mode=0 和 FALLOC_FL_KEEP_SIZE
+        if mode != 0 && mode != FALLOC_FL_KEEP_SIZE {
+            return EOPNOTSUPP.as_isize();
+        }
+        drop(inner);
+
+        if offset < 0 || len <= 0 {
+            return EINVAL.as_isize();
+        }
+        // 溢出检查
+        if let Some(end) = offset.checked_add(len) {
+            if end < 0 {
+                return EFBIG.as_isize();
+            }
+        } else {
+            return EFBIG.as_isize();
+        }
+
+        // tmpfs/ext4 按需分配，预分配为空操作
+        return 0;
+    }
+
+    EBADF.as_isize()
 }

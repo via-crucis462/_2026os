@@ -6,6 +6,7 @@ use bitflags::bitflags;
 
 
 /// 文件权限信息，Stat的子集
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PermStat {
     pub mode: FileMode,
     pub uid: u32,      // 文件owner用户

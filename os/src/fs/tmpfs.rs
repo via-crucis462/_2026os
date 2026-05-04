@@ -12,16 +12,16 @@ use crate::fs::devfs::RtcInode;
 use crate::fs::devfs::TtyInode;
 use super::{VfsInode, Stat, Statx};
 use crate::syscall::fs::Statfs;
+use crate::auth::{PermStat, FileMode};
 
 // 全局唯一的 Inode 分配器
 static TMPFS_INO_COUNTER: AtomicUsize = AtomicUsize::new(10000);
 
-// ==========================================
-// 严谨的内存文件
-// ==========================================
+/// 临时文件inode
 pub struct TmpfsFileInode {
     ino: usize,
     data: Mutex<alloc::vec::Vec<u8>>,
+    perms: Mutex<PermStat>, // 权限信息
 }
 
 impl TmpfsFileInode {
@@ -29,6 +29,7 @@ impl TmpfsFileInode {
         Self {
             ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
             data: Mutex::new(alloc::vec::Vec::new()),
+            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(0o100777), 0, 0)), // 默认权限
         }
     }
 }
@@ -59,11 +60,13 @@ impl super::VfsInode for TmpfsFileInode {
 
     fn get_stat(&self) -> super::Stat {
         let data_len = self.data.lock().len();
+        let perms = self.perms.lock();
+        let (mode, uid, gid) = (perms.mode.bits(), perms.uid, perms.gid);
         super::Stat {
             dev: 0, 
             ino: self.ino as u64,
-            mode: 0o100777, nlink: 1, 
-            uid: 0, gid: 0, rdev: 0, __pad: 0, 
+            mode: mode, nlink: 1, 
+            uid: uid, gid: gid, rdev: 0, __pad: 0, 
 
             size: self.get_size() as i64, 
             blksize: 512, __pad2: 0,
@@ -110,6 +113,13 @@ impl super::VfsInode for TmpfsFileInode {
             __spare2: [0; 14],
         }
     }
+    fn get_perm(&self) -> PermStat {
+        self.perms.lock().clone()
+    }
+    fn set_perm(&self, perm: PermStat) -> bool {
+        *self.perms.lock() = perm;
+        true
+    }
     fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
@@ -117,10 +127,11 @@ impl super::VfsInode for TmpfsFileInode {
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
 
-
+/// 临时目录inode
 pub struct TmpfsDirInode {
     ino: usize,
     entries: Mutex<BTreeMap<String, Arc<dyn super::VfsInode>>>,
+    perms: Mutex<PermStat>, // 权限信息
 }
 
 impl TmpfsDirInode {
@@ -128,6 +139,7 @@ impl TmpfsDirInode {
         Self {
             ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
             entries: Mutex::new(BTreeMap::new()),
+            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(0o040777), 0, 0)),
         }
     }
 }
@@ -184,6 +196,13 @@ impl super::VfsInode for TmpfsDirInode {
             stx_dev_minor: 0, 
             __spare2: [0; 14],
         }
+    }
+    fn get_perm(&self) -> PermStat {
+        self.perms.lock().clone()
+    }
+    fn set_perm(&self, perm: PermStat) -> bool {
+        *self.perms.lock() = perm;
+        true
     }
     fn find(&self, name: &str) -> Option<Arc<dyn super::VfsInode>> {
         self.entries.lock().get(name).cloned()

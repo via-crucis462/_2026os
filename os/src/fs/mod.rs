@@ -43,7 +43,7 @@ pub trait File: Send + Sync {
     /// 获取文件权限信息
     fn get_perm(&self) -> PermStat;
     /// 修改权限，返回是否成功
-    fn set_perm(&self, _perm: PermSet) -> bool {
+    fn set_perm(&self, perm: PermStat) -> bool {
         // 默认不允许修改权限
         false
     }
@@ -180,7 +180,7 @@ pub trait VfsInode: Send + Sync {
         let mode = FileMode::from_bits_truncate(mode);
         PermStat { mode, uid, gid }
     }
-    fn set_perm(&self, _perm: PermSet) -> bool {
+    fn set_perm(&self, _perm: PermStat) -> bool {
         false
     }
     /// 1. 创建软链接

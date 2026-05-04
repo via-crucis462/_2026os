@@ -12,7 +12,7 @@ use super::VfsInode;
 use spin::Mutex;
 use crate::mm::UserBuffer;
 use crate::fs::TimeSpec;
-use crate::auth::PermSet;
+use crate::auth::PermStat;
 use core::any::Any;
 
 
@@ -129,7 +129,7 @@ impl File for OSInode {
         self.inode.get_perm()
     }
 
-    fn set_perm(&self, perm: PermSet) -> bool {
+    fn set_perm(&self, perm: PermStat) -> bool {
         self.inode.set_perm(perm)
     }
 

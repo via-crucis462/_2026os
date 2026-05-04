@@ -311,6 +311,17 @@ impl VfsInode for Ext4Inode {
             ..Default::default()
         }
     }
+    fn set_perm(&self, perm: crate::auth::PermStat) -> bool {
+        let (block_id, offset) = self.fs.get_inode_pos(self.inode_id);
+        let block_cache = crate::ext4fs::block_cache::get_block_cache(block_id as usize, self.fs.block_dev.clone());
+        let mut cache = block_cache.lock();
+        cache.modify(offset, |disk_inode: &mut crate::ext4fs::ext4inode::Ext4InodeDisk| {
+            disk_inode.i_mode = perm.mode.bits() as u16;
+            disk_inode.i_uid = perm.uid as u16;
+            disk_inode.i_gid = perm.gid as u16;
+        });
+        true
+    }
     fn rename_dir_entry(&self, old_name: &str, new_name: &str) -> bool {
     if new_name.len() > old_name.len() {
         return false; 

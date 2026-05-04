@@ -1660,30 +1660,6 @@ pub fn sys_rt_sigaction(
     0 // 成功
 }
 
-use crate::fs::ROOT_DENTRY; 
-
-pub fn sys_fchmodat(_dirfd: isize, path_ptr: *const u8, _mode: u32) -> isize {
-    let task = current_task().unwrap();
-    let process = task.process(); 
-    let token = process.inner_exclusive_access().get_user_token();
-    
-    // 1. 获取路径
-    let path = translated_str(token, path_ptr);
-    
-    // 2. 严谨校验：调用内核的 find_tree 接口确认文件真实存在
-    match ROOT_DENTRY.find_tree(path.as_str(), true) {
-        Some(_dentry) => {
-            // 因为目前的 VfsInode trait 还没有 set_mode 接口，
-            // 为了通过 LTP 测试，我们在这里“假装”修改成功。
-            0 
-        }
-        None => {
-            // 文件不存在，严谨返回 -ENOENT (-2)
-            ENOENT.as_isize()
-        }
-    }
-}
-
 pub fn sys_pselect6(
     nfds: usize,
     readfds_ptr: *mut usize,
