@@ -12,6 +12,7 @@ use super::VfsInode;
 use spin::Mutex;
 use crate::mm::UserBuffer;
 use crate::fs::TimeSpec;
+use crate::auth::PermStat;
 use core::any::Any;
 
 
@@ -118,10 +119,20 @@ impl File for OSInode {
     fn get_dentry(&self) -> Option<Arc<super::Dentry>> {
         Some(self.dentry.clone())
     }
+
     fn pread(&self, offset: usize, buf: UserBuffer) -> usize {
         let read_len = self.read_at(offset, buf);
         read_len
     }
+
+    fn get_perm(&self) -> crate::auth::PermStat {
+        self.inode.get_perm()
+    }
+
+    fn set_perm(&self, perm: PermStat) -> bool {
+        self.inode.set_perm(perm)
+    }
+
     fn lseek(&self, offset: isize, whence: i32) -> isize {
         const SEEK_SET: i32 = 0; // 从文件开头算起
         const SEEK_CUR: i32 = 1; // 从当前位置算起

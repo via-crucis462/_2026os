@@ -627,7 +627,7 @@ pub struct ProcessControlBlockInner {
     pub heap_bottom: usize,
 
     /// Program break
-    pub program_brk: usize,// 注意需要在exec中维护，rcore忽略了这点，运行测例时brk失效，已修复
+    pub program_brk: usize, // 注意需要在exec中维护，rcore忽略了这点，运行测例时brk失效，已修复
 
     pub fd_rlmt: Rlimit64, // cur_lmt, max_lmt
 
@@ -643,13 +643,14 @@ pub struct ProcessControlBlockInner {
 
     pub exit_code: i32, // 进程退出码，默认为0，只有当进程状态为Zombie时才有意义
 
-    pub uid: u32,  // 真实用户 ID
-    pub gid: u32,  // 真实组 ID
-    pub euid: u32, // 有效用户 ID (Effective)
-    pub egid: u32, // 有效组 ID (Effective)
+    pub uid: u32,  // 用户 ID
+    pub gid: u32,  // 用户组 ID
+    pub euid: u32, // 有效用户 ID
+    pub egid: u32, // 有效用户组 ID
+
     pub sid: usize,
-    // 新增：进程组 ID
-    pub pgid: usize,
+    pub pgid: usize, // 进程组 ID
+    
     pub is_zombie: bool,
     // 进程下的线程数
     pub tasks: Vec<Arc<TaskControlBlock>>, 

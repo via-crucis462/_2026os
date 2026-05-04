@@ -1402,7 +1402,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     let inner = process.inner_exclusive_access();
 
     if op != EPOLL_CTL_DEL && event_ptr == 0 {
-        return EFAULT.as_isize(); 
+        return EFAULT.as_isize();
     }
     
 
@@ -1423,7 +1423,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
 
     let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
         Some(ef) => ef,
-        None => return EINVAL.as_isize(), 
+        None => return EINVAL.as_isize(),
     };
 
 
@@ -1712,30 +1712,6 @@ pub fn sys_rt_sigaction(
     0 // 成功
 }
 
-use crate::fs::ROOT_DENTRY; 
-
-pub fn sys_fchmodat(_dirfd: isize, path_ptr: *const u8, _mode: u32) -> isize {
-    let task = current_task().unwrap();
-    let process = task.process(); 
-    let token = process.inner_exclusive_access().get_user_token();
-    
-    // 1. 获取路径
-    let path = translated_str(token, path_ptr);
-    
-    // 2. 严谨校验：调用内核的 find_tree 接口确认文件真实存在
-    match ROOT_DENTRY.find_tree(path.as_str(), true) {
-        Some(_dentry) => {
-            // 因为目前的 VfsInode trait 还没有 set_mode 接口，
-            // 为了通过 LTP 测试，我们在这里“假装”修改成功。
-            0 
-        }
-        None => {
-            // 文件不存在，严谨返回 -ENOENT (-2)
-            ENOENT.as_isize()
-        }
-    }
-}
-
 pub fn sys_pselect6(
     nfds: usize,
     readfds_ptr: *mut usize,
@@ -1980,6 +1956,7 @@ pub fn sys_prlimit64(
 ) -> isize {
     const RLIMIT_NPROC: i32 = 3;
     const RLIMIT_NOFILE: i32 = 7;
+    const RLIMIT_MEMLOCK: i32 = 8;
     info!("sys_prlimit64 called with pid={}, resource={}, new_limit={:#x}, old_limit={:#x}", pid, resource, new_limit as usize, old_limit as usize);
     if pid != 0 {
         return Errno::EPERM.as_isize(); // 不允许修改其他进程
@@ -2006,6 +1983,13 @@ pub fn sys_prlimit64(
             if !new_limit.is_null() {
                 let new = translated_read(token, new_limit);
                 proc_inner.set_rlimit64(new); 
+            }
+            0
+        }
+        RLIMIT_MEMLOCK => {
+            // 锁定内存限制，伪实现
+            if !old_limit.is_null() {
+                translated_write(token, old_limit, Rlimit64 { cur_lmt: 0x40_0000, max_lmt: 0x40_0000 });
             }
             0
         }

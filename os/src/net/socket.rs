@@ -12,6 +12,7 @@ use crate::net::SOCKET_SET;
 use crate::fs::{File, Stat};    // 引入 File trait 和 Stat
 use crate::mm::UserBuffer;      // 引入 UserBuffer
 use crate::net::vec;
+use crate::auth::{PermStat, FileMode}; // 引入权限相关的类型
 
 pub struct TcpSocket {
     pub handle: SocketHandle,
@@ -124,7 +125,13 @@ impl File for TcpSocket {
         }
     }
 
-    fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
+    fn get_perm(&self) -> PermStat {
+        let stat = self.get_stat();
+        let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
+        let mode = FileMode::from_bits_truncate(mode);
+        PermStat { mode, uid, gid }
+    }
+        fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
 
     fn as_any(&self) -> &dyn Any { self }
 }
@@ -240,6 +247,14 @@ impl File for UdpSocket {
         }
     }
 
+    fn get_perm(&self) -> PermStat {
+        let stat = self.get_stat();
+        let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
+        let mode = FileMode::from_bits_truncate(mode);
+        PermStat { mode, uid, gid }
+    }
+
+    
     fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
 
     fn as_any(&self) -> &dyn Any { self }

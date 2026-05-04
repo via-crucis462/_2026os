@@ -44,6 +44,7 @@ pub mod mm;
 pub mod sync;
 pub mod syscall;
 pub mod process;
+pub mod auth;
 
 
 pub use arch::config::*;

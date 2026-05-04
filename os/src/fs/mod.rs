@@ -16,6 +16,7 @@ pub use dir_entry::DirEntry;
 pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
 pub use file_tree::{Dentry};
 use crate::mm::UserBuffer;
+use crate::syscall::errno::Errno;
 use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::collections::VecDeque; 
@@ -23,6 +24,7 @@ use core::any::Any;
 pub mod epoll; 
 pub use epoll::{EpollFile, EpollEvent}; 
 use crate::syscall::fs::Statfs;
+use crate::auth::{FileMode, PermSet, PermStat};
 /// trait File for all file types
 pub trait File: Send + Sync {
     /// the file readable?
@@ -38,6 +40,13 @@ pub trait File: Send + Sync {
     fn read_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
     /// write to the file from buf at a given offset, return the number of bytes written
     fn write_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
+    /// 获取文件权限信息
+    fn get_perm(&self) -> PermStat;
+    /// 修改权限，返回是否成功
+    fn set_perm(&self, perm: PermStat) -> bool {
+        // 默认不允许修改权限
+        false
+    }
     /// get the stat of the file
     fn get_stat(&self) -> Stat;
     /// 获取目录下的所有目录项
@@ -45,7 +54,7 @@ pub trait File: Send + Sync {
     /// 获取文件的 Dentry
     fn get_dentry(&self) -> Option<Arc<Dentry>> { None }
     fn lseek(&self, _offset: isize, _whence: i32) -> isize {
-        -29 
+        Errno::ESPIPE.as_isize()
     }
     fn ready_to_read(&self) -> bool {
         self.readable()
@@ -72,7 +81,7 @@ pub struct Stat {
     /// inode number
     pub ino: u64,
     /// file type and mode
-    pub mode: u32,
+    pub mode: u16,
     /// number of hard links
     pub nlink: u32,
     /// user ID of owner
@@ -163,6 +172,15 @@ pub trait VfsInode: Send + Sync {
     }
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize;
     fn rename_dir_entry(&self, _old_name: &str, _new_name: &str) -> bool{
+        false
+    }
+    fn get_perm(&self) -> PermStat {
+        let stat = self.get_stat();
+        let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
+        let mode = FileMode::from_bits_truncate(mode);
+        PermStat { mode, uid, gid }
+    }
+    fn set_perm(&self, _perm: PermStat) -> bool {
         false
     }
     /// 1. 创建软链接
