@@ -79,6 +79,9 @@ pub fn trap_handler() -> ! {
                 cx.x[17], 
                 [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]]
             );
+            if result < 0 {
+                warn!("syscall {} returned error code {}", cx.x[17], result);
+            }
             // cx is changed during sys_exec, so we have to call it again
             //println!("[kernel] syscall: id={}, args={:x?}, ret={:#x}", cx.x[17], [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]], result);
             cx = current_trap_cx();

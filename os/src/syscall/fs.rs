@@ -269,7 +269,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
 }
 
 pub fn sys_close(fd: usize) -> isize {
-	trace!("kernel:pid[{}] sys_close", current_task().unwrap().process().pid.0);
+	trace!("kernel:pid[{}] sys_close, aim fd = {}", current_task().unwrap().process().pid.0, fd);
     let task = current_task().unwrap();
     let proc = task.process();
     let mut inner = proc.inner_exclusive_access();
@@ -1035,9 +1035,10 @@ pub fn sys_fchownat(dirfd: isize, path_ptr: *const u8, owner: u32, group: u32) -
     let token = inner.get_user_token();
     let euid = inner.uid;
     drop(inner);
-
+    info!("sys_fchownat: dirfd={}, owner={}, group={}", dirfd, owner, group);
     let path = translated_str(token, path_ptr);
-    
+    info!("sys_fchownat: path '{}'", path);
+
     match ROOT_DENTRY.find_tree(path.as_str(), true) {
         Some(dentry) => {
             let mut perm = dentry.inode.get_perm();

@@ -483,7 +483,10 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     let token = proc.inner_exclusive_access().get_user_token();
     match request as u32 {
         TCGETS => {
-            if fd > 2 { return ENOTTY.as_isize(); }
+            if fd > 2 {
+                warn!("[kernel] sys_ioctl: TCGETS request on non-tty fd {}", fd);
+                return ENOTTY.as_isize();
+            }
             let mut termios = Termios {
                 c_iflag: 0o012402, c_oflag: 0o000005,
                 c_cflag: 0o002277, c_lflag: 0o0105011,
@@ -494,10 +497,15 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             if argp != 0 {
                 *translated_refmut(token, argp as *mut Termios) = termios;
                 0 // 成功
-            } else { EFAULT.as_isize() }
+            } else {
+                EFAULT.as_isize()
+            }
         }
         TIOCGWINSZ => {
-            if fd > 2 { return ENOTTY.as_isize(); } // ENOTTY
+            if fd > 2 {
+                warn!("[kernel] sys_ioctl: TIOCGWINSZ request on non-tty fd {}", fd);
+                return ENOTTY.as_isize();
+            }
             let winsize = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
             if argp != 0 {
                 *translated_refmut(token, argp as *mut Winsize) = winsize;
@@ -525,7 +533,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             }
         }
         _ => {
-          
+            warn!("[kernel] sys_ioctl: unsupported request: {}", request);
             ENOTTY.as_isize()
         }
     }
@@ -878,7 +886,8 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                 if exit_code_ptr as usize != 0 {
                     *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
                 }
-                
+                // 从全局进程表里把孩子的记录删除
+                crate::process::remove_process(child_pid);
                 return child_pid as isize;
             }
         }
@@ -945,6 +954,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                             *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
                         }
                         
+                        crate::process::remove_process(child_pid);
                         return child_pid as isize;
                     }
                 }
@@ -1241,28 +1251,34 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
         let process = task.process();
         let token = current_user_token();
         let inner = process.inner_exclusive_access();
-            if let Some(file) = &inner.fd_table[fd as usize].file {
-                if file.readable() {
-                    let file = file.clone();
-                    // 释放锁避免阻塞
-                    drop(inner);
-                    // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
-                    let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
-                    // 使用 read_at 确保不受 FD 当前 offset 影响，并使用系统调用传入的 _off
-                    file.read_at(_off, user_buf);
-                }
+        if let Some(file) = &inner.fd_table[fd as usize].file {
+            if file.readable() {
+                let file = file.clone();
+                // 释放锁避免阻塞
+                drop(inner);
+                // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
+                let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
+                // 使用 read_at 确保不受 FD 当前 offset 影响，并使用系统调用传入的 _off
+                file.read_at(_off, user_buf);
             }
+        } else {
+            return Errno::EBADF.as_isize(); // 无效的文件描述符
         }
-        let task = current_task().unwrap();
-        let process = task.process();
-        let token = current_user_token();
-        let inner = process.inner_exclusive_access();
-        for i in inner.memory_set.areas().iter() {
-            debug!("after map: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
-        }
-    //println!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
-    ret as isize
+    } else {
+        return Errno::EBADF.as_isize();
     }
+    /*
+    let task = current_task().unwrap();
+    let process = task.process();
+    let token = current_user_token();
+    let inner = process.inner_exclusive_access();
+    for i in inner.memory_set.areas().iter() {
+        debug!("after map: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+    }
+     */
+    debug!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
+    ret as isize
+}
 
 /// YOUR JOB: Implement munmap.
 pub fn sys_munmap(start: usize, len: usize) -> isize {
