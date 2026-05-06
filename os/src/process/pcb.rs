@@ -418,16 +418,16 @@ impl ProcessControlBlock {
         let tid_handle = Arc::new(tid_alloc());
         //println!("[kernel] TaskControlBlock::fork: allocated TID {}", tid_handle.0);
         let kernel_stack = kstack_alloc();
-
+        let trap_cx_addr: usize;
+        #[cfg(target_arch = "riscv64")]{
         let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(&kernel_stack).into();
-        memory_set.push(
-            MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
-                MapType::Framed, MapPermission::R | MapPermission::W),
-            None,
-            trap_cx_va.0,
-        );
-        #[cfg(target_arch = "riscv64")]
-        let trap_cx_addr = {
+            memory_set.push(
+                MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
+                    MapType::Framed, MapPermission::R | MapPermission::W),
+                None,
+                trap_cx_va.0,
+            );
+        trap_cx_addr = {
             let trap_cx_ppn = memory_set
                 .translate(trap_cx_va.into())
                 .unwrap()
@@ -435,7 +435,9 @@ impl ProcessControlBlock {
             let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
             let trap_cx_addr: usize = trap_cx_pa.into();
             trap_cx_addr
-        };
+            };
+        }
+        
         #[cfg(target_arch = "loongarch64")]
         let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
 
@@ -516,6 +518,90 @@ impl ProcessControlBlock {
         (proc_control_block, new_task)
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    pub fn clone_thread(
+        self: &Arc<ProcessControlBlock>,
+        stack: Option<usize>,
+        caller_task: Arc<TaskControlBlock>,
+    ) -> Arc<TaskControlBlock> {
+        let tid_handle = Arc::new(tid_alloc());
+        let kernel_stack = kstack_alloc();
+
+        let trap_cx_addr: usize;
+        #[cfg(target_arch = "riscv64")]
+        {
+            let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(&kernel_stack).into();
+            let mut proc_inner = self.inner_exclusive_access();
+            proc_inner.memory_set.push(
+                MapArea::new(
+                    trap_cx_va,
+                    VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
+                    MapType::Framed,
+                    MapPermission::R | MapPermission::W,
+                ),
+                None,
+                trap_cx_va.0,
+            );
+            trap_cx_addr = {
+                let trap_cx_ppn = proc_inner
+                    .memory_set
+                    .translate(trap_cx_va.into())
+                    .unwrap()
+                    .ppn();
+                let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
+                trap_cx_pa.into()
+            };
+        }
+
+        #[cfg(target_arch = "loongarch64")]
+        let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
+
+        #[cfg(target_arch = "riscv64")]
+        let kernel_stack_top = kernel_stack.get_top();
+        #[cfg(target_arch = "loongarch64")]
+        let kernel_stack_top = trap_cx_addr;
+
+        let caller_inner = caller_task.inner_exclusive_access();
+        let new_task = Arc::new(TaskControlBlock {
+            process: Arc::downgrade(self),
+            tid: tid_handle,
+            kernel_stack,
+            inner: MPSafeCell::new(TaskControlBlockInner {
+                trap_cx_addr,
+                task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                task_status: TaskStatus::Ready,
+                owner_hart: None,
+                exit_code: 0,
+                signals: SignalFlags::empty(),
+                signal_mask: caller_inner.signal_mask,
+                handling_sig: caller_inner.handling_sig,
+                signal_mask_backup: None,
+                killed: false,
+                frozen: false,
+                trap_ctx_backup: None,
+                clear_child_tid: 0,
+            }),
+        });
+
+        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
+        *trap_cx = *caller_inner.get_trap_cx();
+        #[cfg(target_arch = "riscv64")]
+        {
+            trap_cx.kernel_sp = kernel_stack_top;
+        }
+        if let Some(stack) = stack {
+            trap_cx.set_sp(stack);
+        }
+        trap_cx.set_a0(0);
+        drop(caller_inner);
+
+        let mut proc_inner = self.inner_exclusive_access();
+        proc_inner.tasks.push(new_task.clone());
+        proc_inner.alive_task_count += 1;
+        drop(proc_inner);
+
+        new_task
     }
 
     /// get pid of process

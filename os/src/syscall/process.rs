@@ -280,8 +280,7 @@ pub fn sys_yield() -> isize {
 }
 
 pub fn sys_gettid() -> isize {
-    // 目前线程ID和进程ID是一样的
-    sys_getpid()
+    current_task().unwrap().gettid() as isize
 }
 pub fn sys_rt_sigreturn() -> isize {
     let task = current_task().unwrap();
@@ -690,9 +689,12 @@ pub const CLONE_THREAD: usize = 0x00010000;
 
 // 部分实现
 pub fn sys_clone(flags: usize, stack: usize, _ptid: usize) -> isize {
+    //println!("sys_clone called with flags={:#x}, stack={:#x}, ptid={:#x}", flags, stack, _ptid);
     if flags & CLONE_THREAD != 0 {
-        do_clone_thread(0, stack)
+        println!("sys_clone: CLONE_THREAD flag is set, cloning a thread with stack={:#x} and ptid={:#x}", stack, _ptid);
+        do_clone_thread(0, stack, flags, _ptid)
     } else {
+        //println!("sys_clone: CLONE_THREAD flag is not set, cloning a process with stack={:#x} and ptid={:#x}", stack, _ptid);
         _sys_fork((stack != 0).then_some(stack))
     }
 }
