@@ -1245,27 +1245,35 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
     };
 
     // 如果是文件映射（非匿名映射）且 FD 合法，读取内容
-    if !mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) && fd >= 0 { // 先前逻辑反了
-        //debug!("[kernel] sys_mmap: file mapping requested for fd={}, start={:#x}, len={:#x}, prot={:?}, flags={:?}", fd, start, len, mmap_prot, mmap_flags);
-        let task = current_task().unwrap();
-        let process = task.process();
-        let token = current_user_token();
-        let inner = process.inner_exclusive_access();
-        if let Some(file) = &inner.fd_table[fd as usize].file {
-            if file.readable() {
-                let file = file.clone();
-                // 释放锁避免阻塞
-                drop(inner);
-                // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
-                let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
-                // 使用 read_at 确保不受 FD 当前 offset 影响，并使用系统调用传入的 _off
-                file.read_at(_off, user_buf);
+    if !mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) {
+        if fd >= 0 {
+            //debug!("[kernel] sys_mmap: file mapping requested for fd={}, start={:#x}, len={:#x}, prot={:?}, flags={:?}", fd, start, len, mmap_prot, mmap_flags);
+            let task = current_task().unwrap();
+            let process = task.process();
+            let token = current_user_token();
+            let inner = process.inner_exclusive_access();
+            let fd_usize = fd as usize;
+            if fd_usize < inner.fd_table.len() {
+                let fd_obj = &inner.fd_table[fd_usize];
+                if let Some(file) = &fd_obj.file {
+                    if file.readable() {
+                        let file = file.clone();
+                        // 释放锁避免阻塞
+                        drop(inner);
+                        // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
+                        let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
+                        // 使用 read_at 确保不受 FD 当前 offset 影响，并使用系统调用传入的 _off
+                        file.read_at(_off, user_buf);
+                    }
+                } else {
+                    return Errno::EBADF.as_isize(); // 无效的文件描述符
+                }
+            } else {
+                return Errno::EBADF.as_isize();
             }
         } else {
-            return Errno::EBADF.as_isize(); // 无效的文件描述符
+            return Errno::EBADF.as_isize();
         }
-    } else {
-        return Errno::EBADF.as_isize();
     }
     /*
     let task = current_task().unwrap();
