@@ -74,6 +74,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 ///The main part of process execution and scheduling
 ///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
 pub fn run_tasks() {
+    //println!("run_tasks: current hart id={}", get_hart_id());
     //let mut counter: usize = 0;
         let hart_id = get_hart_id();
         info!("[kernel] Hello from hart {}!", hart_id);
@@ -115,6 +116,7 @@ pub fn run_tasks() {
             //debug!("[kernel] hart {}, run_tasks: switching to tid={} of pid={}, main_hart={}", hart_id, current_task().unwrap().tid.0, current_task().unwrap().getpid(), MAIN_HART_ID.load(Ordering::Acquire));
             unsafe {
                 // 切换到下一个任务执行流
+                //println!("hart {}: switch to task with tid={} of pid={}", hart_id, current_task().unwrap().tid.0, current_task().unwrap().getpid());
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
             // suspend_current_and_run_next以及exit_current_and_run_next会跳到这里

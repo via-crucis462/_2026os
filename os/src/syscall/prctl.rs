@@ -70,7 +70,7 @@ pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5:
         },
         PR_GETNAME => {
             // 与set相反
-            let mut buff = translated_byte_buffer(current_user_token(), _arg2 as *const u8, 16);
+            let mut buff = crate::mm::translated_byte_buffer_mut(current_user_token(), _arg2 as *const u8, 16);
             let task = current_task().unwrap();
             let process = task.process();
             let inner = process.inner_exclusive_access();

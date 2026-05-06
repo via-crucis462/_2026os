@@ -1,6 +1,6 @@
 //! File and filesystem-related syscalls
 use crate::fs::{OpenFlags, ROOT_DENTRY, Stat, Statx, file_name, make_dir, make_pipe, open_file, parent_path};
-use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
+use crate::mm::{translated_byte_buffer, translated_read, translated_str, translated_write, UserBuffer};
 use crate::task::{current_task, current_user_token};
 use alloc::vec;
 use alloc::sync::Arc;
@@ -67,7 +67,7 @@ pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
     let stat = target_dentry.inode.statfs();
 
     // 3. 将真实数据写入用户空间
-    *translated_refmut(token, buf) = stat;
+    translated_write(token, buf, stat);
     
     0 // Success!
 }
@@ -129,7 +129,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
         trace!("[kernel] sys_read: fd={}, len={}", fd, len);
-        file.read(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
+        file.read(UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, len))) as isize
     } else {
         EBADF.as_isize() // 文件描述符无效
     }
@@ -151,13 +151,13 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     for i in 0..iovcnt {
         let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
         // 从虚拟地址解引
-        let iovec: &IoVec = crate::mm::translated_ref(token, iov_addr as *const IoVec);        
+        let iovec: IoVec = translated_read(token, iov_addr as *const IoVec);
         if iovec.len == 0 {
             continue;
         }
         // 写入缓冲区
         let user_buffer = crate::mm::UserBuffer {
-            buffers: crate::mm::translated_byte_buffer(token, iovec.base as *const u8, iovec.len),
+            buffers: crate::mm::translated_byte_buffer_mut(token, iovec.base as *const u8, iovec.len),
         };
         let read_bytes = file.read(user_buffer);
         total_read += read_bytes;
@@ -338,8 +338,8 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     inner.set_fd(write_fd, pipe_write, false, O_WRONLY);
     // User ABI for pipe is int pipefd[2], i.e. two 32-bit entries.
     let pipe_u32 = pipe as *mut u32;
-    *translated_refmut(token, pipe_u32) = read_fd as u32;
-    *translated_refmut(token, unsafe { pipe_u32.add(1) }) = write_fd as u32;
+    translated_write(token, pipe_u32, read_fd as u32);
+    translated_write(token, unsafe { pipe_u32.add(1) }, write_fd as u32);
     //println!("pipe done");
     0
 }
@@ -427,7 +427,7 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
         let inner = proc.inner_exclusive_access();
         let token = inner.memory_set.token();
          drop(inner);
-        *translated_refmut(token, st) = stat;
+        translated_write(token, st, stat);
         0
     } else {
         return EBADF.as_isize();
@@ -453,7 +453,7 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     let mut total_written = 0;
     for i in 0..iovcnt {
         let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
-        let iovec: &IoVec = translated_ref(token, iov_addr as *const IoVec);      
+        let iovec: IoVec = translated_read(token, iov_addr as *const IoVec);
         if iovec.len == 0 {
             continue; 
         }
@@ -496,7 +496,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
                     statx_data.stx_mtime.tv_sec = msec;
                     statx_data.stx_mtime.tv_nsec = mnsec as u32;
                 }
-                *translated_refmut(token, st) = statx_data;
+                translated_write(token, st, statx_data);
                 return 0;
             }
         }
@@ -534,7 +534,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
             stat.stx_mtime.tv_nsec = mnsec as u32;
         }
 
-        *translated_refmut(token, st) = stat;
+        translated_write(token, st, stat);
         0
     } else {
         return ENOENT.as_isize(); // 文件不存在
@@ -613,7 +613,7 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
     let mut target = alloc::vec![0u8; st.size as usize];
     let read_len = link_dentry.inode.read_at(0, &mut target);
     let copy_len = core::cmp::min(read_len, _len);
-    let mut user_bufs = translated_byte_buffer(token, _buf, copy_len);
+    let mut user_bufs = crate::mm::translated_byte_buffer_mut(token, _buf, copy_len);
     let mut copied = 0usize;
     for seg in user_bufs.iter_mut() {
         if copied >= copy_len {
@@ -829,7 +829,7 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
             return EACCES.as_isize(); // 权限不足
         }
         trace!("[kernel] sys_getdents: fd={}, count={}", fd, count);
-        file.getdents(translated_byte_buffer(token, dirp, count).remove(0)) as isize
+        file.getdents(crate::mm::translated_byte_buffer_mut(token, dirp, count).remove(0)) as isize
     } else {
         return EBADF.as_isize();
     }
@@ -847,7 +847,7 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
     if path_bytes.len() + 1 > size {
         return ENAMETOOLONG.as_isize();
     }
-    let mut user_buf = UserBuffer::new(translated_byte_buffer(token, buf, size));
+    let mut user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, size));
     let mut current_offset = 0;
     let mut path_vec = path_bytes.to_vec();
     path_vec.push(0);
@@ -927,7 +927,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
         let mut stat: Stat = unsafe { core::mem::zeroed() };
         stat.mode = 0o100755; // 假装它是个普通空文件，让 du 闭嘴
         stat.size = 0;
-        let mut user_buf = UserBuffer::new(translated_byte_buffer(token, st as *const u8, core::mem::size_of::<Stat>()) );
+        let mut user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, st as *const u8, core::mem::size_of::<Stat>()) );
         user_buf.write(unsafe {core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())});
         return 0;
     }
@@ -951,7 +951,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
     match target_dentry {
         Some(dentry) => {
             let stat = dentry.inode.get_stat();
-            let mut user_buf = UserBuffer::new(translated_byte_buffer(token, st as *const u8, core::mem::size_of::<Stat>()) );
+            let mut user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, st as *const u8, core::mem::size_of::<Stat>()) );
             user_buf.write(unsafe {core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())});
             0
         }
@@ -977,7 +977,7 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isiz
             return EACCES.as_isize();
         }
         trace!("[kernel] sys_pread64: fd={}, count={}, offset={}", fd, count, offset);
-        file.pread(offset, UserBuffer::new(translated_byte_buffer(token, buf, count))) as isize
+        file.pread(offset, UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, count))) as isize
     } else {
         EBADF.as_isize()
     }

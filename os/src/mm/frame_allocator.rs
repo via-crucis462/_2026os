@@ -2,6 +2,7 @@ use super::{PhysAddr, PhysPageNum};
 #[allow(unused)]
 use crate::arch::config::{DMA_SIZE, MEMORY_END};
 use crate::sync::MPSafeCell;
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
@@ -23,6 +24,17 @@ impl FrameTracker {
         }
         Self { ppn }
     }
+
+    pub fn from_ppn(ppn: PhysPageNum) -> Self {
+        frame_add_ref(ppn);
+        Self { ppn }
+    }
+}
+
+impl Clone for FrameTracker {
+    fn clone(&self) -> Self {
+        Self::from_ppn(self.ppn)
+    }
 }
 
 impl Debug for FrameTracker {
@@ -33,7 +45,10 @@ impl Debug for FrameTracker {
 
 impl Drop for FrameTracker {
     fn drop(&mut self) {
-        frame_dealloc(self.ppn);
+        let remain = frame_release_ref(self.ppn);
+        if remain == 0 {
+            frame_dealloc_raw(self.ppn);
+        }
     }
 }
 
@@ -97,6 +112,8 @@ lazy_static! {
     /// frame allocator instance through lazy_static!
     pub static ref FRAME_ALLOCATOR: MPSafeCell<FrameAllocatorImpl> =
         MPSafeCell::new(FrameAllocatorImpl::new());
+    static ref FRAME_REF_COUNTS: MPSafeCell<BTreeMap<usize, usize>> =
+        MPSafeCell::new(BTreeMap::new());
 }
 /// initiate the frame allocator using `ekernel` and `MEMORY_END`
 pub fn init_frame_allocator() {
@@ -117,10 +134,12 @@ pub fn init_frame_allocator() {
 
 /// Allocate a physical page frame in FrameTracker style
 pub fn frame_alloc() -> Option<FrameTracker> {
-    FRAME_ALLOCATOR
-        .exclusive_access()
-        .alloc()
-        .map(FrameTracker::new)
+    let ppn = {
+        let mut allocator = FRAME_ALLOCATOR.exclusive_access();
+        allocator.alloc()
+    }?;
+    FRAME_REF_COUNTS.exclusive_access().insert(ppn.0, 1);
+    Some(FrameTracker::new(ppn))
 }
 /// 连续分配物理页帧，返回起始物理地址
 #[allow(unused)]
@@ -130,6 +149,41 @@ pub fn frame_alloc_con(pages: usize) -> Option<PhysPageNum> {
 
 /// Deallocate a physical page frame with a given ppn
 pub fn frame_dealloc(ppn: PhysPageNum) {
+    let remain = frame_release_ref(ppn);
+    if remain == 0 {
+        frame_dealloc_raw(ppn);
+    }
+}
+
+pub fn frame_add_ref(ppn: PhysPageNum) {
+    let mut ref_counts = FRAME_REF_COUNTS.exclusive_access();
+    let counter = ref_counts.entry(ppn.0).or_insert(0);
+    *counter += 1;
+}
+
+pub fn frame_ref_count(ppn: PhysPageNum) -> usize {
+    FRAME_REF_COUNTS
+        .exclusive_access()
+        .get(&ppn.0)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn frame_release_ref(ppn: PhysPageNum) -> usize {
+    let mut ref_counts = FRAME_REF_COUNTS.exclusive_access();
+    let counter = ref_counts
+        .get_mut(&ppn.0)
+        .unwrap_or_else(|| panic!("Frame ppn={:#x} refcount missing", ppn.0));
+    assert!(*counter > 0, "Frame ppn={:#x} refcount underflow", ppn.0);
+    *counter -= 1;
+    let remain = *counter;
+    if remain == 0 {
+        ref_counts.remove(&ppn.0);
+    }
+    remain
+}
+
+fn frame_dealloc_raw(ppn: PhysPageNum) {
     FRAME_ALLOCATOR.exclusive_access().dealloc(ppn);
 }
 

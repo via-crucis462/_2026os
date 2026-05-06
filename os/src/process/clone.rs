@@ -30,7 +30,11 @@ pub fn do_fork(_func: usize, stack: usize, _flags: usize) -> isize {
     new_pid as isize
 }
 
-// 稍后实现
-pub fn do_clone_thread(_func: usize, _stack: usize) -> isize {
-    -1
+pub fn do_clone_thread(_func: usize, stack: usize, _flags: usize, _ptid: usize) -> isize {
+    let current_task = current_task().unwrap();
+    let current_proc = current_task.process();
+    let new_task = current_proc.clone_thread((stack != 0).then_some(stack), current_task);
+    let new_tid = new_task.gettid();
+    add_task(new_task);
+    new_tid as isize
 }

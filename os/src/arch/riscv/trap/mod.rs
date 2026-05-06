@@ -103,8 +103,12 @@ pub fn trap_handler() -> ! {
             // 【修改 1】：获取当前的栈指针 SP
             let sp = current_trap_cx().x[2];
             
-            // 【修改 2】：把 sp 传进去，支持动态扩栈
-            if process_inner.memory_set.handle_page_fault(stval, sp) {
+            if process_inner.memory_set.handle_cow_fault(stval) {
+                info!("[WATCHDOG][COW] : {:#x}, PC: {:#x}", stval, sepc);
+                drop(process_inner);
+                drop(process);
+                drop(task);
+            } else if process_inner.memory_set.handle_page_fault(stval, sp) {
                 info!("[WATCHDOG] : {:#x}, PC: {:#x}", stval, sepc);
                 // 修复成功！释放锁
                 drop(process_inner);
