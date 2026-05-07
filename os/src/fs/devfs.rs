@@ -233,7 +233,7 @@ impl VfsInode for RtcInode {
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
 
-// 挂载 /dev 设备文件系统
+/* 挂载 /dev 设备文件系统
 pub fn mount_devfs() {
     info!("[VFS] Mounting pseudo-filesystem: /dev");
     // 这里用 TmpfsDirInode 替代你之前写的只读的 DevDirInode
@@ -245,7 +245,7 @@ pub fn mount_devfs() {
     
     // shm 共享内存目录，内部是共享内存文件
     dev_dentry.insert(String::from("shm"), Arc::new(TmpfsDirInode::new())); 
-}
+} */
 
 impl NullInode {
     pub fn new() -> Self {

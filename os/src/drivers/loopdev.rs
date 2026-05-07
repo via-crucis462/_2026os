@@ -8,9 +8,12 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::sync::MPSafeCell;
-use crate::fs::{File, OSInode};
+use crate::fs::{File, OSInode, VfsInode, TimeSpec, ROOT_DENTRY, file_name, parent_path};
 use crate::ext4fs::BlockDevice;
+use crate::ext4fs::ext4::Ext4FS;
+use crate::ext4fs::ext4inode::Ext4Inode;
 use crate::mm::UserBuffer;
+use crate::process::id::RecycleAllocator;
 
 use lazy_static::lazy_static;
 
@@ -22,6 +25,7 @@ lazy_static! {
 /// Loop设备管理器，创建和管理Loop设备
 pub struct LoopDeviceManager {
     inner: MPSafeCell<LoopDeviceManagerInner>,
+    id_allocator: MPSafeCell<RecycleAllocator>,
 }
 
 impl LoopDeviceManager {
@@ -30,15 +34,24 @@ impl LoopDeviceManager {
             inner: MPSafeCell::new(LoopDeviceManagerInner {
                 devices: Vec::new(),
             }),
+            id_allocator: MPSafeCell::new(RecycleAllocator::new()), // 假设Loop设备ID范围是0-1023
         }
     }
     /// 创建一个Loop设备，参数包括：指向Loop设备的文件、Loop设备在文件中的偏移量、Loop设备的大小
     pub fn create_loop_device(&self, backing_file: Arc<OSInode>, offset: usize, size: usize) -> Arc<LoopDevice> {
         let loop_device = Arc::new(LoopDevice {
             inner: Arc::new(MPSafeCell::new(LoopDeviceInner::new(backing_file, offset, size))),
+            device_id: self.id_allocator.exclusive_access().alloc(),
         });
         self.inner.exclusive_access().devices.push(loop_device.clone());
         loop_device
+    } 
+    pub fn remove_loop_device(&self, device_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        if let Some(pos) = inner.devices.iter().position(|d| d.device_id == device_id) {
+            inner.devices.remove(pos);
+            self.id_allocator.exclusive_access().dealloc(device_id);
+        }
     }
 }
 
@@ -50,6 +63,7 @@ pub struct LoopDeviceManagerInner {
 /// 创建一个Loop设备，参数包括：指向Loop设备的文件、Loop设备在文件中的偏移量、Loop设备的大小
 pub struct LoopDevice {
     pub inner: Arc<MPSafeCell<LoopDeviceInner>>,
+    pub device_id: usize, // Loop设备的ID，可以用于标识不同的Loop设备
 }
 
 impl BlockDevice for LoopDevice {
@@ -77,10 +91,96 @@ impl LoopDeviceInner {
     }
     fn read_at(&self, block_id: usize ,buf: &mut [u8]) -> usize {
         let size = buf.len();
-        self.backing_file.inode.read_at(self.offset + block_id * size, buf)
+        debug_assert_eq!(size, 512, "Block size should strictly matching disk sector size");
+        let file_size = self.backing_file.inode.get_size();
+        let actural_offset = self.offset + block_id * size;
+        if actural_offset + size > file_size {
+            return 0; // 超出文件大小，返回0表示EOF
+        }
+        self.backing_file.inode.read_at(actural_offset, buf)
     }
     fn write_at(&self, block_id: usize, buf: &[u8]) -> usize {
         let size = buf.len();
-        self.backing_file.inode.write_at(self.offset + block_id * size, buf)
+        debug_assert_eq!(size, 512, "Block size should strictly matching disk sector size");
+        let actural_offset = self.offset + block_id * size;
+        if actural_offset + size > self.backing_file.inode.get_size() {
+            return 0; // 超出文件大小，返回0表示EOF
+        }
+        self.backing_file.inode.write_at(actural_offset, buf)
+    }
+}
+
+impl VfsInode for LoopDevice {
+    fn get_size(&self) -> usize {
+        self.inner.exclusive_access().size
+    }
+    fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
+        -1 // 不支持设置时间
+    }
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        let inner = self.inner.exclusive_access();
+        if offset >= inner.size {
+            return 0;
+        }
+        let read_len = buf.len().min(inner.size - offset);
+        inner.backing_file.inode.read_at(inner.offset + offset, &mut buf[..read_len])
+    }
+    fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+        let inner = self.inner.exclusive_access();
+        if offset >= inner.size {
+            return 0;
+        }
+        let write_len = buf.len().min(inner.size - offset);
+        inner.backing_file.inode.write_at(inner.offset + offset, &buf[..write_len])
+    }
+    fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>> {
+        None // Loop设备不支持创建目录
+    }
+    fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>> {
+        None // Loop设备不支持创建文件
+    }
+    
+    fn get_stat(&self) -> crate::fs::Stat {
+        crate::fs::Stat {
+            mode: 0o060666, // 块设备标志位 (S_IFBLK) | rw-rw-rw-
+            blksize: 512,
+            size: self.get_size() as i64,
+            ..Default::default()
+        }
+    }
+    
+    fn get_statx(&self) -> crate::fs::Statx {
+        let mut stx = crate::fs::Statx::default();
+        stx.stx_mode = 0o060666;
+        stx.stx_blksize = 512;
+        stx.stx_size = self.get_size() as u64;
+        stx
+    }
+    
+    fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
+    
+    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
+    
+    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
+}
+
+pub fn create_loop_device(backing_file: Arc<OSInode>, offset: usize, size: usize) -> Arc<LoopDevice> {
+    LOOP_DEVICE_MANAGER.create_loop_device(backing_file, offset, size)
+}
+
+pub fn mount_loop_device(loop_device: Arc<LoopDevice>, mount_point: &str) {
+    // 1. 初始化文件系统（默认使用Ext4，类似于 mount -t ext4）
+    let ext4fs = Ext4FS::open(loop_device);
+    let root_disk_inode = ext4fs.get_disk_inode(2);
+    let root_inode = Arc::new(Ext4Inode::new(2, &root_disk_inode, Arc::new(ext4fs), None));
+
+    // 2. 将文件系统的根目录挂载到主文件系统目录树中
+    let parent_dir = parent_path(mount_point);
+    let name = file_name(mount_point);
+    
+    if let Some(parent_dentry) = ROOT_DENTRY.find_tree(&parent_dir, true) {
+        parent_dentry.insert(name, root_inode);
+    } else {
+        // 如果找不到挂载点父目录则挂载失败，此处可替换为统一的错误处理
     }
 }

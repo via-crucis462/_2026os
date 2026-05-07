@@ -307,12 +307,15 @@ pub fn setup_oscomp_env() {
 
         // 安全地把 shm 塞进现有的 /dev 里
         dev_dentry.insert("shm".to_string(), Arc::new(TmpfsDirInode::new()));
+        // 挂载常用设备文件
         dev_dentry.insert("null".to_string(), Arc::new(NullInode::new())); 
         dev_dentry.insert("zero".to_string(), Arc::new(ZeroInode::new()));
         dev_dentry.insert("rtc".to_string(), Arc::new(RtcInode::new()));
+        // 终端设备
         dev_dentry.insert("tty".to_string(), Arc::new(TtyInode::new()));
-        // 2. 挂载 shm
- 
+
+        // loop设备这里不挂载，采用动态分配方式
+
         info!("[VFS] Mounted /dev/shm safely");
         if root.find_tree("/dev/shm", true).is_some() {
         info!("DEBUG: /dev/shm path is VALID");

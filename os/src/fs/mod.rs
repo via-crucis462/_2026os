@@ -10,7 +10,6 @@ mod devfs;
 pub mod tmpfs;
 pub use tmpfs::setup_oscomp_env;
 pub use tmpfs::{TmpfsFileInode, TmpfsDirInode};
-pub use devfs::mount_devfs;
 pub use procfs::mount_procfs;
 pub use dir_entry::DirEntry;
 pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
