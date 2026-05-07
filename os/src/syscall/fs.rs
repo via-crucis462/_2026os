@@ -921,6 +921,14 @@ pub fn sys_umount(target: *const u8) -> isize {
     return 0;
 }
 
+pub fn fremovexattr(path: *const u8, name: *const u8) -> isize {
+    let token = current_user_token();
+    let path_str = normalize_leading_dot_path(translated_str(token, path));
+    let name_str = translated_str(token, name);
+    debug!("[kernel] sys_fremovexattr: path={}, name={}", path_str, name_str);
+    return 0; // 目前不支持扩展属性，直接返回成功
+}
+
 pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
     let token = current_user_token();
     let path_str = crate::mm::translated_str(token, path_ptr); 
