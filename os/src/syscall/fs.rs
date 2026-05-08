@@ -921,11 +921,15 @@ pub fn sys_umount(target: *const u8) -> isize {
     return 0;
 }
 
-pub fn fremovexattr(path: *const u8, name: *const u8) -> isize {
-    let token = current_user_token();
-    let path_str = normalize_leading_dot_path(translated_str(token, path));
-    let name_str = translated_str(token, name);
-    debug!("[kernel] sys_fremovexattr: path={}, name={}", path_str, name_str);
+/// 移除
+pub fn sys_fremovexattr(_fd: isize, _name: *const u8) -> isize {
+    let name_str = if _name.is_null() {
+        String::new()
+    } else {
+        let token = current_user_token();
+        translated_str(token, _name)
+    };
+    debug!("[kernel] sys_fremovexattr: fd={}, name={}", _fd, name_str);
     return 0; // 目前不支持扩展属性，直接返回成功
 }
 
@@ -1032,6 +1036,43 @@ pub fn sys_fchmodat(dirfd: isize, path_ptr: *const u8, mode: u32) -> isize {
         None => {
             ENOENT.as_isize()
         }
+    }
+}
+
+/// 通过 fd 修改文件权限
+/// Linux: int fchmod(int fd, mode_t mode)
+pub fn sys_fchmod(fd: usize, mode: u32) -> isize {
+    let task = current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+    let euid = inner.uid;
+
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+        return EBADF.as_isize();
+    }
+
+    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    drop(inner);
+
+    let dentry = match file.get_dentry() {
+        Some(d) => d,
+        None => return EBADF.as_isize(),
+    };
+
+    let mut perm = dentry.inode.get_perm();
+    // 鉴权：仅root或所有者可以修改
+    if euid != 0 && perm.uid != euid {
+        return EPERM.as_isize();
+    }
+
+    // 仅修改权限位（低12位）
+    let new_mode = (perm.mode.bits() & !0o7777) | (mode as u16 & 0o7777);
+    perm.set_mode(crate::auth::FileMode::from_bits_truncate(new_mode));
+
+    if dentry.inode.set_perm(perm) {
+        0
+    } else {
+        EACCES.as_isize()
     }
 }
 

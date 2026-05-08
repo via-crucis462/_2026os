@@ -39,13 +39,13 @@ impl File for EpollFile {
         Stat {
             dev: 0, ino: 0, mode: 0, nlink: 1, uid: 0, gid: 0, rdev: 0, __pad: 0,
             size: 0, blksize: 0, __pad2: 0, blocks: 0, atime_sec: 0, atime_nsec: 0,
-            mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     fn get_perm(&self) -> PermStat {
         let stat = self.get_stat();
         let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
-        let mode = FileMode::from_bits_truncate(mode);
+        let mode = FileMode::from_bits_truncate(mode as u16);
         PermStat { mode, uid, gid }
     }
         fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
@@ -77,13 +77,13 @@ impl File for EventFile {
         Stat {
             dev: 0, ino: 0, mode: 0, nlink: 1, uid: 0, gid: 0, rdev: 0, __pad: 0,
             size: 0, blksize: 0, __pad2: 0, blocks: 0, atime_sec: 0, atime_nsec: 0,
-            mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     fn get_perm(&self) -> PermStat {
         let stat = self.get_stat();
         let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
-        let mode = FileMode::from_bits_truncate(mode);
+        let mode = FileMode::from_bits_truncate(mode as u16);
         PermStat { mode, uid, gid }
     }
         fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }

@@ -166,7 +166,6 @@ impl ProcessControlBlock {
                 gid: 0,
                 sid:0,
                 euid: 0,
-                is_zombie: false,
                 egid: 0,
                 umask: 0o022,
                 pgid: pid_handle.0,
@@ -397,7 +396,6 @@ impl ProcessControlBlock {
 
         // 删除其他线程（如果有）
         proc_inner.tasks.retain(|t: &Arc<TaskControlBlock>| Arc::ptr_eq(t, &caller_task));
-        proc_inner.alive_task_count = 1;
         for i in proc_inner.memory_set.areas().iter() {
             debug!("exec: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
         }
@@ -468,13 +466,14 @@ impl ProcessControlBlock {
                 exit_code: 0,
                 uid: parent_inner.uid,
                 gid: parent_inner.gid,
-                euid: parent_inner.euid,                umask: parent_inner.umask,                sid:parent_inner.sid,
+                euid: parent_inner.euid,
+                umask: parent_inner.umask, 
+                sid:parent_inner.sid,
                 egid: parent_inner.egid,
                 pgid: parent_inner.pgid,
                 fd_rlmt: parent_inner.fd_rlmt.clone(),
                 tasks: Vec::new(),
-                is_zombie: false,
-                alive_task_count: 1,
+                alive_task_count: 1, // 初始有一个线程
             })
         });
         let caller_inner = caller_task.inner_exclusive_access();
@@ -652,7 +651,6 @@ pub struct ProcessControlBlockInner {
     pub sid: usize,
     pub pgid: usize, // 进程组 ID
     
-    pub is_zombie: bool,
     // 进程下的线程数
     pub tasks: Vec<Arc<TaskControlBlock>>, 
     // 存活进程数，等于0相当于僵尸进程
@@ -706,7 +704,7 @@ impl ProcessControlBlockInner {
         self.fd_rlmt = new_rlmt;
     }
     pub fn is_zombie(&self) -> bool {
-        self.alive_task_count <= 0
+        self.alive_task_count == 0
     }
     pub fn info_map_areas(&self) {
             println!("mapping asid {}:", self.get_asid());

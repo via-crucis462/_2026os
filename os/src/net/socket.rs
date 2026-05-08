@@ -121,14 +121,14 @@ impl File for TcpSocket {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
-            __unused: [0; 1], // 如果这里报错说类型不匹配，可能需要改成 [0; 2] 或者其他数组形式
+            __unused: [0; 2], // 如果这里报错说类型不匹配，可能需要改成 [0; 2] 或者其他数组形式
         }
     }
 
     fn get_perm(&self) -> PermStat {
         let stat = self.get_stat();
         let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
-        let mode = FileMode::from_bits_truncate(mode);
+        let mode = FileMode::from_bits_truncate(mode as u16);
         PermStat { mode, uid, gid }
     }
         fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
@@ -243,14 +243,14 @@ impl File for UdpSocket {
             nlink: 1, uid: 0, gid: 0, rdev: 0, __pad: 0,
             size: 0, blksize: 0, __pad2: 0, blocks: 0,
             atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
-            ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
 
     fn get_perm(&self) -> PermStat {
         let stat = self.get_stat();
         let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
-        let mode = FileMode::from_bits_truncate(mode);
+        let mode = FileMode::from_bits_truncate(mode as u16);
         PermStat { mode, uid, gid }
     }
 

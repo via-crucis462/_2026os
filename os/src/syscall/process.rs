@@ -251,18 +251,14 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
         if thread.gettid() != task.gettid() {
             let mut t_inner = thread.inner_exclusive_access();
             // 标记这些线程为 killed，它们下次进入 trap_handler 时会自尽
-            t_inner.killed = true; 
-            // 顺便给它们发个信号，把可能在睡觉的线程唤醒
+            // t_inner.killed = true; 
+            // 发信号杀死这些线程
             t_inner.signals.insert(SignalFlags::SIGKILL);
             drop(t_inner);
-            crate::process::wake_up_task(thread.clone());
+            // crate::process::wake_up_task(thread.clone());
         }
     }
 
-
-    // 确保 alive_task_count 在这里被修正，使得当前线程成为最后一个回收资源的
-    proc_inner.alive_task_count = 1; 
-    
     // 记录退出码
     proc_inner.exit_code = exit_code;
     info!("[EXIT_GROUP] PID {} cleanup done. Calling exit_current_and_run_next...", pid);
@@ -270,10 +266,21 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     drop(proc);
     drop(task);
 
-    //   3. 走正常的退出流程
+    // 确保当前线程是最后一个退出的
+    while current_task()
+        .unwrap()
+        .process()
+        .inner_exclusive_access()
+        .alive_task_count > 1 {
+        // 等待其他线程退出，直到 alive_task_count 只剩 1（当前线程）
+        suspend_current_and_run_next();
+    }
+
+    // 正常的退出流程
     exit_current_and_run_next(exit_code);
     panic!("Unreachable!");
 }
+
 pub fn sys_yield() -> isize {
     //trace!("kernel: sys_yield");
     suspend_current_and_run_next();
@@ -861,7 +868,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
 
             has_match = true;
             let child_inner = child.inner_exclusive_access();
-            if child_inner.is_zombie {
+            if child_inner.is_zombie() {
                 zombie_child = Some((child_pid, child_inner.exit_code));
                 break;
             }
@@ -935,7 +942,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                         continue;
                     }
                     let child_inner = child.inner_exclusive_access();
-                    if child_inner.is_zombie {
+                    if child_inner.is_zombie() {
                         zombie_child = Some((child_pid, child_inner.exit_code));
                         break;
                     }

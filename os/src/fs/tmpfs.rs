@@ -72,13 +72,13 @@ impl super::VfsInode for TmpfsFileInode {
         super::Stat {
             dev: 0, 
             ino: self.ino as u64,
-            mode: mode, nlink: 1, 
+            mode: mode as u32, nlink: 1, 
             uid: uid, gid: gid, rdev: 0, __pad: 0, 
 
             size: self.get_size() as i64, 
             blksize: 512, __pad2: 0,
             blocks: ((self.get_size() as i64) + 511) / 512, 
-            atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     
@@ -121,6 +121,9 @@ impl super::VfsInode for TmpfsFileInode {
         }
     }
     fn get_perm(&self) -> PermStat {
+        // 此处的实现与其他常规文件不同。
+        // 其他文件是从 stat 的 mode 字段解析权限，
+        // 而这里直接存储了 PermStat 结构体，所以直接返回
         self.perms.lock().clone()
     }
     fn set_perm(&self, perm: PermStat) -> bool {
@@ -166,7 +169,7 @@ impl super::VfsInode for TmpfsDirInode {
             ino: self.ino as u64, 
             mode: 0o040777, nlink: 2,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
-            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     

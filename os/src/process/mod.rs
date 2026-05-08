@@ -136,7 +136,7 @@ pub fn wake_up_one(mut wait_queue: MutexGuard<WaitQueue>) {
 pub const IDLE_PID: usize = 1;
 
 /// Exit the current 'Running' task and run the next task in task list.
-    pub fn exit_current_and_run_next(exit_code: i32) {
+pub fn exit_current_and_run_next(exit_code: i32) {
     // 改为暂时不take，schedule到runtasks中统一处理
     let task = current_task().unwrap();
     // remove from tid2task
@@ -164,12 +164,7 @@ pub const IDLE_PID: usize = 1;
     let mut orphan_children = alloc::vec::Vec::new();
     
 
-    if proc_inner.alive_task_count == 0 || proc_inner.is_zombie {
-        // 1. 确保标志位被设为 true，这样 wait4 遍历 children 时一抓一个准
-        proc_inner.is_zombie = true;
-        // 注意：如果是单线程程序，alive_task_count 减到 0 时，is_zombie 之前是 false，
-        // 这里会把它变成 true，正式宣告进程进入僵尸态。
-
+    if proc_inner.is_zombie() {
         orphan_children = core::mem::take(&mut proc_inner.children);
         if !orphan_children.is_empty() {
             warn!("[kernel] Process {} orphans {} children to initproc", pid, orphan_children.len());

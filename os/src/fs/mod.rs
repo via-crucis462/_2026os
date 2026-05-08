@@ -70,17 +70,16 @@ pub trait File: Send + Sync {
     }
 }
 
-/// The stat of a inode
+/// 文件状态结构体 (musl riscv64 `struct stat` ABI)
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
-//文件状态结构体
 pub struct Stat {
     /// ID of device containing file
     pub dev: u64,
     /// inode number
     pub ino: u64,
     /// file type and mode
-    pub mode: u16,
+    pub mode: u32,
     /// number of hard links
     pub nlink: u32,
     /// user ID of owner
@@ -111,8 +110,8 @@ pub struct Stat {
     pub ctime_sec: i64,
     /// time of last status change (nanoseconds)
     pub ctime_nsec: i64,
-    /// padding
-    pub __unused: [u32; 1],
+    /// padding (musl: unsigned __unused[2] = 8 bytes)
+    pub __unused: [u32; 2],
 }
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
@@ -176,7 +175,7 @@ pub trait VfsInode: Send + Sync {
     fn get_perm(&self) -> PermStat {
         let stat = self.get_stat();
         let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
-        let mode = FileMode::from_bits_truncate(mode);
+        let mode = FileMode::from_bits_truncate(mode as u16);
         PermStat { mode, uid, gid }
     }
     fn set_perm(&self, _perm: PermStat) -> bool {
@@ -325,7 +324,7 @@ impl File for DummySocket {
             atime_sec: 0, atime_nsec: 0,
             mtime_sec: 0, mtime_nsec: 0,
             ctime_sec: 0, ctime_nsec: 0,
-            __unused: [0; 1], // 严格对应你定义的 [u32; 1]
+            __unused: [0; 2], // 严格对应你定义的 [u32; 1]
         }
     }
 

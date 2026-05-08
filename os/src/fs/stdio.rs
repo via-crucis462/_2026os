@@ -110,7 +110,7 @@ impl File for Stdin {
     fn get_perm(&self) -> crate::auth::PermStat {
         let stat = self.get_stat();
         let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
-        let mode = FileMode::from_bits_truncate(mode);
+        let mode = FileMode::from_bits_truncate(mode as u16);
         PermStat { mode, uid, gid }
     }
 
@@ -157,7 +157,7 @@ impl File for Stdout {
     fn get_perm(&self) -> PermStat {
         let stat = self.get_stat();
         let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
-        let mode = FileMode::from_bits_truncate(mode);
+        let mode = FileMode::from_bits_truncate(mode as u16);
         PermStat { mode, uid, gid }
     }
         fn getdents(&self, _buf: &mut [u8]) -> isize {
@@ -199,7 +199,7 @@ impl File for Stderr {
     fn get_perm(&self) -> PermStat {
         let stat = self.get_stat();
         let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
-        let mode = FileMode::from_bits_truncate(mode);
+        let mode = FileMode::from_bits_truncate(mode as u16);
         PermStat { mode, uid, gid }
     }
         fn getdents(&self, _buf: &mut [u8]) -> isize {

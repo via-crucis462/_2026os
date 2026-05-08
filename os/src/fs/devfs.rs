@@ -65,7 +65,7 @@ impl VfsInode for UrandomInode {
             atime_sec: 0, atime_nsec: 0,
             mtime_sec: 0, mtime_nsec: 0,
             ctime_sec: 0, ctime_nsec: 0,
-            __unused: [0; 1],
+            __unused: [0; 2],
         }
     }
     fn get_statx(&self) -> Statx { 
@@ -166,7 +166,7 @@ impl VfsInode for NullInode {
             nlink: 1,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
             blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
-            ctime_sec: 0, ctime_nsec: 0, __unused: [0;1],
+            ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     fn get_statx(&self) -> Statx { stat_to_statx(&self.get_stat()) }
@@ -199,7 +199,7 @@ impl VfsInode for ZeroInode {
             nlink: 1,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
             blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
-            ctime_sec: 0, ctime_nsec: 0, __unused: [0;1],
+            ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     fn get_statx(&self) -> Statx { stat_to_statx(&self.get_stat()) }
@@ -222,7 +222,7 @@ impl VfsInode for RtcInode {
             nlink: 1,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
             blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
-            ctime_sec: 0, ctime_nsec: 0, __unused: [0;1],
+            ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     fn get_statx(&self) -> Statx { stat_to_statx(&self.get_stat()) }

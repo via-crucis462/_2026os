@@ -90,7 +90,7 @@ impl VfsInode for ProcPidDirInode {
             mode: 0o040555, // 动态目录给只读和执行权限
             nlink: 2,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
-            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     
@@ -156,7 +156,7 @@ fn get_stat(&self) -> super::Stat {
             mode: 0o100666, 
             nlink: 1, 
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
-            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
    impl_default_statx!();
@@ -216,7 +216,7 @@ impl VfsInode for ProcRootInode {
             mode: 0o040555, 
             nlink: 2,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
-            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     
@@ -268,7 +268,7 @@ impl VfsInode for ProcDirInode {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
-            __unused: [0; 1],
+            __unused: [0; 2],
         }
     }
    
@@ -328,7 +328,7 @@ impl VfsInode for ProcStatusInode {
             mode: 0o100444, 
             nlink: 1,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
-            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     
@@ -380,7 +380,7 @@ impl VfsInode for ProcSelfSymlinkInode {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
-            __unused: [0; 1], 
+            __unused: [0; 2], 
         }
     }
 
@@ -413,7 +413,7 @@ impl VfsInode for ProcNsDirInode {
             dev: 0, ino: 2, 
             mode: 0o040555, // S_IFDIR (0o040000) | r-xr-xr-x (0o555) 目录权限
             nlink: 2, uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
-            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
 
@@ -451,7 +451,7 @@ impl VfsInode for ProcNsFileInode {
             ino, 
             mode: 0o100444, 
             nlink: 1, uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
-            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     fn get_size(&self) -> usize { 0 }
@@ -508,7 +508,7 @@ impl VfsInode for MemInfoInode {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
-            __unused:[0; 1],
+            __unused: [0; 2],
         }
     }
     fn get_statx(&self) -> Statx { 
@@ -575,7 +575,7 @@ impl VfsInode for MountsInode {
             dev: 0, ino: 997, mode: 0o100444, nlink: 1, // 普通文件只读
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
             blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
-            ctime_sec: 0, ctime_nsec: 0, __unused: [0;1],
+            ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     // 把底下那堆 unimplemented 或 None 补齐 (跟 MemInfoInode 一样)
