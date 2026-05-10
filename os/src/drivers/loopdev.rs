@@ -14,6 +14,7 @@ use crate::ext4fs::ext4::Ext4FS;
 use crate::ext4fs::ext4inode::Ext4Inode;
 use crate::mm::UserBuffer;
 use crate::process::id::RecycleAllocator;
+use crate::syscall::errno::Errno;
 
 use lazy_static::lazy_static;
 
@@ -168,19 +169,21 @@ pub fn create_loop_device(backing_file: Arc<OSInode>, offset: usize, size: usize
     LOOP_DEVICE_MANAGER.create_loop_device(backing_file, offset, size)
 }
 
-pub fn mount_loop_device(loop_device: Arc<LoopDevice>, mount_point: &str) {
-    // 1. 初始化文件系统（默认使用Ext4，类似于 mount -t ext4）
+pub fn mount_loop_device(loop_device: Arc<LoopDevice>, mount_point: &str) -> Result<usize, isize>{
+    // 创建一个loop设备实例
+    let id = loop_device.device_id;
     let ext4fs = Ext4FS::open(loop_device);
     let root_disk_inode = ext4fs.get_disk_inode(2);
     let root_inode = Arc::new(Ext4Inode::new(2, &root_disk_inode, Arc::new(ext4fs), None));
 
-    // 2. 将文件系统的根目录挂载到主文件系统目录树中
+    // 挂载到文件系统目录树中
     let parent_dir = parent_path(mount_point);
     let name = file_name(mount_point);
     
     if let Some(parent_dentry) = ROOT_DENTRY.find_tree(&parent_dir, true) {
         parent_dentry.insert(name, root_inode);
+        Ok(id)
     } else {
-        // 如果找不到挂载点父目录则挂载失败，此处可替换为统一的错误处理
+        return Err(Errno::ENOENT.as_isize());
     }
 }

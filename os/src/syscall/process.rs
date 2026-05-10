@@ -261,7 +261,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
 
     // 记录退出码
     proc_inner.exit_code = exit_code;
-    info!("[EXIT_GROUP] PID {} cleanup done. Calling exit_current_and_run_next...", pid);
+    
     drop(proc_inner);
     drop(proc);
     drop(task);
@@ -276,6 +276,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
         suspend_current_and_run_next();
     }
 
+    info!("[EXIT_GROUP] PID {} tasks cleanup done. Calling exit_current_and_run_next...", pid);
     // 正常的退出流程
     exit_current_and_run_next(exit_code);
     panic!("Unreachable!");
@@ -834,7 +835,9 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
     const WNOHANG: usize = 0x1;
     let nohang = (options & WNOHANG) != 0;//是否开启了非阻塞选项
     info!("[wait4] P{} waiting for PID/PGID: {}, options: {}", current_pgid, pid, options);
+    let mut printed_info = false;
 
+    loop {
         let children_snapshot = {
             let proc_inner = proc.inner_exclusive_access();
             proc_inner.children.clone()
@@ -893,15 +896,22 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                 if exit_code_ptr as usize != 0 {
                     *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
                 }
-                // 从全局进程表里把孩子的记录删除
-                crate::process::remove_process(child_pid);
+
                 return child_pid as isize;
             }
         }
 
         if nohang {
             return 0; // 没有僵尸孩子但开启了非阻塞选项，直接返回 0
-        }else{
+        }
+        if !printed_info {
+            info!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
+            printed_info = true;
+        }
+        suspend_current_and_run_next();
+    }
+     /*  
+        else{
             // B. 孩子还活着，睡眠等待
             info!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
             // 新增：检查是否被信号打断 
@@ -914,11 +924,12 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                 info!("[wait4] Interrupted by signal! Returning EINTR.");
                 return -4; // -4 对应 EINTR (Interrupted system call)
             }
+
+            let mut count = 0;
             loop{
                 // 继续睡眠等待，直到被调度器唤醒
                 suspend_current_and_run_next();
                 
-                // 每次被唤醒后都检查一次是否有符合条件的僵尸孩子
                 let children_snapshot = {
                     let proc_inner = proc.inner_exclusive_access();
                     proc_inner.children.clone()
@@ -961,12 +972,11 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                             *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
                         }
                         
-                        crate::process::remove_process(child_pid);
                         return child_pid as isize;
                     }
                 }
         }
-    }
+    } */ 
 }
 pub fn sys_kill(pid: isize, signum: i32) -> isize {
     if signum < 0 || signum > 64 {

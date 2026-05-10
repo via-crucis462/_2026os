@@ -141,8 +141,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let task = current_task().unwrap();
     // remove from tid2task
     remove_from_tid2task(task.gettid());
-
     let pid = task.getpid();
+    
     info!("[kernel] Process {} is exiting with code {} ...", pid, exit_code);
     if pid == IDLE_PID {
         println!("[kernel] Idle process exit with exit_code {} ...", exit_code);
@@ -165,6 +165,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     
 
     if proc_inner.is_zombie() {
+        crate::process::remove_process(pid);
         orphan_children = core::mem::take(&mut proc_inner.children);
         if !orphan_children.is_empty() {
             warn!("[kernel] Process {} orphans {} children to initproc", pid, orphan_children.len());
