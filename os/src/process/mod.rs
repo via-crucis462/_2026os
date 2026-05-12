@@ -388,11 +388,7 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
         // 临时屏蔽当前信号，防止处理时被同一个信号再次打断
         task_inner.signal_mask.insert(signal);
         
-        // (可选：如果 action 里有 sa_mask，也应该在这里合并进来)
-        // task_inner.signal_mask.bits |= action.sa_mask;
 
-        // 设置用户态入口和参数
-        // 注意：这里应该是修改 PC 指针，如果是 rCore 通常叫 set_sepc 或修改 trap_ctx.sepc
         trap_ctx.set_rt(handler);
         trap_ctx.set_a0(sig);
 
@@ -400,11 +396,9 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
         if restorer != 0 {
             trap_ctx.set_ra(restorer);
         } else {
-            // ... 注入栈上蹦床代码 (逻辑保持你原来的写法) ...
+
             warn!("[KERNEL WARNING] restorer is 0! Injecting trampoline on stack...");
-            // ... 你的计算 sp, 写 trampoline, 设置 set_ra(sp) 的代码 ...
-            // trap_ctx.set_ra(sp);
-            // trap_ctx.x[2] = sp;
+
         }
 
     } 
@@ -439,13 +433,12 @@ fn check_pending_signals() {
     let mask = task_inner.signal_mask.bits();
     let handling = task_inner.handling_sig;
     
-    // 🚨 探头 3.1：进门第一眼，看看进程当前真实状态！
+
     if signals != 0 {
         info!("[PROBE 3.1] check_pending: signals={:#x}, mask={:#x}, handling_sig={}", signals, mask, handling);
     }
-    drop(task_inner); // 先放锁，免得死锁
+    drop(task_inner); 
 
-    // 注意：信号编号从 1 开始，最大通常是 64。不能从 0 开始，否则 0 - 1 会溢出！
     for sig in 1..=MAX_SIG { 
         let task = current_task().unwrap();
         let proc = task.process();
@@ -460,13 +453,13 @@ fn check_pending_signals() {
         if task_inner.signals.contains(signal) {
             let is_masked = task_inner.signal_mask.contains(signal);
             
-            // 🚨 探头 3.2：看看每一个存在的信号，它是怎么被判定拦截的！
+         
             info!("[PROBE 3.2] found pending sig: {}, is_masked: {}", sig, is_masked);
             
             if !is_masked {
                 let mut masked = false;
                 if task_inner.handling_sig != -1 {
-                    // 这里原本逻辑有点绕，简化一下：如果你正在处理信号，我们保守点先不打断
+           
                     masked = true; 
                     info!("[PROBE 3.3] skipped sig {} because currently handling {}", sig, task_inner.handling_sig);
                 }

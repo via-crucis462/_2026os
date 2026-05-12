@@ -77,11 +77,26 @@ pub struct Winsize {
     pub ws_ypixel: u16, // 像素高度 (通常不用，填 0)
 }
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
 }
+
+
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ITimerVal {
+    pub it_interval: TimeVal, // 周期触发间隔（如果是0代表单次触发）
+    pub it_value: TimeVal,    // 首次触发的剩余时间
+}
+
+
+
+
+
+
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -235,7 +250,9 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
     }
 }
 pub fn sys_exit(exit_code: i32) -> ! {
+    let pid = current_task().unwrap().process().getpid();
     trace!("kernel:pid[{}] sys_exit", current_task().unwrap().process().pid.0);
+    crate::timer::TIMER_MANAGER.lock().cancel_alarm(pid);
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
@@ -278,6 +295,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
 
     info!("[EXIT_GROUP] PID {} tasks cleanup done. Calling exit_current_and_run_next...", pid);
     // 正常的退出流程
+    crate::timer::TIMER_MANAGER.lock().cancel_alarm(pid);
     exit_current_and_run_next(exit_code);
     panic!("Unreachable!");
 }
@@ -1623,11 +1641,47 @@ pub fn sys_sched_getaffinity(_pid: isize, cpusetsize: usize, mask_ptr: *mut u8) 
     }
     0
 }
-pub fn sys_setitimer(_which: usize, _new_value: *const u8, _old_value: *mut u8) -> isize {
-    // 假装定时器设置成功，保证 LTP 测试框架的控制流不崩溃
-    0
-}
+pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize {
+ 
+    if which != 0 {
+        return EINVAL.as_isize(); 
+    }
 
+    let task = crate::task::current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+
+    if new_value == 0 {
+        return EFAULT.as_isize(); 
+    }
+    let new_timer = *crate::mm::translated_ref(token, new_value as *const ITimerVal);
+
+  
+    let delay_ms = new_timer.it_value.sec * 1000 + new_timer.it_value.usec / 1000;
+
+   
+    let pid = process.getpid();
+    let current_ms = get_time_ms();
+    
+
+    let remain_ms = crate::timer::TIMER_MANAGER.lock().set_alarm(pid, current_ms, delay_ms);
+
+
+    if old_value != 0 {
+
+        let old_timer = translated_refmut(token, old_value as *mut ITimerVal);
+        
+
+        old_timer.it_value.sec = remain_ms / 1000;
+        old_timer.it_value.usec = (remain_ms % 1000) * 1000;
+        
+
+        old_timer.it_interval = TimeVal { sec: 0, usec: 0 };
+    }
+
+    0 
+}
 
 
 pub fn sys_ftruncate(fd: usize, _len: usize) -> isize {

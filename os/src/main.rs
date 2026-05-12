@@ -45,7 +45,7 @@ pub mod sync;
 pub mod syscall;
 pub mod process;
 pub mod auth;
-
+pub mod timer;
 
 pub use arch::config::*;
 use crate::drivers::block::NET_DEVICE;
