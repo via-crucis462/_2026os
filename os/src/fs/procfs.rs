@@ -8,6 +8,8 @@ use crate::task::get_process;
 use crate::syscall::fs::Statfs;
 use core::sync::atomic::Ordering;
 use alloc::format;
+use crate::mm::MapPermission;
+
 macro_rules! impl_default_statx {
     () => {
         fn get_statx(&self) -> Statx { 
@@ -72,7 +74,7 @@ impl VfsInode for ProcPidDirInode {
 
             "status" => Some(Arc::new(ProcStatusInode { pid: self.pid })),
             "ns" => Some(Arc::new(ProcNsDirInode { pid: self.pid })),
-            // "maps" => Some(Arc::new(ProcMapsInode { pid: self.pid })),
+            "maps" => Some(Arc::new(ProcMapsInode { pid: self.pid })),
             
             _ => None,
         }
@@ -180,7 +182,68 @@ struct StackBuffer<'a> {
 pub struct ProcRootInode {
     static_entries: TmpfsDirInode, 
 }
+pub struct ProcMapsInode {
+    pub pid: usize,
+}
+impl VfsInode for ProcMapsInode {
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        let mut maps_str = alloc::string::String::new();
+        
 
+        if let Some(process) = crate::task::get_process(self.pid) {
+            let inner = process.inner_exclusive_access();
+            
+
+            for area in inner.memory_set.areas.iter() {
+
+                let start_va: usize = area.vpn_range.get_start().into();
+                let end_va: usize = area.vpn_range.get_end().into();
+                
+
+                let perm = area.get_map_permission();
+                
+
+                let r = if perm.contains(MapPermission::R) { 'r' } else { '-' };
+                let w = if perm.contains(MapPermission::W) { 'w' } else { '-' };
+                let x = if perm.contains(MapPermission::X) { 'x' } else { '-' };
+                let p = 'p';
+                let _ = write!(
+                    maps_str,
+                    "{:08x}-{:08x} {}{}{}{} 00000000 00:00 0\n",
+                    start_va, end_va, r, w, x, p
+                );
+            }
+        }
+        
+        
+        let data = maps_str.as_bytes();
+        if offset >= data.len() {
+            return 0;
+        }
+        let read_len = core::cmp::min(buf.len(), data.len() - offset);
+        buf[..read_len].copy_from_slice(&data[offset..offset + read_len]);
+        read_len
+    }
+
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+
+    fn get_stat(&self) -> super::Stat {
+        super::Stat {
+            dev: 0, ino: 8888, 
+            mode: 0o100444, 
+            nlink: 1, uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
+        }
+    }
+    fn get_size(&self) -> usize {
+        0
+    }
+    fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
+    impl_default_statx!();
+
+
+    impl_unsupported_ops!(-1);
+}
 impl ProcRootInode {
     pub fn new() -> Self {
         Self { static_entries: TmpfsDirInode::new() }

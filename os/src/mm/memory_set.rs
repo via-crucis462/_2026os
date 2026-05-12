@@ -48,7 +48,7 @@ pub fn kernel_token() -> usize {
 pub struct MemorySet {
     page_table: PageTable,
     asid: ASIDHandle,
-    areas: Vec<MapArea>,
+    pub areas: Vec<MapArea>,
     brk_index: usize, //新增，用于记录brk所在area（堆区）的索引，请注意维护，后续可能会删除
 }
 
@@ -975,7 +975,7 @@ impl MemorySet {
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
-    vpn_range: VPNRange,
+    pub vpn_range: VPNRange,
     data_frames: BTreeMap<VirtPageNum, FrameTracker>,
     map_type: MapType,
     map_perm: MapPermission,
