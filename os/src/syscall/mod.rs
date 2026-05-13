@@ -30,6 +30,7 @@ const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_STATFS: usize = 43;
 const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FALLOCATE: usize = 47;
+const SYSCALL_CHROOT: usize = 51;
 const SYSCALL_FCHMOD: usize = 52;
 const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_FCHOWNAT: usize = 54;
@@ -71,6 +72,7 @@ const SYSCALL_SCHED_GETAFFINITY: usize = 123;
 const SYSCALL_YIELD: usize = 124;
 /// kill syscall
 const SYSCALL_KILL: usize = 129;
+
 /// sigaction syscall
 const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_SIGACTION: usize = 134;
@@ -83,6 +85,7 @@ const SYSCALL_SIGRETURN: usize = 139;
 const SYSCALL_SET_PRIORITY: usize = 140;
 const SYSCALL_SETGID: usize = 144;
 const SYSCALL_SETUID: usize = 146;
+const SYSCALL_SETEUID: usize=147;
 const SYSCALL_UMASK: usize = 166;
 const SYSCALL_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
@@ -242,6 +245,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[1] as *const SignalAction,
             args[2] as *mut SignalAction,
         ),
+        SYSCALL_CHROOT => sys_chroot(args[0]),
         SYSCALL_CONNECT => sys_connect(args[0], args[1] as *const u8, args[2] as u32),
         SYSCALL_GETSOCKNAME => sys_getsockname(args[0], args[1] as *mut u8, args[2] as *mut u32),
         SYSCALL_SENDTO => sys_sendto(args[0], args[1] as *const u8, args[2], args[3] as i32, args[4] as *const u8, args[5] as u32),
@@ -259,6 +263,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1]as *mut _),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
         SYSCALL_SETUID => sys_setuid(args[0] as u32),
+        SYSCALL_SETEUID => sys_seteuid(args[0] as u32),
         SYSCALL_SETGID => sys_setgid(args[0] as u32),
         SYSCALL_UMASK => sys_umask(args[0] as u32),
         SYSCALL_GETPID => sys_getpid(),

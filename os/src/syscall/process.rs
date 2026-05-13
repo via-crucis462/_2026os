@@ -310,6 +310,23 @@ pub fn sys_gettid() -> isize {
     // 目前线程ID和进程ID是一样的
     sys_getpid()
 }
+pub fn sys_chroot(path: usize) -> isize {
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let mut inner = proc.inner_exclusive_access();
+
+
+    if inner.euid != 0 {
+        return Errno::EPERM.as_isize();
+    }
+
+    let token = inner.memory_set.token();
+
+    let path_str = crate::mm::translated_str(token, path as *const u8);
+
+
+    0
+}
 pub fn sys_rt_sigreturn() -> isize {
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
@@ -413,7 +430,13 @@ pub fn sys_setgid(gid: u32) -> isize {
     proc_inner.egid = gid;
     0 
 }
-
+pub fn sys_seteuid(euid: u32) -> isize {
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let mut proc_inner = proc.inner_exclusive_access();
+    proc_inner.euid = euid;
+    0 
+}
 /// umask: 设置进程文件模式创建掩码，返回旧掩码
 pub fn sys_umask(mask: u32) -> isize {
     let task = current_task().unwrap();
