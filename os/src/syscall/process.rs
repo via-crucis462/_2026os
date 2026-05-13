@@ -14,6 +14,7 @@ use crate::process::current_task_to_sleep;
 use crate::lazy_static;
 use spin::Mutex;
 use crate::sync::WaitQueue;
+use alloc::collections::VecDeque;
 
 use alloc::collections::BTreeMap;
 
@@ -1518,16 +1519,12 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
         None => return EINVAL.as_isize(),
     };
 
-
     if epfd == fd {
         return EINVAL.as_isize(); 
     }
 
 
-    if target_file_dyn.as_any().is::<EpollFile>() {
-        return EINVAL.as_isize(); 
-    }
-
+    
 
     let stat = target_file_dyn.get_stat();
     let mode = stat.mode;
@@ -1538,7 +1535,86 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
 
         return EPERM.as_isize(); 
     }
+    if op == EPOLL_CTL_ADD && target_file_dyn.as_any().is::<EpollFile>() {
+        let mut adj: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut in_degree: BTreeMap<usize, usize> = BTreeMap::new();
 
+        adj.insert(epfd, alloc::vec![fd]);
+        in_degree.insert(epfd, 0);
+        in_degree.insert(fd, 1);
+
+
+        for i in 0..inner.fd_table.len() {
+            if let Some(f) = &inner.fd_table[i].file {
+                if let Some(ep) = f.as_any().downcast_ref::<EpollFile>() {
+                    adj.entry(i).or_default();
+                    in_degree.entry(i).or_insert(0);
+
+                    let keys: Vec<usize> = ep.interest_list.lock().keys().copied().collect();
+                    for target_fd in keys {
+                        if target_fd < inner.fd_table.len() {
+                            if let Some(t_file) = &inner.fd_table[target_fd].file {
+                                if t_file.as_any().is::<EpollFile>() {
+                                    adj.entry(i).or_default().push(target_fd);
+                                    *in_degree.entry(target_fd).or_insert(0) += 1;
+                                    adj.entry(target_fd).or_default();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+
+        let mut queue = VecDeque::new();
+        let mut depth: BTreeMap<usize, usize> = BTreeMap::new();
+
+ 
+        for (&node, &deg) in in_degree.iter() {
+            if deg == 0 {
+                queue.push_back(node);
+            }
+            depth.insert(node, 1); 
+        }
+
+        let mut visited_count = 0;
+        let mut max_depth = 1;
+
+        while let Some(u) = queue.pop_front() {
+            visited_count += 1;
+            let d_u = *depth.get(&u).unwrap();
+            if d_u > max_depth {
+                max_depth = d_u;
+            }
+
+
+            if let Some(neighbors) = adj.get(&u) {
+                for &v in neighbors {
+                    if let Some(deg) = in_degree.get_mut(&v) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(v);
+                        }
+                    }
+                    let d_v = *depth.get(&v).unwrap();
+         
+                    if d_u + 1 > d_v {
+                        depth.insert(v, d_u + 1);
+                    }
+                }
+            }
+        }
+
+
+        if visited_count != in_degree.len() {
+            return Errno::ELOOP.as_isize(); 
+        }
+
+        if max_depth >= 6 {
+            return Errno::EINVAL.as_isize(); 
+        }
+    }
 
 
     let token = inner.memory_set.token();
