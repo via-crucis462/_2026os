@@ -26,6 +26,11 @@ impl TcpSocket {
         let handle = SOCKET_SET.exclusive_access().add(socket);
         Self { handle }
     }
+    pub fn disconnect(&self) {
+        let mut sockets = SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
+        socket.close(); 
+    }
     pub fn local_endpoint(&self) -> Option<smoltcp::wire::IpEndpoint> {
         let sockets = SOCKET_SET.exclusive_access();
         let socket = sockets.get::<smoltcp::socket::tcp::Socket>(self.handle);
