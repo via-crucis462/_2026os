@@ -19,7 +19,7 @@ pub use id::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle};
 use spin::{Mutex, MutexGuard};
 pub use task::*;
 pub use pcb::*;
-use crate::mm::translated_byte_buffer;
+use crate::{console::print, mm::translated_byte_buffer};
 
 use manager::*;
 pub use manager::{get_process, pop_process, remove_process};
@@ -149,21 +149,24 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         panic!("All applications completed!");
     }
 
-    // **** access current TCB exclusively
+    // 修改当前任务状态
     let mut task_inner = task.inner_exclusive_access();
-    let proc = task.process();
-    let mut proc_inner = proc.inner_exclusive_access();
-    
     // Change status to Zombie
     task_inner.task_status = TaskStatus::Zombie;
     task_inner.exit_code = exit_code;
-    
+    // 克隆一下arc指针
+    let proc = task.process().clone();
+
+    // fix:先释放掉tcb锁
+    drop(task_inner);
+    // fix:再获取pcb锁
+    let mut proc_inner = proc.inner_exclusive_access();
+
     // Decrease the number of alive tasks
     proc_inner.alive_task_count -= 1;
-    let parent_to_wake = proc_inner.parent.as_ref().and_then(|p| p.upgrade());
+    //let parent_to_wake = proc_inner.parent.as_ref().and_then(|p| p.upgrade());
     let mut orphan_children = alloc::vec::Vec::new();
     
-
     if proc_inner.is_zombie() {
         crate::process::remove_process(pid);
         orphan_children = core::mem::take(&mut proc_inner.children);
@@ -189,9 +192,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // **** release current PCB
     drop(proc_inner);
     drop(proc);
-    drop(task_inner);
 
     if !orphan_children.is_empty() {
+        println!("[kernel] Process {} orphans {} children to initproc", pid, orphan_children.len());
         let initproc = INITTASK.process();
         for child in orphan_children.iter() {
             child.inner_exclusive_access().parent = Some(Arc::downgrade(&initproc));

@@ -11,7 +11,7 @@ pub const PAGE_SIZE_BITS: usize = 0xc;
 /// user app's stack size
 pub const USER_STACK_SIZE: usize = 0x80_0000; // 8MB
 /// kernel stack size
-pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 16;
+pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 32; // 128KB
 /// kernel heap size
 pub const KERNEL_HEAP_SIZE: usize = 0x800_0000; // 128MB
 
@@ -22,8 +22,12 @@ pub const TRAMPOLINE: usize = usize::MAX - PAGE_SIZE + 1;
 pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
 /// clock frequency
 pub const CLOCK_FREQ: usize = 12500000;
+/// riscv qemu主要内存起始地址, 注意linker.ld需要与此同步
+pub const MEMORY_BASE: usize = 0x8000_0000;
+/// qemu memory size
+pub const MEMORY_SIZE: usize = 1<<30; // 1GB,0x4000_0000
 /// the physical memory end
-pub const MEMORY_END: usize = 0x4_0000_0000;
+pub const MEMORY_END: usize = MEMORY_BASE + MEMORY_SIZE; // 0xc000_0000
 /// 这里也定义一个
 pub const DMA_SIZE: usize = 0;
 /// The base address of control registers in Virtio_Block device

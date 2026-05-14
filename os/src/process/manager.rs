@@ -146,8 +146,6 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
     TID2TCB
         .exclusive_access()
         .insert(task.gettid(), Arc::clone(&task));
-    let process = task.process();
-    let mut process_inner = process.inner_exclusive_access();
     add_task_into_pool(task);
 }
 

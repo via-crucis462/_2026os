@@ -156,12 +156,13 @@ impl UdpSocket {
 
     /// 绑定本地端口 (供 sys_bind 调用)
     pub fn bind(&self, port: u16) -> isize {
+        // 先锁全局映射表，再锁 bound_port —— 与 sendto() 保持一致的锁顺序，避免 AB-BA 死锁
+        let mut map = LOCAL_UDP_SOCKETS.lock();
         let mut bound = self.bound_port.lock();
         *bound = Some(port);
         
         // 把自己的接收队列注册到全局映射表里！
         // 这样别人往这个端口发数据，就会直接掉进我们的 recv_queue 里。
-        let mut map = LOCAL_UDP_SOCKETS.lock();
         map.insert(port, self.recv_queue.clone());
         0 // 成功
     }

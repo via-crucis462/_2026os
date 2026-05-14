@@ -161,6 +161,7 @@ use process::*;
 use prctl::*;
 use alloc::string::String;
 
+use crate::get_hart_id;
 use crate::syscall::net::*;
 
 use crate::{fs::Stat, task::{SignalAction, current_task}};
@@ -217,7 +218,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         let inner = process.inner_exclusive_access();
         inner.info_map_areas();
     }*/
-    // println!("[K] PID{} called syscall {}", current_task().unwrap().process().pid.0, syscall_id);
+    // println!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
@@ -355,6 +356,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             syscall_id, args[0], args[1], args[2], ret
         );
     }*/
-    // println!("[K] PID{} finished syscall {} with return value {}", current_task().unwrap().process().pid.0, syscall_id, ret);
+    // println!("[K] hart[{}] PID{} finished syscall {} with return value {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
     ret
 }
