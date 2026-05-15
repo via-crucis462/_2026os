@@ -485,6 +485,33 @@ const TCGETS: u32 = 0x5401;
 const TIOCGWINSZ: u32 = 0x5413;
 const RTC_RD_TIME: u32 = 0x80247009; // 真实的 RTC 读取指令号
 
+// Loop 设备相关的 ioctl 命令
+const LOOP_SET_FD: u32 = 0x4C00; //设置 Loop 设备的后端文件描述符
+const LOOP_CLR_FD: u32 = 0x4C01; //清除 Loop 设备的后端文件描述符
+const LOOP_SET_STATUS64: u32 = 0x4C04; //设置 Loop 设备的状态（使用 LoopInfo64 结构体）
+const LOOP_GET_STATUS64: u32 = 0x4C05; //获取 Loop 设备的状态（使用 LoopInfo64 结构体）
+const LOOP_SET_STATUS: u32 = 0x4C02; //设置 Loop 设备的状态
+const LOOP_CTL_GET_FREE: u32 = 0x4C82; //获取一个空闲的 Loop 设备编号
+const BLKGETSIZE64: u32 = 0x80081272; // BLKGETSIZE64
+
+
+#[repr(C)]
+struct LoopInfo64 {
+    lo_device: u64,
+    lo_inode: u64,
+    lo_rdevice: u64,
+    lo_offset: u64,
+    lo_sizelimit: u64,
+    lo_number: u32,
+    lo_encrypt_type: u32,
+    lo_encrypt_key_size: u32,
+    lo_flags: u32,
+    lo_file_name: [u8; 64],
+    lo_crypt_name: [u8; 64],
+    lo_encrypt_key: [u8; 32],
+    lo_init: [u64; 2],
+}
+
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
@@ -544,6 +571,130 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             } else {
                 EFAULT.as_isize() // 指针错误
             }
+        }
+        LOOP_CTL_GET_FREE => {
+            let manager = &crate::drivers::loopdev::LOOP_DEVICE_MANAGER;
+            let free_id = manager.get_free_id();
+            if free_id != -1 { free_id } else { EBUSY.as_isize() }
+        }
+        LOOP_SET_FD => {
+            let backend_fd = argp;
+            if backend_fd >= fd_table.len() || fd_table[backend_fd].file.is_none() {
+                return EBADF.as_isize();
+            }
+            let backend_file = fd_table[backend_fd].file.as_ref().unwrap();
+            let backend_inode = match backend_file.get_dentry() {
+                Some(d) => d.inode.clone(),
+                None => return EINVAL.as_isize(),
+            };
+            
+            let loop_file = fd_table[fd].file.as_ref().unwrap();
+            let dentry = match loop_file.get_dentry() {
+                Some(d) => d,
+                None => return EINVAL.as_isize(),
+            };
+            
+            let mut target_id = None;
+            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    target_id = Some(id);
+                }
+            }
+            
+            if let Some(id) = target_id {
+                if crate::drivers::loopdev::LOOP_DEVICE_MANAGER.set_backing_file(id, Some(backend_inode)) {
+                    0
+                } else {
+                    EINVAL.as_isize()
+                }
+            } else {
+                EINVAL.as_isize()
+            }
+        }
+        LOOP_CLR_FD => {
+            let loop_file = fd_table[fd].file.as_ref().unwrap();
+            let dentry = match loop_file.get_dentry() {
+                Some(d) => d,
+                None => return EINVAL.as_isize(),
+            };
+            
+            let mut target_id = None;
+            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    target_id = Some(id);
+                }
+            }
+            if let Some(id) = target_id {
+                if crate::drivers::loopdev::LOOP_DEVICE_MANAGER.set_backing_file(id, None) {
+                    0
+                } else {
+                    EINVAL.as_isize()
+                }
+            } else {
+                EINVAL.as_isize()
+            }
+        }
+        LOOP_GET_STATUS64 => {
+            let loop_file = fd_table[fd].file.as_ref().unwrap();
+            let dentry = match loop_file.get_dentry() {
+                Some(d) => d,
+                None => return EINVAL.as_isize(),
+            };
+            let mut target_id = None;
+            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    target_id = Some(id);
+                }
+            }
+            if let Some(id) = target_id {
+                if let Some((offset, size)) = crate::drivers::loopdev::LOOP_DEVICE_MANAGER.get_info(id) {
+                    if argp != 0 {
+                        let mut info = LoopInfo64 {
+                            lo_device: 0, lo_inode: 0, lo_rdevice: 0, lo_offset: offset as u64,
+                            lo_sizelimit: size as u64, lo_number: 0, lo_encrypt_type: 0,
+                            lo_encrypt_key_size: 0, lo_flags: 0, lo_file_name: [0; 64],
+                            lo_crypt_name: [0; 64], lo_encrypt_key: [0; 32], lo_init: [0; 2],
+                        };
+                        *translated_refmut(token, argp as *mut LoopInfo64) = info;
+                        0
+                    } else { EFAULT.as_isize() }
+                } else {
+                    ENXIO.as_isize()
+                }
+            } else {
+                ENOTTY.as_isize()
+            }
+        }
+        BLKGETSIZE64 => {
+            let loop_file = fd_table[fd].file.as_ref().unwrap();
+            let dentry = match loop_file.get_dentry() {
+                Some(d) => d,
+                None => return EINVAL.as_isize(),
+            };
+            let mut target_id = None;
+            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    target_id = Some(id);
+                }
+            }
+            if let Some(id) = target_id {
+                if let Some((_, size)) = crate::drivers::loopdev::LOOP_DEVICE_MANAGER.get_info(id) {
+                    if argp != 0 {
+                        *translated_refmut(token, argp as *mut u64) = size as u64;
+                        0
+                    } else { EFAULT.as_isize() }
+                } else {
+                    EINVAL.as_isize()
+                }
+            } else {
+                EINVAL.as_isize()
+            }
+        }
+        LOOP_SET_STATUS64 | LOOP_SET_STATUS => {
+            0
+        }
+        0x5402 => { /* TCSETS */
+            0
         }
         _ => {
             warn!("[kernel] sys_ioctl: unsupported request: {}", request);

@@ -13,6 +13,7 @@ use crate::fs::devfs::TtyInode;
 use super::{VfsInode, Stat, Statx};
 use crate::syscall::fs::Statfs;
 use crate::auth::{PermStat, FileMode};
+use crate::drivers::loopdev::*;
 
 // 全局唯一的 Inode 分配器
 static TMPFS_INO_COUNTER: AtomicUsize = AtomicUsize::new(10000);
@@ -304,11 +305,11 @@ pub fn setup_oscomp_env() {
         let dev_dentry = if let Some(dev) = root.find_tree("/dev", true) {
             dev
         } else {
-            // 理论上不会走到这，因为你在 mount_devfs 已经建了
+            // 理论上不会走到这
             root.insert("dev".to_string(), Arc::new(TmpfsDirInode::new()))
         };
 
-        // 安全地把 shm 塞进现有的 /dev 里
+        // 挂载shm到/dev/shm
         dev_dentry.insert("shm".to_string(), Arc::new(TmpfsDirInode::new()));
         // 挂载常用设备文件
         dev_dentry.insert("null".to_string(), Arc::new(NullInode::new())); 
@@ -317,7 +318,15 @@ pub fn setup_oscomp_env() {
         // 终端设备
         dev_dentry.insert("tty".to_string(), Arc::new(TtyInode::new()));
 
-        // loop设备这里不挂载，采用动态分配方式
+        // loop-control
+        dev_dentry.insert("loop-control".to_string(), Arc::new(LoopControlInode::new()));
+
+        // 挂载8个loop设备
+        for i in 0..8 {
+            let loop_name = alloc::format!("loop{}", i);
+            let loop_device = create_loop_device(None, 0, 0);
+            dev_dentry.insert(loop_name, loop_device);
+        }
 
         info!("[VFS] Mounted /dev/shm safely");
         if root.find_tree("/dev/shm", true).is_some() {
