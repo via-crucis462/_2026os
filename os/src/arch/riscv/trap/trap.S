@@ -37,7 +37,7 @@ __alltraps:
     ld t0, 34*8(sp)
     # load trap_handler into t1
     ld t1, 36*8(sp)
-    # move to kernel_sp
+    # move to kernel_sp 实际上是内核栈顶，初始化后不再变化，所以restore时不需要保存
     ld sp, 35*8(sp)
     # switch to kernel space
     slli t2, t0, 4

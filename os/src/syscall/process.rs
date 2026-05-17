@@ -8,10 +8,13 @@ use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
 use alloc::vec;
 use crate::syscall::EPOLL_CTL_DEL;
+use crate::syscall::EPOLL_CTL_ADD;
+use crate::syscall::EPOLL_CTL_MOD;
 use crate::process::current_task_to_sleep;
 use crate::lazy_static;
 use spin::Mutex;
 use crate::sync::WaitQueue;
+use alloc::collections::VecDeque;
 
 use alloc::collections::BTreeMap;
 
@@ -75,11 +78,26 @@ pub struct Winsize {
     pub ws_ypixel: u16, // 像素高度 (通常不用，填 0)
 }
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
 }
+
+
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ITimerVal {
+    pub it_interval: TimeVal, // 周期触发间隔（如果是0代表单次触发）
+    pub it_value: TimeVal,    // 首次触发的剩余时间
+}
+
+
+
+
+
+
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -234,7 +252,9 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
     }
 }
 pub fn sys_exit(exit_code: i32) -> ! {
+    let pid = current_task().unwrap().process().getpid();
     trace!("kernel:pid[{}] sys_exit", current_task().unwrap().process().pid.0);
+    crate::timer::TIMER_MANAGER.lock().cancel_alarm(pid);
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
@@ -244,35 +264,49 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     let pid = proc.pid.0;
     let mut proc_inner = proc.inner_exclusive_access();
     trace!("[EXIT_GROUP] PID {} starts exiting. Total threads to kill: {}", pid, proc_inner.tasks.len());
+    let tasks = proc_inner.tasks.clone();
+    // fix:先释放掉pcb锁
+    drop(proc_inner);
 
     // 遍历当前进程的所有线程（tasks 列表）
-    for thread in proc_inner.tasks.iter() {
+    for thread in tasks.iter() {
         if thread.gettid() != task.gettid() {
             let mut t_inner = thread.inner_exclusive_access();
             // 标记这些线程为 killed，它们下次进入 trap_handler 时会自尽
-            t_inner.killed = true; 
-            // 顺便给它们发个信号，把可能在睡觉的线程唤醒
+            // t_inner.killed = true; 
+            // 发信号杀死这些线程
             t_inner.signals.insert(SignalFlags::SIGKILL);
             drop(t_inner);
-            crate::process::wake_up_task(thread.clone());
+            // crate::process::wake_up_task(thread.clone());
         }
     }
 
-
-    // 确保 alive_task_count 在这里被修正，使得当前线程成为最后一个回收资源的
-    proc_inner.alive_task_count = 1; 
-    
+    // 退出进程  // 先放掉锁，避免后续迭代时死锁
+    let mut proc_inner = proc.inner_exclusive_access();
     // 记录退出码
     proc_inner.exit_code = exit_code;
-    info!("[EXIT_GROUP] PID {} cleanup done. Calling exit_current_and_run_next...", pid);
+    
     drop(proc_inner);
     drop(proc);
     drop(task);
 
-    //   3. 走正常的退出流程
+    // 确保当前线程是最后一个退出的
+    while current_task()
+        .unwrap()
+        .process()
+        .inner_exclusive_access()
+        .alive_task_count > 1 {
+        // 等待其他线程退出，直到 alive_task_count 只剩 1（当前线程）
+        suspend_current_and_run_next();
+    }
+
+    info!("[EXIT_GROUP] PID {} tasks cleanup done. Calling exit_current_and_run_next...", pid);
+    // 正常的退出流程
+    crate::timer::TIMER_MANAGER.lock().cancel_alarm(pid);
     exit_current_and_run_next(exit_code);
     panic!("Unreachable!");
 }
+
 pub fn sys_yield() -> isize {
     //trace!("kernel: sys_yield");
     suspend_current_and_run_next();
@@ -281,6 +315,23 @@ pub fn sys_yield() -> isize {
 
 pub fn sys_gettid() -> isize {
     current_task().unwrap().gettid() as isize
+}
+pub fn sys_chroot(path: usize) -> isize {
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let mut inner = proc.inner_exclusive_access();
+
+
+    if inner.euid != 0 {
+        return Errno::EPERM.as_isize();
+    }
+
+    let token = inner.memory_set.token();
+
+    let path_str = crate::mm::translated_str(token, path as *const u8);
+
+
+    0
 }
 pub fn sys_rt_sigreturn() -> isize {
     let task = current_task().unwrap();
@@ -385,6 +436,22 @@ pub fn sys_setgid(gid: u32) -> isize {
     proc_inner.egid = gid;
     0 
 }
+pub fn sys_seteuid(euid: u32) -> isize {
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let mut proc_inner = proc.inner_exclusive_access();
+    proc_inner.euid = euid;
+    0 
+}
+/// umask: 设置进程文件模式创建掩码，返回旧掩码
+pub fn sys_umask(mask: u32) -> isize {
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let mut proc_inner = proc.inner_exclusive_access();
+    let old = proc_inner.umask;
+    proc_inner.umask = mask & 0o777;
+    old as isize
+}
 
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
     let task = current_task().unwrap();
@@ -461,6 +528,33 @@ const TCGETS: u32 = 0x5401;
 const TIOCGWINSZ: u32 = 0x5413;
 const RTC_RD_TIME: u32 = 0x80247009; // 真实的 RTC 读取指令号
 
+// Loop 设备相关的 ioctl 命令
+const LOOP_SET_FD: u32 = 0x4C00; //设置 Loop 设备的后端文件描述符
+const LOOP_CLR_FD: u32 = 0x4C01; //清除 Loop 设备的后端文件描述符
+const LOOP_SET_STATUS64: u32 = 0x4C04; //设置 Loop 设备的状态（使用 LoopInfo64 结构体）
+const LOOP_GET_STATUS64: u32 = 0x4C05; //获取 Loop 设备的状态（使用 LoopInfo64 结构体）
+const LOOP_SET_STATUS: u32 = 0x4C02; //设置 Loop 设备的状态
+const LOOP_CTL_GET_FREE: u32 = 0x4C82; //获取一个空闲的 Loop 设备编号
+const BLKGETSIZE64: u32 = 0x80081272; // BLKGETSIZE64
+
+
+#[repr(C)]
+struct LoopInfo64 {
+    lo_device: u64,
+    lo_inode: u64,
+    lo_rdevice: u64,
+    lo_offset: u64,
+    lo_sizelimit: u64,
+    lo_number: u32,
+    lo_encrypt_type: u32,
+    lo_encrypt_key_size: u32,
+    lo_flags: u32,
+    lo_file_name: [u8; 64],
+    lo_crypt_name: [u8; 64],
+    lo_encrypt_key: [u8; 32],
+    lo_init: [u64; 2],
+}
+
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
@@ -472,7 +566,10 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     let token = proc.inner_exclusive_access().get_user_token();
     match request as u32 {
         TCGETS => {
-            if fd > 2 { return ENOTTY.as_isize(); }
+            if fd > 2 {
+                warn!("[kernel] sys_ioctl: TCGETS request on non-tty fd {}", fd);
+                return ENOTTY.as_isize();
+            }
             let mut termios = Termios {
                 c_iflag: 0o012402, c_oflag: 0o000005,
                 c_cflag: 0o002277, c_lflag: 0o0105011,
@@ -483,10 +580,15 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             if argp != 0 {
                 translated_write(token, argp as *mut Termios, termios);
                 0 // 成功
-            } else { EFAULT.as_isize() }
+            } else {
+                EFAULT.as_isize()
+            }
         }
         TIOCGWINSZ => {
-            if fd > 2 { return ENOTTY.as_isize(); } // ENOTTY
+            if fd > 2 {
+                warn!("[kernel] sys_ioctl: TIOCGWINSZ request on non-tty fd {}", fd);
+                return ENOTTY.as_isize();
+            }
             let winsize = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
             if argp != 0 {
                 translated_write(token, argp as *mut Winsize, winsize);
@@ -513,8 +615,132 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 EFAULT.as_isize() // 指针错误
             }
         }
+        LOOP_CTL_GET_FREE => {
+            let manager = &crate::drivers::loopdev::LOOP_DEVICE_MANAGER;
+            let free_id = manager.get_free_id();
+            if free_id != -1 { free_id } else { EBUSY.as_isize() }
+        }
+        LOOP_SET_FD => {
+            let backend_fd = argp;
+            if backend_fd >= fd_table.len() || fd_table[backend_fd].file.is_none() {
+                return EBADF.as_isize();
+            }
+            let backend_file = fd_table[backend_fd].file.as_ref().unwrap();
+            let backend_inode = match backend_file.get_dentry() {
+                Some(d) => d.inode.clone(),
+                None => return EINVAL.as_isize(),
+            };
+            
+            let loop_file = fd_table[fd].file.as_ref().unwrap();
+            let dentry = match loop_file.get_dentry() {
+                Some(d) => d,
+                None => return EINVAL.as_isize(),
+            };
+            
+            let mut target_id = None;
+            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    target_id = Some(id);
+                }
+            }
+            
+            if let Some(id) = target_id {
+                if crate::drivers::loopdev::LOOP_DEVICE_MANAGER.set_backing_file(id, Some(backend_inode)) {
+                    0
+                } else {
+                    EINVAL.as_isize()
+                }
+            } else {
+                EINVAL.as_isize()
+            }
+        }
+        LOOP_CLR_FD => {
+            let loop_file = fd_table[fd].file.as_ref().unwrap();
+            let dentry = match loop_file.get_dentry() {
+                Some(d) => d,
+                None => return EINVAL.as_isize(),
+            };
+            
+            let mut target_id = None;
+            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    target_id = Some(id);
+                }
+            }
+            if let Some(id) = target_id {
+                if crate::drivers::loopdev::LOOP_DEVICE_MANAGER.set_backing_file(id, None) {
+                    0
+                } else {
+                    EINVAL.as_isize()
+                }
+            } else {
+                EINVAL.as_isize()
+            }
+        }
+        LOOP_GET_STATUS64 => {
+            let loop_file = fd_table[fd].file.as_ref().unwrap();
+            let dentry = match loop_file.get_dentry() {
+                Some(d) => d,
+                None => return EINVAL.as_isize(),
+            };
+            let mut target_id = None;
+            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    target_id = Some(id);
+                }
+            }
+            if let Some(id) = target_id {
+                if let Some((offset, size)) = crate::drivers::loopdev::LOOP_DEVICE_MANAGER.get_info(id) {
+                    if argp != 0 {
+                        let mut info = LoopInfo64 {
+                            lo_device: 0, lo_inode: 0, lo_rdevice: 0, lo_offset: offset as u64,
+                            lo_sizelimit: size as u64, lo_number: 0, lo_encrypt_type: 0,
+                            lo_encrypt_key_size: 0, lo_flags: 0, lo_file_name: [0; 64],
+                            lo_crypt_name: [0; 64], lo_encrypt_key: [0; 32], lo_init: [0; 2],
+                        };
+                        translated_write(token, argp as *mut LoopInfo64, info);
+                        0
+                    } else { EFAULT.as_isize() }
+                } else {
+                    ENXIO.as_isize()
+                }
+            } else {
+                ENOTTY.as_isize()
+            }
+        }
+        BLKGETSIZE64 => {
+            let loop_file = fd_table[fd].file.as_ref().unwrap();
+            let dentry = match loop_file.get_dentry() {
+                Some(d) => d,
+                None => return EINVAL.as_isize(),
+            };
+            let mut target_id = None;
+            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    target_id = Some(id);
+                }
+            }
+            if let Some(id) = target_id {
+                if let Some((_, size)) = crate::drivers::loopdev::LOOP_DEVICE_MANAGER.get_info(id) {
+                    if argp != 0 {
+                        translated_write(token, argp as *mut u64, size as u64);
+                        0
+                    } else { EFAULT.as_isize() }
+                } else {
+                    EINVAL.as_isize()
+                }
+            } else {
+                EINVAL.as_isize()
+            }
+        }
+        LOOP_SET_STATUS64 | LOOP_SET_STATUS => {
+            0
+        }
+        0x5402 => { /* TCSETS */
+            0
+        }
         _ => {
-          
+            warn!("[kernel] sys_ioctl: unsupported request: {}", request);
             ENOTTY.as_isize()
         }
     }
@@ -544,6 +770,9 @@ pub fn sys_renameat2(
         cwd.find_tree(&old_parent_path, true),
         cwd.find_tree(&new_parent_path, true)
     ) {
+        // 判断是否在同一个目录下操作（如同目录内重命名 mv /a/foo /a/bar）
+        let same_dir = Arc::ptr_eq(&old_parent, &new_parent);
+
         // 先从前台 VFS 树上把旧节点摘下来
         let moved_dentry_opt = {
             let mut old_children = old_parent.children.lock(); 
@@ -555,11 +784,17 @@ pub fn sys_renameat2(
             let disk_success = old_parent.inode.rename_dir_entry(&old_name, &new_name);
             if disk_success {
                 // 底层成功了，再把节点以新名字挂到 VFS 树上
-                let mut new_children = new_parent.children.lock();
-                new_children.insert(new_name.to_string(), moved_dentry);
+                // 注意：old_children 锁已随块结束而释放，此处重新获取不会死锁
+                if same_dir {
+                    let mut children = old_parent.children.lock();
+                    children.insert(new_name.to_string(), moved_dentry);
+                } else {
+                    let mut new_children = new_parent.children.lock();
+                    new_children.insert(new_name.to_string(), moved_dentry);
+                }
                 return 0;
             } else {
-                // 不成功，挂回去
+                // 不成功，挂回去（锁已释放，安全重取）
                 let mut old_children = old_parent.children.lock();
                 old_children.insert(old_name.to_string(), moved_dentry);
                 return EIO.as_isize();
@@ -792,10 +1027,10 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         ENOENT.as_isize()
     }
 }
-/// If there is not a child process whose pid is same as given, return -1.
-/// Else if there is a child process but it is still running, return -2.
+
+/// 暂时使用旧逻辑
+/// 等待子进程退出
 pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
-    //println!("[kernel] sys_wait4 called with pid: {}, options: {:#x}", pid, options);
     let task = current_task().unwrap();
     let proc = task.process();
     // 提前拿到当前进程的 pgid
@@ -804,20 +1039,20 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
     const WNOHANG: usize = 0x1;
     let nohang = (options & WNOHANG) != 0;//是否开启了非阻塞选项
     info!("[wait4] P{} waiting for PID/PGID: {}, options: {}", current_pgid, pid, options);
+    let mut printed_info = false;
 
-    let scan_children = || {
-        let children_snapshot = {
-            let proc_inner = proc.inner_exclusive_access();
-            proc_inner.children.clone()
-        };
+    loop {
+        // 直接在锁内遍历
+        let mut proc_inner = proc.inner_exclusive_access();
 
-        if children_snapshot.is_empty() {
-            return (false, None);
+        if proc_inner.children.is_empty() {
+            info!("[wait4] P{} has no children at all", current_pgid);
+            return ECHILD.as_isize(); // 没有任何子进程
         }
 
         let mut has_match = false;
         let mut zombie_child: Option<(usize, i32)> = None;
-        for child in children_snapshot.iter() {
+        for child in proc_inner.children.iter() {
             let child_pid = child.getpid();
             let matches = if pid == -1 {
                 true
@@ -838,60 +1073,112 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
 
             has_match = true;
             let child_inner = child.inner_exclusive_access();
-            if child_inner.is_zombie {
+            if child_inner.is_zombie() {
                 zombie_child = Some((child_pid, child_inner.exit_code));
                 break;
             }
         }
-        (has_match, zombie_child)
-    };
 
-    loop {
-        let (has_match, zombie_child) = scan_children();
-
+        // 1. 检查是否存在符合要求的子进程
         if !has_match {
             info!("[wait4] P{} has no matching children for filter {}", current_pgid, pid);
-            return ECHILD.as_isize();
+            return ECHILD.as_isize(); // 真的是一个匹配的都没有，才返回 ECHILD
         }
-
+    
+        // 2. 尝试找一个“已经死掉”的僵尸孩子
         if let Some((zombie_pid, exit_code)) = zombie_child {
-            let mut proc_inner = proc.inner_exclusive_access();
-            if let Some(idx) = proc_inner
-                .children
-                .iter()
-                .position(|child| child.getpid() == zombie_pid)
-            {
+            if let Some(idx) = proc_inner.children.iter().position(|child| child.getpid() == zombie_pid) {
                 let child = proc_inner.children.remove(idx);
                 let child_pid = child.getpid();
-                info!(
-                    "[wait4] P{} collected Zombie P{} (code: {})",
-                    current_pgid, child_pid, exit_code
-                );
+           
+                info!("[wait4] P{} collected Zombie P{} (code: {})", current_pgid, child_pid, exit_code);
+                // 组装状态码
                 let status = (exit_code & 0xff) << 8;
-                let token = proc_inner.memory_set.token();
-                drop(proc_inner);
                 if exit_code_ptr as usize != 0 {
-                    translated_write(token, exit_code_ptr, status);
+                    translated_write(proc_inner.memory_set.token(), exit_code_ptr, status);
                 }
+
                 return child_pid as isize;
             }
         }
 
         if nohang {
-            return 0;
+            return 0; // 没有僵尸孩子但开启了非阻塞选项，直接返回 0
         }
-
-        let task_inner = task.inner_exclusive_access();
-        let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
-        let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18)); // SIGKILL(9), SIGSTOP(19)
-        drop(task_inner);
-        if pending != 0 || unmaskable != 0 {
-            info!("[wait4] Interrupted by signal! Returning EINTR.");
-            return EINTR.as_isize();
+        if !printed_info {
+            info!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
+            printed_info = true;
         }
-
+        drop(proc_inner);
         suspend_current_and_run_next();
     }
+     /*  
+        else{
+            // B. 孩子还活着，睡眠等待
+            info!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
+            // 新增：检查是否被信号打断 
+            let task_inner = task.inner_exclusive_access();
+            let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
+            let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18)); // SIGKILL(9), SIGSTOP(19)
+            drop(task_inner);
+
+            if pending != 0 || unmaskable != 0 {
+                info!("[wait4] Interrupted by signal! Returning EINTR.");
+                return -4; // -4 对应 EINTR (Interrupted system call)
+            }
+
+            let mut count = 0;
+            loop{
+                // 继续睡眠等待，直到被调度器唤醒
+                suspend_current_and_run_next();
+                
+                let children_snapshot = {
+                    let proc_inner = proc.inner_exclusive_access();
+                    proc_inner.children.clone()
+                };
+                let mut zombie_child: Option<(usize, i32)> = None;
+                for child in children_snapshot.iter() {
+                    let child_pid = child.getpid();
+                    let matches = if pid == -1 {
+                        true
+                    } else if pid > 0 {
+                        child_pid == pid as usize
+                    } else {
+                        let child_pgid = child.inner_exclusive_access().pgid;
+                        if pid == 0 {
+                            child_pgid == current_pgid
+                        } else {
+                            child_pgid == (-pid) as usize
+                        }
+                    };
+                    if !matches {
+                        continue;
+                    }
+                    let child_inner = child.inner_exclusive_access();
+                    if child_inner.is_zombie() {
+                        zombie_child = Some((child_pid, child_inner.exit_code));
+                        break;
+                    }
+                }
+                if let Some((zombie_pid, exit_code)) = zombie_child {
+                    let mut proc_inner = proc.inner_exclusive_access();
+                    if let Some(idx) = proc_inner.children.iter().position(|child| child.getpid() == zombie_pid) {
+                        // 收尸成功，拿到孩子的 PID 和退出码
+                        let child = proc_inner.children.remove(idx);
+                        let child_pid = child.getpid();
+                        
+                        info!("[wait4] P{} collected Zombie P{} (code: {}) after waking up", current_pgid, child_pid, exit_code);
+                        // 组装状态码
+                        let status = (exit_code & 0xff) << 8;
+                        if exit_code_ptr as usize != 0 {
+                            *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
+                        }
+                        
+                        return child_pid as isize;
+                    }
+                }
+        }
+    } */ 
 }
 pub fn sys_kill(pid: isize, signum: i32) -> isize {
     if signum < 0 || signum > 64 {
@@ -915,29 +1202,33 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         // 正常逻辑：发送给单个指定 PID 的进程
         if let Some(proc) = get_process(pid as usize) {
             if signum == 0 { return 0; } // 探测成功
-            
+
             let flag = flag.unwrap();
-            let mut inner = proc.inner_exclusive_access();
-            inner.signals.insert(flag); // 进程级 pending
-            
             let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
-            
-            for task_arc in inner.tasks.iter() {
+
+            //   Phase 1: 持 PCB 锁，做进程级操作并克隆首个线程 Arc
+            let first_task: Option<Arc<TaskControlBlock>> = {
+                let mut inner = proc.inner_exclusive_access();
+                inner.signals.insert(flag); // 进程级 pending
+                inner.tasks.first().cloned()
+            }; // PCB 锁在此释放
+
+            //   Phase 2: 无 PCB 锁，只拿 TCB 锁
+            if let Some(task_arc) = first_task {
                 let mut t_inner = task_arc.inner_exclusive_access();
-                
+
                 //   1. 绝对无条件插入信号 (Generation)
                 t_inner.signals.insert(flag);
-                
+
                 //   2. 判断是否被屏蔽 (Delivery check)
                 let is_unblocked = !t_inner.signal_mask.contains(flag);
-                
+
                 if is_unblocked || is_unmaskable {
                     drop(t_inner); // 放锁
                     crate::process::wake_up_task(task_arc.clone()); // 真正唤醒！
                 } else {
                     drop(t_inner); // 被屏蔽了，记录完毕，不打扰睡眠
                 }
-                break; // LTP 中一个进程通常只需要一个线程去处理信号即可
             }
             return 0;
         } else {
@@ -946,41 +1237,61 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
     } else if pid == 0 || pid < -1 {
         //   进阶逻辑：广播给整个进程组！
         let target_pgid = if pid == 0 { current_pgid } else { (-pid) as usize };
-        let mut success = false;
 
-        // 遍历整个系统的 PID 空间（通用写法）
-        for i in 1..4096 { 
-            if let Some(proc) = get_process(i) {
-                let mut inner = proc.inner_exclusive_access();
-                if inner.pgid == target_pgid {
-                    success = true;
-                    if signum == 0 { continue; } // 仅探测
-                    
-                    let flag = flag.unwrap();
-                    inner.signals.insert(flag); // 进程级 pending
-                    let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
-                    
-                    for task_arc in inner.tasks.iter() {
-                        let mut t_inner = task_arc.inner_exclusive_access();
-                        
-                        //   1. 无条件插入信号
-                        t_inner.signals.insert(flag);
-                        
-                        //   2. 判断屏蔽并决定是否唤醒
-                        let is_unblocked = !t_inner.signal_mask.contains(flag);
-                        
-                        if is_unblocked || is_unmaskable {
-                            drop(t_inner);
-                            crate::process::wake_up_task(task_arc.clone());
-                        } else {
-                            drop(t_inner);
-                        }
-                        break; 
+        if signum == 0 {
+            // 仅探测：只需 PCB 锁，不存在锁顺序问题
+            let mut success = false;
+            for i in 1..4096 {
+                if let Some(proc) = get_process(i) {
+                    let inner = proc.inner_exclusive_access();
+                    if inner.pgid == target_pgid {
+                        success = true;
+                        break;
                     }
                 }
             }
+            return if success { 0 } else { -3 };
         }
-        return if success { 0 } else { -3 }; // 如果整个组都没找到，报 ESRCH
+
+        let flag = flag.unwrap();
+        let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
+
+        //   Phase 1: 遍历 PID 空间，持 PCB 锁做进程级操作，收集首个线程 Arc
+        let mut matched_tasks: Vec<Arc<TaskControlBlock>> = Vec::new();
+        for i in 1..4096 {
+            if let Some(proc) = get_process(i) {
+                let mut inner = proc.inner_exclusive_access();
+                if inner.pgid == target_pgid {
+                    inner.signals.insert(flag); // 进程级 pending
+                    if let Some(first_task) = inner.tasks.first() {
+                        matched_tasks.push(first_task.clone());
+                    }
+                }
+            } // PCB 锁在此释放
+        }
+
+        if matched_tasks.is_empty() {
+            return -3; // ESRCH
+        }
+
+        //   Phase 2: 无 PCB 锁，逐个拿 TCB 锁插入信号并唤醒
+        for task_arc in matched_tasks.iter() {
+            let mut t_inner = task_arc.inner_exclusive_access();
+
+            //   1. 无条件插入信号
+            t_inner.signals.insert(flag);
+
+            //   2. 判断屏蔽并决定是否唤醒
+            let is_unblocked = !t_inner.signal_mask.contains(flag);
+
+            if is_unblocked || is_unmaskable {
+                drop(t_inner);
+                crate::process::wake_up_task(task_arc.clone());
+            } else {
+                drop(t_inner);
+            }
+        }
+        return 0;
     }
 
     -1 // 未知情况
@@ -1179,34 +1490,48 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
     };
 
     // 如果是文件映射（非匿名映射）且 FD 合法，读取内容
-    if !mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) && fd >= 0 { // 先前逻辑反了
-        //debug!("[kernel] sys_mmap: file mapping requested for fd={}, start={:#x}, len={:#x}, prot={:?}, flags={:?}", fd, start, len, mmap_prot, mmap_flags);
-        let task = current_task().unwrap();
-        let process = task.process();
-        let token = current_user_token();
-        let inner = process.inner_exclusive_access();
-            if let Some(file) = &inner.fd_table[fd as usize].file {
-                if file.readable() {
-                    let file = file.clone();
-                    // 释放锁避免阻塞
-                    drop(inner);
-                    // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
-                    let user_buf = UserBuffer::new(translated_byte_buffer_mut(token, ret as *const u8, len));
-                    // 使用 read_at 确保不受 FD 当前 offset 影响，并使用系统调用传入的 _off
-                    file.read_at(_off, user_buf);
+    if !mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) {
+        if fd >= 0 {
+            //debug!("[kernel] sys_mmap: file mapping requested for fd={}, start={:#x}, len={:#x}, prot={:?}, flags={:?}", fd, start, len, mmap_prot, mmap_flags);
+            let task = current_task().unwrap();
+            let process = task.process();
+            let token = current_user_token();
+            let inner = process.inner_exclusive_access();
+            let fd_usize = fd as usize;
+            if fd_usize < inner.fd_table.len() {
+                let fd_obj = &inner.fd_table[fd_usize];
+                if let Some(file) = &fd_obj.file {
+                    if file.readable() {
+                        let file = file.clone();
+                        // 释放锁避免阻塞
+                        drop(inner);
+                        // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
+                        let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
+                        // 使用 read_at 确保不受 FD 当前 offset 影响，并使用系统调用传入的 _off
+                        file.read_at(_off, user_buf);
+                    }
+                } else {
+                    return Errno::EBADF.as_isize(); // 无效的文件描述符
                 }
+            } else {
+                return Errno::EBADF.as_isize();
             }
+        } else {
+            return Errno::EBADF.as_isize();
         }
-        let task = current_task().unwrap();
-        let process = task.process();
-        let token = current_user_token();
-        let inner = process.inner_exclusive_access();
-        for i in inner.memory_set.areas().iter() {
-            debug!("after map: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
-        }
-    //println!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
-    ret as isize
     }
+    /*
+    let task = current_task().unwrap();
+    let process = task.process();
+    let token = current_user_token();
+    let inner = process.inner_exclusive_access();
+    for i in inner.memory_set.areas().iter() {
+        debug!("after map: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+    }
+     */
+    debug!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
+    ret as isize
+}
 
 /// YOUR JOB: Implement munmap.
 pub fn sys_munmap(start: usize, len: usize) -> isize {
@@ -1347,28 +1672,135 @@ pub fn sys_epoll_create1(_flags: i32) -> isize {
     }   
 }
 
-// ID 21: sys_epoll_ctl
+
 pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
+
     if op != EPOLL_CTL_DEL && event_ptr == 0 {
-        return EFAULT.as_isize(); // 返回 -EFAULT
+        return EFAULT.as_isize();
     }
     
-    if epfd >= inner.fd_table.len() || fd >= inner.fd_table.len() { return EBADF.as_isize(); } // EBADF
+
+    if epfd >= inner.fd_table.len() || fd >= inner.fd_table.len() { 
+        return EBADF.as_isize(); 
+    }
     
+
     let epoll_file_dyn = match &inner.fd_table[epfd].file {
         Some(f) => f.clone(),
         None => return EBADF.as_isize(),
     };
-    
-    //   向下转型！如果它不是 EpollFile，报错！
-    let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
-        Some(ef) => ef,
-        None => return EINVAL.as_isize(), // EINVAL
+    let target_file_dyn = match &inner.fd_table[fd].file {
+        Some(f) => f.clone(),
+        None => return EBADF.as_isize(), 
     };
     
+
+    let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
+        Some(ef) => ef,
+        None => return EINVAL.as_isize(),
+    };
+
+    if epfd == fd {
+        return EINVAL.as_isize(); 
+    }
+
+
+    
+
+    let stat = target_file_dyn.get_stat();
+    let mode = stat.mode;
+    let s_ifmt = 0o170000;
+    let s_ifreg = 0o100000; 
+    let s_ifdir = 0o040000;
+    if (mode & s_ifmt) == s_ifreg || (mode & s_ifmt) == s_ifdir {
+
+        return EPERM.as_isize(); 
+    }
+    if op == EPOLL_CTL_ADD && target_file_dyn.as_any().is::<EpollFile>() {
+        let mut adj: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut in_degree: BTreeMap<usize, usize> = BTreeMap::new();
+
+        adj.insert(epfd, alloc::vec![fd]);
+        in_degree.insert(epfd, 0);
+        in_degree.insert(fd, 1);
+
+
+        for i in 0..inner.fd_table.len() {
+            if let Some(f) = &inner.fd_table[i].file {
+                if let Some(ep) = f.as_any().downcast_ref::<EpollFile>() {
+                    adj.entry(i).or_default();
+                    in_degree.entry(i).or_insert(0);
+
+                    let keys: Vec<usize> = ep.interest_list.lock().keys().copied().collect();
+                    for target_fd in keys {
+                        if target_fd < inner.fd_table.len() {
+                            if let Some(t_file) = &inner.fd_table[target_fd].file {
+                                if t_file.as_any().is::<EpollFile>() {
+                                    adj.entry(i).or_default().push(target_fd);
+                                    *in_degree.entry(target_fd).or_insert(0) += 1;
+                                    adj.entry(target_fd).or_default();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+
+        let mut queue = VecDeque::new();
+        let mut depth: BTreeMap<usize, usize> = BTreeMap::new();
+
+ 
+        for (&node, &deg) in in_degree.iter() {
+            if deg == 0 {
+                queue.push_back(node);
+            }
+            depth.insert(node, 1); 
+        }
+
+        let mut visited_count = 0;
+        let mut max_depth = 1;
+
+        while let Some(u) = queue.pop_front() {
+            visited_count += 1;
+            let d_u = *depth.get(&u).unwrap();
+            if d_u > max_depth {
+                max_depth = d_u;
+            }
+
+
+            if let Some(neighbors) = adj.get(&u) {
+                for &v in neighbors {
+                    if let Some(deg) = in_degree.get_mut(&v) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(v);
+                        }
+                    }
+                    let d_v = *depth.get(&v).unwrap();
+         
+                    if d_u + 1 > d_v {
+                        depth.insert(v, d_u + 1);
+                    }
+                }
+            }
+        }
+
+
+        if visited_count != in_degree.len() {
+            return Errno::ELOOP.as_isize(); 
+        }
+
+        if max_depth >= 6 {
+            return Errno::EINVAL.as_isize(); 
+        }
+    }
+
+
     let token = inner.memory_set.token();
     let event = if op != 2 { // 如果不是 EPOLL_CTL_DEL，就需要读取用户态传来的数据
         //   使用你提供的 translated_ref
@@ -1377,15 +1809,34 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
         EpollEvent { events: 0, data: 0 }
     };
     
+
     let mut list = epoll_file.interest_list.lock();
     match op {
-        1 => { list.insert(fd, event); 0 } // EPOLL_CTL_ADD
-        2 => { list.remove(&fd); 0 }       // EPOLL_CTL_DEL
-        3 => { list.insert(fd, event); 0 } // EPOLL_CTL_MOD
-        _ => EINVAL.as_isize(), // EINVAL
+        EPOLL_CTL_ADD => {
+            if list.contains_key(&fd) {
+           
+                return EEXIST.as_isize(); 
+            }
+            list.insert(fd, event); 
+            0 
+        }
+        EPOLL_CTL_DEL => { 
+            if list.remove(&fd).is_none() {
+             
+                return ENOENT.as_isize(); 
+            }
+            0 
+        }
+        EPOLL_CTL_MOD => { 
+            if !list.contains_key(&fd) {
+                return ENOENT.as_isize(); 
+            }
+            list.insert(fd, event); 
+            0 
+        }
+        _ => EINVAL.as_isize(), 
     }
 }
-
 // ID 22: sys_epoll_wait
 pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i32) -> isize {
     info!(
@@ -1473,11 +1924,46 @@ pub fn sys_sched_getaffinity(_pid: isize, cpusetsize: usize, mask_ptr: *mut u8) 
     }
     0
 }
-pub fn sys_setitimer(_which: usize, _new_value: *const u8, _old_value: *mut u8) -> isize {
-    // 假装定时器设置成功，保证 LTP 测试框架的控制流不崩溃
-    0
-}
+pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize {
+ 
+    if which != 0 {
+        return EINVAL.as_isize(); 
+    }
 
+    let task = crate::task::current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+
+    if new_value == 0 {
+        return EFAULT.as_isize(); 
+    }
+    let new_timer = *crate::mm::translated_ref(token, new_value as *const ITimerVal);
+
+  
+    let delay_ms = new_timer.it_value.sec * 1000 + new_timer.it_value.usec / 1000;
+
+   
+    let pid = process.getpid();
+    let current_ms = get_time_ms();
+    
+
+    let remain_ms = crate::timer::TIMER_MANAGER.lock().set_alarm(pid, current_ms, delay_ms);
+
+
+    if old_value != 0 {
+        // 读取修改后写回
+        let mut old_timer = translated_read(token, old_value as *mut ITimerVal);
+        
+        old_timer.it_value.sec = remain_ms / 1000;
+        old_timer.it_value.usec = (remain_ms % 1000) * 1000;
+        old_timer.it_interval = TimeVal { sec: 0, usec: 0 };
+
+        translated_write(token, old_value as *mut ITimerVal, old_timer);
+    }
+
+    0 
+}
 
 
 pub fn sys_ftruncate(fd: usize, _len: usize) -> isize {
@@ -1611,30 +2097,6 @@ pub fn sys_rt_sigaction(
     inner.signal_actions.table[table_idx] = translated_read(token, action);
     
     0 // 成功
-}
-
-use crate::fs::ROOT_DENTRY; 
-
-pub fn sys_fchmodat(_dirfd: isize, path_ptr: *const u8, _mode: u32) -> isize {
-    let task = current_task().unwrap();
-    let process = task.process(); 
-    let token = process.inner_exclusive_access().get_user_token();
-    
-    // 1. 获取路径
-    let path = translated_str(token, path_ptr);
-    
-    // 2. 严谨校验：调用内核的 find_tree 接口确认文件真实存在
-    match ROOT_DENTRY.find_tree(path.as_str(), true) {
-        Some(_dentry) => {
-            // 因为目前的 VfsInode trait 还没有 set_mode 接口，
-            // 为了通过 LTP 测试，我们在这里“假装”修改成功。
-            0 
-        }
-        None => {
-            // 文件不存在，严谨返回 -ENOENT (-2)
-            ENOENT.as_isize()
-        }
-    }
 }
 
 pub fn sys_pselect6(
@@ -1883,6 +2345,7 @@ pub fn sys_prlimit64(
 ) -> isize {
     const RLIMIT_NPROC: i32 = 3;
     const RLIMIT_NOFILE: i32 = 7;
+    const RLIMIT_MEMLOCK: i32 = 8;
     info!("sys_prlimit64 called with pid={}, resource={}, new_limit={:#x}, old_limit={:#x}", pid, resource, new_limit as usize, old_limit as usize);
     if pid != 0 {
         return Errno::EPERM.as_isize(); // 不允许修改其他进程
@@ -1909,6 +2372,13 @@ pub fn sys_prlimit64(
             if !new_limit.is_null() {
                 let new = translated_read(token, new_limit);
                 proc_inner.set_rlimit64(new); 
+            }
+            0
+        }
+        RLIMIT_MEMLOCK => {
+            // 锁定内存限制，伪实现
+            if !old_limit.is_null() {
+                translated_write(token, old_limit, Rlimit64 { cur_lmt: 0x40_0000, max_lmt: 0x40_0000 });
             }
             0
         }

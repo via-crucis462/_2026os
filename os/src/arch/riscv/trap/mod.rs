@@ -20,6 +20,9 @@ use crate::syscall::syscall;
 use crate::task::{
     KernelStack, SignalFlags, check_signals_error_of_current, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token, exit_current_and_run_next, handle_signals, suspend_current_and_run_next
 };
+use crate::arch::timer::get_time_ms;
+use alloc::sync::Arc;
+
 use crate::arch::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
 use riscv::register::{scause, stval, stvec, sie};
@@ -79,6 +82,9 @@ pub fn trap_handler() -> ! {
                 cx.x[17], 
                 [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]]
             );
+            if result < 0 {
+                warn!("pid[{}] syscall {} returned error code {}", current_task().unwrap().process().pid.0, cx.x[17], result);
+            }
             // cx is changed during sys_exec, so we have to call it again
             //println!("[kernel] syscall: id={}, args={:x?}, ret={:#x}", cx.x[17], [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]], result);
             cx = current_trap_cx();
@@ -86,6 +92,22 @@ pub fn trap_handler() -> ! {
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_trigger();
+            let current_ms = get_time_ms();
+            let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
+            for pid in expired_pids {
+                if let Some(process) = crate::task::get_process(pid) {
+                    let mut process_inner = process.inner_exclusive_access();
+
+                    for task in process_inner.tasks.iter() {
+                        let mut task_inner = task.inner_exclusive_access();
+                        task_inner.signals |= crate::task::SignalFlags::SIGALRM;
+                        if task_inner.task_status == crate::task::TaskStatus::Blocked {
+                            task_inner.task_status = crate::task::TaskStatus::Ready;
+                            crate::task::add_task(Arc::clone(task)); 
+                        }
+                    }
+                }
+            }
             net_poll();
             suspend_current_and_run_next();
         }
@@ -156,10 +178,6 @@ pub fn trap_handler() -> ! {
     //let cause = scause::read().cause();
     //println!("[PROBE 2] trap_handler ending (cause: {:?}), preparing to handle_signals", cause);
 
-    /*crate::process::handle_signals();
-    if current_task().unwrap().inner_exclusive_access().killed {
-        exit_current_and_run_next(-1); 
-    }*/
 
     trap_return();
     

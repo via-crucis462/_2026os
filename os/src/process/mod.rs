@@ -19,9 +19,10 @@ pub use id::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle};
 use spin::{Mutex, MutexGuard};
 pub use task::*;
 pub use pcb::*;
-use crate::mm::translated_byte_buffer;
+use crate::{console::print, mm::translated_byte_buffer};
 
 use manager::*;
+pub use manager::{get_process, pop_process, remove_process};
 use crate::sync::*;
 
 /// 任务处理器，改为pub供外部调用
@@ -135,40 +136,39 @@ pub fn wake_up_one(mut wait_queue: MutexGuard<WaitQueue>) {
 pub const IDLE_PID: usize = 1;
 
 /// Exit the current 'Running' task and run the next task in task list.
-    pub fn exit_current_and_run_next(exit_code: i32) {
+pub fn exit_current_and_run_next(exit_code: i32) {
     // 改为暂时不take，schedule到runtasks中统一处理
     let task = current_task().unwrap();
     // remove from tid2task
     remove_from_tid2task(task.gettid());
-
     let pid = task.getpid();
+    
     info!("[kernel] Process {} is exiting with code {} ...", pid, exit_code);
     if pid == IDLE_PID {
         println!("[kernel] Idle process exit with exit_code {} ...", exit_code);
         panic!("All applications completed!");
     }
 
-    // **** access current TCB exclusively
+    // 修改当前任务状态
     let mut task_inner = task.inner_exclusive_access();
-    let proc = task.process();
-    let mut proc_inner = proc.inner_exclusive_access();
-    
     // Change status to Zombie
     task_inner.task_status = TaskStatus::Zombie;
     task_inner.exit_code = exit_code;
-    
+    // 克隆一下arc指针
+    let proc = task.process().clone();
+
+    // fix:先释放掉tcb锁
+    drop(task_inner);
+    // fix:再获取pcb锁
+    let mut proc_inner = proc.inner_exclusive_access();
+
     // Decrease the number of alive tasks
     proc_inner.alive_task_count -= 1;
-    let parent_to_wake = proc_inner.parent.as_ref().and_then(|p| p.upgrade());
+    //let parent_to_wake = proc_inner.parent.as_ref().and_then(|p| p.upgrade());
     let mut orphan_children = alloc::vec::Vec::new();
     
-
-    if proc_inner.alive_task_count == 0 || proc_inner.is_zombie {
-        // 1. 确保标志位被设为 true，这样 wait4 遍历 children 时一抓一个准
-        proc_inner.is_zombie = true;
-        // 注意：如果是单线程程序，alive_task_count 减到 0 时，is_zombie 之前是 false，
-        // 这里会把它变成 true，正式宣告进程进入僵尸态。
-
+    if proc_inner.is_zombie() {
+        crate::process::remove_process(pid);
         orphan_children = core::mem::take(&mut proc_inner.children);
         if !orphan_children.is_empty() {
             warn!("[kernel] Process {} orphans {} children to initproc", pid, orphan_children.len());
@@ -192,9 +192,9 @@ pub const IDLE_PID: usize = 1;
     // **** release current PCB
     drop(proc_inner);
     drop(proc);
-    drop(task_inner);
 
     if !orphan_children.is_empty() {
+        println!("[kernel] Process {} orphans {} children to initproc", pid, orphan_children.len());
         let initproc = INITTASK.process();
         for child in orphan_children.iter() {
             child.inner_exclusive_access().parent = Some(Arc::downgrade(&initproc));
@@ -391,11 +391,7 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
         // 临时屏蔽当前信号，防止处理时被同一个信号再次打断
         task_inner.signal_mask.insert(signal);
         
-        // (可选：如果 action 里有 sa_mask，也应该在这里合并进来)
-        // task_inner.signal_mask.bits |= action.sa_mask;
 
-        // 设置用户态入口和参数
-        // 注意：这里应该是修改 PC 指针，如果是 rCore 通常叫 set_sepc 或修改 trap_ctx.sepc
         trap_ctx.set_rt(handler);
         trap_ctx.set_a0(sig);
 
@@ -403,11 +399,9 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
         if restorer != 0 {
             trap_ctx.set_ra(restorer);
         } else {
-            // ... 注入栈上蹦床代码 (逻辑保持你原来的写法) ...
+
             warn!("[KERNEL WARNING] restorer is 0! Injecting trampoline on stack...");
-            // ... 你的计算 sp, 写 trampoline, 设置 set_ra(sp) 的代码 ...
-            // trap_ctx.set_ra(sp);
-            // trap_ctx.x[2] = sp;
+
         }
 
     } 
@@ -442,13 +436,12 @@ fn check_pending_signals() {
     let mask = task_inner.signal_mask.bits();
     let handling = task_inner.handling_sig;
     
-    // 🚨 探头 3.1：进门第一眼，看看进程当前真实状态！
+
     if signals != 0 {
         info!("[PROBE 3.1] check_pending: signals={:#x}, mask={:#x}, handling_sig={}", signals, mask, handling);
     }
-    drop(task_inner); // 先放锁，免得死锁
+    drop(task_inner); 
 
-    // 注意：信号编号从 1 开始，最大通常是 64。不能从 0 开始，否则 0 - 1 会溢出！
     for sig in 1..=MAX_SIG { 
         let task = current_task().unwrap();
         let proc = task.process();
@@ -463,13 +456,13 @@ fn check_pending_signals() {
         if task_inner.signals.contains(signal) {
             let is_masked = task_inner.signal_mask.contains(signal);
             
-            // 🚨 探头 3.2：看看每一个存在的信号，它是怎么被判定拦截的！
+         
             info!("[PROBE 3.2] found pending sig: {}, is_masked: {}", sig, is_masked);
             
             if !is_masked {
                 let mut masked = false;
                 if task_inner.handling_sig != -1 {
-                    // 这里原本逻辑有点绕，简化一下：如果你正在处理信号，我们保守点先不打断
+           
                     masked = true; 
                     info!("[PROBE 3.3] skipped sig {} because currently handling {}", sig, task_inner.handling_sig);
                 }

@@ -12,6 +12,7 @@ use crate::net::SOCKET_SET;
 use crate::fs::{File, Stat};    // 引入 File trait 和 Stat
 use crate::mm::UserBuffer;      // 引入 UserBuffer
 use crate::net::vec;
+use crate::auth::{PermStat, FileMode}; // 引入权限相关的类型
 
 pub struct TcpSocket {
     pub handle: SocketHandle,
@@ -24,6 +25,11 @@ impl TcpSocket {
         let socket = TcpSocketSmol::new(rx_buffer, tx_buffer);
         let handle = SOCKET_SET.exclusive_access().add(socket);
         Self { handle }
+    }
+    pub fn disconnect(&self) {
+        let mut sockets = SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
+        socket.close(); 
     }
     pub fn local_endpoint(&self) -> Option<smoltcp::wire::IpEndpoint> {
         let sockets = SOCKET_SET.exclusive_access();
@@ -120,11 +126,17 @@ impl File for TcpSocket {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
-            __unused: [0; 1], // 如果这里报错说类型不匹配，可能需要改成 [0; 2] 或者其他数组形式
+            __unused: [0; 2], // 如果这里报错说类型不匹配，可能需要改成 [0; 2] 或者其他数组形式
         }
     }
 
-    fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
+    fn get_perm(&self) -> PermStat {
+        let stat = self.get_stat();
+        let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
+        let mode = FileMode::from_bits_truncate(mode as u16);
+        PermStat { mode, uid, gid }
+    }
+        fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
 
     fn as_any(&self) -> &dyn Any { self }
 }
@@ -149,12 +161,13 @@ impl UdpSocket {
 
     /// 绑定本地端口 (供 sys_bind 调用)
     pub fn bind(&self, port: u16) -> isize {
+        // 先锁全局映射表，再锁 bound_port —— 与 sendto() 保持一致的锁顺序，避免 AB-BA 死锁
+        let mut map = LOCAL_UDP_SOCKETS.lock();
         let mut bound = self.bound_port.lock();
         *bound = Some(port);
         
         // 把自己的接收队列注册到全局映射表里！
         // 这样别人往这个端口发数据，就会直接掉进我们的 recv_queue 里。
-        let mut map = LOCAL_UDP_SOCKETS.lock();
         map.insert(port, self.recv_queue.clone());
         0 // 成功
     }
@@ -236,10 +249,18 @@ impl File for UdpSocket {
             nlink: 1, uid: 0, gid: 0, rdev: 0, __pad: 0,
             size: 0, blksize: 0, __pad2: 0, blocks: 0,
             atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
-            ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
 
+    fn get_perm(&self) -> PermStat {
+        let stat = self.get_stat();
+        let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
+        let mode = FileMode::from_bits_truncate(mode as u16);
+        PermStat { mode, uid, gid }
+    }
+
+    
     fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
 
     fn as_any(&self) -> &dyn Any { self }

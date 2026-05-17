@@ -8,6 +8,7 @@
 
 
 mod frame_allocator;
+pub use frame_allocator::get_free_frames;
 mod heap_allocator;
 mod memory_set;
 mod id;

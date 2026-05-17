@@ -12,16 +12,17 @@ use crate::fs::devfs::RtcInode;
 use crate::fs::devfs::TtyInode;
 use super::{VfsInode, Stat, Statx};
 use crate::syscall::fs::Statfs;
+use crate::auth::{PermStat, FileMode};
+use crate::drivers::loopdev::*;
 
 // 全局唯一的 Inode 分配器
 static TMPFS_INO_COUNTER: AtomicUsize = AtomicUsize::new(10000);
 
-// ==========================================
-// 严谨的内存文件
-// ==========================================
+/// 临时文件inode
 pub struct TmpfsFileInode {
     ino: usize,
     data: Mutex<alloc::vec::Vec<u8>>,
+    perms: Mutex<PermStat>, // 权限信息
 }
 
 impl TmpfsFileInode {
@@ -29,6 +30,14 @@ impl TmpfsFileInode {
         Self {
             ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
             data: Mutex::new(alloc::vec::Vec::new()),
+            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(0o100777), 0, 0)), // 默认权限
+        }
+    }
+    pub fn new_with_data(data: &[u8]) -> Self {
+        Self {
+            ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
+            data: Mutex::new(data.to_vec()), // 直接把传进来的切片转成 Vec 存起来
+            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(0o100777), 0, 0)), // 默认权限
         }
     }
 }
@@ -59,16 +68,18 @@ impl super::VfsInode for TmpfsFileInode {
 
     fn get_stat(&self) -> super::Stat {
         let data_len = self.data.lock().len();
+        let perms = self.perms.lock();
+        let (mode, uid, gid) = (perms.mode.bits(), perms.uid, perms.gid);
         super::Stat {
             dev: 0, 
             ino: self.ino as u64,
-            mode: 0o100777, nlink: 1, 
-            uid: 0, gid: 0, rdev: 0, __pad: 0, 
+            mode: mode as u32, nlink: 1, 
+            uid: uid, gid: gid, rdev: 0, __pad: 0, 
 
             size: self.get_size() as i64, 
             blksize: 512, __pad2: 0,
             blocks: ((self.get_size() as i64) + 511) / 512, 
-            atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     
@@ -110,6 +121,16 @@ impl super::VfsInode for TmpfsFileInode {
             __spare2: [0; 14],
         }
     }
+    fn get_perm(&self) -> PermStat {
+        // 此处的实现与其他常规文件不同。
+        // 其他文件是从 stat 的 mode 字段解析权限，
+        // 而这里直接存储了 PermStat 结构体，所以直接返回
+        self.perms.lock().clone()
+    }
+    fn set_perm(&self, perm: PermStat) -> bool {
+        *self.perms.lock() = perm;
+        true
+    }
     fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
@@ -117,10 +138,11 @@ impl super::VfsInode for TmpfsFileInode {
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
 
-
+/// 临时目录inode
 pub struct TmpfsDirInode {
     ino: usize,
     entries: Mutex<BTreeMap<String, Arc<dyn super::VfsInode>>>,
+    perms: Mutex<PermStat>, // 权限信息
 }
 
 impl TmpfsDirInode {
@@ -128,7 +150,12 @@ impl TmpfsDirInode {
         Self {
             ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
             entries: Mutex::new(BTreeMap::new()),
+            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(0o040777), 0, 0)),
         }
+    }
+    pub fn insert(&self, name: String, inode: Arc<dyn VfsInode>) -> Arc<dyn VfsInode> {
+        self.entries.lock().insert(name, inode.clone());
+        inode
     }
 }
 
@@ -143,7 +170,7 @@ impl super::VfsInode for TmpfsDirInode {
             ino: self.ino as u64, 
             mode: 0o040777, nlink: 2,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
-            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 1],
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
     
@@ -184,6 +211,13 @@ impl super::VfsInode for TmpfsDirInode {
             stx_dev_minor: 0, 
             __spare2: [0; 14],
         }
+    }
+    fn get_perm(&self) -> PermStat {
+        self.perms.lock().clone()
+    }
+    fn set_perm(&self, perm: PermStat) -> bool {
+        *self.perms.lock() = perm;
+        true
     }
     fn find(&self, name: &str) -> Option<Arc<dyn super::VfsInode>> {
         self.entries.lock().get(name).cloned()
@@ -232,6 +266,16 @@ pub fn setup_oscomp_env() {
     info!("[VFS] Mounted /tmp");
 
     // 2. 挂载 bin, sbin, usr 等虚拟目录
+    let etc_dentry = root.insert("etc".to_string(), Arc::new(TmpfsDirInode::new()));
+    let passwd_content = "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
+    let group_content = "root:x:0:\nnobody:x:65534:\n";
+    
+    etc_dentry.insert("passwd".to_string(), Arc::new(TmpfsFileInode::new_with_data(passwd_content.as_bytes())));
+    etc_dentry.insert("group".to_string(), Arc::new(TmpfsFileInode::new_with_data(group_content.as_bytes())));
+
+    let var_dentry = root.insert("var".to_string(), Arc::new(TmpfsDirInode::new()));
+    var_dentry.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new()));
+    var_dentry.insert("run".to_string(), Arc::new(TmpfsDirInode::new()));
     let bin_dentry = root.insert("bin".to_string(), Arc::new(TmpfsDirInode::new()));
     let sbin_dentry = root.insert("sbin".to_string(), Arc::new(TmpfsDirInode::new()));
     let usr_dentry = root.insert("usr".to_string(), Arc::new(TmpfsDirInode::new()));
@@ -261,18 +305,29 @@ pub fn setup_oscomp_env() {
         let dev_dentry = if let Some(dev) = root.find_tree("/dev", true) {
             dev
         } else {
-            // 理论上不会走到这，因为你在 mount_devfs 已经建了
+            // 理论上不会走到这
             root.insert("dev".to_string(), Arc::new(TmpfsDirInode::new()))
         };
 
-        // 安全地把 shm 塞进现有的 /dev 里
+        // 挂载shm到/dev/shm
         dev_dentry.insert("shm".to_string(), Arc::new(TmpfsDirInode::new()));
+        // 挂载常用设备文件
         dev_dentry.insert("null".to_string(), Arc::new(NullInode::new())); 
         dev_dentry.insert("zero".to_string(), Arc::new(ZeroInode::new()));
         dev_dentry.insert("rtc".to_string(), Arc::new(RtcInode::new()));
+        // 终端设备
         dev_dentry.insert("tty".to_string(), Arc::new(TtyInode::new()));
-        // 2. 挂载 shm
-        dev_dentry.insert("shm".to_string(), Arc::new(TmpfsDirInode::new()));
+
+        // loop-control
+        dev_dentry.insert("loop-control".to_string(), Arc::new(LoopControlInode::new()));
+
+        // 挂载8个loop设备
+        for i in 0..8 {
+            let loop_name = alloc::format!("loop{}", i);
+            let loop_device = create_loop_device(None, 0, 0);
+            dev_dentry.insert(loop_name, loop_device);
+        }
+
         info!("[VFS] Mounted /dev/shm safely");
         if root.find_tree("/dev/shm", true).is_some() {
         info!("DEBUG: /dev/shm path is VALID");

@@ -3,6 +3,7 @@
 use super::*;
 use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
 use schedule::*;
+use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::{
     arch::trap::{TrapContext, trap_handler, trap_cx_va_by_kernel_stack},
@@ -63,6 +64,7 @@ impl FileDescriptor {
 
 pub struct ProcessControlBlock {
     pub pid: Arc<PidHandle>,
+    pub oom_score_adj: AtomicI32,
     pub inner: MPSafeCell<ProcessControlBlockInner>,
 }
 
@@ -140,6 +142,7 @@ impl ProcessControlBlock {
         // 进程控制块
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),// 注意：实际上只克隆了指针
+            oom_score_adj: AtomicI32::new(0),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: true, // initproc和shell默认在主核运行
                 pname: String::from("initproc"),
@@ -164,8 +167,8 @@ impl ProcessControlBlock {
                 gid: 0,
                 sid:0,
                 euid: 0,
-                is_zombie: false,
                 egid: 0,
+                umask: 0o022,
                 pgid: pid_handle.0,
                 alive_task_count: 0,
                 tasks: Vec::new(),
@@ -356,6 +359,8 @@ impl ProcessControlBlock {
         // 压入 argc
         user_sp -= core::mem::size_of::<usize>();
         translated_write(memory_set.token(), user_sp as *mut usize, args.len());
+        // 调整锁序：先拿tcb锁再拿pcb锁，避免死锁
+        let mut task_inner = caller_task.inner_exclusive_access();
         // 更新 PCB 内部信息
         let mut proc_inner = self.inner_exclusive_access();
         for fd in 0..proc_inner.fd_table.len() {
@@ -389,7 +394,6 @@ impl ProcessControlBlock {
         trap_cx.set_a1(argv_base);
 
         // 更新tcb信息
-        let mut task_inner = caller_task.inner_exclusive_access();
         task_inner.trap_cx_addr = trap_cx_addr;
         *task_inner.get_trap_cx() = trap_cx;
 
@@ -407,6 +411,8 @@ impl ProcessControlBlock {
     /// 已编辑，添加了stack参数 
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
     pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>, caller_task: Arc<TaskControlBlock>)-> (Arc<Self>, Arc<TaskControlBlock>) {
+        // fix:锁序调整，先拿tcb锁再拿pcb锁
+        let caller_inner = caller_task.inner_exclusive_access();
         // ---- hold parent PCB lock
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
@@ -451,6 +457,7 @@ impl ProcessControlBlock {
         //println!("[kernel] ProcessControlBlock::fork: copied fd_table with {} entries", new_fd_table.len());
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
+            oom_score_adj: AtomicI32::new(self.oom_score_adj.load(Ordering::SeqCst)),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: false, 
                 pname: parent_inner.pname.clone(),
@@ -468,16 +475,15 @@ impl ProcessControlBlock {
                 uid: parent_inner.uid,
                 gid: parent_inner.gid,
                 euid: parent_inner.euid,
+                umask: parent_inner.umask, 
                 sid:parent_inner.sid,
                 egid: parent_inner.egid,
                 pgid: parent_inner.pgid,
                 fd_rlmt: parent_inner.fd_rlmt.clone(),
                 tasks: Vec::new(),
-                is_zombie: false,
-                alive_task_count: 1,
+                alive_task_count: 1, // 初始有一个线程
             })
         });
-        let caller_inner = caller_task.inner_exclusive_access();
         let new_task = Arc::new(TaskControlBlock {
             process: Arc::downgrade(&proc_control_block),
             tid: tid_handle.clone(),
@@ -711,7 +717,7 @@ pub struct ProcessControlBlockInner {
     pub heap_bottom: usize,
 
     /// Program break
-    pub program_brk: usize,// 注意需要在exec中维护，rcore忽略了这点，运行测例时brk失效，已修复
+    pub program_brk: usize, // 注意需要在exec中维护，rcore忽略了这点，运行测例时brk失效，已修复
 
     pub fd_rlmt: Rlimit64, // cur_lmt, max_lmt
 
@@ -727,14 +733,15 @@ pub struct ProcessControlBlockInner {
 
     pub exit_code: i32, // 进程退出码，默认为0，只有当进程状态为Zombie时才有意义
 
-    pub uid: u32,  // 真实用户 ID
-    pub gid: u32,  // 真实组 ID
-    pub euid: u32, // 有效用户 ID (Effective)
-    pub egid: u32, // 有效组 ID (Effective)
+    pub uid: u32,  // 用户 ID
+    pub gid: u32,  // 用户组 ID
+    pub euid: u32, // 有效用户 ID
+    pub egid: u32, // 有效用户组 ID
+    pub umask: u32, // 文件模式创建掩码
+
     pub sid: usize,
-    // 新增：进程组 ID
-    pub pgid: usize,
-    pub is_zombie: bool,
+    pub pgid: usize, // 进程组 ID
+    
     // 进程下的线程数
     pub tasks: Vec<Arc<TaskControlBlock>>, 
     // 存活进程数，等于0相当于僵尸进程
@@ -788,7 +795,7 @@ impl ProcessControlBlockInner {
         self.fd_rlmt = new_rlmt;
     }
     pub fn is_zombie(&self) -> bool {
-        self.alive_task_count <= 0
+        self.alive_task_count == 0
     }
     pub fn info_map_areas(&self) {
             println!("mapping asid {}:", self.get_asid());

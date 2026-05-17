@@ -4,6 +4,7 @@ use crate::sync::MPSafeCell;
 use alloc::sync::{Arc, Weak};
 use crate::mm::{frame_alloc, FrameTracker}; 
 use crate::arch::config::PAGE_SIZE;
+use crate::auth::{PermStat, FileMode};
 use core::any::Any;
 
 use crate::task::suspend_current_and_run_next;
@@ -267,6 +268,14 @@ impl File for Pipe {
         }
     }
 
+    fn get_perm(&self) -> crate::auth::PermStat {
+        let stat = self.get_stat();
+        let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
+        let mode = FileMode::from_bits_truncate(mode as u16);
+        PermStat { mode, uid, gid }
+    }
+
+    
     fn getdents(&self, _buf: &mut [u8]) -> isize {
         trace!("Pipe: getdents called on a pipe, returning -1");
         -1

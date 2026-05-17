@@ -216,16 +216,58 @@ pci驱动能跑了
 
     5）一个小细节补充：初始化时bl会把当前hartid存到a0，当前的实现中采用一个常用做法：start时将a0的值读进tp（线程指针），需要获取核心id时直接读tp即可。请不要修改tp。
 
-
-
-
 ## 3.18
 ### fmx
 1. 调整syscall工作目录的几处问题。
 2. 标准化syscall的返回值，将旧实现的-1和magic number统一改成枚举。
 3. 为la的busybox做好了适配。
 
+## 3-4月
+添加和调整syscall，使libctest全部过测
+网络初步实现
+
 ## 4.22
 ### wbt
 1. 重写了exec中的相关逻辑，重构了石山，并在每个逻辑段除.text和.data段之间插入了10页隔离页，不占物理内存
 2. 目前，用户栈仍在堆底，因为还未修改上下文相关，不过似乎也不需要改，因为带来不了什么性能提升其实
+
+## 5月初
+### fmx
+1. 文件鉴权（mode user group）
+2. loop设备实现
+3. 发现&调试多核场景下的死锁问题
+
+## 5.14
+### fmx
+1. 修复了kill, exit, exit_group的锁获取顺序错误导致的随机死锁。顺便修改exec中的锁获取顺序。
+```rust
+    //! 说明
+    /// 在同时获取进程和线程锁的情况下，一般的系统调用和exit获取锁的顺序为
+    let task_inner = task.inner_exlusive_access();
+    // ...
+    let proc_inner = proc.inner_exlusive_access();
+
+    /// 然而在kill中，给进程组发送信号原逻辑为：
+    for proc in manager {
+        let inner = proc.i_e_a();
+        for task in inner.tasks {
+            // ...
+            // <!!!>
+            t_inner = task.i_e_a();
+            // ...
+        }
+    }
+    // <!!!>:如果此时某个task在另一个cpu核上运行，正在退出或者执行其他系统调用，获取了tinner并即将获取pinner，此时会死锁
+
+    /// exit_group中原逻辑与上面的kill类似，具体见此文档更新前的最后一个commit
+
+    /// --- 更新后 ---
+
+    /// 将锁序改为一致，或者先drop pinner在获取t inner
+    /// exec中的锁序也改为一致
+    
+```
+2. 修复了exit中无用的父进程arc指针获取（并且未释放）导致的内存泄露
+3. 修复了内存空间设置错误的问题
+  
+   修复上述问题后ltp能稳定运行至退出

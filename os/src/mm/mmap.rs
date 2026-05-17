@@ -18,10 +18,10 @@ bitflags! {
 bitflags! {
     pub struct MMapFlags: i32 {
         const MAP_FILE      = 0;
-        const MAP_SHARED    = 1 << 0;
-        const MAP_PRIVATE   = 1 << 1;
-        const MAP_ANONYMOUS = 1 << 2;
-        const MAP_FIXED     = 1 << 4;
+        const MAP_SHARED    = 0x01;
+        const MAP_PRIVATE   = 0x02;
+        const MAP_FIXED     = 0x10;
+        const MAP_ANONYMOUS = 0x20;
     }
 }
 
