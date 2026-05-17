@@ -345,6 +345,8 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
         None => return EMFILE.as_isize(), //   
     };
     inner.set_fd(write_fd, pipe_write, false, O_WRONLY as usize);
+    // 释放锁，因为下面的write会访问用户锁
+    drop(inner);
     // User ABI for pipe is int pipefd[2], i.e. two 32-bit entries.
     let pipe_u32 = pipe as *mut u32;
     translated_write(token, pipe_u32, read_fd as u32);
