@@ -101,7 +101,7 @@ gdb-rv:
 	-ex "set schedule-multiple on" \
 	-ex "target extended-remote :$(RV_GDB_PORT)" \
 	-ex "info threads" \
-	-ex "b os::syscall::fs::sys_dup2"
+#	-ex "b os::syscall::fs::sys_dup2"
 
 gdb-la:
 	@$(GDB) $(LA_ELF) \

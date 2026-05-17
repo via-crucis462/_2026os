@@ -358,6 +358,9 @@ impl ProcessControlBlock {
         // 压入 argc
         user_sp -= core::mem::size_of::<usize>();
         *translated_refmut(memory_set.token(), user_sp as *mut usize) = args.len();
+        
+        // fix:锁序调整，先拿tcb锁再拿pcb锁
+        let mut task_inner = caller_task.inner_exclusive_access();
         // 更新 PCB 内部信息
         let mut proc_inner = self.inner_exclusive_access();
         for fd in 0..proc_inner.fd_table.len() {
@@ -390,7 +393,6 @@ impl ProcessControlBlock {
         trap_cx.set_a1(argv_base);
 
         // 更新tcb信息
-        let mut task_inner = caller_task.inner_exclusive_access();
         task_inner.trap_cx_addr = trap_cx_addr;
         *task_inner.get_trap_cx() = trap_cx;
 
@@ -399,7 +401,6 @@ impl ProcessControlBlock {
         for i in proc_inner.memory_set.areas().iter() {
             debug!("exec: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
         }
-        
     }
 
 
@@ -407,6 +408,8 @@ impl ProcessControlBlock {
     /// 已编辑，添加了stack参数 
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
     pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>, caller_task: Arc<TaskControlBlock>)-> (Arc<Self>, Arc<TaskControlBlock>) {
+        // fix:锁序调整，先拿tcb锁再拿pcb锁
+        let caller_inner = caller_task.inner_exclusive_access();
         // ---- hold parent PCB lock
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
@@ -476,7 +479,6 @@ impl ProcessControlBlock {
                 alive_task_count: 1, // 初始有一个线程
             })
         });
-        let caller_inner = caller_task.inner_exclusive_access();
         let new_task = Arc::new(TaskControlBlock {
             process: Arc::downgrade(&proc_control_block),
             tid: tid_handle.clone(),

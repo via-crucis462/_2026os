@@ -263,9 +263,12 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     let pid = proc.pid.0;
     let mut proc_inner = proc.inner_exclusive_access();
     trace!("[EXIT_GROUP] PID {} starts exiting. Total threads to kill: {}", pid, proc_inner.tasks.len());
+    let tasks = proc_inner.tasks.clone();
+    // fix:先释放掉pcb锁
+    drop(proc_inner);
 
     // 遍历当前进程的所有线程（tasks 列表）
-    for thread in proc_inner.tasks.iter() {
+    for thread in tasks.iter() {
         if thread.gettid() != task.gettid() {
             let mut t_inner = thread.inner_exclusive_access();
             // 标记这些线程为 killed，它们下次进入 trap_handler 时会自尽
@@ -277,6 +280,8 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
         }
     }
 
+    // 退出进程  // 先放掉锁，避免后续迭代时死锁
+    let mut proc_inner = proc.inner_exclusive_access();
     // 记录退出码
     proc_inner.exit_code = exit_code;
     
@@ -522,6 +527,33 @@ const TCGETS: u32 = 0x5401;
 const TIOCGWINSZ: u32 = 0x5413;
 const RTC_RD_TIME: u32 = 0x80247009; // 真实的 RTC 读取指令号
 
+// Loop 设备相关的 ioctl 命令
+const LOOP_SET_FD: u32 = 0x4C00; //设置 Loop 设备的后端文件描述符
+const LOOP_CLR_FD: u32 = 0x4C01; //清除 Loop 设备的后端文件描述符
+const LOOP_SET_STATUS64: u32 = 0x4C04; //设置 Loop 设备的状态（使用 LoopInfo64 结构体）
+const LOOP_GET_STATUS64: u32 = 0x4C05; //获取 Loop 设备的状态（使用 LoopInfo64 结构体）
+const LOOP_SET_STATUS: u32 = 0x4C02; //设置 Loop 设备的状态
+const LOOP_CTL_GET_FREE: u32 = 0x4C82; //获取一个空闲的 Loop 设备编号
+const BLKGETSIZE64: u32 = 0x80081272; // BLKGETSIZE64
+
+
+#[repr(C)]
+struct LoopInfo64 {
+    lo_device: u64,
+    lo_inode: u64,
+    lo_rdevice: u64,
+    lo_offset: u64,
+    lo_sizelimit: u64,
+    lo_number: u32,
+    lo_encrypt_type: u32,
+    lo_encrypt_key_size: u32,
+    lo_flags: u32,
+    lo_file_name: [u8; 64],
+    lo_crypt_name: [u8; 64],
+    lo_encrypt_key: [u8; 32],
+    lo_init: [u64; 2],
+}
+
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
@@ -582,6 +614,130 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 EFAULT.as_isize() // 指针错误
             }
         }
+        LOOP_CTL_GET_FREE => {
+            let manager = &crate::drivers::loopdev::LOOP_DEVICE_MANAGER;
+            let free_id = manager.get_free_id();
+            if free_id != -1 { free_id } else { EBUSY.as_isize() }
+        }
+        LOOP_SET_FD => {
+            let backend_fd = argp;
+            if backend_fd >= fd_table.len() || fd_table[backend_fd].file.is_none() {
+                return EBADF.as_isize();
+            }
+            let backend_file = fd_table[backend_fd].file.as_ref().unwrap();
+            let backend_inode = match backend_file.get_dentry() {
+                Some(d) => d.inode.clone(),
+                None => return EINVAL.as_isize(),
+            };
+            
+            let loop_file = fd_table[fd].file.as_ref().unwrap();
+            let dentry = match loop_file.get_dentry() {
+                Some(d) => d,
+                None => return EINVAL.as_isize(),
+            };
+            
+            let mut target_id = None;
+            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    target_id = Some(id);
+                }
+            }
+            
+            if let Some(id) = target_id {
+                if crate::drivers::loopdev::LOOP_DEVICE_MANAGER.set_backing_file(id, Some(backend_inode)) {
+                    0
+                } else {
+                    EINVAL.as_isize()
+                }
+            } else {
+                EINVAL.as_isize()
+            }
+        }
+        LOOP_CLR_FD => {
+            let loop_file = fd_table[fd].file.as_ref().unwrap();
+            let dentry = match loop_file.get_dentry() {
+                Some(d) => d,
+                None => return EINVAL.as_isize(),
+            };
+            
+            let mut target_id = None;
+            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    target_id = Some(id);
+                }
+            }
+            if let Some(id) = target_id {
+                if crate::drivers::loopdev::LOOP_DEVICE_MANAGER.set_backing_file(id, None) {
+                    0
+                } else {
+                    EINVAL.as_isize()
+                }
+            } else {
+                EINVAL.as_isize()
+            }
+        }
+        LOOP_GET_STATUS64 => {
+            let loop_file = fd_table[fd].file.as_ref().unwrap();
+            let dentry = match loop_file.get_dentry() {
+                Some(d) => d,
+                None => return EINVAL.as_isize(),
+            };
+            let mut target_id = None;
+            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    target_id = Some(id);
+                }
+            }
+            if let Some(id) = target_id {
+                if let Some((offset, size)) = crate::drivers::loopdev::LOOP_DEVICE_MANAGER.get_info(id) {
+                    if argp != 0 {
+                        let mut info = LoopInfo64 {
+                            lo_device: 0, lo_inode: 0, lo_rdevice: 0, lo_offset: offset as u64,
+                            lo_sizelimit: size as u64, lo_number: 0, lo_encrypt_type: 0,
+                            lo_encrypt_key_size: 0, lo_flags: 0, lo_file_name: [0; 64],
+                            lo_crypt_name: [0; 64], lo_encrypt_key: [0; 32], lo_init: [0; 2],
+                        };
+                        *translated_refmut(token, argp as *mut LoopInfo64) = info;
+                        0
+                    } else { EFAULT.as_isize() }
+                } else {
+                    ENXIO.as_isize()
+                }
+            } else {
+                ENOTTY.as_isize()
+            }
+        }
+        BLKGETSIZE64 => {
+            let loop_file = fd_table[fd].file.as_ref().unwrap();
+            let dentry = match loop_file.get_dentry() {
+                Some(d) => d,
+                None => return EINVAL.as_isize(),
+            };
+            let mut target_id = None;
+            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    target_id = Some(id);
+                }
+            }
+            if let Some(id) = target_id {
+                if let Some((_, size)) = crate::drivers::loopdev::LOOP_DEVICE_MANAGER.get_info(id) {
+                    if argp != 0 {
+                        *translated_refmut(token, argp as *mut u64) = size as u64;
+                        0
+                    } else { EFAULT.as_isize() }
+                } else {
+                    EINVAL.as_isize()
+                }
+            } else {
+                EINVAL.as_isize()
+            }
+        }
+        LOOP_SET_STATUS64 | LOOP_SET_STATUS => {
+            0
+        }
+        0x5402 => { /* TCSETS */
+            0
+        }
         _ => {
             warn!("[kernel] sys_ioctl: unsupported request: {}", request);
             ENOTTY.as_isize()
@@ -613,6 +769,9 @@ pub fn sys_renameat2(
         cwd.find_tree(&old_parent_path, true),
         cwd.find_tree(&new_parent_path, true)
     ) {
+        // 判断是否在同一个目录下操作（如同目录内重命名 mv /a/foo /a/bar）
+        let same_dir = Arc::ptr_eq(&old_parent, &new_parent);
+
         // 先从前台 VFS 树上把旧节点摘下来
         let moved_dentry_opt = {
             let mut old_children = old_parent.children.lock(); 
@@ -624,11 +783,17 @@ pub fn sys_renameat2(
             let disk_success = old_parent.inode.rename_dir_entry(&old_name, &new_name);
             if disk_success {
                 // 底层成功了，再把节点以新名字挂到 VFS 树上
-                let mut new_children = new_parent.children.lock();
-                new_children.insert(new_name.to_string(), moved_dentry);
+                // 注意：old_children 锁已随块结束而释放，此处重新获取不会死锁
+                if same_dir {
+                    let mut children = old_parent.children.lock();
+                    children.insert(new_name.to_string(), moved_dentry);
+                } else {
+                    let mut new_children = new_parent.children.lock();
+                    new_children.insert(new_name.to_string(), moved_dentry);
+                }
                 return 0;
             } else {
-                // 不成功，挂回去
+                // 不成功，挂回去（锁已释放，安全重取）
                 let mut old_children = old_parent.children.lock();
                 old_children.insert(old_name.to_string(), moved_dentry);
                 return EIO.as_isize();
@@ -880,19 +1045,17 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
     let mut printed_info = false;
 
     loop {
-        let children_snapshot = {
-            let proc_inner = proc.inner_exclusive_access();
-            proc_inner.children.clone()
-        };
+        // 直接在锁内遍历，不 clone（避免持锁期间触发堆分配导致等锁死锁）
+        let mut proc_inner = proc.inner_exclusive_access();
 
-        if children_snapshot.is_empty() {
+        if proc_inner.children.is_empty() {
             info!("[wait4] P{} has no children at all", current_pgid);
             return ECHILD.as_isize(); // 没有任何子进程
         }
 
         let mut has_match = false;
         let mut zombie_child: Option<(usize, i32)> = None;
-        for child in children_snapshot.iter() {
+        for child in proc_inner.children.iter() {
             let child_pid = child.getpid();
             let matches = if pid == -1 {
                 true
@@ -927,7 +1090,6 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
     
         // 2. 尝试找一个“已经死掉”的僵尸孩子
         if let Some((zombie_pid, exit_code)) = zombie_child {
-            let mut proc_inner = proc.inner_exclusive_access();
             if let Some(idx) = proc_inner.children.iter().position(|child| child.getpid() == zombie_pid) {
                 let child = proc_inner.children.remove(idx);
                 let child_pid = child.getpid();
@@ -950,6 +1112,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
             info!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
             printed_info = true;
         }
+        drop(proc_inner);
         suspend_current_and_run_next();
     }
      /*  
@@ -1042,29 +1205,33 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         // 正常逻辑：发送给单个指定 PID 的进程
         if let Some(proc) = get_process(pid as usize) {
             if signum == 0 { return 0; } // 探测成功
-            
+
             let flag = flag.unwrap();
-            let mut inner = proc.inner_exclusive_access();
-            inner.signals.insert(flag); // 进程级 pending
-            
             let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
-            
-            for task_arc in inner.tasks.iter() {
+
+            //   Phase 1: 持 PCB 锁，做进程级操作并克隆首个线程 Arc
+            let first_task: Option<Arc<TaskControlBlock>> = {
+                let mut inner = proc.inner_exclusive_access();
+                inner.signals.insert(flag); // 进程级 pending
+                inner.tasks.first().cloned()
+            }; // PCB 锁在此释放
+
+            //   Phase 2: 无 PCB 锁，只拿 TCB 锁
+            if let Some(task_arc) = first_task {
                 let mut t_inner = task_arc.inner_exclusive_access();
-                
+
                 //   1. 绝对无条件插入信号 (Generation)
                 t_inner.signals.insert(flag);
-                
+
                 //   2. 判断是否被屏蔽 (Delivery check)
                 let is_unblocked = !t_inner.signal_mask.contains(flag);
-                
+
                 if is_unblocked || is_unmaskable {
                     drop(t_inner); // 放锁
                     crate::process::wake_up_task(task_arc.clone()); // 真正唤醒！
                 } else {
                     drop(t_inner); // 被屏蔽了，记录完毕，不打扰睡眠
                 }
-                break; // LTP 中一个进程通常只需要一个线程去处理信号即可
             }
             return 0;
         } else {
@@ -1073,41 +1240,61 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
     } else if pid == 0 || pid < -1 {
         //   进阶逻辑：广播给整个进程组！
         let target_pgid = if pid == 0 { current_pgid } else { (-pid) as usize };
-        let mut success = false;
 
-        // 遍历整个系统的 PID 空间（通用写法）
-        for i in 1..4096 { 
-            if let Some(proc) = get_process(i) {
-                let mut inner = proc.inner_exclusive_access();
-                if inner.pgid == target_pgid {
-                    success = true;
-                    if signum == 0 { continue; } // 仅探测
-                    
-                    let flag = flag.unwrap();
-                    inner.signals.insert(flag); // 进程级 pending
-                    let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
-                    
-                    for task_arc in inner.tasks.iter() {
-                        let mut t_inner = task_arc.inner_exclusive_access();
-                        
-                        //   1. 无条件插入信号
-                        t_inner.signals.insert(flag);
-                        
-                        //   2. 判断屏蔽并决定是否唤醒
-                        let is_unblocked = !t_inner.signal_mask.contains(flag);
-                        
-                        if is_unblocked || is_unmaskable {
-                            drop(t_inner);
-                            crate::process::wake_up_task(task_arc.clone());
-                        } else {
-                            drop(t_inner);
-                        }
-                        break; 
+        if signum == 0 {
+            // 仅探测：只需 PCB 锁，不存在锁顺序问题
+            let mut success = false;
+            for i in 1..4096 {
+                if let Some(proc) = get_process(i) {
+                    let inner = proc.inner_exclusive_access();
+                    if inner.pgid == target_pgid {
+                        success = true;
+                        break;
                     }
                 }
             }
+            return if success { 0 } else { -3 };
         }
-        return if success { 0 } else { -3 }; // 如果整个组都没找到，报 ESRCH
+
+        let flag = flag.unwrap();
+        let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
+
+        //   Phase 1: 遍历 PID 空间，持 PCB 锁做进程级操作，收集首个线程 Arc
+        let mut matched_tasks: Vec<Arc<TaskControlBlock>> = Vec::new();
+        for i in 1..4096 {
+            if let Some(proc) = get_process(i) {
+                let mut inner = proc.inner_exclusive_access();
+                if inner.pgid == target_pgid {
+                    inner.signals.insert(flag); // 进程级 pending
+                    if let Some(first_task) = inner.tasks.first() {
+                        matched_tasks.push(first_task.clone());
+                    }
+                }
+            } // PCB 锁在此释放
+        }
+
+        if matched_tasks.is_empty() {
+            return -3; // ESRCH
+        }
+
+        //   Phase 2: 无 PCB 锁，逐个拿 TCB 锁插入信号并唤醒
+        for task_arc in matched_tasks.iter() {
+            let mut t_inner = task_arc.inner_exclusive_access();
+
+            //   1. 无条件插入信号
+            t_inner.signals.insert(flag);
+
+            //   2. 判断屏蔽并决定是否唤醒
+            let is_unblocked = !t_inner.signal_mask.contains(flag);
+
+            if is_unblocked || is_unmaskable {
+                drop(t_inner);
+                crate::process::wake_up_task(task_arc.clone());
+            } else {
+                drop(t_inner);
+            }
+        }
+        return 0;
     }
 
     -1 // 未知情况
