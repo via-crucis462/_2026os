@@ -174,9 +174,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             warn!("[kernel] Process {} orphans {} children to initproc", pid, orphan_children.len());
         }
         
-        // 考虑到cow，暂不清理当前进程的内存
-        // proc_inner.memory_set.recycle_data_pages();
-        // proc_inner.fd_table.clear();
+        // 清理资源
+        proc_inner.memory_set.recycle_data_pages();
+        proc_inner.fd_table.clear();
 
         
         // 唤醒父进程并发送 SIGCHLD 信号
