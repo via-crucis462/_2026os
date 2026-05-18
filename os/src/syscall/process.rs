@@ -942,6 +942,8 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     let token = current_user_token();
     let task = current_task().unwrap();
     let cwd = task.process().inner_exclusive_access().cwd.clone();
+    let gid = task.process().inner_exclusive_access().gid;
+    let uid = task.process().inner_exclusive_access().uid;
     drop(task);
     let path_str = {
         if let Some(path) = try_translated_str(token, path){
@@ -950,9 +952,11 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             return EFAULT.as_isize();
         }
     };
-     
-    //println!("exec: normalized path: '{}'", path_str);
+    if path_str.len() > 255 {
+        return ENAMETOOLONG.as_isize();
+    }
 
+    // println!("exec: normalized path: '{}'", path_str);
 
     let mut args_vec: Vec<String> = Vec::new();
     // 提取原始参数数组
@@ -988,8 +992,14 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     if let Some(mut app_inode) = app_inode_opt {
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         
+        // 鉴权逻辑，但当前实现用户几乎一定是root，所以似乎没用
+        let perm = app_inode.get_perm();
+        if !perm.can_execute(uid, gid) {
+            return EACCES.as_isize();
+        }
+
         let app_name = app_inode.get_dentry().name.clone();
-        
+
         // 脚本处理逻辑 (.sh)
         if app_name.ends_with(".sh") {
             info!("[kernel] sys_exec: detected script '{}', trying to execute with busybox", app_name);
@@ -1029,7 +1039,50 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         // exec 成功后不会回到旧程序，返回 0 可避免 trap 收尾把 argc 写进新程序 a0。
         0
     } else {
-        //println!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
+        // 打开失败，细分错误码，后续考虑修改open_file逻辑来避免重复查路径
+        // 检查路径中是否有中间组件不是目录
+        let start_node = if path_str.starts_with('/') {
+            crate::fs::ROOT_DENTRY.clone()
+        } else {
+            cwd.clone()
+        };
+
+        let parts: Vec<&str> = path_str
+            .split('/')
+            .filter(|s| !s.is_empty() && *s != ".")
+            .collect();
+
+        if !parts.is_empty() {
+            let mut cur = start_node;
+            // 只遍历到倒数第二个（中间路径组件），最后一个是被执行的文件本身
+            for comp in &parts[..parts.len() - 1] {
+                if *comp == ".." {
+                    if let Some(parent) = cur.parent.upgrade() {
+                        cur = parent;
+                    }
+                    continue;
+                }
+                // 当前节点必须是目录才能继续向下查找
+                let stat = cur.inode.get_stat();
+                let ftype = stat.mode & 0o170000; // S_IFMT
+                if ftype != 0o040000 && ftype != 0o120000 {
+                    // 不是目录也不是软链接
+                    return ENOTDIR.as_isize();
+                }
+                if let Some(child) = cur.find_child(comp) {
+                    cur = child;
+                } else {
+                    // 中间组件不存在 -> ENOENT
+                    return ENOENT.as_isize();
+                }
+            }
+            // 检查最后一个组件的父目录是否是目录
+            let stat = cur.inode.get_stat();
+            let ftype = stat.mode & 0o170000; // S_IFMT
+            if ftype != 0o040000 && ftype != 0o120000 {
+                return ENOTDIR.as_isize();
+            }
+        }
         ENOENT.as_isize()
     }
 }
