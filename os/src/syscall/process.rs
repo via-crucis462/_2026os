@@ -2,7 +2,7 @@
 //! 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
 //! 内存管理也暂时放在此处
 
-use crate::mm::translated_read;
+use crate::mm::{translated_read, try_translated_str};
 use crate::{get_hart_id};
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
@@ -943,8 +943,14 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     let task = current_task().unwrap();
     let cwd = task.process().inner_exclusive_access().cwd.clone();
     drop(task);
-    
-    let path_str = normalize_leading_dot_path(translated_str(token, path));//直接删除路径中的.，不进行其他处理
+    let path_str = {
+        if let Some(path) = try_translated_str(token, path){
+            normalize_leading_dot_path(path)
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
+     
     //println!("exec: normalized path: '{}'", path_str);
 
 
@@ -1004,7 +1010,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         let all_data = app_inode.read_all();
         // 验证 ELF 签名
         if all_data.len() < 4 || &all_data[0..4] != &[0x7f, 0x45, 0x4c, 0x46] {
-            return ENOEXEC.as_isize(); // ENOEXEC
+            return ENOEXEC.as_isize();
         }
         
         let task = current_task().unwrap();

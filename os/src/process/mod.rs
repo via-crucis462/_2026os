@@ -174,12 +174,12 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             warn!("[kernel] Process {} orphans {} children to initproc", pid, orphan_children.len());
         }
         
-        // 3. 清理当前进程持有的资源
-        proc_inner.memory_set.recycle_data_pages();
-        proc_inner.fd_table.clear();
+        // 考虑到cow，暂不清理当前进程的内存
+        // proc_inner.memory_set.recycle_data_pages();
+        // proc_inner.fd_table.clear();
 
         
-        // 4. 唤醒父进程并发送 SIGCHLD 信号
+        // 唤醒父进程并发送 SIGCHLD 信号
         /*if let Some(parent) = parent_to_wake {
             let mut parent_inner = parent.inner_exclusive_access();
             parent_inner.signals.insert(SignalFlags::SIGCHLD);

@@ -358,6 +358,31 @@ pub fn translated_str(token: usize, ptr: *const u8) -> String {
     string
 }
 
+/// +错误处理
+pub fn try_translated_str(token: usize, ptr: *const u8) -> Option<String> {
+    if !prepare_user_read(token, ptr as usize, 1) {
+        return None;
+    }
+    let page_table = PageTable::from_token(token);
+    let mut string = String::new();
+    let mut va = ptr as usize;
+    loop {
+        if !prepare_user_read(token, va, 1) {
+            return None;
+        }
+        let ch: u8 = *(page_table
+            .translate_va(VirtAddr::from(va))
+            .unwrap()
+            .get_mut());
+        if ch == 0 {
+            break;
+        }
+        string.push(ch as char);
+        va += 1;
+    }
+    Some(string)
+}
+
 /// Translate a ptr[u8] array through page table and return a reference of T
 pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
     let len = core::mem::size_of::<T>();
