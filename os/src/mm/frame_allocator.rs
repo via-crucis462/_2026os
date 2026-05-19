@@ -102,9 +102,9 @@ impl FrameAllocator for StackFrameAllocator {
     }
     fn alloc(&mut self, page_size: PageSize) -> Option<PhysPageNum> {
         match page_size {
-            PageSize::Standardpage => self.alloc_std(),
-            PageSize::Megapage => self.alloc_mega(),
-            PageSize::Gigapage => self.alloc_giga(),
+            PageSize::Page4K => self.alloc_std(),
+            PageSize::Page2M => self.alloc_mega(),
+            PageSize::Page1G => self.alloc_giga(),
         }
     }
     fn alloc_std(&mut self) -> Option<PhysPageNum> {
@@ -118,7 +118,7 @@ impl FrameAllocator for StackFrameAllocator {
         }
     }
     fn alloc_mega(&mut self) -> Option<PhysPageNum> {
-        let mega_pages = PageSize::Megapage.num_pages();
+        let mega_pages = PageSize::Page2M.num_pages();
         if let Some(ppn) = self.recycled_mega.pop() {
             Some(ppn.into())
         } else if self.current + mega_pages > self.end {
@@ -129,7 +129,7 @@ impl FrameAllocator for StackFrameAllocator {
         }
     }
     fn alloc_giga(&mut self) -> Option<PhysPageNum> {
-        let giga_pages = PageSize::Gigapage.num_pages();
+        let giga_pages = PageSize::Page1G.num_pages();
         if let Some(ppn) = self.recycled_giga.pop() {
             Some(ppn.into())
         } else if self.current + giga_pages > self.end {
@@ -143,18 +143,18 @@ impl FrameAllocator for StackFrameAllocator {
         let ppn_val = ppn.0;
         // validity check: 按页大小检查对应回收链表防止重复释放
         let already_freed = match page_size {
-            PageSize::Standardpage => self.recycled_std.contains(&ppn_val),
-            PageSize::Megapage => self.recycled_mega.contains(&ppn_val),
-            PageSize::Gigapage => self.recycled_giga.contains(&ppn_val),
+            PageSize::Page4K => self.recycled_std.contains(&ppn_val),
+            PageSize::Page2M => self.recycled_mega.contains(&ppn_val),
+            PageSize::Page1G => self.recycled_giga.contains(&ppn_val),
         };
         if ppn_val >= self.end || already_freed {
             panic!("Frame ppn={:#x} has not been allocated!", ppn_val);
         }           
         // 按页大小回收
         match page_size {
-            PageSize::Standardpage => self.recycled_std.push(ppn_val),
-            PageSize::Megapage => self.recycled_mega.push(ppn_val),
-            PageSize::Gigapage => self.recycled_giga.push(ppn_val),
+            PageSize::Page4K => self.recycled_std.push(ppn_val),
+            PageSize::Page2M => self.recycled_mega.push(ppn_val),
+            PageSize::Page1G => self.recycled_giga.push(ppn_val),
         }
     }
     // 待实现
@@ -249,13 +249,13 @@ fn frame_dealloc_raw(ppn: PhysPageNum, page_size: PageSize) {
 pub fn frame_allocator_test() {
     let mut v: Vec<FrameTracker> = Vec::new();
     for i in 0..5 {
-        let frame = frame_alloc(PageSize::Standardpage).unwrap();
+        let frame = frame_alloc(PageSize::Page4K).unwrap();
         println!("{:?}", frame);
         v.push(frame);
     }
     v.clear();
     for i in 0..5 {
-        let frame = frame_alloc(PageSize::Standardpage).unwrap();
+        let frame = frame_alloc(PageSize::Page4K).unwrap();
         println!("{:?}", frame);
         v.push(frame);
     }

@@ -111,7 +111,7 @@ pub fn kstack_alloc() -> KernelStack {
         kstack_bottom.into(),
         kstack_top.into(),
         MapPermission::R | MapPermission::W,
-        PageSize::Standardpage, // 内核栈用标准页
+        PageSize::Page4K, // 内核栈用标准页
     );
     KernelStack(kstack_id)
 }

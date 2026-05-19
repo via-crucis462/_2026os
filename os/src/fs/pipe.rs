@@ -57,7 +57,7 @@ impl PipeRingBuffer {
     pub fn new() -> Self {
         let mut frames = alloc::vec::Vec::new();
        for _ in 0..16 {
-            frames.push(frame_alloc(PageSize::Standardpage).expect("Failed to alloc physical frame for pipe!"));
+            frames.push(frame_alloc(PageSize::Page4K).expect("Failed to alloc physical frame for pipe!"));
         }
         Self {
             frames,

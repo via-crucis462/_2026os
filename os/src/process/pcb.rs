@@ -115,7 +115,7 @@ impl ProcessControlBlock {
                      VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
                     MapType::Framed,
                     MapPermission::R | MapPermission::W,
-                    PageSize::Standardpage // 初始化进程默认用标准页
+                    PageSize::Page4K // 初始化进程默认用标准页
                 ),
                 None,
                 trap_cx_va.0,
@@ -253,7 +253,7 @@ impl ProcessControlBlock {
                     VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
                     MapType::Framed,
                     MapPermission::R | MapPermission::W,
-                    PageSize::Standardpage // trap上下文映射页默认用标准页
+                    PageSize::Page4K // trap上下文映射页默认用标准页
                 ),
                 None,
                 trap_cx_va.0,
@@ -277,7 +277,7 @@ impl ProcessControlBlock {
             final_entry_point, user_sp
         );
 
-        
+        let stack_page_size = PageSize::Page4K; // 默认用标准页映射用户程序
         let memory_top = heap_bottom;
         // 压入具体的字符串内容（高地址），默认用标准页
         let mut argv_ptrs: Vec<usize> = Vec::new();
@@ -440,7 +440,7 @@ impl ProcessControlBlock {
                     VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
                     MapType::Framed,
                     MapPermission::R | MapPermission::W,
-                    PageSize::Standardpage // fork的trap上下文映射页默认用标准页
+                    PageSize::Page4K // fork的trap上下文映射页默认用标准页
                 ),
                 None,
                 trap_cx_va.0,
@@ -557,7 +557,7 @@ impl ProcessControlBlock {
                     VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
                     MapType::Framed,
                     MapPermission::R | MapPermission::W,
-                    PageSize::Standardpage // trap上下文映射页默认用标准页
+                    PageSize::Page4K // trap上下文映射页默认用标准页
                 ),
                 None,
                 trap_cx_va.0,

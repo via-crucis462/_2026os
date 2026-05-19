@@ -169,6 +169,7 @@ fn main_init(hart_id: usize) {
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger();
     init_other_hart(hart_id);
+    println!("main_init done, run tasks...");
     task::run_tasks();
 }
 

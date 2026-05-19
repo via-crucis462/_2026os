@@ -92,7 +92,7 @@ impl Hal for VirtioHal {
     fn dma_alloc(pages: usize) -> usize {
         let mut ppn_base = PhysPageNum(0);
         for i in 0..pages {
-            let frame = frame_alloc(crate::mm::PageSize::Standardpage).unwrap();
+            let frame = frame_alloc(crate::mm::PageSize::Page4K).unwrap();
             if i == 0 {
                 ppn_base = frame.ppn;
             }
@@ -109,7 +109,7 @@ impl Hal for VirtioHal {
         let pa = PhysAddr::from(pa);
         let mut ppn_base: PhysPageNum = pa.into();
         for _ in 0..pages {
-            frame_dealloc(ppn_base, crate::mm::PageSize::Standardpage);
+            frame_dealloc(ppn_base, crate::mm::PageSize::Page4K);
             ppn_base.step();
         }
         0
