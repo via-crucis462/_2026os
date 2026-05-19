@@ -1,7 +1,7 @@
 use super::{frame_alloc, FrameTracker};
 use super::{PageTable, pte::*, PTEFlags};
 #[allow(unused)]
-use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
+use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, PageSize};
 use super::{StepByOne, VPNRange};
 use super::id::*;
 #[allow(unused)]
@@ -13,6 +13,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use riscv::addr::page;
 use core::arch::asm;
 use lazy_static::*;
 #[cfg(target_arch = "riscv64")]
@@ -97,9 +98,15 @@ impl MemorySet {
         start_va: VirtAddr,
         end_va: VirtAddr,
         permission: MapPermission,
+        page_size: PageSize,
     ) {
         self.push(
-            MapArea::new(start_va, end_va, MapType::Framed, permission),
+            MapArea::new(
+                start_va, end_va,
+                MapType::Framed,
+                permission,
+                page_size
+            ),
             None,
             start_va.into(),
         );
@@ -110,9 +117,16 @@ impl MemorySet {
         start_va: VirtAddr,
         end_va: VirtAddr,
         permission: MapPermission,
+        page_size: PageSize,
     ) {
         self.push(
-            MapArea::new(start_va, end_va, MapType::File, permission),
+            MapArea::new(
+                start_va,
+                end_va,
+                MapType::File,
+                permission,
+                page_size
+            ),
             None,
             start_va.into(),
         );
@@ -146,6 +160,7 @@ impl MemorySet {
             (guard_start + guard_pages * PAGE_SIZE).into(),
             MapType::Guard,
             MapPermission::empty(),
+            PageSize::Standardpage
         ));
     }
     /// Mention that trampoline is not collected by areas.
@@ -157,6 +172,7 @@ impl MemorySet {
             VirtAddr::from(TRAMPOLINE).into(),
             PhysAddr::from(strampoline as *const () as usize).into(),// 高位0x9...被截断
             PTEFlags::R | PTEFlags::X,
+            PageSize::Standardpage // 默认标准页大小
         );
     }
     /// Without kernel stacks.
@@ -181,6 +197,7 @@ impl MemorySet {
                 (etext as *const () as usize).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::X,
+                PageSize::Standardpage
             ),
             None,
             stext as *const () as usize,
@@ -192,6 +209,7 @@ impl MemorySet {
                 (erodata as *const () as usize).into(),
                 MapType::Identical,
                 MapPermission::R,
+                PageSize::Standardpage
             ),
             None,
             srodata as *const () as usize,
@@ -203,6 +221,7 @@ impl MemorySet {
                 (edata as *const () as usize).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::W,
+                PageSize::Standardpage
             ),
             None,
             sdata as *const () as usize,
@@ -214,6 +233,7 @@ impl MemorySet {
                 (ebss as *const () as usize).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::W,
+                PageSize::Standardpage
             ),
             None,
             sbss_with_stack as *const () as usize,
@@ -253,6 +273,7 @@ impl MemorySet {
                     (MEMORY_END - 4096).into(),
                     MapType::Identical,
                     MapPermission::R | MapPermission::W,
+                    PageSize::Standardpage
                 ),
                 None,
                 ekernel as *const () as usize,
@@ -267,6 +288,7 @@ impl MemorySet {
                     ((*pair).0 + (*pair).1).into(),
                     MapType::Identical,
                     MapPermission::R | MapPermission::W,
+                    PageSize::Standardpage
                 ),
                 None,
                 (*pair).0,
@@ -349,7 +371,13 @@ impl MemorySet {
                     }
                     
                     //新建逻辑段实例并更新结尾的最大虚拟页号
-                    let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
+                    let map_area = MapArea::new(
+                        start_va,
+                        end_va,
+                        MapType::Framed,
+                        map_perm,
+                        PageSize::Standardpage
+                    );
                     let area_end_vpn = map_area.vpn_range.get_end();
                     if area_end_vpn > max_end_vpn {
                         max_end_vpn = area_end_vpn;
@@ -453,6 +481,7 @@ impl MemorySet {
                                 end_va.into(),
                                 MapType::Framed,
                                 map_perm,
+                                PageSize::Standardpage
                             ),
                             Some(data),
                             start_va,
@@ -490,6 +519,7 @@ impl MemorySet {
                 user_stack_top.into(),
                 MapType::Framed,
                 MapPermission::R | MapPermission::W | MapPermission::U,
+                PageSize::Standardpage
             ),
             None,
             user_stack_bottom,
@@ -503,6 +533,7 @@ impl MemorySet {
                 heap_bottom_vpn.into(),
                 MapType::Framed,
                 MapPermission::R | MapPermission::W | MapPermission::U,
+                PageSize::Standardpage
             ),
             None,
             heap_bottom,
@@ -551,6 +582,7 @@ impl MemorySet {
             let map_type = user_space.areas[idx].map_type;
             let map_perm = user_space.areas[idx].map_perm;
             let is_shared = user_space.areas[idx].is_shared;
+            let page_size = user_space.areas[idx].page_size;
             let vpn_range = VPNRange::new(
                 user_space.areas[idx].vpn_range.get_start(),
                 user_space.areas[idx].vpn_range.get_end(),
@@ -560,7 +592,7 @@ impl MemorySet {
             if share_user_pages {
                 let mut new_area = MapArea::from_another(&user_space.areas[idx]);
                 for vpn in vpn_range {
-                    let Some(src_pte) = user_space.page_table.translate(vpn) else {
+                    let Some(src_pte) = user_space.page_table.translate(vpn, page_size) else {
                         continue;
                     };
                     if !src_pte.is_valid() {
@@ -573,12 +605,12 @@ impl MemorySet {
                         map_perm
                     };
                     let child_flags = PTEFlags::from_bits(child_perm.bits).unwrap();
-                    memory_set.page_table.map(vpn, src_pte.ppn(), child_flags);
-                    new_area.data_frames.insert(vpn, FrameTracker::from_ppn(src_pte.ppn()));
+                    memory_set.page_table.map(vpn, src_pte.ppn(), child_flags, page_size);
+                    new_area.data_frames.insert(vpn, FrameTracker::from_ppn(src_pte.ppn(), page_size));
                     if writable_cow {
                         let parent_perm = map_perm & !MapPermission::W;
                         let parent_flags = PTEFlags::from_bits(parent_perm.bits).unwrap();
-                        user_space.page_table.set_flags(vpn, parent_flags);
+                        user_space.page_table.set_flags(vpn, parent_flags, page_size);
                     }
                 }
                 memory_set.areas.push(new_area);
@@ -591,7 +623,7 @@ impl MemorySet {
                         if src_pte.is_valid() {
                             let src_ppn = src_pte.ppn();
                             if memory_set.translate(vpn).is_none() || !memory_set.translate(vpn).unwrap().is_valid() {
-                                memory_set.page_table.translate_create(vpn);
+                                memory_set.page_table.translate_create(vpn, page_size);
                             }
                             let dst_ppn = memory_set.translate(vpn).unwrap().ppn();
                             dst_ppn.get_bytes_array().copy_from_slice(src_ppn.get_bytes_array());
@@ -613,16 +645,16 @@ impl MemorySet {
             if area.map_type == MapType::Guard || area.is_shared || !area.map_perm.contains(MapPermission::W) {
                 return false;
             }
-            if let Some(pte) = page_table.translate(vpn) {
+            if let Some(pte) = page_table.translate(vpn, area.page_size) {
                 if pte.is_valid() && !pte.writable() {
                     let old_ppn = pte.ppn();
-                    let new_frame = frame_alloc().unwrap();
+                    let new_frame = frame_alloc(area.page_size).unwrap();
                     let new_ppn = new_frame.ppn;
                     new_ppn
                         .get_bytes_array()
                         .copy_from_slice(old_ppn.get_bytes_array());
                     let pte_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
-                    page_table.set_entry(vpn, new_ppn, pte_flags);
+                    page_table.set_entry(vpn, new_ppn, pte_flags, area.page_size);
                     area.data_frames.insert(vpn, new_frame);
                     #[cfg(target_arch = "loongarch64")]
                     Self::flush_tlb_after_mapping_change();
@@ -637,11 +669,22 @@ impl MemorySet {
         if len == 0 {
             return true;
         }
+        let page_size = if let Some(page_size) = self.areas.iter().find_map(|area| {
+            if VirtAddr::from(start) >= area.vpn_range.get_start().into() && VirtAddr::from(start) < area.vpn_range.get_end().into() {
+                Some(area.page_size)
+            } else {
+                None
+            }
+        }) {
+            page_size
+        } else {
+            return false;
+        };
         let mut vpn = VirtAddr::from(start).floor();
         let end_vpn = VirtAddr::from(start + len - 1).floor();
         loop {
             let page_start = vpn.0 * PAGE_SIZE;
-            match self.page_table.translate(vpn) {
+            match self.page_table.translate(vpn, page_size) {
                 Some(pte) if pte.is_valid() && pte.writable() => {}
                 Some(pte) if pte.is_valid() => {
                     if !self.handle_cow_fault(page_start) {
@@ -652,7 +695,7 @@ impl MemorySet {
                     if !self.handle_page_fault(page_start, sp) {
                         return false;
                     }
-                    match self.page_table.translate(vpn) {
+                    match self.page_table.translate(vpn, page_size) {
                         Some(pte) if pte.is_valid() && pte.writable() => {}
                         Some(pte) if pte.is_valid() => {
                             if !self.handle_cow_fault(page_start) {
@@ -666,7 +709,7 @@ impl MemorySet {
             if vpn == end_vpn {
                 break;
             }
-            vpn.step();
+            vpn.step_by(page_size.num_pages());
         }
         true
     }
@@ -674,18 +717,30 @@ impl MemorySet {
         if len == 0 {
             return true;
         }
+        let page_size = if let Some(page_size) = self.areas.iter().find_map(|area| {
+            if VirtAddr::from(start) >= area.vpn_range.get_start().into() && VirtAddr::from(start) < area.vpn_range.get_end().into() {
+                Some(area.page_size)
+            } else {
+                None
+            }
+        }) {
+            page_size
+        } else {
+            return false;
+        };
+
         let mut vpn = VirtAddr::from(start).floor();
         let end_vpn = VirtAddr::from(start + len - 1).floor();
         loop {
             let page_start = vpn.0 * PAGE_SIZE;
-            match self.page_table.translate(vpn) {
+            match self.page_table.translate(vpn, page_size) {
                 Some(pte) if pte.is_valid() && pte.readable() => {}
                 Some(pte) if pte.is_valid() => return false,
                 _ => {
                     if !self.handle_page_fault(page_start, sp) {
                         return false;
                     }
-                    match self.page_table.translate(vpn) {
+                    match self.page_table.translate(vpn, page_size) {
                         Some(pte) if pte.is_valid() && pte.readable() => {}
                         _ => return false,
                     }
@@ -694,7 +749,7 @@ impl MemorySet {
             if vpn == end_vpn {
                 break;
             }
-            vpn.step();
+            vpn.step_by(page_size.num_pages());
         }
         true
     }
@@ -722,14 +777,28 @@ impl MemorySet {
     
     /// Translate a virtual page number to a page table entry
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
-        self.page_table.translate(vpn)
+        let page_size = self.areas.iter().find_map(|area| {
+            if vpn >= area.vpn_range.get_start() && vpn < area.vpn_range.get_end() {
+                Some(area.page_size)
+            } else {
+                None
+            }
+        })?;
+        self.page_table.translate(vpn, page_size)
     }
-    pub fn translate_create(&mut self, vpn: VirtPageNum) -> Option<PageTableEntry> {
-        self.page_table.translate_create(vpn)
+    pub fn translate_create(&mut self, vpn: VirtPageNum, page_size: PageSize) -> Option<PageTableEntry> {
+        self.page_table.translate_create(vpn, page_size)
     }
     #[cfg(target_arch = "loongarch64")]
     pub fn set_pte_dirty(&mut self, vpn: VirtPageNum) -> bool {
-        if let Some(pte) = self.page_table.find_pte(vpn) {
+        let page_size = self.areas.iter().find_map(|area| {
+            if vpn >= area.vpn_range.get_start() && vpn < area.vpn_range.get_end() {
+                Some(area.page_size)
+            } else {
+                None
+            }
+        })?;
+        if let Some(pte) = self.page_table.find_pte(vpn, page_size) {
             pte.set_dirty();
             true
         } else {
@@ -798,7 +867,7 @@ impl MemorySet {
         addr: usize,
         length: usize,
         prot: mmap::MMapProt,
-        mmap_flags: mmap::MMapFlags
+        mmap_flags: mmap::MMapFlags,
     ) -> Result<usize, i32> {
         let mut start_va = addr;
         if start_va == 0 {
@@ -845,6 +914,7 @@ impl MemorySet {
         VirtAddr::from(start_va),
         VirtAddr::from(start_va + length),
             permission,
+            PageSize::Standardpage // mmap目前直接用标准页
         );
         if mmap_flags.contains(mmap::MMapFlags::MAP_SHARED) {
             self.areas.last_mut().unwrap().is_shared = true;
@@ -946,6 +1016,7 @@ impl MemorySet {
                         VirtAddr::from(a_end.0 * PAGE_SIZE),
                         area.map_type,
                         area.map_perm,
+                        area.page_size
                     );
                     right_area.data_frames = right_frames;
                     new_areas.push(right_area);
@@ -988,6 +1059,8 @@ impl MemorySet {
         let vpn = VirtAddr::from(bad_addr).floor();
         let page_table = &mut self.page_table;
         
+        let mut page_size_opt = None;
+
         // 1. 遍历寻找包含该虚拟页号的合法内存段 (MapArea)
         if let Some(area) = self.areas.iter_mut().find(|a| {
             vpn >= a.vpn_range.get_start() && vpn < a.vpn_range.get_end()
@@ -995,8 +1068,11 @@ impl MemorySet {
             if area.map_type == MapType::Guard {
                 return false;
             }
+
+            page_size_opt = Some(area.page_size);
+
             // 2. 检查该页是否已经在页表中映射
-            if let Some(pte) = page_table.translate(vpn) {
+            if let Some(pte) = page_table.translate(vpn, area.page_size) {
                 if pte.is_valid() {
                     // 已经映射却还报 Fault，通常是非法写只读段
                     return false;
@@ -1004,7 +1080,7 @@ impl MemorySet {
             }
             
             // 3. 确认为合法的未映射页（惰性分配触发），执行分配和映射
-            area.map_one(page_table, vpn);
+            area.map_one(page_table, vpn, page_size_opt.unwrap());
             
             #[cfg(target_arch = "loongarch64")]
             Self::flush_tlb_after_mapping_change();
@@ -1045,7 +1121,7 @@ impl MemorySet {
             // 为刚刚扩张出来的这些虚拟页（从 vpn 到 old_start_vpn）全部分配物理帧并映射
             for v in vpn.0..old_start_vpn.0 {
                 // 假设你引入了 VirtPageNum
-                self.areas[idx].map_one(page_table, VirtPageNum::from(v));
+                self.areas[idx].map_one(page_table, VirtPageNum::from(v), page_size_opt.unwrap());
             }
             
             #[cfg(target_arch = "loongarch64")]
@@ -1091,6 +1167,7 @@ pub struct MapArea {
     map_type: MapType,
     map_perm: MapPermission,
     pub is_shared: bool,
+    pub page_size: PageSize,
 }
 
 impl MapArea {
@@ -1099,6 +1176,7 @@ impl MapArea {
         end_va: VirtAddr,
         map_type: MapType,
         map_perm: MapPermission,
+        page_size: PageSize,
     ) -> Self {
         let start_vpn: VirtPageNum = start_va.floor();
         let end_vpn: VirtPageNum = end_va.ceil();
@@ -1108,6 +1186,7 @@ impl MapArea {
             map_type,
             map_perm,
             is_shared: false,
+            page_size,
         }
     }
     pub fn get_vpn_range(&self) -> &VPNRange {
@@ -1120,22 +1199,23 @@ impl MapArea {
             map_type: another.map_type,
             map_perm: another.map_perm,
             is_shared: another.is_shared,
+            page_size: another.page_size,
         }
     }
-    pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+    pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum, page_size: PageSize) {
         let ppn: PhysPageNum;
         match self.map_type {
             MapType::Identical => {
                 ppn = PhysPageNum(vpn.0);
             }
             MapType::Framed => {
-                let frame = frame_alloc().unwrap();
+                let frame = frame_alloc(page_size).unwrap();
                 ppn = frame.ppn;
                 self.data_frames.insert(vpn, frame);
             }
             // 文件映射：目前简单处理为 Framed，以便 sys_mmap 可以直接读写
             MapType::File => {
-                let frame = frame_alloc().unwrap();
+                let frame = frame_alloc(page_size).unwrap();
                 ppn = frame.ppn;
                 self.data_frames.insert(vpn, frame);
             }
@@ -1150,30 +1230,30 @@ impl MapArea {
             page_table.map(vpn, ppn, pte_flags);
         }
         #[cfg(target_arch = "riscv64")]
-        page_table.map(vpn, ppn, pte_flags);
+        page_table.map(vpn, ppn, pte_flags, page_size);
     }
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         match self.map_type {
             MapType::Framed | MapType::File => {
                 if self.data_frames.remove(&vpn).is_some() {
-                    page_table.unmap(vpn);
+                    page_table.unmap(vpn, self.page_size);
                 } else if self.is_shared {
                     // 核心：子进程的共享页没有 FrameTracker（因为物理页在父进程手里），
                     // 但子进程退出时依然需要解除自己页表里的映射，防止死锁或崩溃。
-                    if page_table.translate(vpn).is_some() && page_table.translate(vpn).unwrap().is_valid() {
-                        page_table.unmap(vpn);
+                    if page_table.translate(vpn, self.page_size).is_some() && page_table.translate(vpn, self.page_size).unwrap().is_valid() {
+                        page_table.unmap(vpn, self.page_size);
                     }
                 }
             }
             MapType::Identical => {
-                page_table.unmap(vpn);
+                page_table.unmap(vpn, self.page_size);
             }
             MapType::Guard => {}
         }
     }
     pub fn map(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
-            self.map_one(page_table, vpn);
+            self.map_one(page_table, vpn, self.page_size);
         }
     }
     pub fn unmap(&mut self, page_table: &mut PageTable) {
@@ -1192,7 +1272,7 @@ impl MapArea {
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(self.vpn_range.get_end(), new_end) {
             trace!("MapArea::append_to: old vpn end={:#x} , mapping new page vpn={:#x}", self.vpn_range.get_end().0, vpn.0);
-            self.map_one(page_table, vpn)
+            self.map_one(page_table, vpn, self.page_size)
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
     }
@@ -1214,7 +1294,7 @@ impl MapArea {
         while data_offset < len {
             let src_len = (len - data_offset).min(PAGE_SIZE - page_offset);
             let dst = &mut page_table
-                .translate(current_vpn)
+                .translate(current_vpn, self.page_size)
                 .unwrap()
                 .ppn()
                 .get_bytes_array()[page_offset..page_offset + src_len];
@@ -1234,7 +1314,7 @@ impl MapArea {
         else {
             let mut data = Vec::new();
             for vpn in self.vpn_range {
-                let src = &page_table.translate(vpn).unwrap().ppn().get_bytes_array();
+                let src = &page_table.translate(vpn, self.page_size).unwrap().ppn().get_bytes_array();
                 data.extend_from_slice(src);
             }
             Some(data)
@@ -1242,6 +1322,9 @@ impl MapArea {
     }
     pub fn get_map_permission(&self) -> MapPermission {
         self.map_perm
+    }
+    pub fn contains(&self, vpn: VirtPageNum) -> bool {
+        vpn >= self.vpn_range.get_start() && vpn < self.vpn_range.get_end()
     }
 }
 
@@ -1277,17 +1360,17 @@ pub fn remap_test() {
     let mid_data: VirtAddr = ((sdata as *const () as usize + edata as *const () as usize) / 2).into();
     assert!(!kernel_space
         .page_table
-        .translate(mid_text.floor())
+        .translate(mid_text.floor(), PageSize::Standardpage)
         .unwrap()
         .writable(),);
     assert!(!kernel_space
         .page_table
-        .translate(mid_rodata.floor())
+        .translate(mid_rodata.floor(), PageSize::Standardpage)
         .unwrap()
         .writable(),);
     assert!(!kernel_space
         .page_table
-        .translate(mid_data.floor())
+        .translate(mid_data.floor(), PageSize::Standardpage)
         .unwrap()
         .executable(),);
     println!("remap_test passed!");

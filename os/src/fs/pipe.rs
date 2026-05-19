@@ -1,5 +1,5 @@
 use super::File;
-use crate::mm::UserBuffer;
+use crate::mm::{PageSize, UserBuffer};
 use crate::sync::MPSafeCell;
 use alloc::sync::{Arc, Weak};
 use crate::mm::{frame_alloc, FrameTracker}; 
@@ -57,7 +57,7 @@ impl PipeRingBuffer {
     pub fn new() -> Self {
         let mut frames = alloc::vec::Vec::new();
        for _ in 0..16 {
-            frames.push(frame_alloc().expect("Failed to alloc physical frame for pipe!"));
+            frames.push(frame_alloc(PageSize::Standardpage).expect("Failed to alloc physical frame for pipe!"));
         }
         Self {
             frames,

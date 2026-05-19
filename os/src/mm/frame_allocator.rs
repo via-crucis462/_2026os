@@ -1,4 +1,4 @@
-use super::{PhysAddr, PhysPageNum};
+use super::{PhysAddr, PhysPageNum, PageSize};
 #[allow(unused)]
 use crate::arch::config::{DMA_SIZE, MEMORY_END};
 use crate::sync::MPSafeCell;
@@ -12,28 +12,30 @@ use lazy_static::*;
 pub struct FrameTracker {
     /// physical page number
     pub ppn: PhysPageNum,
+    /// 页大小
+    pub page_size: PageSize,
 }
 
 impl FrameTracker {
     /// Create a new FrameTracker
-    pub fn new(ppn: PhysPageNum) -> Self {
+    pub fn new(ppn: PhysPageNum, page_size: PageSize) -> Self {
         // page cleaning
         let bytes_array = ppn.get_bytes_array();
         for i in bytes_array {
             *i = 0;
         }
-        Self { ppn }
+        Self { ppn, page_size: page_size }
     }
 
-    pub fn from_ppn(ppn: PhysPageNum) -> Self {
+    pub fn from_ppn(ppn: PhysPageNum, page_size: PageSize) -> Self {
         frame_add_ref(ppn);
-        Self { ppn }
+        Self { ppn, page_size: page_size }
     }
 }
 
 impl Clone for FrameTracker {
     fn clone(&self) -> Self {
-        Self::from_ppn(self.ppn)
+        Self::from_ppn(self.ppn, self.page_size)
     }
 }
 
@@ -140,17 +142,17 @@ pub fn init_frame_allocator() {
 }
 
 /// Allocate a physical page frame in FrameTracker style
-pub fn frame_alloc() -> Option<FrameTracker> {
+pub fn frame_alloc(page_size: PageSize) -> Option<FrameTracker> {
     let ppn = {
         let mut allocator = FRAME_ALLOCATOR.exclusive_access();
         allocator.alloc()
     }?;
     FRAME_REF_COUNTS.exclusive_access().insert(ppn.0, 1);
-    Some(FrameTracker::new(ppn))
+    Some(FrameTracker::new(ppn, page_size))
 }
 /// 连续分配物理页帧，返回起始物理地址
 #[allow(unused)]
-pub fn frame_alloc_con(pages: usize) -> Option<PhysPageNum> {
+pub fn frame_alloc_con(pages: usize, page_size: PageSize) -> Option<PhysPageNum> {
     FRAME_ALLOCATOR.exclusive_access().alloc_con(pages)
 }
 
@@ -199,13 +201,13 @@ fn frame_dealloc_raw(ppn: PhysPageNum) {
 pub fn frame_allocator_test() {
     let mut v: Vec<FrameTracker> = Vec::new();
     for i in 0..5 {
-        let frame = frame_alloc().unwrap();
+        let frame = frame_alloc(PageSize::Standardpage).unwrap();
         println!("{:?}", frame);
         v.push(frame);
     }
     v.clear();
     for i in 0..5 {
-        let frame = frame_alloc().unwrap();
+        let frame = frame_alloc(PageSize::Standardpage).unwrap();
         println!("{:?}", frame);
         v.push(frame);
     }

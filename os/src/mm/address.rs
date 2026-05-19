@@ -209,6 +209,11 @@ impl PhysPageNum {
 pub trait StepByOne {
     /// step by one element(page number)
     fn step(&mut self);
+    fn step_by(&mut self, steps: usize) {
+        for _ in 0..steps {
+            self.step();
+        }
+    }
 }
 impl StepByOne for VirtPageNum {
     fn step(&mut self) {
