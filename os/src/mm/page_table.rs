@@ -2,7 +2,6 @@ use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAdd
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use riscv::addr::page;
 use crate::arch::config::PAGE_SIZE;
 use crate::arch::trap::{current_trap_cx_user_va, TrapContext};
 use crate::mm::MapArea;
@@ -105,7 +104,7 @@ impl PageTable {
                 break;
             }
             if pte.is_empty() {
-                let frame = frame_alloc(Some(PageSize::Standardpage)).unwrap();
+                let frame = frame_alloc(PageSize::Standardpage).unwrap();
                 *pte = PageTableEntry::new_dir(frame.ppn);
                 self.frames.push(frame);
             }
@@ -267,7 +266,7 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
                 }
             }
         };
-        vpn.step();
+        vpn.step_by(page_size.num_pages());
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
         if end_va.page_offset() == 0 {
@@ -308,7 +307,7 @@ fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
                 break;
             }
         }
-        vpn.step();
+        vpn.step_by(page_size.num_pages());
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
         start = end_va.into();
@@ -363,7 +362,7 @@ fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
                 break;
             }
         }
-        vpn.step();
+        vpn.step_by(page_size.num_pages());
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
         start = end_va.into();

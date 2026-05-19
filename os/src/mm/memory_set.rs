@@ -13,7 +13,6 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use riscv::addr::page;
 use core::arch::asm;
 use lazy_static::*;
 #[cfg(target_arch = "riscv64")]
@@ -591,11 +590,15 @@ impl MemorySet {
                 && map_perm.contains(MapPermission::U);
             if share_user_pages {
                 let mut new_area = MapArea::from_another(&user_space.areas[idx]);
-                for vpn in vpn_range {
+                let step = page_size.num_pages();
+                let mut vpn = vpn_range.get_start();
+                while vpn < vpn_range.get_end() {
                     let Some(src_pte) = user_space.page_table.translate(vpn, page_size) else {
+                        vpn.step_by(step);
                         continue;
                     };
                     if !src_pte.is_valid() {
+                        vpn.step_by(step);
                         continue;
                     }
                     let writable_cow = map_perm.contains(MapPermission::W) && !is_shared;
@@ -612,13 +615,16 @@ impl MemorySet {
                         let parent_flags = PTEFlags::from_bits(parent_perm.bits).unwrap();
                         user_space.page_table.set_flags(vpn, parent_flags, page_size);
                     }
+                    vpn.step_by(step);
                 }
                 memory_set.areas.push(new_area);
             } else {
                 let new_area: MapArea = MapArea::from_another(&user_space.areas[idx]);
                 let start_va: VirtAddr = new_area.vpn_range.get_start().into();
                 memory_set.push(new_area, None, start_va.0);
-                for vpn in vpn_range {
+                let step = page_size.num_pages();
+                let mut vpn = vpn_range.get_start();
+                while vpn < vpn_range.get_end() {
                     if let Some(src_pte) = user_space.translate(vpn) {
                         if src_pte.is_valid() {
                             let src_ppn = src_pte.ppn();
@@ -626,9 +632,16 @@ impl MemorySet {
                                 memory_set.page_table.translate_create(vpn, page_size);
                             }
                             let dst_ppn = memory_set.translate(vpn).unwrap().ppn();
-                            dst_ppn.get_bytes_array().copy_from_slice(src_ppn.get_bytes_array());
+                            // 按实际页大小拷贝全部数据（大页需拷贝多个基本页）
+                            let num_pages = page_size.num_pages();
+                            for i in 0..num_pages {
+                                PhysPageNum(dst_ppn.0 + i)
+                                    .get_bytes_array()
+                                    .copy_from_slice(PhysPageNum(src_ppn.0 + i).get_bytes_array());
+                            }
                         }
                     }
+                    vpn.step_by(step);
                 }
             }
         }
@@ -650,9 +663,13 @@ impl MemorySet {
                     let old_ppn = pte.ppn();
                     let new_frame = frame_alloc(area.page_size).unwrap();
                     let new_ppn = new_frame.ppn;
-                    new_ppn
-                        .get_bytes_array()
-                        .copy_from_slice(old_ppn.get_bytes_array());
+                    // 按实际页大小拷贝全部数据（大页需拷贝多个基本页）
+                    let num_pages = area.page_size.num_pages();
+                    for i in 0..num_pages {
+                        PhysPageNum(new_ppn.0 + i)
+                            .get_bytes_array()
+                            .copy_from_slice(PhysPageNum(old_ppn.0 + i).get_bytes_array());
+                    }
                     let pte_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
                     page_table.set_entry(vpn, new_ppn, pte_flags, area.page_size);
                     area.data_frames.insert(vpn, new_frame);
