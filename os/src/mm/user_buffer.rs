@@ -48,6 +48,12 @@ impl UserBuffer {
             current += copy_len;
         }
     }
+    pub fn read_into_buffer(&self, buffer: Self) {
+        self.read(kernel_buffer);
+    }
+    pub fn write_from_buffer(&mut self, buffer: Self) {
+        self.write(kernel_buffer);
+    }
 }
 
 impl IntoIterator for UserBuffer {

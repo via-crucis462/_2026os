@@ -288,7 +288,7 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> i
     let proc = task.process();
     let token = current_user_token();
     let path_str = normalize_leading_dot_path(translated_str(token, path));
-    debug!("kernel:pid[{}] sys_accessat: dirfd={}, path={}, mode={}", task.process().pid.0, dirfd, path_str, _mode);
+    info!("kernel:pid[{}] sys_accessat: dirfd={}, path={}, mode={}", task.process().pid.0, dirfd, path_str, _mode);
 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
@@ -1164,4 +1164,10 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: i64, len: i64) -> isize {
     }
 
     EBADF.as_isize()
+}
+
+/// 创建匿名内存文件
+pub fn sys_memfd_create(_name: *const u8, _flags: u32) -> isize {
+    trace!("kernel:pid[{}] sys_memfd_create NOT IMPLEMENTED", current_task().unwrap().process().pid.0);
+    ENOSYS.as_isize()
 }

@@ -150,6 +150,8 @@ const SYSCALL_UMOUNT: usize = 39;
 const SYSCALL_RENAMEAT2: usize = 276;
 /// random syscall
 const SYSCALL_GETRANDOM: usize = 278;
+/// memfd syscall
+const SYSCALL_MEMFD_CREATE: usize = 279;
 /// resq
 const SYSCALL_RESQ: usize = 293;
 /// accessat syscall
@@ -340,6 +342,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RESQ => sys_resq(),
         SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
+        SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
         _ => {
             warn!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
