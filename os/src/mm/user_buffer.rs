@@ -48,11 +48,39 @@ impl UserBuffer {
             current += copy_len;
         }
     }
-    pub fn read_into_buffer(&self, buffer: Self) {
-        self.read(kernel_buffer);
+    pub fn read_into_buffer(&self, mut data: Self) -> isize {
+        let mut i = 0;
+        let mut j = 0;
+        for buf in self.buffers.iter() {
+            for ch in buf.iter() {
+                if let Some(da) = data.buffers[i].get_mut(j) {
+                    *da = unsafe {*ch};
+                    i += 1;
+                } else {
+                    i = 0;
+                    j += 1;
+                    break;
+                }
+            }
+        }
+        data.len() as isize
     }
-    pub fn write_from_buffer(&mut self, buffer: Self) {
-        self.write(kernel_buffer);
+    pub fn write_from_buffer(&mut self, data: Self) -> isize {
+        let mut i = 0;
+        let mut j = 0;
+        for buf in self.buffers.iter_mut() {
+            for ch in buf.iter_mut() {
+                if let Some(da) = data.buffers[i].get(j) {
+                    *ch = unsafe {*da};
+                    i += 1;
+                } else {
+                    i = 0;
+                    j += 1;
+                    break;
+                }
+            }
+        }
+        data.len() as isize
     }
 }
 

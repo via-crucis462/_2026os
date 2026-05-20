@@ -435,7 +435,7 @@ impl MemorySet {
                     .program_iter()
                     .filter_map(|segment| {
                         if let Ok(xmas_elf::program::Type::Load) = segment.get_type() {
-                            Some(VirtAddr::from(segment.virtual_addr() as usize).floor().0 * PAGE_SIZE)
+                            Some(VirtAddr::from(segment.virtual_addr() as usize).std_floor().0 * PAGE_SIZE)
                         } else {
                             None
                         }
@@ -470,7 +470,7 @@ impl MemorySet {
                         let offset = interp_ph.offset() as usize;
                         let file_size = interp_ph.file_size() as usize;
                         let data = &interp_data[offset..offset + file_size];
-                        let interp_end_vpn: VirtPageNum = VirtAddr::from(end_va).ceil();
+                        let interp_end_vpn: VirtPageNum = VirtAddr::from(end_va).std_ceil();
                         if interp_end_vpn > max_end_vpn {
                             max_end_vpn = interp_end_vpn;
                         }
@@ -525,7 +525,7 @@ impl MemorySet {
         );
         let heap_bottom = user_stack_top + GUARD_PAGES * PAGE_SIZE;
         memory_set.push_guard_area(user_stack_top, GUARD_PAGES);
-        let heap_bottom_vpn = VirtAddr::from(heap_bottom).ceil();
+        let heap_bottom_vpn = VirtAddr::from(heap_bottom).std_ceil();
         memory_set.push(
             MapArea::new(
                 heap_bottom_vpn.into(),
@@ -650,7 +650,7 @@ impl MemorySet {
         memory_set
     }
     pub fn handle_cow_fault(&mut self, bad_addr: usize) -> bool {
-        let vpn = VirtAddr::from(bad_addr).floor();
+        let vpn = VirtAddr::from(bad_addr).std_floor();
         let page_table = &mut self.page_table;
         if let Some(area) = self.areas.iter_mut().find(|a| {
             vpn >= a.vpn_range.get_start() && vpn < a.vpn_range.get_end()
@@ -697,8 +697,8 @@ impl MemorySet {
         } else {
             return false;
         };
-        let mut vpn = VirtAddr::from(start).floor();
-        let end_vpn = VirtAddr::from(start + len - 1).floor();
+        let mut vpn = VirtAddr::from(start).std_floor();
+        let end_vpn = VirtAddr::from(start + len - 1).std_floor();
         loop {
             let page_start = vpn.0 * PAGE_SIZE;
             match self.page_table.translate(vpn) {
@@ -746,8 +746,8 @@ impl MemorySet {
             return false;
         };
 
-        let mut vpn = VirtAddr::from(start).floor();
-        let end_vpn = VirtAddr::from(start + len - 1).floor();
+        let mut vpn = VirtAddr::from(start).std_floor();
+        let end_vpn = VirtAddr::from(start + len - 1).std_floor();
         loop {
             let page_start = vpn.0 * PAGE_SIZE;
             match self.page_table.translate(vpn) {
@@ -836,9 +836,9 @@ impl MemorySet {
         if let Some(area) = self
             .areas
             .iter_mut()
-            .find(|area| area.vpn_range.get_start() == start.floor())
+            .find(|area| area.vpn_range.get_start() == start.std_floor())
         {
-            area.shrink_to(&mut self.page_table, new_end.ceil());
+            area.shrink_to(&mut self.page_table, new_end.std_ceil());
             #[cfg(target_arch = "loongarch64")]
             Self::flush_tlb_after_mapping_change();
             true
@@ -854,9 +854,9 @@ impl MemorySet {
         if let Some(area) = self
             .areas
             .iter_mut()
-            .find(|area| area.vpn_range.get_start() == start.floor())
+            .find(|area| area.vpn_range.get_start() == start.std_floor())
         {
-            area.append_to(&mut self.page_table, new_end.ceil());
+            area.append_to(&mut self.page_table, new_end.std_ceil());
             #[cfg(target_arch = "loongarch64")]
             Self::flush_tlb_after_mapping_change();
             true
@@ -870,8 +870,8 @@ impl MemorySet {
         for area in self.areas.iter() {
             let area_start = area.vpn_range.get_start();
             let area_end = area.vpn_range.get_end();
-            let target_start = VirtAddr::from(start).floor();
-            let target_end = VirtAddr::from(start + len).ceil();
+            let target_start = VirtAddr::from(start).std_floor();
+            let target_end = VirtAddr::from(start + len).std_ceil();
             if target_end > area_start && target_start < area_end {
                 return true;
             }
@@ -995,8 +995,8 @@ impl MemorySet {
         let brk_end = brk_area.vpn_range.get_end().0 * PAGE_SIZE;
 
         let end = start + length;
-        let start_vpn = VirtAddr::from(start).floor();
-        let end_vpn = VirtAddr::from(end).ceil();
+        let start_vpn = VirtAddr::from(start).std_floor();
+        let end_vpn = VirtAddr::from(end).std_ceil();
 
         // 收集因从中间截断而产生的新右半部分区域
         let mut new_areas: Vec<MapArea> = Vec::new();
@@ -1061,7 +1061,7 @@ impl MemorySet {
         // 删除长度为0的区域，但不删除brk及之前的区域
         self.areas.retain(|area| {
             area.vpn_range.get_start() < area.vpn_range.get_end() ||
-            area.vpn_range.get_start() <= VirtAddr::from(brk_end).floor()
+            area.vpn_range.get_start() <= VirtAddr::from(brk_end).std_floor()
         });
 
         #[cfg(target_arch = "loongarch64")]
@@ -1073,7 +1073,7 @@ impl MemorySet {
     #[no_mangle]
     #[inline(never)]
     pub fn handle_page_fault(&mut self, bad_addr: usize, sp: usize) -> bool {
-        let vpn = VirtAddr::from(bad_addr).floor();
+        let vpn = VirtAddr::from(bad_addr).std_floor();
         let page_table = &mut self.page_table;
         
         let mut page_size_opt = None;
@@ -1106,7 +1106,7 @@ impl MemorySet {
         }
         
         // 4. 【新增】：动态扩张用户栈 (Dynamic Stack Growth)
-        let sp_vpn = VirtAddr::from(sp).floor();
+        let sp_vpn = VirtAddr::from(sp).std_floor();
         
         // 设定一个栈最大允许单次/总共扩张的大小，比如 32 页 (128KB)，防止恶意程序耗尽内存
         const MAX_EXPAND_PAGES: usize = 32;
@@ -1195,8 +1195,8 @@ impl MapArea {
         map_perm: MapPermission,
         page_size: PageSize,
     ) -> Self {
-        let start_vpn: VirtPageNum = start_va.floor();
-        let end_vpn: VirtPageNum = end_va.ceil();
+        let start_vpn: VirtPageNum = start_va.std_floor();
+        let end_vpn: VirtPageNum = end_va.std_ceil();
         Self {
             vpn_range: VPNRange::new(start_vpn, end_vpn),
             data_frames: BTreeMap::new(),
@@ -1377,17 +1377,17 @@ pub fn remap_test() {
     let mid_data: VirtAddr = ((sdata as *const () as usize + edata as *const () as usize) / 2).into();
     assert!(!kernel_space
         .page_table
-        .translate(mid_text.floor())
+        .translate(mid_text.std_floor())
         .unwrap()
         .writable(),);
     assert!(!kernel_space
         .page_table
-        .translate(mid_rodata.floor())
+        .translate(mid_rodata.std_floor())
         .unwrap()
         .writable(),);
     assert!(!kernel_space
         .page_table
-        .translate(mid_data.floor())
+        .translate(mid_data.std_floor())
         .unwrap()
         .executable(),);
     println!("remap_test passed!");

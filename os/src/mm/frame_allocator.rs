@@ -184,8 +184,8 @@ pub fn init_frame_allocator() {
     let frame_start = ekernel as *const() as usize;
     
     FRAME_ALLOCATOR.exclusive_access().init(
-        PhysAddr::from(frame_start).ceil(),
-        PhysAddr::from(MEMORY_END).floor(),
+        PhysAddr::from(frame_start).std_ceil(),
+        PhysAddr::from(MEMORY_END).std_floor(),
     );
 }
 

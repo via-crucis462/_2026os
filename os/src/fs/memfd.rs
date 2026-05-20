@@ -38,7 +38,20 @@ impl MemFdInode {
     pub fn set_range(&mut self, start: VirtPageNum, end: VirtPageNum) {
         *self.range.lock() = VPNRange::new(start, end);
     }
-    pub fn write(&mut self, offset: usize, data: UserBuffer) -> isize {
+    pub fn read_at(&self, offset: usize, mut data: UserBuffer) -> isize {
+        let range = self.get_range();
+        let start_addr = range.get_start().0 * PAGE_SIZE;
+        let end_addr = range.get_end().0 * PAGE_SIZE;
+        let read_start = (start_addr + offset) as *const u8;
+        if read_start as usize + data.len() > end_addr {
+            return Errno::EFAULT.as_isize() ; // 超出范围
+        }
+        let mut buffer = UserBuffer{
+            buffers: translated_byte_buffer_mut(self.token, read_start, data.len())
+        };
+        buffer.read_into_buffer(data)
+    }
+    pub fn write_at(&mut self, offset: usize, data: UserBuffer) -> isize {
         let range = self.get_range();
         let start_addr = range.get_start().0 * PAGE_SIZE;
         let end_addr = range.get_end().0 * PAGE_SIZE;
@@ -46,21 +59,9 @@ impl MemFdInode {
         if write_start as usize + data.len() > end_addr {
             return Errno::EFAULT.as_isize() ; // 超出范围
         }
-        let mut buffer = translated_byte_buffer_mut(self.token, write_start, data.len());
-        let mut i = 0;
-        let mut j = 0;
-        for buf in buffer.iter_mut() {
-            for ch in buf.iter_mut() {
-                if let Some(da) = data.buffers[i].get(j) {
-                    *ch = unsafe {*da};
-                    i += 1;
-                } else {
-                    i = 0;
-                    j += 1;
-                    break;
-                }
-            }
-        }
-        data.len() as isize
+        let mut buffer = UserBuffer{
+            buffers: translated_byte_buffer_mut(self.token, write_start, data.len())
+        };
+        buffer.write_from_buffer(data)
     }
 }

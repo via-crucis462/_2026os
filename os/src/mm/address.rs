@@ -103,29 +103,34 @@ impl From<VirtPageNum> for usize {
 /// virtual address impl
 impl VirtAddr {
     /// Get the (floor) virtual page number
-    pub fn floor(&self) -> VirtPageNum {
+    pub fn std_floor(&self) -> VirtPageNum {
         VirtPageNum(self.0 / PAGE_SIZE)
     }
 
     /// Get the (ceil) virtual page number
-    pub fn ceil(&self) -> VirtPageNum {
+    pub fn std_ceil(&self) -> VirtPageNum {
         VirtPageNum((self.0 - 1 + PAGE_SIZE) / PAGE_SIZE)
     }
 
     /// Get the page offset of virtual address
-    pub fn page_offset(&self) -> usize {
+    /// 当作4k标准页的偏移量
+    pub fn std_page_offset(&self) -> usize {
         self.0 & (PAGE_SIZE - 1)
+    }
+    /// 按照实际页大小计算偏移量，适用于大页
+    pub fn actual_page_offset(&self, page_size: super::PageSize) -> usize {
+        self.0 & (page_size.size() - 1)
     }
 
     /// Check if the virtual address is aligned by page size
-    pub fn aligned(&self) -> bool {
-        self.page_offset() == 0
+    pub fn std_aligned(&self) -> bool {
+        self.std_page_offset() == 0
     }
 }
 impl From<VirtAddr> for VirtPageNum {
     fn from(v: VirtAddr) -> Self {
-        assert_eq!(v.page_offset(), 0);
-        v.floor()
+        assert_eq!(v.std_page_offset(), 0);
+        v.std_floor()
     }
 }
 impl From<VirtPageNum> for VirtAddr {
@@ -135,26 +140,26 @@ impl From<VirtPageNum> for VirtAddr {
 }
 impl PhysAddr {
     /// Get the (floor) physical page number
-    pub fn floor(&self) -> PhysPageNum {
+    pub fn std_floor(&self) -> PhysPageNum {
         PhysPageNum(self.0 / PAGE_SIZE)
     }
     /// Get the (ceil) physical page number
-    pub fn ceil(&self) -> PhysPageNum {
+    pub fn std_ceil(&self) -> PhysPageNum {
         PhysPageNum((self.0 - 1 + PAGE_SIZE) / PAGE_SIZE)
     }
     /// Get the page offset of physical address
-    pub fn page_offset(&self) -> usize {
+    pub fn std_page_offset(&self) -> usize {
         self.0 & (PAGE_SIZE - 1)
     }
     /// Check if the physical address is aligned by page size
-    pub fn aligned(&self) -> bool {
-        self.page_offset() == 0
+    pub fn std_aligned(&self) -> bool {
+        self.std_page_offset() == 0
     }
 }
 impl From<PhysAddr> for PhysPageNum {
     fn from(v: PhysAddr) -> Self {
-        assert_eq!(v.page_offset(), 0);
-        v.floor()
+        assert_eq!(v.std_page_offset(), 0);
+        v.std_floor()
     }
 }
 impl From<PhysPageNum> for PhysAddr {

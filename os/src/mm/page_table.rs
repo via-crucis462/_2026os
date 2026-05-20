@@ -11,9 +11,9 @@ use crate::process::{current_task, current_user_token};
 /// 页大小，单位Bytes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageSize {
-    Page4K = 4096, // 4KB
-    Page2M = 2 * 1024 * 1024, // 2MB
-    Page1G = 1024 * 1024 * 1024,// 1GB,
+    Page4K = 1 << 12, // 4KB
+    Page2M = 1 << ( 12 + 9 ), // 2MB
+    Page1G = 1 << ( 12 + 9 + 9 ), // 1GB
 }
     
 impl PageSize {
@@ -218,9 +218,9 @@ impl PageTable {
     }
     /// get the physical address from the virtual address
     pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
-        self.find_pte(va.clone().floor()).map(|(pte, size)| {
+        self.find_pte(va.clone().std_floor()).map(|(pte, size)| {
             let aligned_pa: PhysAddr = pte.ppn().into();
-            let offset = va.page_offset();
+            let offset = va.actual_page_offset(size);
             let aligned_pa_usize: usize = aligned_pa.into();
             (aligned_pa_usize + offset).into()
         })
@@ -245,7 +245,7 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     let mut v = Vec::new();
     while start < end {
         let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.floor();
+        let mut vpn = start_va.std_floor();
         let (ppn, size) = match page_table.translate_and_get_size(vpn) {
             Some((pte, size)) if pte.is_valid() => (pte.ppn(), size),
             _ => {
@@ -271,10 +271,10 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         vpn.step_by(size.num_pages());
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
-        if end_va.page_offset() == 0 {
-            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..]);
+        if end_va.actual_page_offset(size) == 0 {
+            v.push(&mut ppn.get_bytes_array()[start_va.actual_page_offset(size)..]);
         } else {
-            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..end_va.page_offset()]);
+            v.push(&mut ppn.get_bytes_array()[start_va.actual_page_offset(size)..end_va.actual_page_offset(size)]);
         }
         start = end_va.into();
     }
@@ -291,7 +291,7 @@ fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
     let mut ready = true;
     while start < end {
         let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.floor();
+        let mut vpn = start_va.std_floor();
         let p_s = page_table.find_pte(vpn);
         let size = match p_s {
             Some((pte, size)) if pte.is_valid() && pte.readable() => {
@@ -339,7 +339,7 @@ fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
     let mut ready = true;
     while start < end {
         let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.floor();
+        let mut vpn = start_va.std_floor();
         let p_s = page_table.find_pte(vpn);
         let size = match p_s {
             Some((pte, size)) if pte.is_valid() && pte.readable() => {
@@ -441,7 +441,7 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
         .translate_va(VirtAddr::from(ptr as usize))
         .unwrap();
     debug!("translated_ref: start_pa = {:#x}, end_pa = {:#x}, len = {:#x}", pa.0, pa.0 + len - 1, len);
-    if pa.floor() == PhysAddr(pa.0 + len - 1).floor() {
+    if pa.std_floor() == PhysAddr(pa.0 + len - 1).std_floor() {
         pa.get_ref()
     } else {
         alloc::boxed::Box::leak(alloc::boxed::Box::new(translated_read(token, ptr)))
@@ -455,8 +455,9 @@ pub fn translated_read<T>(token: usize, ptr: *const T) -> T {
     let page_table = PageTable::from_token(token);
     let mut data = vec![0u8; len];
     let start_va = VirtAddr::from(ptr as usize);
+    let (pte, size) = page_table.find_pte(start_va.std_floor()).unwrap();
     // 页内快路径：保持原有低开销行为
-    if start_va.page_offset() + len <= PAGE_SIZE {
+    if start_va.std_page_offset() + len <= size.size() {
         let pa = page_table
             .translate_va(start_va)
             .unwrap();
@@ -483,8 +484,9 @@ pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
     let page_table = PageTable::from_token(token);
     let data = unsafe { core::slice::from_raw_parts((&value as *const T) as *const u8, len) };
     let start_va = VirtAddr::from(ptr as usize);
+    let (pte, size) = page_table.find_pte(start_va.std_floor()).unwrap();
     // 页内快路径：保持原有低开销行为
-    if start_va.page_offset() + len <= PAGE_SIZE {
+    if start_va.std_page_offset() + len <= size.size() {
         let pa = page_table
             .translate_va(start_va)
             .unwrap();
