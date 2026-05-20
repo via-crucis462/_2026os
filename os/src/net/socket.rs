@@ -5,7 +5,7 @@ use smoltcp::socket::tcp::{Socket as TcpSocketSmol, SocketBuffer};
 use smoltcp::iface::SocketHandle;
 use alloc::collections::{BTreeMap, VecDeque};
 use spin::Mutex;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use lazy_static::lazy_static;
 use smoltcp::wire::{IpAddress, IpEndpoint};
 use crate::net::SOCKET_SET;
@@ -78,16 +78,20 @@ impl File for TcpSocket {
 
         let mut current = 0;
         for buffer in buf.buffers.iter_mut() {
-            let copy_len = buffer.len().min(recv_len - current);
+            let copy_len = buffer.len().min(recv_len.saturating_sub(current));
+            if copy_len == 0 {
+                break;
+            }
             buffer[..copy_len].copy_from_slice(&temp_buf[current..current + copy_len]);
             current += copy_len;
             if current == recv_len { break; }
         }
         
-        recv_len
+        current
     }
 
     fn write(&self, buf: UserBuffer) -> usize {
+        println!("TcpSocket write called with {} bytes", buf.len());
         let mut sockets = SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
 
@@ -227,12 +231,15 @@ impl File for UdpSocket {
             let mut current = 0;
             let recv_len = data.len();
             for buffer in buf.buffers.iter_mut() {
-                let copy_len = buffer.len().min(recv_len - current);
+                let copy_len = buffer.len().min(recv_len.saturating_sub(current));
+                if copy_len == 0 {
+                    break;
+                }
                 buffer[..copy_len].copy_from_slice(&data[current..current + copy_len]);
                 current += copy_len;
                 if current == recv_len { break; }
             }
-            recv_len
+            current
         } else {
             0
         }
@@ -240,6 +247,7 @@ impl File for UdpSocket {
     
     fn write(&self, buf: UserBuffer) -> usize {
         // Udp 默认用 sendto，普通 write 这里做兜底
+        println!("UdpSocket write called with {} bytes, but no destination specified. Ignoring.", buf.len());
         buf.len()
     }
 
@@ -261,6 +269,147 @@ impl File for UdpSocket {
     }
 
     
+    fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
+
+    fn as_any(&self) -> &dyn Any { self }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum UnixSocketType {
+    Stream,
+    Datagram,
+}
+
+struct UnixSocketInner {
+    recv_queue: VecDeque<Vec<u8>>,
+    peer: Option<Weak<Mutex<UnixSocketInner>>>,
+    attached_prog: Option<usize>,
+    socket_type: UnixSocketType,
+}
+
+pub struct UnixSocket {
+    inner: Arc<Mutex<UnixSocketInner>>,
+}
+
+impl UnixSocket {
+    pub fn pair(socket_type: UnixSocketType) -> (Self, Self) {
+        let left = Arc::new(Mutex::new(UnixSocketInner {
+            recv_queue: VecDeque::new(),
+            peer: None,
+            attached_prog: None,
+            socket_type,
+        }));
+        let right = Arc::new(Mutex::new(UnixSocketInner {
+            recv_queue: VecDeque::new(),
+            peer: None,
+            attached_prog: None,
+            socket_type,
+        }));
+        left.lock().peer = Some(Arc::downgrade(&right));
+        right.lock().peer = Some(Arc::downgrade(&left));
+        (
+            Self { inner: left },
+            Self { inner: right },
+        )
+    }
+
+    pub fn attach_bpf(&self, prog_fd: usize) {
+        self.inner.lock().attached_prog = Some(prog_fd);
+    }
+}
+
+impl File for UnixSocket {
+    fn readable(&self) -> bool { true }
+    fn writable(&self) -> bool { true }
+
+    fn read(&self, mut buf: UserBuffer) -> usize {
+        let mut inner = self.inner.lock();
+        let Some(packet) = inner.recv_queue.pop_front() else {
+            return 0;
+        };
+        let mut copied = 0usize;
+        for segment in buf.buffers.iter_mut() {
+            let copy_len = segment.len().min(packet.len().saturating_sub(copied));
+            if copy_len == 0 {
+                break;
+            }
+            segment[..copy_len].copy_from_slice(&packet[copied..copied + copy_len]);
+            copied += copy_len;
+        }
+        copied
+    }
+
+    fn write(&self, buf: UserBuffer) -> usize {
+        println!("UnixSocket write called with {} bytes", buf.len());
+        let mut payload = vec![0u8; buf.len()];
+        let mut payload_len = 0usize;
+        for segment in buf.buffers.iter() {
+            let end = payload_len + segment.len();
+            payload[payload_len..end].copy_from_slice(segment);
+            payload_len = end;
+        }
+
+        let peer = {
+            let inner = self.inner.lock();
+            inner.peer.as_ref().and_then(Weak::upgrade)
+        };
+        let Some(peer) = peer else {
+            println!("UnixSocket write failed: no peer connected");
+            return 0;
+        };
+
+        let attached_prog = {
+            let mut peer_inner = peer.lock();
+            let prog_fd = peer_inner.attached_prog;
+            match peer_inner.socket_type {
+                UnixSocketType::Datagram | UnixSocketType::Stream => {
+                    peer_inner.recv_queue.push_back(payload);
+                }
+            }
+            prog_fd
+        };
+
+        if let Some(prog_fd) = attached_prog {
+            let _ = crate::syscall::bpf::run_socket_filter_program(prog_fd);
+        }
+        println!("UnixSocket wrote {} bytes to peer", payload_len);
+        payload_len
+    }
+
+    fn ready_to_read(&self) -> bool {
+        !self.inner.lock().recv_queue.is_empty()
+    }
+
+    fn get_stat(&self) -> Stat {
+        Stat {
+            dev: 0,
+            ino: 0,
+            mode: 0o140000 | 0o666,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            __pad: 0,
+            size: 0,
+            blksize: 0,
+            __pad2: 0,
+            blocks: 0,
+            atime_sec: 0,
+            atime_nsec: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            __unused: [0; 2],
+        }
+    }
+
+    fn get_perm(&self) -> PermStat {
+        let stat = self.get_stat();
+        let mode = FileMode::from_bits_truncate(stat.mode as u16);
+        PermStat { mode, uid: stat.uid, gid: stat.gid }
+    }
+
     fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
 
     fn as_any(&self) -> &dyn Any { self }

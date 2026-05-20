@@ -1,9 +1,9 @@
 use crate::task::current_task;
-use crate::net::socket::TcpSocket;
+use crate::net::socket::{TcpSocket, UnixSocket, UnixSocketType};
 use crate::process::*;
 use crate::syscall::Errno::*;
 use crate::syscall::Arc;
-use crate::mm::{translated_read, translated_ref, translated_write, translated_byte_buffer, UserBuffer};
+use crate::mm::{translated_read, translated_write, translated_byte_buffer, UserBuffer};
 use crate::syscall::errno::Errno;
 use alloc::vec;
 
@@ -74,8 +74,21 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         return ENOTSOCK.as_isize(); // ENOTSOCK (不是一个 Socket)
     }
 }
-/// 设置 Socket 的属性选项。
-/// 目前作为“伪实现”直接返回成功(0)，主要用于兼容 musl libc 初始化时对 SO_RCVTIMEO 等选项的探测。
+/// 设置 socket 选项。
+///
+/// 参数含义：
+/// - `fd`：目标 socket 的文件描述符。
+/// - `level`：选项层级。当前识别 `SOL_SOCKET`。
+/// - `optname`：具体选项名。当前支持 `SO_ATTACH_BPF`。
+/// - `optval`：指向用户空间选项值缓冲区的指针。
+/// - `optlen`：`optval` 缓冲区长度，单位为字节。
+/// 
+/// - 若 `fd` 无效，返回 `EBADF`。
+/// - 若 `level == SOL_SOCKET && optname == SO_ATTACH_BPF`，则从 `optval` 中读取一个
+///   `prog_fd`，并将其附着到 `UnixSocket`；要求 `optlen >= sizeof(i32)`。
+/// - 对 UDP/TCP socket 的其他选项，当前为了兼容用户态探测逻辑，直接返回成功 `0`。
+/// - 对非 socket 文件对象，返回 `ENOTSOCK`。
+///
 pub fn sys_setsockopt(
     fd: usize,
     level: usize,
@@ -83,9 +96,12 @@ pub fn sys_setsockopt(
     optval: *const u8,
     optlen: u32,
 ) -> isize {
+    const SOL_SOCKET: usize = 1;
+    const SO_ATTACH_BPF: usize = 50;
     let task = crate::task::current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
 
     // 1. 检查 fd 是否合法
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
@@ -95,8 +111,21 @@ pub fn sys_setsockopt(
     // 2. 获取文件对象
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     drop(inner); // 提前释放进程锁
+    if level == SOL_SOCKET && optname == SO_ATTACH_BPF {
+        if optlen < core::mem::size_of::<i32>() as u32 || optval.is_null() {
+            return Errno::EINVAL.as_isize();
+        }
+        let prog_fd = translated_read(token, optval as *const i32);
+        if prog_fd < 0 || !crate::syscall::bpf::is_socket_filter_prog_fd(prog_fd as usize) {
+            return Errno::EBADF.as_isize();
+        }
+        if let Some(socket) = file.as_any().downcast_ref::<UnixSocket>() {
+            socket.attach_bpf(prog_fd as usize);
+            return 0;
+        }
+    }
     if let Some(_udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
-        return 0; // 假装设置成功
+        return 0;
     }
     // 3. 检查这个文件到底是不是 Socket？
     if let Some(_socket) = file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
@@ -133,15 +162,7 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
         }
 
      
-        let mut family_bytes = [0u8; 2];
-        for i in 0..2 {
-           
-            let ptr = (addr as usize + i) as *const u8;
-            family_bytes[i] = unsafe { *crate::mm::translated_ref(token, ptr) };
-        }
-        
- 
-        let sa_family = u16::from_ne_bytes(family_bytes);
+        let sa_family = translated_read(token, addr as *const u16);
 
       
         const AF_UNSPEC: u16 = 0;
@@ -163,14 +184,7 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
         if addrlen < 16 {
             return Errno::EINVAL.as_isize(); 
         }
-
-
-        let mut sockaddr = [0u8; 16];
-        sockaddr[0..2].copy_from_slice(&family_bytes);
-        for i in 2..16 {
-            let ptr = (addr as usize + i) as *const u8;
-            sockaddr[i] = unsafe { *crate::mm::translated_ref(token, ptr) };
-        }
+        let sockaddr = translated_read(token, addr as *const [u8; 16]);
         
       
         let port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
@@ -228,10 +242,7 @@ pub fn sys_sendto(
         // 2. 解析 dest_addr (C 语言的 sockaddr 结构体)
         if dest_addr as usize != 0 {
             let mut sockaddr_bytes = [0u8; 16];
-            for i in 0..16 {
-                // 逐字节翻译并拷贝用户态内存
-                sockaddr_bytes[i] = *crate::mm::translated_ref(token, (dest_addr as usize + i) as *const u8);
-            }
+            sockaddr_bytes = translated_read(token, dest_addr as *const [u8; 16]);
             // 解析出端口 (大端序转主机序)
             let port = u16::from_be_bytes([sockaddr_bytes[2], sockaddr_bytes[3]]);
             // 解析出 IPv4 地址
@@ -363,20 +374,12 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     let nonblock = (socket_type & 0o4000) != 0;
     
     // 2. 提取真正的 socket 核心类型 (屏蔽掉标志位)
-    // 常见的值：1 = SOCK_STREAM (TCP), 2 = SOCK_DGRAM (UDP)
     let real_socket_type = socket_type & 0xff;
     
     // 3. 寻找空闲 FD
-    let mut allocated_fd = None;
-    for (i, fd_desc) in inner.fd_table.iter().enumerate() {
-        if fd_desc.file.is_none() {
-            allocated_fd = Some(i);
-            break;
-        }
-    }
+    let allocated_fd = inner.alloc_fd();
     
-    // 4. 根据类型分配不同的 Socket！
-    // 🌟 这里是重点：我们开始区分 TCP 和 UDP
+    // 4. 根据类型分配不同的 Socket
     let socket_file: Arc<dyn crate::fs::File> = if real_socket_type == 2 {
         // 如果是 UDP，分配 UdpSocket (我们等会儿去建这个结构体)
         Arc::new(crate::net::socket::UdpSocket::new()) 
@@ -403,6 +406,56 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     fd as isize
 }
 
+pub fn sys_socketpair(domain: usize, socket_type: usize, protocol: usize, sv: *mut u8) -> isize {
+    const AF_UNIX: usize = 1;
+    const SOCK_STREAM: usize = 1;
+    const SOCK_DGRAM: usize = 2;
+    const SOCK_NONBLOCK: usize = 0o4000;
+    const SOCK_CLOEXEC: usize = 0o2000000;
+
+    let task = current_task().unwrap();
+    let process = task.process();
+    let mut inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+
+    if domain != AF_UNIX {
+        return Errno::EAFNOSUPPORT.as_isize();
+    }
+    if protocol != 0 {
+        return Errno::EPROTONOSUPPORT.as_isize();
+    }
+    let real_type = socket_type & 0xff;
+    let socket_kind = match real_type {
+        SOCK_STREAM => UnixSocketType::Stream,
+        SOCK_DGRAM => UnixSocketType::Datagram,
+        _ => return Errno::EPROTOTYPE.as_isize(),
+    };
+
+    let left_fd = match inner.alloc_fd() {
+        Some(fd) => fd,
+        None => return Errno::EMFILE.as_isize(),
+    };
+    let right_fd = match inner.alloc_fd() {
+        Some(fd) => fd,
+        None => {
+            inner.clear_fd(left_fd);
+            return Errno::EMFILE.as_isize();
+        }
+    };
+    let (left, right) = UnixSocket::pair(socket_kind);
+    let status = if (socket_type & SOCK_NONBLOCK) != 0 { SOCK_NONBLOCK } else { 0 };
+    let cloexec = (socket_type & SOCK_CLOEXEC) != 0;
+    inner.set_fd(left_fd, Arc::new(left), cloexec, status);
+    inner.set_fd(right_fd, Arc::new(right), cloexec, status);
+    drop(inner);
+
+    let mut data = [0u8; 8];
+    data[..4].copy_from_slice(&(left_fd as i32).to_ne_bytes());
+    data[4..].copy_from_slice(&(right_fd as i32).to_ne_bytes());
+    translated_write(token, sv as *mut [u8; 8], data);
+    0
+}
+
 pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
@@ -417,9 +470,7 @@ pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
     drop(inner); // 提早释放锁
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         // 从 addr 中安全读取端口信息
-        let mut port_bytes = [0u8; 2];
-        port_bytes[0] = *crate::mm::translated_ref(token, (addr as usize + 2) as *const u8);
-        port_bytes[1] = *crate::mm::translated_ref(token, (addr as usize + 3) as *const u8);
+        let port_bytes = translated_read(token, (addr as usize + 2) as *const [u8; 2]);
         let port = u16::from_be_bytes(port_bytes);
         
         // 绑定端口
@@ -427,12 +478,7 @@ pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
     }
     if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
         // 1. 从用户态读取 16 字节的 sockaddr_in
-        let mut sockaddr = [0u8; 16];
-        let mut curr = addr as usize;
-        for i in 0..16 {
-            sockaddr[i] = unsafe { *crate::mm::translated_ref(token, curr as *const u8) };
-            curr += 1;
-        }
+        let sockaddr = translated_read(token, addr as *const [u8; 16]);
         
         // 2. 解析大端序的端口号
         let port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);

@@ -105,6 +105,7 @@ const SYSCALL_GETEGID: usize = 177;
 const SYSCALL_GETTID: usize = 178;
 const SYSCALL_SYSINFO: usize = 179;
 const SYSCALL_SOCKET: usize = 198;
+const SYSCALL_SOCKETPAIR: usize = 199;
 /// brk syscall
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_LISTEN: usize = 201;
@@ -115,11 +116,11 @@ const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_SETSOCKOPT: usize = 208;
 const SYSCALL_BRK: usize = 214;
+/// munmap syscall
+const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_ADD_KEY: usize = 217;
 const SYSCALL_REQUEST_KEY: usize = 218;
 const SYSCALL_KEYCTL: usize = 219;
-/// munmap syscall
-const SYSCALL_MUNMAP: usize = 215;
 /// clone syscall
 const SYSCALL_CLONE: usize = 220;
 /// exec syscall
@@ -150,11 +151,14 @@ const SYSCALL_UMOUNT: usize = 39;
 const SYSCALL_RENAMEAT2: usize = 276;
 /// random syscall
 const SYSCALL_GETRANDOM: usize = 278;
+const SYSCALL_BPF: usize = 280;
 /// resq
 const SYSCALL_RESQ: usize = 293;
 /// accessat syscall
 const SYSCALL_ACCESSAT: usize = 48;
+pub mod bpf;
 pub mod fs;
+use bpf::*;
 mod process;
 mod prctl;
 pub mod errno;
@@ -289,6 +293,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0] as isize, args[1], args[2] as *mut u8),
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as i32, args[1] as *const usize, args[2] as *mut usize, args[3] as usize),
         SYSCALL_STATFS=> sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
+        SYSCALL_SOCKETPAIR => sys_socketpair(args[0], args[1], args[2], args[3] as *mut u8),
         SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
         SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
         SYSCALL_SYSLOG => sys_syslog(args[0], args[1], args[2]),
@@ -334,6 +339,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_UMOUNT => sys_umount(args[0] as *const u8),
         SYSCALL_STATX => sys_statx(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32, args[4] as *mut Statx),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2] as u32),
+        SYSCALL_BPF => sys_bpf(args[0], args[1] as *const u8, args[2]),
         SYSCALL_PRCTL => sys_prctl(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_SET_ROBUST_LIST => sys_robust_list(),
         SYSCALL_GET_ROBUST_LIST => sys_get_robust_list(),
@@ -355,12 +361,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             println!("after exec memory syscall mmap area: {:#x} - {:#x} ", i.get_vpn_range().get_start().0 << 12, i.get_vpn_range().get_end().0 << 12);
         }
     }*/
-    /*if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
-        debug!(
-            "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}] | Ret: {}", 
-            syscall_id, args[0], args[1], args[2], ret
-        );
-    }*/
+        /*println!(
+            "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}] | Ret: {}", 
+            syscall_id, args[0], args[1], args[2], args[3], args[4], ret
+        );*/
     // println!("[K] hart[{}] PID{} finished syscall {} with return value {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
     ret
 }

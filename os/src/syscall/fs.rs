@@ -5,7 +5,6 @@ use crate::task::{current_task, current_user_token};
 use alloc::vec;
 use alloc::sync::Arc;
 use alloc::string::ToString;
-use crate::syscall::translated_ref;
 use crate::syscall::TIME_CACHE;
 use super::{errno::Errno::*, normalize_leading_dot_path};
 use crate::syscall::TmpfsFileInode;
@@ -951,8 +950,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
         let mut stat: Stat = unsafe { core::mem::zeroed() };
         stat.mode = 0o100755; // 假装它是个普通空文件，让 du 闭嘴
         stat.size = 0;
-        let mut user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, st as *const u8, core::mem::size_of::<Stat>()) );
-        user_buf.write(unsafe {core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())});
+        crate::mm::translated_write(token, st, stat);
         return 0;
     }
     let base_dir = if path_str.starts_with('/') {
@@ -975,8 +973,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
     match target_dentry {
         Some(dentry) => {
             let stat = dentry.inode.get_stat();
-            let mut user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, st as *const u8, core::mem::size_of::<Stat>()) );
-            user_buf.write(unsafe {core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())});
+            crate::mm::translated_write(token, st, stat);
             0
         }
         None => {

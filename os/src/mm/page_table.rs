@@ -384,7 +384,7 @@ pub fn try_translated_str(token: usize, ptr: *const u8) -> Option<String> {
 }
 
 /// Translate a ptr[u8] array through page table and return a reference of T
-pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
+/*pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
     let len = core::mem::size_of::<T>();
     assert!(prepare_user_read(token, ptr as usize, len), "translated_ref: user ptr is not readable");
     let page_table = PageTable::from_token(token);
@@ -397,20 +397,26 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
     } else {
         alloc::boxed::Box::leak(alloc::boxed::Box::new(translated_read(token, ptr)))
     }
-}
+}*/
 
 /// 从给定地址读取数据并返回T
 pub fn translated_read<T>(token: usize, ptr: *const T) -> T {
+    try_translated_read(token, ptr).unwrap_or_else(|| unsafe { core::mem::zeroed() })
+}
+
+pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
     let len = core::mem::size_of::<T>();
-    assert!(prepare_user_read(token, ptr as usize, len), "translated_read: user ptr is not readable");
+    if !prepare_user_read(token, ptr as usize, len) {
+        return None;
+    }
     let page_table = PageTable::from_token(token);
     let mut data = vec![0u8; len];
     let start_va = VirtAddr::from(ptr as usize);
     // 页内快路径：保持原有低开销行为
     if start_va.page_offset() + len <= PAGE_SIZE {
-        let pa = page_table
-            .translate_va(start_va)
-            .unwrap();
+        let Some(pa) = page_table.translate_va(start_va) else {
+            return None;
+        };
         let start = pa.0;
         let end = start + len;
         for (idx, addr) in (start..end).enumerate() {
@@ -420,25 +426,30 @@ pub fn translated_read<T>(token: usize, ptr: *const T) -> T {
         // 跨页路径：按虚拟地址逐字节翻译，避免假设物理地址连续
         for idx in 0..len {
             let va = VirtAddr::from((ptr as usize) + idx);
-            let pa = page_table.translate_va(va).unwrap();
+            let Some(pa) = page_table.translate_va(va) else {
+                return None;
+            };
             data[idx] = unsafe { *(pa.0 as *const u8) };
         }
     }
-    unsafe { core::ptr::read(data.as_ptr() as *const T) }
+    Some(unsafe { core::ptr::read(data.as_ptr() as *const T) })
 }
 
 /// 将用户空间的T写入给定地址
-pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
+
+pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) -> bool {
     let len = core::mem::size_of::<T>();
-    assert!(prepare_user_write(token, ptr as usize, len), "translated_write: user ptr is not writable");
+    if !prepare_user_write(token, ptr as usize, len) {
+        return false;
+    }
     let page_table = PageTable::from_token(token);
     let data = unsafe { core::slice::from_raw_parts((&value as *const T) as *const u8, len) };
     let start_va = VirtAddr::from(ptr as usize);
     // 页内快路径：保持原有低开销行为
     if start_va.page_offset() + len <= PAGE_SIZE {
-        let pa = page_table
-            .translate_va(start_va)
-            .unwrap();
+        let Some(pa) = page_table.translate_va(start_va) else {
+            return false;
+        };
         let start = pa.0;
         let end = start + len;
         for (idx, addr) in (start..end).enumerate() {
@@ -448,8 +459,12 @@ pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
         // 跨页路径：按虚拟地址逐字节翻译，避免假设物理地址连续
         for idx in 0..len {
             let va = VirtAddr::from((ptr as usize) + idx);
-            let pa = page_table.translate_va(va).unwrap();
+            let Some(pa) = page_table.translate_va(va) else {
+                return false;
+            };
             unsafe { *(pa.0 as *mut u8) = data[idx] };
         }
     }
+
+    true
 }
