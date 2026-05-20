@@ -1211,7 +1211,7 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
                 MemfdFlags::MFD_HUGE_8MB | MemfdFlags::MFD_HUGE_16MB |
                 MemfdFlags::MFD_HUGE_32MB | MemfdFlags::MFD_HUGE_256MB | MemfdFlags::MFD_HUGE_512MB |
                 MemfdFlags::MFD_HUGE_2GB | MemfdFlags::MFD_HUGE_16GB => {
-                    return EINVAL.as_isize();
+                    return ENODEV.as_isize(); // 不支持的巨页大小返回没有设备
                 },
                 MemfdFlags::MFD_HUGE_2MB => PageSize::Page2M,
                 MemfdFlags::MFD_HUGE_1GB => PageSize::Page1G,
