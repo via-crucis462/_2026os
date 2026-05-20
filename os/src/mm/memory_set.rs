@@ -1314,12 +1314,12 @@ impl MapArea {
                 .translate(current_vpn)
                 .unwrap()
                 .ppn()
-                .get_bytes_array()[page_offset..page_offset + src_len];
+                .get_bytes_array_with_size(self.page_size)[page_offset..page_offset + src_len];
             dst.copy_from_slice(&data[data_offset..data_offset + src_len]);
             
             data_offset += src_len;
             page_offset = 0;
-            current_vpn.step();
+            current_vpn.step_by(self.page_size.num_pages());
         }
     }
     /// 返回这段中的数据（如果framed）
@@ -1331,7 +1331,7 @@ impl MapArea {
         else {
             let mut data = Vec::new();
             for vpn in self.vpn_range {
-                let src = &page_table.translate(vpn).unwrap().ppn().get_bytes_array();
+                let src = &page_table.translate(vpn).unwrap().ppn().get_bytes_array_with_size(self.page_size);
                 data.extend_from_slice(src);
             }
             Some(data)

@@ -1,6 +1,7 @@
 //! File and filesystem-related syscalls
+use crate::PAGE_SIZE;
 use crate::fs::{OpenFlags, ROOT_DENTRY, Stat, Statx, file_name, make_dir, make_pipe, open_file, parent_path};
-use crate::mm::{translated_byte_buffer, translated_read, translated_str, translated_write, UserBuffer};
+use crate::mm::{PageSize, UserBuffer, translated_byte_buffer, translated_read, translated_str, translated_write};
 use crate::task::{current_task, current_user_token};
 use alloc::vec;
 use alloc::sync::Arc;
@@ -1166,8 +1167,78 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: i64, len: i64) -> isize {
     EBADF.as_isize()
 }
 
-/// 创建匿名内存文件
-pub fn sys_memfd_create(_name: *const u8, _flags: u32) -> isize {
-    trace!("kernel:pid[{}] sys_memfd_create NOT IMPLEMENTED", current_task().unwrap().process().pid.0);
-    ENOSYS.as_isize()
+// memfd flags
+bitflags::bitflags! {
+    pub struct MemfdFlags: u32 {
+        const MFD_CLOEXEC       = 0x0001;
+        const MFD_ALLOW_SEALING = 0x0002;
+        const MFD_HUGETLB       = 0x0004;
+        const MFD_NOEXEC_SEAL   = 0x0008;
+        const MFD_EXEC          = 0x0010;
+        
+        // 巨页大页掩码
+        const MFD_HUGE_MASK     = 0x3f << 26;
+        
+        // 常见的巨页大小
+        const MFD_HUGE_64KB     = 16 << 26;
+        const MFD_HUGE_512KB    = 19 << 26;
+        const MFD_HUGE_1MB      = 20 << 26;
+        const MFD_HUGE_2MB      = 21 << 26;
+        const MFD_HUGE_8MB      = 23 << 26;
+        const MFD_HUGE_16MB     = 24 << 26;
+        const MFD_HUGE_32MB     = 25 << 26;
+        const MFD_HUGE_256MB    = 28 << 26;
+        const MFD_HUGE_512MB    = 29 << 26;
+        const MFD_HUGE_1GB      = 30 << 26;
+        const MFD_HUGE_2GB      = 31 << 26;
+        const MFD_HUGE_16GB     = 34 << 26;
+    }
 }
+
+/// 创建匿名内存文件
+pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
+    let flags = match MemfdFlags::from_bits(flags) {
+        Some(f) => f,
+        None => return EINVAL.as_isize(),
+    };
+
+    // 解析页大小
+    let page_size = {
+        if flags.contains(MemfdFlags::MFD_HUGETLB) {
+            match flags.intersection(MemfdFlags::MFD_HUGE_MASK) {
+                // 不支持的巨页大小
+                MemfdFlags::MFD_HUGE_64KB | MemfdFlags::MFD_HUGE_512KB | MemfdFlags::MFD_HUGE_1MB | 
+                MemfdFlags::MFD_HUGE_8MB | MemfdFlags::MFD_HUGE_16MB |
+                MemfdFlags::MFD_HUGE_32MB | MemfdFlags::MFD_HUGE_256MB | MemfdFlags::MFD_HUGE_512MB |
+                MemfdFlags::MFD_HUGE_2GB | MemfdFlags::MFD_HUGE_16GB => {
+                    return EINVAL.as_isize();
+                },
+                MemfdFlags::MFD_HUGE_2MB => PageSize::Page2M,
+                MemfdFlags::MFD_HUGE_1GB => PageSize::Page1G,
+                _ => return EINVAL.as_isize(),
+            }
+        } else {
+            PageSize::Page4K
+        }
+    };
+
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let token = proc.inner_exclusive_access().get_user_token();
+    let name_str = translated_str(token, name);
+
+    // 创建 memfd 文件（只创建 inode + dentry，不映射 VPN）
+    let file = crate::fs::memfd::create_memfd(&name_str, page_size);
+
+    let mut inner = proc.inner_exclusive_access();
+    let fd = match inner.alloc_fd() {
+        Some(fd) => fd,
+        None => return EMFILE.as_isize(),
+    };
+    inner.set_fd(fd, file, flags.contains(MemfdFlags::MFD_CLOEXEC), 0);
+
+    trace!("kernel:pid[{}] sys_memfd_create: name='{}', page_size={:?}, fd={}",
+        task.process().pid.0, name_str, page_size, fd);
+    fd as isize
+}
+

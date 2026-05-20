@@ -21,7 +21,7 @@ impl FrameTracker {
     /// Create a new FrameTracker
     pub fn new(ppn: PhysPageNum, page_size: PageSize) -> Self {
         // page cleaning
-        let bytes_array = ppn.get_bytes_array();
+        let bytes_array = ppn.get_bytes_array_with_size(page_size);
         for i in bytes_array {
             *i = 0;
         }
@@ -50,9 +50,8 @@ impl Drop for FrameTracker {
     fn drop(&mut self) {
         let remain = frame_release_ref(self.ppn);
         if remain == 0 {
-            // 按页大小释放所有组成的基本页
-            let page_size = self.page_size;
-            frame_dealloc_raw(self.ppn, page_size);
+            // 按页大小释放
+            frame_dealloc_raw(self.ppn, self.page_size);
         }
     }
 }
