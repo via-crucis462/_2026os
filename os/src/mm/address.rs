@@ -194,6 +194,7 @@ impl PhysAddr {
 }
 impl PhysPageNum {
     /// Get the reference of page table(array of ptes)
+    /// pte 一定是按标准页组织的
     pub fn get_pte_array(&self) -> &'static mut [PageTableEntry] {
         let pa: PhysAddr = (*self).into();
         unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut PageTableEntry, PAGE_SIZE>>3) }
@@ -202,6 +203,11 @@ impl PhysPageNum {
     pub fn get_bytes_array(&self) -> &'static mut [u8] {
         let pa: PhysAddr = (*self).into();
         unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, PAGE_SIZE) }
+    }
+    /// 支持大页的版本
+    pub fn get_bytes_array_with_size(&self, page_size: super::PageSize) -> &'static mut [u8] {
+        let pa: PhysAddr = (*self).into();
+        unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, page_size.size()) }
     }
     /// Get the mutable reference of physical address
     pub fn get_mut<T>(&self) -> &'static mut T {

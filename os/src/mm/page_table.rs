@@ -272,9 +272,9 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
         if end_va.actual_page_offset(size) == 0 {
-            v.push(&mut ppn.get_bytes_array()[start_va.actual_page_offset(size)..]);
+            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..]);
         } else {
-            v.push(&mut ppn.get_bytes_array()[start_va.actual_page_offset(size)..end_va.actual_page_offset(size)]);
+            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..end_va.actual_page_offset(size)]);
         }
         start = end_va.into();
     }
