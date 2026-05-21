@@ -48,6 +48,7 @@ impl UserBuffer {
             current += copy_len;
         }
     }
+    /// buffer到buffer的版本，之前写东西实现的后来发现没必要，实际上很少用到
     pub fn read_into_buffer(&self, mut data: Self) -> isize {
         let mut i = 0;
         let mut j = 0;
@@ -65,6 +66,7 @@ impl UserBuffer {
         }
         data.len() as isize
     }
+    /// buffer到buffer的版本
     pub fn write_from_buffer(&mut self, data: Self) -> isize {
         let mut i = 0;
         let mut j = 0;

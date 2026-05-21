@@ -185,6 +185,12 @@ impl MemorySet {
             ".bss [{:#x}, {:#x})",
             sbss_with_stack as *const () as usize, ebss as *const () as usize
         );
+        
+        // 映射跳板页
+        // la64下不映射到内核空间
+        #[cfg(target_arch = "riscv64")]
+        memory_set.map_trampoline();
+
         info!("mapping .text section");
         memory_set.push(
             MapArea::new(
@@ -260,10 +266,7 @@ impl MemorySet {
                 ekernel_addr + DMA_SIZE,
             );
         }
-        // map trampoline
-        // la64下不映射到内核空间
-        #[cfg(target_arch = "riscv64")]
-        memory_set.map_trampoline();
+        // --- 等到大页映射完再映射标准页，避免产生碎片（虽然会被放进回收栈，影响很小） ---
 
         #[cfg(target_arch = "riscv64")]{
             info!("mapping physical memory");
@@ -273,12 +276,13 @@ impl MemorySet {
                     (MEMORY_END - 4096).into(),
                     MapType::Identical,
                     MapPermission::R | MapPermission::W,
-                    PageSize::Page4K // 非内核部分物理内存还是使用4K页
+                    PageSize::Page2M
                 ),
                 None,
                 ekernel as *const () as usize,
             );
         }
+
         // 两者均有MMIO空间，地址可能不同
         info!("mapping memory-mapped registers");
         for pair in MMIO {
@@ -294,6 +298,7 @@ impl MemorySet {
                 (*pair).0,
             );
         }
+
         memory_set
     }
     /// Include sections in elf and trampoline and TrapContext and user stack,
@@ -1080,6 +1085,7 @@ impl MemorySet {
         Ok(())
     }
     /// 处理缺页异常。如果触发异常的地址在合法区域内，则为其分配物理页；否则返回 false。
+    /// 这部分逻辑目前暂时是ai写的，没怎么用到，待后续完善&测试
     #[no_mangle]
     #[inline(never)]
     pub fn handle_page_fault(&mut self, bad_addr: usize, sp: usize) -> bool {

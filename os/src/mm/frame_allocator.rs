@@ -103,7 +103,7 @@ impl StackFrameAllocator {
             }
         }
     }
-    // 拆分大页到多个小页， 返回第一个页号
+    // 拆分大页到多个小页（未使用的放到回收栈）， 返回第一个页号
     fn split_into(base: usize, total: usize, unit: usize, recycler: &mut Vec<usize>) -> usize {
         for i in 1..total {
             recycler.push(base + i * unit);
@@ -252,6 +252,7 @@ pub fn frame_alloc(page_size: PageSize) -> Option<FrameTracker> {
     Some(FrameTracker::new(ppn, page_size))
 }
 /// 连续分配物理页帧，返回起始物理地址, 只允许标准页
+/// 不过目前未实现连续分配
 #[allow(unused)]
 pub fn frame_alloc_con(pages: usize) -> Option<PhysPageNum> {
     FRAME_ALLOCATOR.exclusive_access().alloc_con(pages)

@@ -47,3 +47,4 @@ pub fn do_munmap(addr: usize, length: usize) -> Result<(), i32> {
 }
 // 尽管文件映射在syscall中实现，但此处设置一个shared区域
 // （未实现）
+// 早期想法，似乎没必要
