@@ -2,7 +2,7 @@
 //! 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
 //! 内存管理也暂时放在此处
 
-use crate::mm::{translated_read, try_translated_str};
+use crate::mm::{translated_read, try_translated_read, try_translated_str};
 use crate::{get_hart_id};
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
@@ -27,7 +27,7 @@ lazy_static! {
 }
 
 pub use crate::{
-    arch::timer::{get_real_time_ns, get_time_ms, get_time_us, get_timer_ticks}, 
+    arch::timer::{ADJ_ESTERROR, ADJ_FREQUENCY, ADJ_MAXERROR, ADJ_MICRO, ADJ_NANO, ADJ_OFFSET, ADJ_OFFSET_SINGLESHOT, ADJ_OFFSET_SS_READ, ADJ_SETOFFSET, ADJ_STATUS, ADJ_TAI, ADJ_TICK, ADJ_TIMECONST, CLOCK_ADJ_ALLOWED_MODES, CLOCK_ADJ_RW_STATUS, CLOCK_ADJ_STATE, CLOCK_ADJ_VALID_STATUS, CLOCK_REALTIME_OFFSET_NS, ITimerVal, RtcTime, STA_CLOCKERR, STA_CLK, STA_DEL, STA_FLL, STA_FREQHOLD, STA_INS, STA_MODE, STA_NANO, STA_PLL, STA_PPSERROR, STA_PPSFREQ, STA_PPSJITTER, STA_PPSSIGNAL, STA_PPSTIME, STA_PPSWANDER, STA_UNSYNC, TIME_ERROR, TIME_OK, TimeSpec, TimeVal, Timex, get_real_time_ns, get_time_ms, get_time_us, get_timer_ticks}, 
     fs::*, 
     mm::{UserBuffer, mmap, translated_byte_buffer, translated_str, translated_byte_buffer_mut, translated_write}, 
     process::{
@@ -57,19 +57,6 @@ pub struct Termios {
     pub c_cc: [u8; 19], // 控制字符数组
 }
 #[repr(C)]
-pub struct RtcTime {
-    pub tm_sec: i32,
-    pub tm_min: i32,
-    pub tm_hour: i32,
-    pub tm_mday: i32,
-    pub tm_mon: i32,
-    pub tm_year: i32,
-    pub tm_wday: i32,
-    pub tm_yday: i32,
-    pub tm_isdst: i32,
-}
-
-#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Winsize {
     pub ws_row: u16,    // 行数
@@ -77,22 +64,6 @@ pub struct Winsize {
     pub ws_xpixel: u16, // 像素宽度 (通常不用，填 0)
     pub ws_ypixel: u16, // 像素高度 (通常不用，填 0)
 }
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct TimeVal {
-    pub sec: usize,
-    pub usec: usize,
-}
-
-
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct ITimerVal {
-    pub it_interval: TimeVal, // 周期触发间隔（如果是0代表单次触发）
-    pub it_value: TimeVal,    // 首次触发的剩余时间
-}
-
 
 
 
@@ -500,14 +471,45 @@ pub fn sys_setsid() -> isize {
 }
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
+fn clock_adj_has_invalid_mode_bits(modes: u32) -> bool {
+    let allowed = CLOCK_ADJ_ALLOWED_MODES | ADJ_OFFSET_SINGLESHOT | ADJ_OFFSET_SS_READ;
+    modes & !allowed != 0
+}
+
+fn clock_adj_write_status(old_status: i32, new_status: i32) -> i32 {
+    let preserved = old_status & !CLOCK_ADJ_RW_STATUS;
+    preserved | (new_status & CLOCK_ADJ_RW_STATUS)
+}
+
+fn clock_adj_result_from_status(status: i32) -> isize {
+    if status & STA_UNSYNC != 0 {
+        TIME_ERROR
+    } else {
+        TIME_OK
+    }
+}
+
+fn current_wallclock_ns() -> i64 {
+    let base_ns = get_real_time_ns() as i128;
+    let offset_ns = *CLOCK_REALTIME_OFFSET_NS.lock() as i128;
+    let adjusted = base_ns + offset_ns;
+
+    if adjusted <= 0 {
+        0
+    } else if adjusted > i64::MAX as i128 {
+        i64::MAX
+    } else {
+        adjusted as i64
+    }
+}
+
 pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
     if tp as usize == 0 {
         return EFAULT.as_isize();
     }
     let (sec, nsec) = match clock_id {
         CLOCK_REALTIME => {
-            // 
-            let total_ns = get_real_time_ns() as usize; 
+            let total_ns = current_wallclock_ns() as usize;
             (total_ns / 1_000_000_000, total_ns % 1_000_000_000)
             
         }
@@ -2191,7 +2193,166 @@ pub fn sys_times(tms_ptr: *mut usize) -> isize {
     let current_ms = get_time_ms();
     current_ms as isize
 }
+pub fn sys_clock_adjtime(which_clock: i32, tp: *mut Timex) -> isize {
+    if tp.is_null() {
+        return EFAULT.as_isize();
+    }
+    if which_clock != CLOCK_REALTIME as i32 {
+        return EINVAL.as_isize();
+    }
 
+    let token = current_user_token();
+    let Some(mut tx) = try_translated_read(token, tp as *const Timex) else {
+        return EFAULT.as_isize();
+    };
+
+    if clock_adj_has_invalid_mode_bits(tx.modes) {
+        return EINVAL.as_isize();
+    }
+
+    if tx.status & !CLOCK_ADJ_VALID_STATUS != 0 {
+        return EINVAL.as_isize();
+    }
+
+    let requires_privilege = tx.modes != 0 && tx.modes != ADJ_OFFSET_SS_READ;
+    if requires_privilege {
+        let task = current_task().unwrap();
+        let proc = task.process();
+        if proc.inner_exclusive_access().euid != 0 {
+            return EPERM.as_isize();
+        }
+    }
+
+    let mut state = CLOCK_ADJ_STATE.lock();
+    if tx.modes == ADJ_OFFSET_SS_READ {
+        tx.offset = state.pending_single_shot;
+    } else {
+        if tx.modes & ADJ_OFFSET_SINGLESHOT == ADJ_OFFSET_SINGLESHOT {
+            state.pending_single_shot = tx.offset;
+            state.offset = tx.offset;
+        }
+
+        if tx.modes & ADJ_OFFSET != 0 {
+            if !(-512_000..=512_000).contains(&tx.offset) {
+                return EINVAL.as_isize();
+            }
+            state.offset = tx.offset;
+        }
+        if tx.modes & ADJ_FREQUENCY != 0 {
+            if !(-32_768_000..=32_768_000).contains(&tx.freq) {
+                return EINVAL.as_isize();
+            }
+            state.freq = tx.freq;
+        }
+        if tx.modes & ADJ_MAXERROR != 0 {
+            state.maxerror = tx.maxerror;
+        }
+        if tx.modes & ADJ_ESTERROR != 0 {
+            state.esterror = tx.esterror;
+        }
+        if tx.modes & ADJ_STATUS != 0 {
+            state.status = clock_adj_write_status(state.status, tx.status);
+        }
+        if tx.modes & ADJ_TIMECONST != 0 {
+            state.constant = tx.constant;
+        }
+        if tx.modes & ADJ_TAI != 0 {
+            state.tai = tx.tai;
+        }
+        if tx.modes & ADJ_NANO != 0 {
+            state.is_nano = true;
+            state.status |= STA_NANO;
+        }
+        if tx.modes & ADJ_MICRO != 0 {
+            state.is_nano = false;
+            state.status &= !STA_NANO;
+        }
+        if tx.modes & ADJ_TICK != 0 {
+            if !(9_000..=11_000).contains(&tx.tick) {
+                return EINVAL.as_isize();
+            }
+            state.tick = tx.tick;
+        }
+        if tx.modes & ADJ_SETOFFSET != 0 {
+            state.offset = tx.time.tv_sec.saturating_mul(1_000_000) + tx.time.tv_usec;
+        }
+    }
+
+    let now_ns = current_wallclock_ns();
+    tx.offset = state.offset;
+    tx.freq = state.freq;
+    tx.maxerror = state.maxerror;
+    tx.esterror = state.esterror;
+    tx.status = state.status;
+    tx.constant = state.constant;
+    tx.precision = if state.is_nano { 1 } else { 1_000 };
+    tx.tolerance = 32768000;
+    tx.time.tv_sec = now_ns / 1_000_000_000;
+    tx.time.tv_usec = if state.is_nano {
+        now_ns % 1_000_000_000
+    } else {
+        (now_ns % 1_000_000_000) / 1_000
+    };
+    tx.tick = state.tick;
+    tx.ppsfreq = 0;
+    tx.jitter = 0;
+    tx.shift = 0;
+    tx.stabil = 0;
+    tx.jitcnt = 0;
+    tx.calcnt = 0;
+    tx.errcnt = 0;
+    tx.stbcnt = 0;
+    tx.tai = state.tai;
+
+    if !translated_write(token, tp, tx) {
+        return EFAULT.as_isize();
+    }
+
+    clock_adj_result_from_status(state.status)
+}
+pub fn sys_clock_settime(which_clock: i32, tp: *const TimeSpec) -> isize {
+    if tp.is_null() {
+        return EFAULT.as_isize();
+    }
+    if which_clock != CLOCK_REALTIME as i32 {
+        return EINVAL.as_isize();
+    }
+
+    let token = current_user_token();
+    let timespec = match try_translated_read(token, tp) {
+        Some(ts) => ts,
+        None => return EFAULT.as_isize(),
+    };
+
+    if timespec.tv_nsec >= 1_000_000_000 {
+        return EINVAL.as_isize();
+    }
+
+    let task = current_task().unwrap();
+    let proc = task.process();
+    if proc.inner_exclusive_access().euid != 0 {
+        return EPERM.as_isize();
+    }
+
+    let requested_ns = (timespec.tv_sec as i128)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(timespec.tv_nsec as i128);
+    let base_ns = get_real_time_ns() as i128;
+    let offset_ns = requested_ns.saturating_sub(base_ns);
+    let offset_ns = offset_ns.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+
+    *CLOCK_REALTIME_OFFSET_NS.lock() = offset_ns;
+
+    let mut state = CLOCK_ADJ_STATE.lock();
+    state.status &= !STA_UNSYNC;
+    if state.is_nano {
+        state.status |= STA_NANO;
+    } else {
+        state.status &= !STA_NANO;
+    }
+
+    0
+}
 pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> isize {
     let token = current_user_token();
     let mut user_buf = translated_byte_buffer(token, buf, len);

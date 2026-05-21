@@ -66,6 +66,7 @@ const SYSCALL_GET_ROBUST_LIST: usize = 100;
 
 const SYSCALL_SLEEP:usize =101;
 const SYSCALL_SETITIMER: usize = 103;
+const SYSCALL_CLOCK_SETTIME: usize = 112;
 const SYSCALL_SYSLOG: usize = 116;
 /// yield syscall
 const SYSCALL_SCHED_GETAFFINITY: usize = 123;
@@ -132,6 +133,7 @@ const SYSCALL_MSYNC: usize = 227;
 /// waitpid syscall
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
+const SYSCALL_CLOCK_ADJTIME: usize = 266;
 /// statx syscall
 const SYSCALL_STATX: usize = 291;
 /// spawn syscall
@@ -346,6 +348,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RESQ => sys_resq(),
         SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
+        SYSCALL_CLOCK_ADJTIME => sys_clock_adjtime(args[0] as i32, args[1] as *mut Timex),
+        SYSCALL_CLOCK_SETTIME => sys_clock_settime(args[0] as i32, args[1] as *const TimeSpec),
         _ => {
             warn!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
