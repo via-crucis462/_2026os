@@ -1261,7 +1261,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
 
     if pid > 0 {
         // 正常逻辑：发送给单个指定 PID 的进程
-        println!("sys_kill: sending signal {} to PID {}", signum, pid);
+        // println!("sys_kill: sending signal {} to PID {}", signum, pid);
         if let Some(proc) = get_process(pid as usize) {
             if signum == 0 { return 0; } // 探测成功
 

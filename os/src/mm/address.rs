@@ -121,10 +121,12 @@ impl VirtAddr {
     pub fn actual_page_offset(&self, page_size: super::PageSize) -> usize {
         self.0 & (page_size.size() - 1)
     }
-
     /// Check if the virtual address is aligned by page size
     pub fn std_aligned(&self) -> bool {
         self.std_page_offset() == 0
+    }
+    pub fn actual_aligned(&self, page_size: super::PageSize) -> bool {
+        self.actual_page_offset(page_size) == 0
     }
 }
 impl From<VirtAddr> for VirtPageNum {
@@ -151,9 +153,16 @@ impl PhysAddr {
     pub fn std_page_offset(&self) -> usize {
         self.0 & (PAGE_SIZE - 1)
     }
+    /// 按照实际页大小计算偏移量，适用于大页
+    pub fn actual_page_offset(&self, page_size: super::PageSize) -> usize {
+        self.0 & (page_size.size() - 1)
+    }
     /// Check if the physical address is aligned by page size
     pub fn std_aligned(&self) -> bool {
         self.std_page_offset() == 0
+    }
+    pub fn actual_aligned(&self, page_size: super::PageSize) -> bool {
+        self.actual_page_offset(page_size) == 0
     }
 }
 impl From<PhysAddr> for PhysPageNum {

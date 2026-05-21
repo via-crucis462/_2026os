@@ -10,6 +10,7 @@ use lazy_static::*;
 
 
 /// tracker for physical page frame allocation and deallocation
+/// 现在的实现带引用计数
 pub struct FrameTracker {
     /// physical page number
     pub ppn: PhysPageNum,
@@ -67,11 +68,16 @@ trait FrameAllocator {
     fn alloc_con(&mut self, pages: usize) -> Option<PhysPageNum>;
 }
 /// an implementation for frame allocator
+/// 当前实现与伙伴系统有相似处
+/// 如果发现偏移未对齐，则自动向上取整并把中间放进recycled
+/// 同时，分配页时优先从本级回收页中取，其次从更大页拆分
+/// 1G页虽然理论支持但硬件内存不满足
 pub struct StackFrameAllocator {
     current: usize,
     end: usize,
     recycled_std: Vec<usize>,
     recycled_mega: Vec<usize>,
+    // 注：当前内存其实不够分配1G大页，但架构支持，所以仍然这样写
     recycled_giga: Vec<usize>,
 }
 
@@ -79,8 +85,32 @@ impl StackFrameAllocator {
     pub fn init(&mut self, l: PhysPageNum, r: PhysPageNum) {
         self.current = l.0;
         self.end = r.0;
-        // trace!("last {} Physical Frames.", self.end - self.current);
     }
+    // 按大页优先顺序回收范围内的页
+    fn recycle_range(&mut self, mut pos: usize, end: usize) {
+        let mega = PageSize::Page2M.num_pages();
+        let giga = PageSize::Page1G.num_pages();
+        while pos < end {
+            if pos % giga == 0 && end - pos >= giga {
+                self.recycled_giga.push(pos);
+                pos += giga;
+            } else if pos % mega == 0 && end - pos >= mega {
+                self.recycled_mega.push(pos);
+                pos += mega;
+            } else {
+                self.recycled_std.push(pos);
+                pos += 1;
+            }
+        }
+    }
+    // 拆分大页到多个小页， 返回第一个页号
+    fn split_into(base: usize, total: usize, unit: usize, recycler: &mut Vec<usize>) -> usize {
+        for i in 1..total {
+            recycler.push(base + i * unit);
+        }
+        base
+    }
+    /// 注意是标准页
     pub fn free_frames(&self) -> usize {
         // 未曾分配过的页框数 (end - current) + 已经被释放回收的页框数
         self.end - self.current + self.recycled_std.len() + self.recycled_mega.len() + self.recycled_giga.len()
@@ -107,35 +137,59 @@ impl FrameAllocator for StackFrameAllocator {
         }
     }
     fn alloc_std(&mut self) -> Option<PhysPageNum> {
+        // 优先直接从标准页链表取
         if let Some(ppn) = self.recycled_std.pop() {
             Some(ppn.into())
-        } else if self.current == self.end {
-            None
-        } else {
+        } else if let Some(mega_ppn) = self.recycled_mega.pop() {
+            // 其次从 2MB 大页回收链表拆分
+            let mega_pages = PageSize::Page2M.num_pages();
+            Some(Self::split_into(mega_ppn, mega_pages, 1, &mut self.recycled_std).into())
+        } else if self.current < self.end {
             self.current += 1;
             Some((self.current - 1).into())
+        } else if let Some(giga_ppn) = self.recycled_giga.pop() {
+            // 两级拆分
+            let mega_pages = PageSize::Page2M.num_pages();
+            let mega_in_giga = PageSize::Page1G.num_pages() / mega_pages;
+            let first_mega = Self::split_into(giga_ppn, mega_in_giga, mega_pages, &mut self.recycled_mega);
+            Some(Self::split_into(first_mega, mega_pages, 1, &mut self.recycled_std).into())
+        } else {
+            None
         }
     }
     fn alloc_mega(&mut self) -> Option<PhysPageNum> {
         let mega_pages = PageSize::Page2M.num_pages();
+        // 优先直接取
         if let Some(ppn) = self.recycled_mega.pop() {
-            Some(ppn.into())
-        } else if self.current + mega_pages > self.end {
+            return Some(ppn.into());
+        // 其次拆分1G
+        } else if let Some(giga_ppn) = self.recycled_giga.pop() {
+            let mega_in_giga = PageSize::Page1G.num_pages() / mega_pages;
+            return Some(Self::split_into(giga_ppn, mega_in_giga, mega_pages, &mut self.recycled_mega).into());
+        }
+        // 回收页不满足要求，确保对齐后分配新的
+        let aligned_current = ((self.current + mega_pages - 1) / mega_pages) * mega_pages;
+        if aligned_current + mega_pages > self.end {
             None
         } else {
-            self.current += mega_pages;
-            Some((self.current - mega_pages).into())
+            self.recycle_range(self.current, aligned_current);
+            self.current = aligned_current + mega_pages;
+            Some(aligned_current.into())
         }
     }
     fn alloc_giga(&mut self) -> Option<PhysPageNum> {
         let giga_pages = PageSize::Page1G.num_pages();
         if let Some(ppn) = self.recycled_giga.pop() {
-            Some(ppn.into())
-        } else if self.current + giga_pages > self.end {
+            return Some(ppn.into());
+        }
+        // 确保对齐后分配新的
+        let aligned_current = ((self.current + giga_pages - 1) / giga_pages) * giga_pages;
+        if aligned_current + giga_pages > self.end {
             None
         } else {
-            self.current += giga_pages;
-            Some((self.current - giga_pages).into())
+            self.recycle_range(self.current, aligned_current);
+            self.current = aligned_current + giga_pages;
+            Some(aligned_current.into())
         }
     }
     fn dealloc(&mut self, ppn: PhysPageNum, page_size: PageSize) {

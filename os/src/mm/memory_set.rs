@@ -177,10 +177,6 @@ impl MemorySet {
     /// Without kernel stacks.
     pub fn new_kernel() -> Self {
         let mut memory_set = Self::new_bare();
-        // map trampoline
-        // la64下不映射到内核空间
-        #[cfg(target_arch = "riscv64")]
-        memory_set.map_trampoline();
         // map kernel sections
         info!(".text [{:#x}, {:#x})", stext as *const () as usize, etext as *const () as usize);
         info!(".rodata [{:#x}, {:#x})", srodata as *const () as usize, erodata as *const () as usize);
@@ -196,7 +192,7 @@ impl MemorySet {
                 (etext as *const () as usize).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::X,
-                PageSize::Page4K
+                PageSize::Page2M
             ),
             None,
             stext as *const () as usize,
@@ -208,7 +204,7 @@ impl MemorySet {
                 (erodata as *const () as usize).into(),
                 MapType::Identical,
                 MapPermission::R,
-                PageSize::Page4K
+                PageSize::Page2M
             ),
             None,
             srodata as *const () as usize,
@@ -220,7 +216,7 @@ impl MemorySet {
                 (edata as *const () as usize).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::W,
-                PageSize::Page4K
+                PageSize::Page2M
             ),
             None,
             sdata as *const () as usize,
@@ -232,7 +228,7 @@ impl MemorySet {
                 (ebss as *const () as usize).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::W,
-                PageSize::Page4K
+                PageSize::Page2M
             ),
             None,
             sbss_with_stack as *const () as usize,
@@ -264,6 +260,11 @@ impl MemorySet {
                 ekernel_addr + DMA_SIZE,
             );
         }
+        // map trampoline
+        // la64下不映射到内核空间
+        #[cfg(target_arch = "riscv64")]
+        memory_set.map_trampoline();
+
         #[cfg(target_arch = "riscv64")]{
             info!("mapping physical memory");
             memory_set.push(
@@ -272,7 +273,7 @@ impl MemorySet {
                     (MEMORY_END - 4096).into(),
                     MapType::Identical,
                     MapPermission::R | MapPermission::W,
-                    PageSize::Page4K
+                    PageSize::Page4K // 非内核部分物理内存还是使用4K页
                 ),
                 None,
                 ekernel as *const () as usize,
@@ -1010,18 +1011,23 @@ impl MemorySet {
                 let delete_left = a_start >= start_vpn; // 目标区域覆盖了当前块的左侧
                 let delete_right = a_end <= end_vpn;    // 目标区域覆盖了当前块的右侧
 
+                let step = area.page_size.num_pages();
                 if delete_left && delete_right {
                     // 情况1：All（当前块被目标区域完全包裹，全部删掉）
-                    for vpn in VPNRange::new(a_start, a_end) {
+                    let mut vpn = a_start;
+                    while vpn < a_end {
                         area.unmap_one(&mut self.page_table, vpn);
+                        vpn.step_by(step);
                     }
                     area.resize(a_start, a_start); // 长度设为0，稍后统一 retain 清理
                     
                 } else if !delete_left && !delete_right {
                     // 情况2：Split（目标区域在当前块中间，一分为二）
                     // 2.1 清理中间被 unmap 的页表和物理页
-                    for vpn in VPNRange::new(start_vpn, end_vpn) {
+                    let mut vpn = start_vpn;
+                    while vpn < end_vpn {
                         area.unmap_one(&mut self.page_table, vpn);
+                        vpn.step_by(step);
                     }
                     // 2.2 切出右半部分保留的物理帧
                     let right_frames = area.data_frames.split_off(&end_vpn);
@@ -1040,15 +1046,19 @@ impl MemorySet {
                     
                 } else if delete_left {
                     // 情况3：Inc_Left（删掉左边部分）
-                    for vpn in VPNRange::new(a_start, end_vpn) {
+                    let mut vpn = a_start;
+                    while vpn < end_vpn {
                         area.unmap_one(&mut self.page_table, vpn);
+                        vpn.step_by(step);
                     }
                     area.resize(end_vpn, a_end);
                     
                 } else if delete_right {
                     // 情况4：Inc_Right（删掉右边部分）
-                    for vpn in VPNRange::new(start_vpn, a_end) {
+                    let mut vpn = start_vpn;
+                    while vpn < a_end {
                         area.unmap_one(&mut self.page_table, vpn);
+                        vpn.step_by(step);
                     }
                     area.resize(a_start, start_vpn);
                 }
@@ -1269,27 +1279,39 @@ impl MapArea {
         }
     }
     pub fn map(&mut self, page_table: &mut PageTable) {
-        for vpn in self.vpn_range {
+        let step = self.page_size.num_pages();
+        let mut vpn = self.vpn_range.get_start();
+        while vpn < self.vpn_range.get_end() {
             self.map_one(page_table, vpn, self.page_size);
+            vpn.step_by(step);
         }
     }
     pub fn unmap(&mut self, page_table: &mut PageTable) {
-        for vpn in self.vpn_range {
+        let step = self.page_size.num_pages();
+        let mut vpn = self.vpn_range.get_start();
+        while vpn < self.vpn_range.get_end() {
             self.unmap_one(page_table, vpn);
+            vpn.step_by(step);
         }
     }
     #[allow(unused)]
     pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
-        for vpn in VPNRange::new(new_end, self.vpn_range.get_end()) {
-            self.unmap_one(page_table, vpn)
+        let step = self.page_size.num_pages();
+        let mut vpn = new_end;
+        while vpn < self.vpn_range.get_end() {
+            self.unmap_one(page_table, vpn);
+            vpn.step_by(step);
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
     }
     #[allow(unused)]
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
-        for vpn in VPNRange::new(self.vpn_range.get_end(), new_end) {
+        let step = self.page_size.num_pages();
+        let mut vpn = self.vpn_range.get_end();
+        while vpn < new_end {
             trace!("MapArea::append_to: old vpn end={:#x} , mapping new page vpn={:#x}", self.vpn_range.get_end().0, vpn.0);
-            self.map_one(page_table, vpn, self.page_size)
+            self.map_one(page_table, vpn, self.page_size);
+            vpn.step_by(step);
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
     }
@@ -1330,9 +1352,12 @@ impl MapArea {
         }
         else {
             let mut data = Vec::new();
-            for vpn in self.vpn_range {
+            let step = self.page_size.num_pages();
+            let mut vpn = self.vpn_range.get_start();
+            while vpn < self.vpn_range.get_end() {
                 let src = &page_table.translate(vpn).unwrap().ppn().get_bytes_array_with_size(self.page_size);
                 data.extend_from_slice(src);
+                vpn.step_by(step);
             }
             Some(data)
         }

@@ -220,6 +220,7 @@ impl PageTable {
     pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
         self.find_pte(va.clone().std_floor()).map(|(pte, size)| {
             let aligned_pa: PhysAddr = pte.ppn().into();
+            assert!(aligned_pa.actual_aligned(size), "translate_va: pa {:#x} is not aligned to page size {:#x}", aligned_pa.0, size.size());
             let offset = va.actual_page_offset(size);
             let aligned_pa_usize: usize = aligned_pa.into();
             (aligned_pa_usize + offset).into()
