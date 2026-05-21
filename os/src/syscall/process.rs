@@ -1156,7 +1156,9 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                 if exit_code_ptr as usize != 0 {
                     translated_write(proc_inner.memory_set.token(), exit_code_ptr, status);
                 }
-
+                drop(proc_inner);
+                // 从全局进程表里删除
+                crate::process::remove_process(child_pid);
                 return child_pid as isize;
             }
         }
@@ -1241,7 +1243,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
 }
 pub fn sys_kill(pid: isize, signum: i32) -> isize {
     if signum < 0 || signum > 64 {
-        return -22; // EINVAL
+        return EINVAL.as_isize();
     }
 
     let current_task = current_task().unwrap();
@@ -1253,12 +1255,13 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
     } else {
         match SignalFlags::from_bits(1 << (signum - 1)) {
             Some(f) => Some(f),
-            None => return -22,
+            None => return EINVAL.as_isize(),
         }
     };
 
     if pid > 0 {
         // 正常逻辑：发送给单个指定 PID 的进程
+        println!("sys_kill: sending signal {} to PID {}", signum, pid);
         if let Some(proc) = get_process(pid as usize) {
             if signum == 0 { return 0; } // 探测成功
 
@@ -1291,7 +1294,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
             }
             return 0;
         } else {
-            return -3; // ESRCH
+            return ESRCH.as_isize();
         }
     } else if pid == 0 || pid < -1 {
         //   进阶逻辑：广播给整个进程组！
@@ -1309,7 +1312,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
                     }
                 }
             }
-            return if success { 0 } else { -3 };
+            return if success { 0 } else { ESRCH.as_isize() };
         }
 
         let flag = flag.unwrap();
@@ -1330,7 +1333,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         }
 
         if matched_tasks.is_empty() {
-            return -3; // ESRCH
+            return ESRCH.as_isize(); // 没有找到任何匹配的进程组
         }
 
         //   Phase 2: 无 PCB 锁，逐个拿 TCB 锁插入信号并唤醒
@@ -1353,7 +1356,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         return 0;
     }
 
-    -1 // 未知情况
+    panic!("sys_kill: should not reach here, pid={}", pid);
 }
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
@@ -2295,6 +2298,9 @@ pub struct SigInfo {
     pub _pad: [u32; 29], 
 }
 pub type SigSet = usize;
+
+/// ！！！目前的实现似乎始终超时，相关内容待人工重写！！！
+/// 
 /// **系统调用：rt_sigtimedwait (0x81)**
 /// 
 /// ### 功能描述

@@ -168,7 +168,6 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let mut orphan_children = alloc::vec::Vec::new();
     
     if proc_inner.is_zombie() {
-        crate::process::remove_process(pid);
         orphan_children = core::mem::take(&mut proc_inner.children);
         if !orphan_children.is_empty() {
             warn!("[kernel] Process {} orphans {} children to initproc", pid, orphan_children.len());
