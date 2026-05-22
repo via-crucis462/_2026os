@@ -535,6 +535,8 @@ const LOOP_SET_STATUS64: u32 = 0x4C04; //设置 Loop 设备的状态（使用 Lo
 const LOOP_GET_STATUS64: u32 = 0x4C05; //获取 Loop 设备的状态（使用 LoopInfo64 结构体）
 const LOOP_SET_STATUS: u32 = 0x4C02; //设置 Loop 设备的状态
 const LOOP_CTL_GET_FREE: u32 = 0x4C82; //获取一个空闲的 Loop 设备编号
+const LOOP_SET_BLOCK_SIZE: u32 = 0x4C09;
+const LOOP_CONFIGURE: u32 = 0x4C0A;
 const BLKGETSIZE64: u32 = 0x80081272; // BLKGETSIZE64
 
 
@@ -555,6 +557,9 @@ struct LoopInfo64 {
     lo_init: [u64; 2],
 }
 
+/// ioctl
+/// io设备控制系统调用
+/// 虽然loop设备驱动实现好了，但这里部分loop设备操作是伪实现的
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
@@ -734,6 +739,24 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             }
         }
         LOOP_SET_STATUS64 | LOOP_SET_STATUS => {
+            0
+        }
+        LOOP_SET_BLOCK_SIZE => {
+            let bs = argp;
+            if bs < 512 || bs > 4096 || bs.count_ones() != 1 {
+                return EINVAL.as_isize();
+            }
+            0
+        }
+        LOOP_CONFIGURE => {
+            let fd = translated_read(token, argp as *const i32);
+            let bs = translated_read(token, (argp + 4) as *const u32) as usize;
+            if fd < 0 {
+                return EBADF.as_isize();
+            }
+            if bs > 0 && (bs < 512 || bs > 4096 || bs.count_ones() != 1) {
+                return EINVAL.as_isize();
+            }
             0
         }
         0x5402 => { /* TCSETS */

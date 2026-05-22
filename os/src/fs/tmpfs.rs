@@ -290,6 +290,17 @@ pub fn setup_oscomp_env() {
     let usr_bin_dentry = usr_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new()));
     let lib_dentry = root.insert("lib".to_string(), Arc::new(TmpfsDirInode::new()));
     let lib64_dentry = root.insert("lib64".to_string(), Arc::new(TmpfsDirInode::new()));
+    
+    // loop测例检查的文件
+    let lib_modules = lib_dentry.insert("modules".to_string(), Arc::new(TmpfsDirInode::new()));
+    let lib_modules_rcore = lib_modules.insert("5.10.0-rcore".to_string(), Arc::new(TmpfsDirInode::new()));
+    lib_modules_rcore.insert("modules.builtin".to_string(), Arc::new(TmpfsFileInode::new_with_data(b"kernel/drivers/block/loop.ko\n")));
+    lib_modules_rcore.insert("modules.dep".to_string(), Arc::new(TmpfsFileInode::new_with_data(b"")));
+    
+    // loop测例检查的文件
+    let sys_dentry = root.insert("sys".to_string(), Arc::new(TmpfsDirInode::new()));
+    let sys_module_dentry = sys_dentry.insert("module".to_string(), Arc::new(TmpfsDirInode::new()));
+    sys_module_dentry.insert("loop".to_string(), Arc::new(TmpfsDirInode::new()));
 
     // 3. 将 Busybox 和 libc 的真实 Inode 映射进虚拟目录
     if let Some(musl_dir) = root.find_tree("/musl", true) {
