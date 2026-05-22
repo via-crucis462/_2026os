@@ -950,7 +950,14 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             return EFAULT.as_isize();
         }
     };
-     
+     if path_str.len() >= 4096 { // PATH_MAX
+        return ENAMETOOLONG.as_isize(); 
+    }
+    for comp in path_str.split('/') {
+        if comp.len() > 255 {
+            return ENAMETOOLONG.as_isize(); 
+        }
+    }
     //println!("exec: normalized path: '{}'", path_str);
 
 
@@ -982,10 +989,16 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     trace!("[kernel] sys_exec: before open_file");
     
     // 1. 尝试正常打开主程序
-    let mut app_inode_opt = open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY);
+    let mut app_inode_opt = open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY,0);
 
     // 2. 继续执行逻辑
     if let Some(mut app_inode) = app_inode_opt {
+        let stat = app_inode.inode.get_stat();
+        let is_dir = (stat.mode & 0o170000) == 0o040000; 
+        let can_exec = (stat.mode & 0o111) != 0;        
+        if is_dir || !can_exec {
+            return EACCES.as_isize();
+        }
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         
         let app_name = app_inode.get_dentry().name.clone();
@@ -994,7 +1007,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         if app_name.ends_with(".sh") {
             info!("[kernel] sys_exec: detected script '{}', trying to execute with busybox", app_name);
             let busybox = "/musl/busybox";
-            if let Some(inode) = open_file(cwd.clone(), busybox, OpenFlags::RDONLY) {
+            if let Some(inode) = open_file(cwd.clone(), busybox, OpenFlags::RDONLY,0) {
                 let mut new_args = vec!["musl/busybox".to_string(), "sh".to_string()];
                 // 如果脚本没带参数，把脚本路径加进去
                 if args_vec.len() <= 1 { new_args.push(path_str.clone()); }
@@ -1029,6 +1042,25 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         // exec 成功后不会回到旧程序，返回 0 可避免 trap 收尾把 argc 写进新程序 a0。
         0
     } else {
+        let mut check_path = alloc::string::String::new();
+        if path_str.starts_with('/') { check_path.push('/'); }
+        
+        let comps: alloc::vec::Vec<&str> = path_str.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+        for i in 0..comps.len() {
+            if i > 0 && !check_path.ends_with('/') { check_path.push('/'); }
+            check_path.push_str(comps[i]);
+            // 如果当前不是最后一段路径，或者原路径明确以 '/' 结尾（如 testfile/），这一段必须是目录
+            let require_dir = i < comps.len() - 1 || path_str.ends_with('/');
+            if require_dir {
+                if let Some(node) = cwd.find_tree(&check_path, true) {
+                    let stat = node.inode.get_stat();
+                    let is_dir = (stat.mode & 0o170000) == 0o040000;
+                    if !is_dir {
+                        return ENOTDIR.as_isize(); // ENOTDIR: 路径中间遇到了非目录文件
+                    }
+                }
+            }
+        }
         //println!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
         ENOENT.as_isize()
     }

@@ -30,17 +30,18 @@ pub struct TmpfsFileInode {
 }
 
 impl TmpfsFileInode {
-    pub fn new() -> Self {
+    pub fn new(mode: u32) -> Self {
+        let full_mode = 0o100000 | (mode & 0o7777);
         Self {
             ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
             pages: Mutex::new(BTreeMap::new()),
             size: Mutex::new(0),
-            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(0o100777), 0, 0)),
+            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(full_mode as _), 0, 0)),
         }
     }
 
     pub fn new_with_data(data: &[u8]) -> Self {
-        let inode = Self::new();
+        let inode = Self::new(0o777);
         inode.write_at(0, data); 
         inode
     }
@@ -204,11 +205,12 @@ pub struct TmpfsDirInode {
 }
 
 impl TmpfsDirInode {
-    pub fn new() -> Self {
+    pub fn new(mode: u32) -> Self {
+        let full_mode = 0o040000 | (mode & 0o7777); // S_IFDIR
         Self {
             ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
             entries: Mutex::new(BTreeMap::new()),
-            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(0o040777), 0, 0)),
+            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(full_mode as _), 0, 0)),
         }
     }
     pub fn insert(&self, name: String, inode: Arc<dyn VfsInode>) -> Arc<dyn VfsInode> {
@@ -223,10 +225,12 @@ impl super::VfsInode for TmpfsDirInode {
     fn get_size(&self) -> usize { 0 }
     
     fn get_stat(&self) -> super::Stat {
+        let perms = self.perms.lock();
+        let (mode, uid, gid) = (perms.mode.bits(), perms.uid, perms.gid);
         super::Stat {
             dev: 0, 
             ino: self.ino as u64, 
-            mode: 0o040777, nlink: 2,
+            mode: mode as u32, nlink: 2,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
             blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
@@ -281,14 +285,14 @@ impl super::VfsInode for TmpfsDirInode {
         self.entries.lock().get(name).cloned()
     }
 
-    fn create_file(&self, name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> {
-        let new_file: Arc<dyn super::VfsInode> = Arc::new(TmpfsFileInode::new());
+    fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn super::VfsInode>> {
+       let new_file: Arc<dyn super::VfsInode> = Arc::new(TmpfsFileInode::new(mode));
         self.entries.lock().insert(name.to_string(), new_file.clone());
         Some(new_file)
     }
 
-    fn create_dir(&self, name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> {
-        let new_dir: Arc<dyn super::VfsInode> = Arc::new(TmpfsDirInode::new());
+    fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn super::VfsInode>> {
+        let new_dir: Arc<dyn super::VfsInode> = Arc::new(TmpfsDirInode::new(mode));
         self.entries.lock().insert(name.to_string(), new_dir.clone());
         Some(new_dir)
     }
@@ -320,28 +324,28 @@ pub fn setup_oscomp_env() {
     let root = ROOT_DENTRY.clone();
 
     // 1. 挂载 /tmp 
-    root.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new()));
+    root.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     info!("[VFS] Mounted /tmp");
 
     // 2. 挂载 bin, sbin, usr 等虚拟目录
-    let etc_dentry = root.insert("etc".to_string(), Arc::new(TmpfsDirInode::new()));
+    let etc_dentry = root.insert("etc".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let passwd_content = "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
     let group_content = "root:x:0:\nnobody:x:65534:\n";
     
     etc_dentry.insert("passwd".to_string(), Arc::new(TmpfsFileInode::new_with_data(passwd_content.as_bytes())));
     etc_dentry.insert("group".to_string(), Arc::new(TmpfsFileInode::new_with_data(group_content.as_bytes())));
 
-    let var_dentry = root.insert("var".to_string(), Arc::new(TmpfsDirInode::new()));
-    var_dentry.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new()));
-    var_dentry.insert("run".to_string(), Arc::new(TmpfsDirInode::new()));
-    let bin_dentry = root.insert("bin".to_string(), Arc::new(TmpfsDirInode::new()));
-    let sbin_dentry = root.insert("sbin".to_string(), Arc::new(TmpfsDirInode::new()));
-    let usr_dentry = root.insert("usr".to_string(), Arc::new(TmpfsDirInode::new()));
-    let usr_local_dentry = usr_dentry.insert("local".to_string(), Arc::new(TmpfsDirInode::new()));
-    let usr_local_bin_dentry = usr_local_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new()));
-    let usr_bin_dentry = usr_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new()));
-    let lib_dentry = root.insert("lib".to_string(), Arc::new(TmpfsDirInode::new()));
-    let lib64_dentry = root.insert("lib64".to_string(), Arc::new(TmpfsDirInode::new()));
+    let var_dentry = root.insert("var".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    var_dentry.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    var_dentry.insert("run".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let bin_dentry = root.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let sbin_dentry = root.insert("sbin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let usr_dentry = root.insert("usr".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let usr_local_dentry = usr_dentry.insert("local".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let usr_local_bin_dentry = usr_local_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let usr_bin_dentry = usr_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let lib_dentry = root.insert("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let lib64_dentry = root.insert("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
 
     // 3. 将 Busybox 和 libc 的真实 Inode 映射进虚拟目录
     if let Some(musl_dir) = root.find_tree("/musl", true) {
@@ -364,11 +368,11 @@ pub fn setup_oscomp_env() {
             dev
         } else {
             // 理论上不会走到这
-            root.insert("dev".to_string(), Arc::new(TmpfsDirInode::new()))
+            root.insert("dev".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
         };
 
         // 挂载shm到/dev/shm
-        dev_dentry.insert("shm".to_string(), Arc::new(TmpfsDirInode::new()));
+        dev_dentry.insert("shm".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
         // 挂载常用设备文件
         dev_dentry.insert("null".to_string(), Arc::new(NullInode::new())); 
         dev_dentry.insert("zero".to_string(), Arc::new(ZeroInode::new()));

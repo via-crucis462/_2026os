@@ -246,7 +246,7 @@ impl VfsInode for ProcMapsInode {
 }
 impl ProcRootInode {
     pub fn new() -> Self {
-        Self { static_entries: TmpfsDirInode::new() }
+        Self { static_entries: TmpfsDirInode::new(0o777) }
     }
     pub fn insert_static(&self, name: String, inode: Arc<dyn VfsInode>) {
         self.static_entries.insert(name, inode);
@@ -688,8 +688,8 @@ impl VfsInode for MountsInode {
 
 pub fn mount_procfs() {
     let proc_root = Arc::new(ProcRootInode::new());
-    let sys_dir = Arc::new(TmpfsDirInode::new());
-    let kernel_dir = Arc::new(TmpfsDirInode::new());
+    let sys_dir = Arc::new(TmpfsDirInode::new(0o777));
+    let kernel_dir = Arc::new(TmpfsDirInode::new(0o777));
     kernel_dir.insert(
         String::from("tainted"), 
         Arc::new(TmpfsFileInode::new_with_data(b"0\n"))
@@ -702,12 +702,12 @@ pub fn mount_procfs() {
     proc_root.insert_static(String::from("sys"), sys_dir);
     proc_root.insert_static(String::from("meminfo"), Arc::new(MemInfoInode));
     proc_root.insert_static(String::from("mounts"), Arc::new(MountsInode));
-    let self_dentry = Arc::new(TmpfsDirInode::new());
+    let self_dentry = Arc::new(TmpfsDirInode::new(0o777));
     self_dentry.insert(
         String::from("oom_score_adj"), 
         Arc::new(TmpfsFileInode::new_with_data(b"0\n"))
     );
-    self_dentry.insert(String::from("maps"), Arc::new(TmpfsFileInode::new()));
+    self_dentry.insert(String::from("maps"), Arc::new(TmpfsFileInode::new(0o777)));
     
     proc_root.insert_static(String::from("self"), Arc::new(ProcSelfSymlinkInode));
     // 4. 正式把完整的动态 /proc 挂载到操作系统的 ROOT_DENTRY！

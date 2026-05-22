@@ -70,28 +70,23 @@ impl Dentry {
         if path.is_empty() {
             return Some(self.clone());
         }
-
         // 1. 确定搜索起点
         let mut current = if path.starts_with('/') {
             ROOT_DENTRY.clone()
         } else {
             self.clone()
         };
-
         // 2. 将路径拆解为动态组件队列 (忽略 ".")
         let mut components: alloc::vec::Vec<String> = path
             .split('/')
             .filter(|s| !s.is_empty() && *s != ".")
             .map(String::from)
             .collect();
-
         let mut symlink_depth = 0;
         const MAX_SYMLINK_DEPTH: usize = 8; // 最大软链接解析深度
-
         // 3. 核心迭代解析循环
         while !components.is_empty() {
             let comp = components.remove(0); // 取出当前要解析的层级
-
             // 处理上一级目录 ".."
             if comp == ".." {
                 if let Some(parent) = current.parent.upgrade() {
@@ -99,48 +94,39 @@ impl Dentry {
                 }
                 continue;
             }
-
             // 查找子节点（利用你写好的带缓存的 find_child）
             let next = current.find_child(&comp)?;
-
             // 检查是不是软链接
             let stat = next.inode.get_stat();
             let is_symlink = (stat.mode & 0o170000) == 0o120000; // S_IFLNK
-
             if is_symlink {
                 let is_last_segment = components.is_empty();
-                
                 // 如果是最后一个路径分量且不需要追踪链接（对应 O_NOFOLLOW），直接返回软链接的 Dentry
                 if is_last_segment && !follow_links {
                     current = next;
                     break;
                 }
-
                 // 深度检查，防止 A -> B -> A 死循环炸掉内核栈
                 symlink_depth += 1;
                 if symlink_depth > MAX_SYMLINK_DEPTH {
                     warn!("[VFS] find_tree: ELOOP (Too many levels of symbolic links) path='{}'", path);
                     return None;
                 }
-
                 // 读取软链接指向的目标路径
                 let size = stat.size as usize;
                 let mut buffer = alloc::vec![0u8; size];
                 let read_len = next.inode.read_at(0, &mut buffer);
                 let target_path = alloc::string::String::from_utf8_lossy(&buffer[..read_len]).into_owned();
-
                 // 如果软链接目标是绝对路径，起点直接切回根目录
                 if target_path.starts_with('/') {
                     current = ROOT_DENTRY.clone();
                 }
-
                 // 把软链接目标拆解，作为新的路径前缀塞入队列
                 let mut new_comps: alloc::vec::Vec<String> = target_path
                     .split('/')
                     .filter(|s| !s.is_empty() && *s != ".")
                     .map(String::from)
                     .collect();
-
                 // 原有剩下的路径接在展开的软链接后面
                 new_comps.extend(components);
                 components = new_comps;
@@ -248,9 +234,9 @@ pub fn file_name(path: &str) -> String {
     }
 }
 
-pub fn create_file_in_dentry(parent: &Arc<Dentry>, name: String) -> Arc<Dentry> {
+pub fn create_file_in_dentry(parent: &Arc<Dentry>, name: String, mode: u32) -> Arc<Dentry> {
     // 默认创建普通文件权限 0o100666
-    let vfs_inode = parent.inode.create_file(&name, 0o100666)
+    let vfs_inode = parent.inode.create_file(&name, mode)
         .expect("VFS: Failed to create file in disk");
     
     // 将新创建的 Inode 插入 Dentry 缓存树
