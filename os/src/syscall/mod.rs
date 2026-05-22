@@ -160,6 +160,7 @@ pub mod fs;
 mod process;
 mod prctl;
 pub mod errno;
+mod mm;
 mod net;
 use fs::*;
 use process::*;

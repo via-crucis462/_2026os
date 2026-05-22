@@ -1,6 +1,6 @@
 //! Process management syscalls
-//! 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
-//! 内存管理也暂时放在此处
+//! 进程管理相关系统调用实现
+//! 内存管理也暂时放在此处，后续迁移到mm
 
 use crate::mm::{translated_read, try_translated_str};
 use crate::{get_hart_id};
