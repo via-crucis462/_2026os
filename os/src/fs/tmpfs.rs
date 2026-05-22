@@ -14,14 +14,18 @@ use super::{VfsInode, Stat, Statx};
 use crate::syscall::fs::Statfs;
 use crate::auth::{PermStat, FileMode};
 use crate::drivers::loopdev::*;
+use crate::mm::{FrameTracker, PhysPageNum };
+use crate::mm::frame_alloc;
 
+use crate::PAGE_SIZE;
 // 全局唯一的 Inode 分配器
 static TMPFS_INO_COUNTER: AtomicUsize = AtomicUsize::new(10000);
 
 /// 临时文件inode
 pub struct TmpfsFileInode {
     ino: usize,
-    data: Mutex<alloc::vec::Vec<u8>>,
+    pages: Mutex<BTreeMap<usize, FrameTracker>>,
+    size: Mutex<usize>,
     perms: Mutex<PermStat>, // 权限信息
 }
 
@@ -29,46 +33,100 @@ impl TmpfsFileInode {
     pub fn new() -> Self {
         Self {
             ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
-            data: Mutex::new(alloc::vec::Vec::new()),
-            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(0o100777), 0, 0)), // 默认权限
+            pages: Mutex::new(BTreeMap::new()),
+            size: Mutex::new(0),
+            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(0o100777), 0, 0)),
         }
     }
+
     pub fn new_with_data(data: &[u8]) -> Self {
-        Self {
-            ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
-            data: Mutex::new(data.to_vec()), // 直接把传进来的切片转成 Vec 存起来
-            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(0o100777), 0, 0)), // 默认权限
-        }
+        let inode = Self::new();
+        inode.write_at(0, data); 
+        inode
     }
 }
 
 impl super::VfsInode for TmpfsFileInode {
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        let data = self.data.lock();
-        if offset >= data.len() {
-            return 0; // 读到文件尾
+        let size = *self.size.lock();
+        if offset >= size {
+            return 0; 
         }
-        let read_len = core::cmp::min(buf.len(), data.len() - offset);
-        buf[..read_len].copy_from_slice(&data[offset..offset + read_len]);
+        let read_len = core::cmp::min(buf.len(), size - offset);
+        
+        let pages = self.pages.lock();
+        let mut current_offset = offset;
+        let mut buf_idx = 0;
+        
+        while buf_idx < read_len {
+            let page_idx = current_offset / PAGE_SIZE;
+            let page_inner_offset = current_offset % PAGE_SIZE;
+            let bytes_to_read = core::cmp::min(read_len - buf_idx, PAGE_SIZE - page_inner_offset);
+            
+            if let Some(frame) = pages.get(&page_idx) {
+                let src = &frame.ppn.get_bytes_array()[page_inner_offset..page_inner_offset + bytes_to_read];
+                buf[buf_idx..buf_idx + bytes_to_read].copy_from_slice(src);
+            } else {
+                // 稀疏文件未分配页则填 0
+                buf[buf_idx..buf_idx + bytes_to_read].fill(0);
+            }
+            
+            current_offset += bytes_to_read;
+            buf_idx += bytes_to_read;
+        }
         read_len
     }
 
-    // 真正的内存文件写（支持自动扩容）
+    // 2. 适配页缓存的文件写入（支持动态自动扩容分配物理页）
     fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
-        let mut data = self.data.lock();
+        let mut size = self.size.lock();
+        let mut pages = self.pages.lock();
         let end_offset = offset + buf.len();
-        if end_offset > data.len() {
-            // 如果写超出了当前文件大小，自动扩展 Vec，并用 0 填充空隙
-            data.resize(end_offset, 0); 
+        
+        let mut current_offset = offset;
+        let mut buf_idx = 0;
+        
+        while buf_idx < buf.len() {
+            let page_idx = current_offset / PAGE_SIZE;
+            let page_inner_offset = current_offset % PAGE_SIZE;
+            let bytes_to_write = core::cmp::min(buf.len() - buf_idx, PAGE_SIZE - page_inner_offset);
+            
+            // 如果这一页还没创建，直接调用内核页分配器占领一个物理页
+            let frame = pages.entry(page_idx).or_insert_with(|| {
+                crate::mm::frame_alloc().expect("[Tmpfs] Failed to allocate physical page frame")
+            });
+            
+            let dest = &mut frame.ppn.get_bytes_array()[page_inner_offset..page_inner_offset + bytes_to_write];
+            dest.copy_from_slice(&buf[buf_idx..buf_idx + bytes_to_write]);
+            
+            current_offset += bytes_to_write;
+            buf_idx += bytes_to_write;
         }
-        data[offset..end_offset].copy_from_slice(buf);
+        
+        if end_offset > *size {
+            *size = end_offset; // 自动扩容
+        }
         buf.len()
     }
-    fn get_size(&self) -> usize { self.data.lock().len() }
 
+    fn get_size(&self) -> usize {
+        *self.size.lock()
+    }
+    fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
+        let mut frames = self.pages.lock();
+        // 如果 mmap 映射的页超出了当前文件大小，Linux 允许直接分配空白页给它
+        let frame = frames.entry(page_offset).or_insert_with(|| {
+            let f = frame_alloc().unwrap();
+            let page_kvaddr = f.ppn.0 << 12;
+            unsafe { core::slice::from_raw_parts_mut(page_kvaddr as *mut u8, PAGE_SIZE).fill(0); }
+            f
+        });
+        Some(frame.ppn)
+    }
     fn get_stat(&self) -> super::Stat {
-        let data_len = self.data.lock().len();
+       
         let perms = self.perms.lock();
+        let file_size = self.get_size() as i64; // 提前获取大小
         let (mode, uid, gid) = (perms.mode.bits(), perms.uid, perms.gid);
         super::Stat {
             dev: 0, 
@@ -77,7 +135,7 @@ impl super::VfsInode for TmpfsFileInode {
             uid: uid, gid: gid, rdev: 0, __pad: 0, 
 
             size: self.get_size() as i64, 
-            blksize: 512, __pad2: 0,
+            blksize: 4096, __pad2: 0,
             blocks: ((self.get_size() as i64) + 511) / 512, 
             atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }

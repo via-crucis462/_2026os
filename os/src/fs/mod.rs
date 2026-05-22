@@ -24,6 +24,8 @@ pub mod epoll;
 pub use epoll::{EpollFile, EpollEvent}; 
 use crate::syscall::fs::Statfs;
 use crate::auth::{FileMode, PermSet, PermStat};
+use crate::mm::PhysPageNum;
+
 /// trait File for all file types
 pub trait File: Send + Sync {
     /// the file readable?
@@ -67,6 +69,11 @@ pub trait File: Send + Sync {
     }
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
         0
+    }
+    // 获取该文件指定页偏移的物理页号。
+    // 如果没有，文件内部负责分配一个并存起来。
+    fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
+        None // 默认不支持
     }
 }
 
@@ -229,6 +236,9 @@ pub trait VfsInode: Send + Sync {
             f_bavail: 0, f_files: 0, f_ffree: 0, f_fsid: [0, 0],
             f_namelen: 255, f_frsize: 0, f_flags: 0, f_spare: [0; 4],
         }
+    }
+    fn get_shared_page(&self, _page_offset: usize) -> Option<PhysPageNum> {
+        None
     }
 
 }

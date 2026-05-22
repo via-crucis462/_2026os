@@ -14,6 +14,7 @@ use crate::mm::UserBuffer;
 use crate::fs::TimeSpec;
 use crate::auth::PermStat;
 use core::any::Any;
+use crate::mm::PhysPageNum;
 
 
 pub struct OSInode {
@@ -166,6 +167,10 @@ impl File for OSInode {
     }
 
     fn as_any(&self) -> &dyn Any { self }
+    fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
+        // 转发给底层的具体文件系统 Inode
+        self.inode.get_shared_page(page_offset)
+    }
 }
 bitflags! {
     ///  The flags argument to the open() system call is constructed by ORing together zero or more of the following values:

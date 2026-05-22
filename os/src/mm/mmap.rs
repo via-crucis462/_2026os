@@ -3,6 +3,8 @@
 
 use bitflags::*;
 use crate::task::processor::*;
+use alloc::sync::Arc;
+use crate::fs::File;
 
 // mmap 权限标志
 bitflags! {
@@ -33,13 +35,19 @@ pub fn do_brk(addr: usize) -> Result<usize, i32> {
 }
 
 /// 处理mmap系统调用的分配部分
-pub fn do_mmap(addr: usize, length: usize, prot: MMapProt, flags: MMapFlags) -> Result<usize, i32> {
-    //println!("do_mmap: addr = {:#x}, length = {}, prot = {:?}", addr, length, prot);
+pub fn do_mmap(
+    addr: usize, 
+    length: usize, 
+    prot: MMapProt, 
+    flags: MMapFlags,
+    file_inner: Option<Arc<dyn File + Send + Sync>>,
+    offset: usize,                     
+) -> Result<usize, i32> {
     let task = current_processor().current().unwrap();
     let proc = task.process();
-    proc.mmap(addr, length, prot, flags)
+    // 继续向下转发
+    proc.mmap(addr, length, prot, flags, file_inner, offset) 
 }
-
 pub fn do_munmap(addr: usize, length: usize) -> Result<(), i32> {
     let task = current_processor().current().unwrap();
     let proc = task.process();

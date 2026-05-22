@@ -1486,39 +1486,23 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
     let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
     let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
 
-    // 分配内存并映射
-    let ret = match mmap::do_mmap(start, len, mmap_prot , mmap_flags) {
-        Ok(addr) => addr,
-        Err(_) => {
-            //debug!("[kernel] sys_mmap: do_mmap failed for start={:#x}, len={:#x}, prot={:?}, flags={:?}", start, len, mmap_prot, mmap_flags);
-            return Errno::ENOMEM.as_isize(); // 内存不足
-        }
-    };
+    let is_anonymous = mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS);
+    let is_shared = mmap_flags.contains(mmap::MMapFlags::MAP_SHARED);
+    let mut file_inner = None;
 
-    // 如果是文件映射（非匿名映射）且 FD 合法，读取内容
-    if !mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) {
-        if fd >= 0 {
-            //debug!("[kernel] sys_mmap: file mapping requested for fd={}, start={:#x}, len={:#x}, prot={:?}, flags={:?}", fd, start, len, mmap_prot, mmap_flags);
-            let task = current_task().unwrap();
-            let process = task.process();
-            let token = current_user_token();
-            let inner = process.inner_exclusive_access();
-            let fd_usize = fd as usize;
-            if fd_usize < inner.fd_table.len() {
-                let fd_obj = &inner.fd_table[fd_usize];
-                if let Some(file) = &fd_obj.file {
-                    if file.readable() {
-                        let file = file.clone();
-                        // 释放锁避免阻塞
-                        drop(inner);
-                        // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
-                        let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
-                        // 使用 read_at 确保不受 FD 当前 offset 影响，并使用系统调用传入的 _off
-                        file.read_at(_off, user_buf);
-                    }
-                } else {
-                    return Errno::EBADF.as_isize(); // 无效的文件描述符
-                }
+    // 前置检查并提取文件对象
+    if !is_anonymous {
+        if fd < 0 {
+            return Errno::EBADF.as_isize();
+        }
+        let task = current_task().unwrap();
+        let process = task.process();
+        let inner = process.inner_exclusive_access();
+        let fd_usize = fd as usize;
+        
+        if fd_usize < inner.fd_table.len() {
+            if let Some(file) = &inner.fd_table[fd_usize].file {
+                file_inner = Some(file.clone()); // 拿到文件的 Arc 强引用
             } else {
                 return Errno::EBADF.as_isize();
             }
@@ -1526,15 +1510,28 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
             return Errno::EBADF.as_isize();
         }
     }
-    /*
-    let task = current_task().unwrap();
-    let process = task.process();
-    let token = current_user_token();
-    let inner = process.inner_exclusive_access();
-    for i in inner.memory_set.areas().iter() {
-        debug!("after map: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+
+    //将 file_inner 和 _off 逐层转发给 do_mmap
+    let ret = match mmap::do_mmap(start, len, mmap_prot, mmap_flags, file_inner.clone(), _off) {
+        Ok(addr) => addr,
+        Err(_) => {
+            return Errno::ENOMEM.as_isize(); // 内存不足
+        }
+    };
+
+    // 
+    // 只有在非匿名且非共享（即传统的 MAP_PRIVATE 读文件到内存）时，执行你原有的手动读取
+    if !is_anonymous && !is_shared {
+        if let Some(file) = file_inner {
+            if file.readable() {
+                let token = current_user_token();
+                // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
+                let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
+                // 使用 read_at 确保不受 FD 当前 offset 影响
+                file.read_at(_off, user_buf);
+            }
+        }
     }
-     */
     debug!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
     ret as isize
 }

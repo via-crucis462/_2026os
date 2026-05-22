@@ -681,10 +681,12 @@ impl ProcessControlBlock {
         addr: usize,
         length: usize,
         prot: mmap::MMapProt,
-        flags: mmap::MMapFlags
+        flags: mmap::MMapFlags,
+        file_inner: Option<Arc<dyn File + Send + Sync>>,
+        offset: usize,
     ) -> Result<usize, i32> {
         let mut inner = self.inner_exclusive_access();
-        inner.memory_set.mmap(addr, length, prot, flags)
+        inner.memory_set.mmap(addr, length, prot, flags, file_inner, offset)
     }
     /// 处理munmap
     pub fn munmap(&self, addr: usize, length: usize) -> Result<(), i32> {
