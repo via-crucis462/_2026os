@@ -16,7 +16,7 @@ lazy_static! {
 pub struct ShmManager {
     id_allocator: RecycleAllocator,
     // id->Shm
-    shms: BTreeMap<usize, Arc<Shm>>,
+    shms: BTreeMap<u32, Arc<Shm>>,
 }
 
 impl ShmManager {
@@ -26,14 +26,18 @@ impl ShmManager {
             shms: BTreeMap::new(),
         }
     }
-    pub fn remove_shm(&mut self, id: usize) {
+    pub fn remove_shm(&mut self, id: u32) {
         self.shms.remove(&id);
-        self.id_allocator.dealloc(id);
+        self.id_allocator.dealloc(id as usize);
     }
     pub fn create_shm(&mut self, size: usize, key: i32, mode: u16, cpid: usize) -> Arc<Shm> {
         let id = self.id_allocator.alloc();
-        let shm = Arc::new(Shm::new(id, size, key, mode, cpid));
-        self.shms.insert(id, shm.clone());
+        // 上溢出检查
+        if id > u32::MAX as usize {
+            panic!("Too many shared memory segments");
+        }
+        let shm = Arc::new(Shm::new(id as u32, size, key, mode, cpid));
+        self.shms.insert(id as u32, shm.clone());
         shm
     }
 }
@@ -66,7 +70,7 @@ pub struct ShmidDs {
 }
 
 pub struct Shm {
-    id: usize,
+    id: u32,
     // 需要保证顺序
     frames: Vec<FrameTracker>,
     // 状态信息
@@ -74,7 +78,7 @@ pub struct Shm {
 }
 
 impl Shm {
-    pub fn new(id: usize, size: usize, key: i32, mode: u16, cpid: usize) -> Self {
+    pub fn new(id: u32, size: usize, key: i32, mode: u16, cpid: usize) -> Self {
         // 默认用4K页
         let page_size = PageSize::Page4K;
         let num_pages = (size + page_size.size() - 1) / page_size.size();
@@ -96,10 +100,25 @@ impl Shm {
             stat: Mutex::new(stat),
         }
     }
-    pub fn get_id(&self) -> usize {
+    pub fn get_id(&self) -> u32 {
         self.id
     }
     pub fn get_size(&self) -> usize {
         self.stat.lock().shm_segsz
     }
+    pub fn get_key(&self) -> i32 {
+        self.stat.lock().shm_perm.key
+    }
+}
+
+pub fn get_new_shm(size: usize, key: i32, mode: u16, cpid: usize) -> Arc<Shm> {
+    SHM_MANAGER.exclusive_access().create_shm(size, key, mode, cpid)
+}
+
+pub fn get_shm_by_id(id: u32) -> Option<Arc<Shm>> {
+    SHM_MANAGER.exclusive_access().shms.get(&id).cloned()
+}
+
+pub fn get_shm_by_key(key: i32) -> Option<Arc<Shm>> {
+    SHM_MANAGER.exclusive_access().shms.values().find(|s| s.get_key() == key).cloned()
 }

@@ -104,6 +104,9 @@ const SYSCALL_GETGID: usize = 176;
 const SYSCALL_GETEGID: usize = 177;
 const SYSCALL_GETTID: usize = 178;
 const SYSCALL_SYSINFO: usize = 179;
+
+const SYSCALL_SHMGET: usize = 194;
+
 const SYSCALL_SOCKET: usize = 198;
 /// brk syscall
 const SYSCALL_BIND: usize = 200;
@@ -165,6 +168,7 @@ mod net;
 use fs::*;
 use process::*;
 use prctl::*;
+use mm::*;
 use alloc::string::String;
 
 use crate::get_hart_id;
@@ -344,6 +348,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
         SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
+        SYSCALL_SHMGET => sys_shmget(args[0] as i32, args[1], args[2] as i32),
         _ => {
             warn!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
