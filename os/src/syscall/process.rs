@@ -78,7 +78,7 @@ pub struct Winsize {
     pub ws_ypixel: u16, // 像素高度 (通常不用，填 0)
 }
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
@@ -2082,7 +2082,44 @@ pub fn sys_sigreturn() -> isize {
 const SIG_BLOCK: usize = 0;
 const SIG_UNBLOCK: usize = 1;
 const SIG_SETMASK: usize = 2;
-
+#[repr(C)]
+#[derive(Debug,Clone, Copy, Default)]
+pub struct Rusage {
+    pub ru_utime: TimeVal, // 用户态运行时间
+    pub ru_stime: TimeVal, // 内核态运行时间
+    pub ru_maxrss: isize,  // 最大驻留集大小 (最大使用内存)
+    pub ru_ixrss: isize,   // 共享内存大小
+    pub ru_idrss: isize,   // 非共享数据大小
+    pub ru_isrss: isize,   // 非共享栈大小
+    pub ru_minflt: isize,  // 软缺页异常次数
+    pub ru_majflt: isize,  // 硬缺页异常次数
+    pub ru_nswap: isize,   // 交换出内存的次数
+    pub ru_inblock: isize, // 块输入操作次数
+    pub ru_oublock: isize, // 块输出操作次数
+    pub ru_msgsnd: isize,  // 发送 IPC 消息次数
+    pub ru_msgrcv: isize,  // 接收 IPC 消息次数
+    pub ru_nsignals: isize,// 收到的信号次数
+    pub ru_nvcsw: isize,   // 主动上下文切换次数
+    pub ru_nivcsw: isize,  // 被动上下文切换次数
+}
+pub fn sys_getrusage(who: i32, usage_ptr: *mut Rusage) -> isize {
+    // 常见的 who 参数定义：
+    const RUSAGE_SELF: i32 = 0;       // 请求当前进程的资源使用情况
+    const RUSAGE_CHILDREN: i32 = -1;  // 请求那些已经被回收的子进程的资源使用情况
+    const RUSAGE_THREAD: i32 = 1;     // 请求当前线程的资源使用情况
+    // 参数校验
+    if who != RUSAGE_SELF && who != RUSAGE_CHILDREN && who != RUSAGE_THREAD {
+        return EINVAL.as_isize(); 
+    }
+    if usage_ptr as usize == 0 {
+        return EFAULT.as_isize(); 
+    }
+    let token = current_user_token();
+    // 返回全 0 的结构体
+    let usage = Rusage::default();
+    crate::mm::translated_write(token, usage_ptr, usage);
+    0 
+}
 #[allow(dead_code)]
 fn check_sigaction_error(signal: SignalFlags) -> bool {
     if signal == SignalFlags::SIGKILL || signal == SignalFlags::SIGSTOP
