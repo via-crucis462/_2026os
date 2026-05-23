@@ -686,6 +686,35 @@ impl VfsInode for MountsInode {
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
 
+/// /proc/cgroups — 报告内核支持的 cgroup 子系统列表
+/// 当前内核不支持 cgroup，因此仅返回表头行，
+/// 这样 LTP 测例可通过 grep "cpu" 检测到不支持并正确 TCONF 跳过。
+pub struct CgroupsInode;
+
+impl VfsInode for CgroupsInode {
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        if offset > 0 { return 0; }
+        let content = b"#subsys_name\thierarchy\tnum_cgroups\tenabled\n";
+        let len = content.len().min(buf.len());
+        buf[..len].copy_from_slice(&content[..len]);
+        len
+    }
+
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn get_size(&self) -> usize { 0 }
+    fn get_stat(&self) -> Stat {
+        Stat {
+            dev: 0, ino: 996, mode: 0o100444, nlink: 1,
+            uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
+            ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
+        }
+    }
+    impl_default_statx!();
+    impl_unsupported_ops!(-1);
+    fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
+}
+
 pub fn mount_procfs() {
     let proc_root = Arc::new(ProcRootInode::new());
     let sys_dir = Arc::new(TmpfsDirInode::new());
@@ -702,6 +731,7 @@ pub fn mount_procfs() {
     proc_root.insert_static(String::from("sys"), sys_dir);
     proc_root.insert_static(String::from("meminfo"), Arc::new(MemInfoInode));
     proc_root.insert_static(String::from("mounts"), Arc::new(MountsInode));
+    proc_root.insert_static(String::from("cgroups"), Arc::new(CgroupsInode));
     let self_dentry = Arc::new(TmpfsDirInode::new());
     self_dentry.insert(
         String::from("oom_score_adj"), 

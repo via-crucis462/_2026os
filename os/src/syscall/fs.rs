@@ -1,7 +1,7 @@
 //! File and filesystem-related syscalls
 use crate::PAGE_SIZE;
 use crate::fs::{OpenFlags, ROOT_DENTRY, Stat, Statx, file_name, make_dir, make_pipe, open_file, parent_path};
-use crate::mm::{PageSize, UserBuffer, translated_byte_buffer, translated_read, translated_str, translated_write};
+use crate::mm::{PageSize, UserBuffer, translated_byte_buffer, translated_read, translated_str, translated_write, try_translated_str};
 use crate::task::{current_task, current_user_token};
 use alloc::vec;
 use alloc::sync::Arc;
@@ -827,6 +827,21 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usiz
     total_transferred as isize
 }
 
+/// copy_file_range syscall stub — not yet implemented.
+/// Returns ENOSYS so LTP tests get a clear "not supported" rather than an
+/// "unimplemented syscall" warning.
+pub fn sys_copy_file_range(
+    _fd_in: usize,
+    _off_in: *mut i64,
+    _fd_out: usize,
+    _off_out: *mut i64,
+    _len: usize,
+    _flags: u32,
+) -> isize {
+    warn!("[kernel] sys_copy_file_range: not implemented");
+    ENOSYS.as_isize()
+}
+
 pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
@@ -842,19 +857,7 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
             return EACCES.as_isize(); // 权限不足
         }
         trace!("kernel:pid[{}] sys_getdents: fd={}, count={}", task.process().pid.0, fd, count);
-        let mut kbuf = alloc::vec![0u8; count];
-        let read_len = file.getdents(&mut kbuf) as usize;
-        if read_len as isize == -1 {
-            return -1;
-        }
-        let mut user_buf_iter = translated_byte_buffer(token, dirp, read_len).into_iter();
-        let mut current_offset = 0;
-        for frag in user_buf_iter {
-            let frag_len = frag.len();
-            frag.copy_from_slice(&kbuf[current_offset..current_offset + frag_len]);
-            current_offset += frag_len;
-        }
-        read_len as isize
+        file.getdents(translated_byte_buffer(token, dirp, count).remove(0)) as isize
     } else {
         return EBADF.as_isize();
     }
@@ -889,7 +892,17 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
 
 pub fn sys_chdir(path: *const u8) -> isize {
     let token = current_user_token();
-    let path_str = normalize_leading_dot_path(translated_str(token, path));
+    let path_str = try_translated_str(token, path);
+    
+    let path_str = if let Some(path_str) = path_str {
+        if path_str.len() > 255 {
+            return ENAMETOOLONG.as_isize();
+        }
+        normalize_leading_dot_path(path_str)
+    } else {
+        return EFAULT.as_isize();
+    };
+
     debug!("kernel:pid[{}] sys_chdir: path={}", current_task().unwrap().process().pid.0, path_str);
     
     let task = current_task().unwrap();

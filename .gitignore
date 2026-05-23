@@ -46,3 +46,4 @@ os/src/arch/la/initproc.ltp
 os/src/arch/riscv/initprocT
 *.bak
 bak
+user-*

@@ -155,6 +155,8 @@ const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 /// memfd syscall
 const SYSCALL_MEMFD_CREATE: usize = 279;
+/// copy_file_range syscall (Linux riscv64)
+const SYSCALL_COPY_FILE_RANGE: usize = 285;
 /// resq
 const SYSCALL_RESQ: usize = 293;
 /// accessat syscall
@@ -348,6 +350,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
         SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
+        SYSCALL_COPY_FILE_RANGE => sys_copy_file_range(args[0], args[1] as *mut i64, args[2], args[3] as *mut i64, args[4], args[5] as u32),
         SYSCALL_SHMGET => sys_shmget(args[0] as i32, args[1], args[2] as i32),
         _ => {
             warn!(

@@ -2,7 +2,7 @@
 //! 进程管理相关系统调用实现
 //! 内存管理也暂时放在此处，后续迁移到mm
 
-use crate::mm::{translated_read, try_translated_str};
+use crate::mm::{translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{get_hart_id};
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
@@ -518,7 +518,14 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
         }
     };
     let token = current_user_token();
-    let mut time_spec = translated_read(token, tp);
+    let mut time_spec = {
+        if let Some(ts) = try_translated_read(token, tp) {
+            ts
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
+    
     time_spec.tv_sec = sec;
     time_spec.tv_nsec = nsec;
     translated_write(token, tp, time_spec);
@@ -1515,9 +1522,21 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
     let start = get_time_ms();
     let token = current_user_token();
-    let req_val = translated_read(token, req);
+    let req_val = {
+        if let Some(ts) = try_translated_read(token, req) {
+            ts
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
+
+    // 大于一秒的参数不合法
+    if req_val.tv_nsec >= 1_000_000_000 {
+        return EINVAL.as_isize();
+    }
 
     let duration_ms = req_val.tv_sec * 1000 + req_val.tv_nsec / 1_000_000;
+
    info!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
     while get_time_ms() < start + duration_ms {
         //   1. 检查是否有未屏蔽的信号到来
@@ -1537,10 +1556,20 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
             
             // 如果用户传入了 rem 指针，把剩下的时间写进去
             if rem as usize != 0 {
-                let mut rem_spec = translated_read(token, rem);
+                let mut rem_spec = {
+                    if let Some(ts) = try_translated_read(token, rem) {
+                        ts
+                    } else {
+                        return EFAULT.as_isize();
+                    }
+                };
                 rem_spec.tv_sec = rem_ms / 1000;
                 rem_spec.tv_nsec = (rem_ms % 1000) * 1_000_000;
-                translated_write(token, rem, rem_spec);
+                if try_translated_write(token, rem, rem_spec) {
+                    ()
+                } else {
+                    return EFAULT.as_isize();
+                }
             }
             
             //   3. 返回 -EINTR (-4)，触发外层的 trap_handler 调用 handle_signals

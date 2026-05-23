@@ -478,6 +478,15 @@ pub fn translated_read<T>(token: usize, ptr: *const T) -> T {
     unsafe { core::ptr::read(data.as_ptr() as *const T) }
 }
 
+pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
+    let len = core::mem::size_of::<T>();
+    if !prepare_user_read(token, ptr as usize, len) {
+        return None;
+    }
+    Some(translated_read(token, ptr))
+}
+
+
 /// 将用户空间的T写入给定地址
 pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
     let len = core::mem::size_of::<T>();
@@ -504,4 +513,13 @@ pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
             unsafe { *(pa.0 as *mut u8) = data[idx] };
         }
     }
+}
+
+pub fn try_translated_write<T>(token: usize, ptr: *mut T, value: T) -> bool {
+    let len = core::mem::size_of::<T>();
+    if !prepare_user_write(token, ptr as usize, len) {
+        return false;
+    }
+    translated_write(token, ptr, value);
+    true
 }
