@@ -86,6 +86,7 @@ const SYSCALL_SET_PRIORITY: usize = 140;
 const SYSCALL_SETGID: usize = 144;
 const SYSCALL_SETUID: usize = 146;
 const SYSCALL_SETEUID: usize=147;
+const SYSCALL_GETRESUID: usize = 148;
 const SYSCALL_UMASK: usize = 166;
 const SYSCALL_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
@@ -266,6 +267,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SETUID => sys_setuid(args[0] as u32),
         SYSCALL_SETEUID => sys_seteuid(args[0] as u32),
         SYSCALL_SETGID => sys_setgid(args[0] as u32),
+        SYSCALL_GETRESUID => sys_getresuid(args[0] as *mut u32, args[1] as *mut u32, args[2] as *mut u32),
         SYSCALL_UMASK => sys_umask(args[0] as u32),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),

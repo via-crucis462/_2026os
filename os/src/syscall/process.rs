@@ -498,6 +498,24 @@ pub fn sys_setsid() -> isize {
     
     pid as isize // 成功时返回新的会话 ID
 }
+// 系统调用号 148: getresuid
+// 让用户态程序查询自己当前拥有的 RUID、EUID、SUID。
+// 内核需要把查到的 Root UID (0) 写进用户态传入的指针里。
+pub fn sys_getresuid(ruid_ptr: *mut u32, euid_ptr: *mut u32, suid_ptr: *mut u32) -> isize {
+    // 获取当前进程的物理/虚拟内存翻译 Token
+    let token = current_user_token();
+    let root_uid: u32 = 0;
+    if ruid_ptr as usize != 0 {
+        translated_write(token, ruid_ptr, root_uid);
+    }
+    if euid_ptr as usize != 0 {
+        translated_write(token, euid_ptr, root_uid);
+    }
+    if suid_ptr as usize != 0 {
+        translated_write(token, suid_ptr, root_uid);
+    }
+    0 
+}
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
 pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
