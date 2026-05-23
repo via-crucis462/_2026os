@@ -2201,6 +2201,16 @@ pub fn sys_pselect6(
         readfds = translated_read(token, readfds_ptr);
     }
     
+    let has_timeout = _timeout as usize != 0;
+    let mut deadline_ms: usize = 0;
+    let mut timeout_ms: usize = 0;
+    if has_timeout {
+        let timespec = translated_read(token, _timeout as *const TimeSpec);
+        timeout_ms = timespec.tv_sec * 1000 + timespec.tv_nsec / 1_000_000;
+        deadline_ms = get_time_ms() + timeout_ms;
+    }
+    
+    // debug!("[kernel] pselect6 nfds={} has_timeout={} timeout_ms={}", nfds, has_timeout, timeout_ms);
     loop {
         let mut process_inner = process.inner_exclusive_access();
         let fd_table = &process_inner.fd_table;
@@ -2229,7 +2239,11 @@ pub fn sys_pselect6(
             return ready_count as isize;
         }
         
-        // 【核心修正】规范中的死锁禁令：必须先释放 PCB 锁，再挂起任务！
+        if has_timeout && get_time_ms() >= deadline_ms {
+            return 0;
+        }
+        
+        // 挂起前先释放锁
         drop(process_inner);
         suspend_current_and_run_next();
     }

@@ -204,6 +204,7 @@ impl VfsInode for Ext4Inode {
             if read_len == 0 { break; }
 
             let mut block_offset = 0;
+            let mut buffer_full = false;
   
             while block_offset < read_len && buf_offset < buf_len {
                 if let Some(ext4_dirent) = Ext4DirEntry::from_bytes(&temp_buf[block_offset..]) {
@@ -225,6 +226,7 @@ impl VfsInode for Ext4Inode {
                         
                         if buf_offset + d_reclen > buf_len {
                           //  println!("VFS: getdents buffer full, stopping read");
+                            buffer_full = true;
                             break; 
                         }
 
@@ -261,7 +263,18 @@ impl VfsInode for Ext4Inode {
                 }
             } 
 
-            *offset += read_len; 
+            if block_offset == 0 && buffer_full {
+                if buf_offset == 0 {
+                    return -1;
+                }
+                break;
+            }
+
+            *offset += block_offset; 
+
+            if buffer_full {
+                break;
+            }
         }
 
         if !last_name.is_empty() {

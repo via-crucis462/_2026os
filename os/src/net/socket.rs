@@ -62,8 +62,16 @@ impl TcpSocket {
 }
 
 impl File for TcpSocket {
-    fn readable(&self) -> bool { true }
-    fn writable(&self) -> bool { true }
+    fn readable(&self) -> bool {
+        let mut sockets = SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
+        socket.can_recv() || !socket.may_recv()
+    }
+    fn writable(&self) -> bool {
+        let mut sockets = SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
+        socket.can_send() || !socket.may_send()
+    }
 
     fn read(&self, mut buf: UserBuffer) -> usize {
         let mut sockets = SOCKET_SET.exclusive_access();
@@ -217,7 +225,10 @@ impl UdpSocket {
 
 // 实现 File trait，使其能放进系统的 fd_table 中
 impl File for UdpSocket {
-    fn readable(&self) -> bool { true }
+    fn readable(&self) -> bool {
+        let queue = self.recv_queue.lock();
+        !queue.is_empty()
+    }
     fn writable(&self) -> bool { true }
     
     fn read(&self, mut buf: UserBuffer) -> usize {

@@ -842,7 +842,19 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
             return EACCES.as_isize(); // 权限不足
         }
         trace!("kernel:pid[{}] sys_getdents: fd={}, count={}", task.process().pid.0, fd, count);
-        file.getdents(translated_byte_buffer(token, dirp, count).remove(0)) as isize
+        let mut kbuf = alloc::vec![0u8; count];
+        let read_len = file.getdents(&mut kbuf) as usize;
+        if read_len as isize == -1 {
+            return -1;
+        }
+        let mut user_buf_iter = translated_byte_buffer(token, dirp, read_len).into_iter();
+        let mut current_offset = 0;
+        for frag in user_buf_iter {
+            let frag_len = frag.len();
+            frag.copy_from_slice(&kbuf[current_offset..current_offset + frag_len]);
+            current_offset += frag_len;
+        }
+        read_len as isize
     } else {
         return EBADF.as_isize();
     }

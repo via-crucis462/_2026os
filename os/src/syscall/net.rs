@@ -365,6 +365,16 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     // 2. 提取真正的 socket 核心类型 (屏蔽掉标志位)
     // 常见的值：1 = SOCK_STREAM (TCP), 2 = SOCK_DGRAM (UDP)
     let real_socket_type = socket_type & 0xff;
+
+    if domain != 2 && domain != 1 {
+        // We only support AF_INET(2) and AF_UNIX(1) for now
+        return crate::syscall::errno::Errno::EAFNOSUPPORT.as_isize();
+    }
+    
+    if real_socket_type == 3 {
+        // SOCK_RAW
+        return crate::syscall::errno::Errno::ESOCKTNOSUPPORT.as_isize();
+    }
     
     // 3. 寻找空闲 FD
     let mut allocated_fd = None;
