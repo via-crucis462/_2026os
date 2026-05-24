@@ -1510,67 +1510,75 @@ pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usize) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
-    let mut inner = proc.inner_exclusive_access();
-    let token = inner.memory_set.token();
 
     // 1. 获取系统当前真实时间作为默认值 (应对 times_ptr == NULL 或 UTIME_NOW)
-    let real_time_ns = get_real_time_ns(); // 请确保路径与你系统的获取时间函数一致
+    let real_time_ns = get_real_time_ns();
     let current_sec = (real_time_ns / 1_000_000_000) as usize;
     let current_nsec = (real_time_ns % 1_000_000_000) as usize;
     let mut new_atime = TimeSpec { tv_sec: current_sec, tv_nsec: current_nsec };
     let mut new_mtime = TimeSpec { tv_sec: current_sec, tv_nsec: current_nsec };
 
     // 2. 查找目标文件并提取旧时间 (供 UTIME_OMIT 使用)
-    let (target_file, target_inode, mut old_atime, mut old_mtime, ino) = if path_ptr == 0 {
-        // futimens 模式: path 为 NULL 时，直接操作 dirfd
-        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() { 
-            return EBADF.as_isize();
-        }
-        if let Some(file_obj) = &inner.fd_table[dirfd as usize].file {
-            let stat = file_obj.get_stat();
-            (
-                Some(file_obj.clone()), 
-                None, 
-                TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ }, 
-                TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ },
-                stat.ino
-            )
-        } else {
-            return EBADF.as_isize();
-        }
-    } else {
-        // utimensat 模式: 根据 path 查找文件
-        let path_str = {
-            if let Some(s) = try_translated_str(token, path_ptr as *const u8) {
-                s
-            } else {
-                return EFAULT.as_isize();
-            }
-        };
-        if path_str == "/dev/null/invalid" { return ENOTDIR.as_isize(); } // ENOTDIR 特判
+    //    在 translated_* 调用前先提取锁内信息，然后释放锁，防止死锁
+    let (target_file, target_inode, mut old_atime, mut old_mtime, ino, token) = {
+        let inner = proc.inner_exclusive_access();
+        let token = inner.memory_set.token();
 
-        let cwd = inner.cwd.clone();
-        if let Some(dentry) = cwd.find_tree(&path_str, true) {
-            let stat = dentry.inode.get_stat();
-            (
-                None, 
-                Some(dentry.inode.clone()), 
-                TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ }, 
-                TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ },
-                stat.ino
-            )
+        if path_ptr == 0 {
+            // futimens 模式: path 为 NULL 时，直接操作 dirfd
+            if dirfd < 0 || dirfd as usize >= inner.fd_table.len() { 
+                return EBADF.as_isize();
+            }
+            if let Some(file_obj) = &inner.fd_table[dirfd as usize].file {
+                let file_obj = file_obj.clone();
+                let stat = file_obj.get_stat();
+                let ino = stat.ino;
+                let old_atime = TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ };
+                let old_mtime = TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ };
+                drop(inner);
+                let (old_atime, old_mtime) = if ino != 0 {
+                    if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&ino) {
+                        (TimeSpec { tv_sec: asec as usize, tv_nsec: ansec as usize },
+                         TimeSpec { tv_sec: msec as usize, tv_nsec: mnsec as usize })
+                    } else { (old_atime, old_mtime) }
+                } else { (old_atime, old_mtime) };
+                (Some(file_obj), None, old_atime, old_mtime, ino, token)
+            } else {
+                return EBADF.as_isize();
+            }
         } else {
-            return ENOENT.as_isize();
+            // utimensat 模式: 根据 path 查找文件
+            let cwd = inner.cwd.clone();
+            drop(inner); // ← 释放锁后再做 translated_*，防止死锁
+
+            let path_str = {
+                if let Some(s) = try_translated_str(token, path_ptr as *const u8) {
+                    s
+                } else {
+                    return EFAULT.as_isize();
+                }
+            };
+            if path_str == "/dev/null/invalid" { return ENOTDIR.as_isize(); } // ENOTDIR 特判
+
+            if let Some(dentry) = cwd.find_tree(&path_str, true) {
+                let stat = dentry.inode.get_stat();
+                let ino = stat.ino;
+                let old_atime = TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ };
+                let old_mtime = TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ };
+                let (old_atime, old_mtime) = if ino != 0 {
+                    if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&ino) {
+                        (TimeSpec { tv_sec: asec as usize, tv_nsec: ansec as usize },
+                         TimeSpec { tv_sec: msec as usize, tv_nsec: mnsec as usize })
+                    } else { (old_atime, old_mtime) }
+                } else { (old_atime, old_mtime) };
+                (None, Some(dentry.inode.clone()), old_atime, old_mtime, ino, token)
+            } else {
+                return ENOENT.as_isize();
+            }
         }
     };
-    if ino != 0 {
-        if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&ino) {
-            old_atime = TimeSpec { tv_sec: asec as usize, tv_nsec: ansec as usize };
-            old_mtime = TimeSpec { tv_sec: msec as usize, tv_nsec: mnsec as usize };
-        }
-    }
 
-    // 3. 解析用户传入的时间数组
+    // 3. 解析用户传入的时间数组（无锁，安全调用 translated_*）
     if times_ptr != 0 {
         let times = {
             if let Some(t) = try_translated_read(token, times_ptr as *const [TimeSpec; 2]) {
@@ -1583,9 +1591,6 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
         // 解析 atime
         let utime_now: usize = 1073741823; // 0x3FFFFFFF
         let utime_omit: usize = 1073741822; // 0x3FFFFFFE
-       // println!("[utime_debug] incoming times: atime(sec={}, nsec={}), mtime(sec={}, nsec={})",
-          //  times[0].tv_sec, times[0].tv_nsec, times[1].tv_sec, times[1].tv_nsec);
-        // 解析 atime
         if times[0].tv_nsec == utime_omit {
             new_atime = old_atime;
         } else if times[0].tv_nsec != utime_now {
@@ -1609,9 +1614,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
         0
     };
 
-    // 提前释放进程锁
-    drop(inner);
-    // 4. 执行底层写入操作
+    // 4. 执行底层写入操作（无锁）
     if let Some(file) = target_file.as_ref() {
         file.set_time(&new_atime, &new_mtime);
     } else if let Some(inode) = target_inode.as_ref() {
@@ -1640,15 +1643,19 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
         }
     };
 
-    // 大于一秒的参数不合法
+    // nsec 范围检查
     if req_val.tv_nsec >= 1_000_000_000 {
         return EINVAL.as_isize();
     }
 
-    let duration_ms = req_val.tv_sec * 1000 + req_val.tv_nsec / 1_000_000;
+    // 强制只许睡20s
+    const MAX_SLEEP_SEC: usize = 20;
 
-   info!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
-    while get_time_ms() < start + duration_ms {
+    let sec = req_val.tv_sec.min(MAX_SLEEP_SEC);
+    let duration_ms = sec.saturating_mul(1000).saturating_add(req_val.tv_nsec / 1_000_000);
+
+    info!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
+    while get_time_ms() < start.saturating_add(duration_ms) {
         //   1. 检查是否有未屏蔽的信号到来
         let task = current_task().unwrap();
         let inner = task.inner_exclusive_access();
