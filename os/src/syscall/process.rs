@@ -200,8 +200,17 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         drop(task_inner); 
         // ----------------------------------------
 
-        let inner = proc.inner_exclusive_access();
-        let token = inner.get_user_token();
+        // 提取 token 和 fd_table 后立即释放锁，防止 translated_* 死锁
+        let (token, fd_table) = {
+            let inner = proc.inner_exclusive_access();
+            let token = inner.get_user_token();
+            let fd_table = inner.fd_table.clone();
+            (token, fd_table)
+        }; // inner 在此释放
+
+        // 防止随机/恶意 nfds 导致死循环
+        const POLL_MAX: usize = 1024;
+        let nfds = nfds.min(POLL_MAX);
         let mut ready_count = 0;
         
         // --- 🔵 遍历轮询所有的 fd ---
@@ -221,11 +230,11 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
             if fd < 0 { continue; }
             let fd_usize = fd as usize;
             
-            if fd_usize >= inner.fd_table.len() || inner.fd_table[fd_usize].file.is_none() {
+            if fd_usize >= fd_table.len() || fd_table[fd_usize].file.is_none() {
                 pollfd.revents = 0x008; // POLLERR
                 ready_count += 1;
             } else {
-                let file = inner.fd_table[fd_usize].file.as_ref().unwrap();
+                let file = fd_table[fd_usize].file.as_ref().unwrap();
                 
                 // 检查读
                 if (pollfd.events & POLLIN) != 0 && file.ready_to_read() {
@@ -248,7 +257,6 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         
         // 4. 如果找到了就绪事件，恢复掩码并返回！
         if ready_count > 0 {
-            drop(inner);
             let mut task_inner = task.inner_exclusive_access();
             task_inner.signal_mask = original_mask; 
             drop(task_inner);
@@ -258,7 +266,6 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         // 5. 如果没找到事件，处理超时逻辑
         if has_timeout {
             if get_time_ms() >= deadline_ms {
-                drop(inner);
                 let mut task_inner = task.inner_exclusive_access();
                 task_inner.signal_mask = original_mask; 
                 drop(task_inner);
@@ -267,7 +274,6 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         }
         
         // 6. 没超时或无限等待，乖乖让出 CPU 等待下一次调度
-        drop(inner); // 必须先 drop 掉锁！
         suspend_current_and_run_next();
     }
 }
@@ -347,7 +353,7 @@ pub fn sys_chroot(path: usize) -> isize {
     }
 
     let token = inner.memory_set.token();
-
+    drop(inner);
     let path_str = {
         if let Some(s) = crate::mm::try_translated_str(token, path as *const u8) {
             s
@@ -2181,6 +2187,8 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
     let process = task.process();
     let inner = process.inner_exclusive_access();
     let token = inner.memory_set.token();
+    // 及时释放锁
+    drop(inner);
 
     if new_value == 0 {
         return EFAULT.as_isize(); 

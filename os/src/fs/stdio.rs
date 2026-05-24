@@ -92,11 +92,13 @@ impl File for Stdin {
     }
 
     fn write(&self, _user_buf: UserBuffer) -> usize {
-        panic!("Cannot write to stdin!");
+        warn!("write to stdin is not allowed");
+        0
     }
 
     fn write_at(&self, _offset: usize, _user_buf: UserBuffer) -> usize {
-        panic!("Cannot write to stdin!");
+        warn!("write_at to stdin is not allowed");
+        0
     }
 
     fn get_stat(&self) -> super::Stat {
@@ -131,7 +133,8 @@ impl File for Stdout {
         true
     }
     fn read(&self, _user_buf: UserBuffer) -> usize {
-        panic!("Cannot read from stdout!");
+        warn!("read from stdout is not allowed");
+        0
     }
     fn write(&self, user_buf: UserBuffer) -> usize {
         //let _lock = STDOUT_LOCK.exclusive_access();
@@ -175,7 +178,8 @@ impl File for Stderr {
         true
     }
     fn read(&self, _user_buf: UserBuffer) -> usize {
-        panic!("Cannot read from stderr!");
+        warn!("read from stderr is not allowed");
+        0
     }
     fn write(&self, user_buf: UserBuffer) -> usize {
         for buffer in user_buf.buffers.iter() {

@@ -149,6 +149,9 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     }
 }
 pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
+    // 防止随机/恶意 iovcnt 导致死循环或 DOS
+    const IOV_MAX: usize = 1024;
+    let iovcnt = iovcnt.min(IOV_MAX);
     let task = current_task().unwrap();
     let proc = task.process();
     let inner = proc.inner_exclusive_access();
@@ -476,6 +479,9 @@ pub struct IoVec {
 }
 
 pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
+    // 防止随机/恶意 iovcnt 导致死循环或 DOS
+    const IOV_MAX: usize = 1024;
+    let iovcnt = iovcnt.min(IOV_MAX);
     let task = current_task().unwrap();
     let proc = task.process();
     let inner = proc.inner_exclusive_access();
