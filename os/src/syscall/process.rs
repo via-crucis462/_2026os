@@ -154,10 +154,18 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         };
         
         // 换算成毫秒 (秒 * 1000 + 纳秒 / 1,000,000)
-        let timeout_ms = timespec.tv_sec * 1000 + timespec.tv_nsec / 1_000_000;
-        
-        // 算出绝对的超时时间点
-        deadline_ms = get_time_ms() + timeout_ms;
+        // nsec 范围检查
+        if timespec.tv_nsec >= 1_000_000_000 {
+            return EINVAL.as_isize();
+        }
+        // tv_sec 范围检查
+        const MAX_PPOLL_TIMEOUT_SEC: usize = 86400;
+        if timespec.tv_sec > MAX_PPOLL_TIMEOUT_SEC {
+            return EINVAL.as_isize();
+        }
+        let timeout_ms = timespec.tv_sec.saturating_mul(1000).saturating_add(timespec.tv_nsec / 1_000_000);
+        // 计算ddl
+        deadline_ms = get_time_ms().saturating_add(timeout_ms);
     }
 
     // 2. 备份原始掩码，并应用临时掩码
@@ -1654,11 +1662,12 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
         return EINVAL.as_isize();
     }
 
-    // 强制只许睡20s
+    // 防止随机/恶意 tv_sec 导致过长睡眠
     const MAX_SLEEP_SEC: usize = 20;
-
-    let sec = req_val.tv_sec.min(MAX_SLEEP_SEC);
-    let duration_ms = sec.saturating_mul(1000).saturating_add(req_val.tv_nsec / 1_000_000);
+    if req_val.tv_sec > MAX_SLEEP_SEC {
+        return EINVAL.as_isize();
+    }
+    let duration_ms = req_val.tv_sec.saturating_mul(1000).saturating_add(req_val.tv_nsec / 1_000_000);
 
     info!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
     while get_time_ms() < start.saturating_add(duration_ms) {
@@ -2086,7 +2095,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
         _ => EINVAL.as_isize(), 
     }
 }
-// ID 22: sys_epoll_wait
+
 pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i32) -> isize {
     info!(
         "[kernel] sys_epoll_wait: epfd={}, events_ptr={:#x}, maxevents={}, timeout={}ms",
@@ -2094,13 +2103,16 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
     );
     let task = current_task().unwrap();
     if events_ptr == 0 {
-        return EFAULT.as_isize(); // 返回 -EFAULT (Bad address)
+        return EFAULT.as_isize();
     }
     
     //   2. 防御非法容量：POSIX 规定 maxevents 必须大于 0
     if maxevents <= 0 {
-        return EINVAL.as_isize(); // 返回 -EINVAL (Invalid argument)
-    }   
+        return EINVAL.as_isize();
+    }
+    // 防止随机/恶意 maxevents 导致过大分配
+    const EPOLL_MAX_EVENTS: i32 = 1024;
+    let maxevents = maxevents.min(EPOLL_MAX_EVENTS);
 
     //   1. 记录进来的起始时间（用于带超时的阻塞）
     let start_time = get_time_ms(); 
@@ -2110,8 +2122,14 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
         let inner = process.inner_exclusive_access();
         
         if epfd >= inner.fd_table.len() { return EBADF.as_isize(); }
-        let epoll_file_dyn = inner.fd_table[epfd].file.clone().unwrap();
-        let epoll_file = epoll_file_dyn.as_any().downcast_ref::<EpollFile>().unwrap();
+        let epoll_file_dyn = match &inner.fd_table[epfd].file {
+            Some(f) => f.clone(),
+            None => return EBADF.as_isize(),
+        };
+        let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
+            Some(ef) => ef,
+            None => return EINVAL.as_isize(),
+        };
         
         let mut ready_events = alloc::vec::Vec::new();
         let list = epoll_file.interest_list.lock();
@@ -2156,11 +2174,10 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
             // 限时阻塞模式，看看有没有超时
             let current_time = get_time_ms();
             if current_time - start_time >= timeout as usize {
-                return 0; // 超时了！赶紧返回 0，千万别卡死！
+                return 0;
             }
         }
         
-        // 如果 timeout == -1 或者还没超时，挂起当前进程，让出 CPU
         drop(inner); 
         suspend_current_and_run_next();
     }
@@ -2408,14 +2425,30 @@ pub fn sys_pselect6(
                 return EFAULT.as_isize();
             }
         };
-        timeout_ms = timespec.tv_sec * 1000 + timespec.tv_nsec / 1_000_000;
-        deadline_ms = get_time_ms() + timeout_ms;
+        // nsec 范围检查
+        if timespec.tv_nsec >= 1_000_000_000 {
+            return EINVAL.as_isize();
+        }
+        // 防止随机/恶意 tv_sec 导致超时，饱和运算防溢出
+        const MAX_TIMEOUT_SEC: usize = 86400;
+        let sec = if timespec.tv_sec > MAX_TIMEOUT_SEC {
+            return EINVAL.as_isize();
+        } else {
+            timespec.tv_sec
+        };
+        timeout_ms = sec.saturating_mul(1000).saturating_add(timespec.tv_nsec / 1_000_000);
+        deadline_ms = get_time_ms().saturating_add(timeout_ms);
     }
+
+    // 防止随机/恶意 nfds 导致死循环
+    const PSELECT_MAX_FD: usize = 1024;
+    let nfds = nfds.min(PSELECT_MAX_FD);
     
     // debug!("[kernel] pselect6 nfds={} has_timeout={} timeout_ms={}", nfds, has_timeout, timeout_ms);
     loop {
         let mut process_inner = process.inner_exclusive_access();
-        let fd_table = &process_inner.fd_table;
+        let fd_table = &process_inner.fd_table.clone();
+        drop(process_inner); // 写回前先释放锁
         let mut ready_count = 0;
         let mut ready_readfds = 0usize;
         
@@ -2446,9 +2479,7 @@ pub fn sys_pselect6(
         if has_timeout && get_time_ms() >= deadline_ms {
             return 0;
         }
-        
-        // 挂起前先释放锁
-        drop(process_inner);
+
         suspend_current_and_run_next();
     }
 }

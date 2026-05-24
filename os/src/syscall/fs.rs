@@ -177,14 +177,17 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
         if iovec.len == 0 {
             continue;
         }
+        // 防止随机/恶意 iovec.len 导致堆分配溢出
+        const IOV_BUF_MAX: usize = 1024 * 1024; // 1MB
+        let iovec_len = iovec.len.min(IOV_BUF_MAX);
         // 写入缓冲区
         let user_buffer = crate::mm::UserBuffer {
-            buffers: crate::mm::translated_byte_buffer_mut(token, iovec.base as *const u8, iovec.len),
+            buffers: crate::mm::translated_byte_buffer_mut(token, iovec.base as *const u8, iovec_len),
         };
         let read_bytes = file.read(user_buffer);
         total_read += read_bytes;
         // 读到底了
-        if read_bytes < iovec.len {
+        if read_bytes < iovec_len {
             break;
         }
     }
@@ -478,9 +481,11 @@ pub struct IoVec {
 }
 
 pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
-    // 防止随机/恶意 iovcnt 导致死循环或 DOS
+    // 参数合法性检查
     const IOV_MAX: usize = 1024;
-    let iovcnt = iovcnt.min(IOV_MAX);
+    if iovcnt > IOV_MAX {
+        return EINVAL.as_isize();
+    }
     let task = current_task().unwrap();
     let proc = task.process();
     let inner = proc.inner_exclusive_access();
@@ -504,11 +509,16 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
         if iovec.len == 0 {
             continue; 
         }
+        const IOV_BUF_MAX: usize = 1024;
+        if iovec.len > IOV_BUF_MAX {
+            return EFAULT.as_isize();
+        }
+        let iovec_len = iovec.len.min(IOV_BUF_MAX);
         let user_buffer = UserBuffer {
-            buffers: translated_byte_buffer(token, iovec.base as *const u8, iovec.len),
+            buffers: translated_byte_buffer(token, iovec.base as *const u8, iovec_len),
         };
         let written = file.write(user_buffer);
-        if written == 0 && iovec.len > 0 {
+        if written == 0 && iovec_len > 0 {
             warn!("pid[{}] [sys_writev] FATAL: Underlying file returned 0 on write! fd={}", proc.pid.0, fd);
         }
         total_written += written;
