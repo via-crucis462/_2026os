@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 use bitflags::*;
-use crate::task::processor::PROCESSOR;
+use crate::task::processor::*;
 
 // mmap 权限标志
 bitflags! {
@@ -18,31 +18,33 @@ bitflags! {
 bitflags! {
     pub struct MMapFlags: i32 {
         const MAP_FILE      = 0;
-        const MAP_SHARED    = 1 << 0;
-        const MAP_PRIVATE   = 1 << 1;
-        const MAP_ANONYMOUS = 1 << 2;
-        const MAP_FIXED     = 1 << 4;
+        const MAP_SHARED    = 0x01;
+        const MAP_PRIVATE   = 0x02;
+        const MAP_FIXED     = 0x10;
+        const MAP_ANONYMOUS = 0x20;
     }
 }
 
 /// 修改断点
 pub fn do_brk(addr: usize) -> Result<usize, i32> {
-    let task = PROCESSOR.exclusive_access().current().unwrap();
-    task.change_program_brk(addr)
+    let task = current_processor().current().unwrap();
+    let proc = task.process();
+    proc.change_program_brk(addr)
 }
 
 /// 处理mmap系统调用的分配部分
 pub fn do_mmap(addr: usize, length: usize, prot: MMapProt, flags: MMapFlags) -> Result<usize, i32> {
     //println!("do_mmap: addr = {:#x}, length = {}, prot = {:?}", addr, length, prot);
-    let task = PROCESSOR.exclusive_access().current().unwrap();
-    let ax = task.mmap(addr, length, prot, flags);
-    //println!("do_mmap: result = {:#x?}", ax);
-    ax
+    let task = current_processor().current().unwrap();
+    let proc = task.process();
+    proc.mmap(addr, length, prot, flags)
 }
 
 pub fn do_munmap(addr: usize, length: usize) -> Result<(), i32> {
-    let task = PROCESSOR.exclusive_access().current().unwrap();
-    task.munmap(addr, length)
+    let task = current_processor().current().unwrap();
+    let proc = task.process();
+    proc.munmap(addr, length)
 }
 // 尽管文件映射在syscall中实现，但此处设置一个shared区域
 // （未实现）
+// 早期想法，似乎没必要

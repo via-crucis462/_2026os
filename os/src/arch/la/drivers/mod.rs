@@ -8,6 +8,12 @@ use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use crate::{drivers::pci::{PCIDevice,scan_bus}, sync::MPSafeCell};
 
+pub enum DeviceType {
+    VirtIOBlock,
+    VirtIONet,
+    //
+}
+
 lazy_static!(
     pub static ref DEVICE_MANAGER: MPSafeCell<DeviceManager> = MPSafeCell::new(DeviceManager::new());
 );
@@ -20,10 +26,8 @@ pub fn search_pci() {
         manager.push(device);
     }
     // 列出设备，调试用
-    // manager.list();
+    manager.list();
 }
-
-
 
 // pci设备管理器
 pub struct DeviceManager{

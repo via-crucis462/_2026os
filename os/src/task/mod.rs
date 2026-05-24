@@ -11,7 +11,8 @@
 
 mod action;
 mod context;
-mod manager;
+pub mod manager;
+pub use manager::pid2task;
 pub mod id;
 /// 任务处理器，改为pub供外部调用
 pub mod processor;

@@ -19,6 +19,71 @@ impl UserBuffer {
         }
         total
     }
+    /// 将内核中的连续字节流（如结构体转化的 &[u8] 或文件缓存）写入用户态缓冲区
+    pub fn write(&mut self, data: &[u8]) {
+        let mut current = 0;
+        for buffer in self.buffers.iter_mut() {
+            let remain = data.len() - current;
+            if remain == 0 {
+                break;
+            }
+            // 取当前 buffer 容量和剩余待写数据长度的较小值，防止越界
+            let copy_len = core::cmp::min(buffer.len(), remain);
+            // 利用 memcpy 级别的高效拷贝
+            buffer[..copy_len].copy_from_slice(&data[current..current + copy_len]);
+            current += copy_len;
+        }
+    }
+
+    /// 从用户态缓冲区读取数据，存入内核中的连续字节流中
+    pub fn read(&self, data: &mut [u8]) {
+        let mut current = 0;
+        for buffer in self.buffers.iter() {
+            let remain = data.len() - current;
+            if remain == 0 {
+                break;
+            }
+            let copy_len = core::cmp::min(buffer.len(), remain);
+            data[current..current + copy_len].copy_from_slice(&buffer[..copy_len]);
+            current += copy_len;
+        }
+    }
+    /// buffer到buffer的版本，之前写东西实现的后来发现没必要，实际上很少用到
+    pub fn read_into_buffer(&self, mut data: Self) -> isize {
+        let mut i = 0;
+        let mut j = 0;
+        for buf in self.buffers.iter() {
+            for ch in buf.iter() {
+                if let Some(da) = data.buffers[i].get_mut(j) {
+                    *da = unsafe {*ch};
+                    i += 1;
+                } else {
+                    i = 0;
+                    j += 1;
+                    break;
+                }
+            }
+        }
+        data.len() as isize
+    }
+    /// buffer到buffer的版本
+    pub fn write_from_buffer(&mut self, data: Self) -> isize {
+        let mut i = 0;
+        let mut j = 0;
+        for buf in self.buffers.iter_mut() {
+            for ch in buf.iter_mut() {
+                if let Some(da) = data.buffers[i].get(j) {
+                    *ch = unsafe {*da};
+                    i += 1;
+                } else {
+                    i = 0;
+                    j += 1;
+                    break;
+                }
+            }
+        }
+        data.len() as isize
+    }
 }
 
 impl IntoIterator for UserBuffer {

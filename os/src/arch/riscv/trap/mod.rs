@@ -12,13 +12,17 @@
 //! was. For example, timer interrupts trigger task preemption, and syscalls go
 //! to [`syscall()`].
 mod context;
-
+use crate::net::net_poll;
+use crate::{KERNEL_STACK_SIZE, PAGE_SIZE, get_hart_id};
 use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
+use crate::mm::VirtAddr;
 use crate::syscall::syscall;
 use crate::task::{
-    check_signals_error_of_current, current_add_signal, current_trap_cx, current_user_token,
-    exit_current_and_run_next, handle_signals, suspend_current_and_run_next, SignalFlags,
+    KernelStack, SignalFlags, check_signals_error_of_current, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token, exit_current_and_run_next, handle_signals, suspend_current_and_run_next
 };
+use crate::arch::timer::get_time_ms;
+use alloc::sync::Arc;
+
 use crate::arch::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
 use riscv::register::{scause, stval, stvec, sie};
@@ -54,6 +58,17 @@ pub fn enable_timer_interrupt() {
 /// trap handler
 #[no_mangle]
 pub fn trap_handler() -> ! {
+    trace!("[kernel] trap_handler: a trap from user space");
+    let scause = riscv::register::scause::read();
+    let sepc = riscv::register::sepc::read();
+    let stval = riscv::register::stval::read();
+
+    debug!(
+        "trap_handler: cause: {:?}, sepc: {:#x}, stval: {:#x}", 
+        scause.cause(), 
+        sepc, 
+        stval
+    );
     set_kernel_trap_entry();
     let scause = scause::read();
     let stval = stval::read();
@@ -62,54 +77,137 @@ pub fn trap_handler() -> ! {
         Trap::Exception(Exception::UserEnvCall) => {
             let mut cx = current_trap_cx();
             cx.set_rt(cx.get_rt() + 4);
-            // get system call return value
+            // get system call return valuehandle_signals
             let result = syscall(
                 cx.x[17], 
                 [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]]
             );
+            if result < 0 {
+                warn!("pid[{}] syscall {} returned error code {}", current_task().unwrap().process().pid.0, cx.x[17], result);
+            }
             // cx is changed during sys_exec, so we have to call it again
+            //println!("[kernel] syscall: id={}, args={:x?}, ret={:#x}", cx.x[17], [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]], result);
             cx = current_trap_cx();
             cx.set_a0(result as usize);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_trigger();
+            let current_ms = get_time_ms();
+            let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
+            for pid in expired_pids {
+                if let Some(process) = crate::task::get_process(pid) {
+                    let mut process_inner = process.inner_exclusive_access();
+
+                    for task in process_inner.tasks.iter() {
+                        let mut task_inner = task.inner_exclusive_access();
+                        task_inner.signals |= crate::task::SignalFlags::SIGALRM;
+                        if task_inner.task_status == crate::task::TaskStatus::Blocked {
+                            task_inner.task_status = crate::task::TaskStatus::Ready;
+                            crate::task::add_task(Arc::clone(task)); 
+                        }
+                    }
+                }
+            }
+            net_poll();
             suspend_current_and_run_next();
+        }
+        Trap::Exception(Exception::StorePageFault) |
+        Trap::Exception(Exception::LoadPageFault) |
+        Trap::Exception(Exception::InstructionPageFault) => {
+            /*println!(
+                "[kernel] error  {:#x},  {:#x}",
+                stval, sepc
+            );*/
+            let task = current_task().unwrap();
+            let process = task.process(); 
+            let mut process_inner = process.inner_exclusive_access();
+            
+            // 【修改 1】：获取当前的栈指针 SP
+            let sp = current_trap_cx().x[2];
+            
+            if process_inner.memory_set.handle_cow_fault(stval) {
+                info!("[WATCHDOG][COW] : {:#x}, PC: {:#x}", stval, sepc);
+                drop(process_inner);
+                drop(process);
+                drop(task);
+            } else if process_inner.memory_set.handle_page_fault(stval, sp) {
+                info!("[WATCHDOG] : {:#x}, PC: {:#x}", stval, sepc);
+                // 修复成功！释放锁
+                drop(process_inner);
+                drop(process);
+                drop(task);
+            } else {
+                println!(
+                    "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}, sp={:#x}",
+                    crate::task::current_task().unwrap().process().pid.0,
+                    scause.cause(),
+                    current_trap_cx().get_rt(),
+                    stval,
+                    sp
+                );
+                process_inner.info_map_areas();
+                drop(process_inner);
+                drop(process);
+                drop(task);
+                // 取消原来的 current_add_signal(SignalFlags::SIGSEGV);
+                // 发信号压栈死循环。
+                // 直接以 11 (SIGSEGV的默认信号值) 退出码击毙当前进程！
+                crate::task::exit_current_and_run_next(11);
+            }
         }
         _ => {
             println!(
                 "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
-                crate::task::current_task().unwrap().pid.0,
+                crate::task::current_task().unwrap().process().pid.0,
                 scause.cause(),
                 current_trap_cx().get_rt(),
                 stval
             );
-            println!("[kernel] Trap! Source: User");
-            println!("[kernel] Scause: {:?} (Code: {})", scause.cause(), scause.bits());
-            println!("[kernel] Stval:  {:#x} (Bad Address)", stval);
+            error!("[kernel] Trap! Source: User");
+            error!("[kernel] Scause: {:?} (Code: {})", scause.cause(), scause.bits());
+            error!("[kernel] Stval:  {:#x} (Bad Address)", stval);
             error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, bad instruction = {:#x}",
                 scause.cause(),
-                crate::task::current_task().unwrap().pid.0,
+                current_task().unwrap().process().pid.0,
                 stval,
                 current_trap_cx().get_rt(),
             );
             current_add_signal(SignalFlags::SIGSEGV);
         }
     }
-    handle_signals();
+    //let cause = scause::read().cause();
+    //println!("[PROBE 2] trap_handler ending (cause: {:?}), preparing to handle_signals", cause);
 
-    // check error signals (if error then exit)
-    if let Some((errno, msg)) = check_signals_error_of_current() {
-        trace!("[kernel] trap_handler: .. check signals {}", msg);
-        exit_current_and_run_next(errno);
-    }
+
     trap_return();
+    
+}
+
+// 注意：不用VirtAddr包装，因为sv39要求高位符号扩展
+pub fn current_trap_cx_user_va() -> usize {
+    current_task().unwrap().kernel_stack.get_top() - KERNEL_STACK_SIZE
+}
+
+pub fn trap_cx_va_by_tid(tid: usize) -> usize {
+    TRAMPOLINE - tid * (KERNEL_STACK_SIZE + PAGE_SIZE) - KERNEL_STACK_SIZE
+}
+
+pub fn trap_cx_va_by_kernel_stack(kernel_stack: &KernelStack) -> usize {
+    let kernel_stack_top = kernel_stack.get_top();
+    kernel_stack_top - KERNEL_STACK_SIZE
 }
 
 #[no_mangle]
 /// return to user space
 pub fn trap_return() -> ! {
+
+    crate::process::handle_signals();
+    if current_task().unwrap().inner_exclusive_access().killed {
+        info!("[SIG PROBE] EXECUTING DEATH SENTENCE FOR PID!");
+        exit_current_and_run_next(-1); 
+    }
     set_user_trap_entry();
-    let trap_cx_ptr = TRAP_CONTEXT_BASE;
+    let trap_cx_ptr = current_trap_cx_user_va();
     let user_satp = current_user_token();
     // println!("[kernel] trap_return: to user mode");
     extern "C" {
@@ -117,7 +215,7 @@ pub fn trap_return() -> ! {
         fn __restore();
     }
     let restore_va = __restore as *const () as usize - __alltraps as *const () as usize + TRAMPOLINE;
-    // trace!("[kernel] trap_return: ..before return");
+    trace!("[kernel] trap_return: ..before return");
     unsafe {
         asm!(
             "fence.i",
@@ -129,15 +227,53 @@ pub fn trap_return() -> ! {
         );
     }
 }
+#[no_mangle]
+pub fn debug_info() {
+    println!("2");
+}
+
 
 #[no_mangle]
 /// handle trap from kernel
 /// Unimplement: traps/interrupts/exceptions from kernel mode
 /// Todo: Chapter 9: I/O device
 pub fn trap_from_kernel() -> ! {
-    use riscv::register::sepc;
-    trace!("stval = {:#x}, sepc = {:#x}", stval::read(), sepc::read());
-    panic!("a trap {:?} from kernel!", scause::read().cause());
+    use riscv::register::{satp, sepc, sstatus};
+    let cause = scause::read().cause();
+    let stval_v = stval::read();
+    let sepc_v = sepc::read();
+    let sstatus_v = sstatus::read().bits();
+    let satp_v = satp::read().bits();
+    let hart_id = crate::get_hart_id();
+
+    error!(
+        "[kernel][panic] trap_from_kernel: hart={}, cause={:?}, sepc={:#x}, stval={:#x}, sstatus={:#x}, satp={:#x}",
+        hart_id,
+        cause,
+        sepc_v,
+        stval_v,
+        sstatus_v,
+        satp_v
+    );
+
+    if let Some(task) = crate::task::current_task() {
+        error!(
+            "[kernel][panic] current task snapshot: pid={}, tid={}, task_ptr={:#x}",
+            task.getpid(),
+            task.gettid(),
+            (&*task) as *const _ as usize
+        );
+    } else {
+        error!("[kernel][panic] no current task on this hart");
+    }
+
+    panic!(
+        "a trap {:?} from kernel! sepc={:#x}, stval={:#x}, hart={}.",
+        cause,
+        sepc_v,
+        stval_v,
+        hart_id
+    );
 }
 
 pub use context::TrapContext;

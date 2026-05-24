@@ -8,6 +8,7 @@
 
 
 mod frame_allocator;
+pub use frame_allocator::get_free_frames;
 mod heap_allocator;
 mod memory_set;
 mod id;
@@ -18,6 +19,7 @@ pub mod mmap;
 pub mod user_buffer;
 pub mod address;
 pub mod page_table;
+pub mod shm;
 
 
 use address::VPNRange;
@@ -25,7 +27,7 @@ pub use page_table::*;
 pub use flags::PTEFlags;
 pub use user_buffer::UserBuffer;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
-pub use frame_allocator::{frame_alloc, frame_dealloc, FrameTracker};
+pub use frame_allocator::{frame_alloc, frame_dealloc, frame_ref_count, FrameTracker};
 pub use memory_set::remap_test;
 pub use memory_set::{kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
 pub use crate::arch::mm::pte;

@@ -10,7 +10,7 @@ use core::arch::asm;
 // 地址翻译模式（简称“直接映射模式”）和页表映射地址翻译模式（简称“页表映射模式”）两种。
 // 0x1设置特权级plv0，0x10设置缓存开启
 const DMW0_VAL: usize = UNCHACHED_KERNEL_BASE | 0x1;
-const DMW1_VAL: usize = KERNEL_BASE | 0x11;
+const DMW1_VAL: usize = KERNEL_BASE | 0x11;//0b10001
 const DMW2_VAL: usize = 0 | 0x1;
 const DMW3_VAL: usize = 0;
 
@@ -80,6 +80,16 @@ fn init_tlb() {
         asm!("cpucfg {}, {}", out(reg) cfg01, in(reg) 0x1);
     }
    debug!("[kernel] cfg01: {:#x}", cfg01);
+}
+
+pub fn flush_tlb_for_asid(asid: usize) {
+    unsafe {
+        asm!(
+            "invtlb 0x4, {asid}, $r0",
+            asid = in(reg) asid,
+        );
+        asm!("dbar 0");
+    }
 }
 
 // 修改根页表地址

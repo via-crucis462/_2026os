@@ -26,13 +26,13 @@ bitflags!{
 
 impl PTEFlagsLA64{
     fn default() -> Self {
-        PTEFlagsLA64::V | PTEFlagsLA64::MAT0 | PTEFlagsLA64::P | PTEFlagsLA64::W
+        PTEFlagsLA64::V | PTEFlagsLA64::MAT0 | PTEFlagsLA64::P
     }
 }
 
 pub fn from_riscv_flags(riscv_flags: PTEFlags) -> PTEFlagsLA64 {
     // 默认设置
-    let mut la64_flags = PTEFlagsLA64::V | PTEFlagsLA64::MAT0 | PTEFlagsLA64::P | PTEFlagsLA64::W;
+    let mut la64_flags = PTEFlagsLA64::V | PTEFlagsLA64::MAT0 | PTEFlagsLA64::P;
     if (riscv_flags & PTEFlags::V) != PTEFlags::empty() {
         la64_flags |= PTEFlagsLA64::V;
     }
@@ -47,6 +47,7 @@ pub fn from_riscv_flags(riscv_flags: PTEFlags) -> PTEFlagsLA64 {
     }
     if (riscv_flags & PTEFlags::W) != PTEFlags::empty() {
         la64_flags |= PTEFlagsLA64::W;
+        la64_flags |= PTEFlagsLA64::D;
     }
     if (riscv_flags & PTEFlags::X) == PTEFlags::empty() {
         la64_flags |= PTEFlagsLA64::NX;

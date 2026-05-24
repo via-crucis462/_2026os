@@ -292,37 +292,52 @@ pub fn scan_bus(am: CSpaceAccessMethod) -> BusScan {
 }
 
 
-use crate::arch::la::drivers::block::*;
+use crate::drivers::{DeviceType , block::VirtioHal};
 use alloc::boxed::Box;
 
-pub fn scan_pci_device_to_trans() -> Option<PciTransport> {
+
+pub fn scan_and_init_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTransport> {
     //! bug: root会被泄露到堆中，可能会有问题
     //! 如果不使用这样的方式，此函数会有生命周期问题，不过目前的实现能跑
     let am = CSpaceAccessMethod::MemoryMapped;
     // 调用库中的扫描函数扫描第一个块设备
     for dev in scan_bus(am) {
-        // 只初始化块设备
-        if dev.id.vendor_id != 0x1AF4 || dev.id.device_id != 0x1001 {
-            continue;
-        }
         // 调试用，输出信息
-        info!("found a boclk device: bus={:#x} dev={:#x} func={:#x}", 
+        info!("found a device: bus={:#x} dev={:#x} func={:#x}", 
             dev.loc.bus,
             dev.loc.device,
             dev.loc.function
         );
+        match dev_type {
+            DeviceType::VirtIOBlock => {
+                if !(dev.id.vendor_id == 0x1AF4 && dev.id.device_id == 0x1001) {
+                    // 0x1AF4是virtio的vendor id，0x1001是virtio块设备的device id
+                    continue;
+                }
+            },
+            DeviceType::VirtIONet => {
+                if !(dev.id.vendor_id == 0x1AF4 && dev.id.device_id == 0x1000) {
+                    // 0x1AF4是virtio的vendor id，0x1000是virtio网卡设备的device id
+                    continue;
+                }
+            },
+            // _ => continue,
+        }
+        info!("found a target device, info: vendor_id={:#x}, device_id={:#x}, class={:#x}, subclass={:#x}",
+            dev.id.vendor_id, dev.id.device_id, dev.id.class, dev.id.subclass);
         // 初始化bar
         for (idx, obar) in dev.bars.iter().enumerate() {
             if let Some(bar) = obar {
                 match bar {
                     BAR::Memory(_base, len, prefetchable, ty) => {
-                        info!("BAR{}: type Memory at {:#x}, length {:#x}, {:?}, {:?}",
+                        debug!("BAR{}: type Memory at {:#x}, length {:#x}, {:?}, {:?}",
                             idx, _base, len, prefetchable, ty
                         );
                         // 分配MMIO地址
                         let base_addr = mmio_alloc(*len as usize);
                         // 写入 BAR
                         if ty == &Type::Bits64 {
+                            // 64位分两部分写入
                             unsafe{
                                 CSpaceAccessMethod::MemoryMapped.write32(
                                     dev.loc, 16 + (idx << 2) as u16,
@@ -343,14 +358,14 @@ pub fn scan_pci_device_to_trans() -> Option<PciTransport> {
                         }
                     }
                     BAR::IO(port) => {
-                        info!("BAR{}: type IO at {:#x}", idx, port);
+                        debug!("BAR{}: type IO at {:#x}", idx, port);
                     }
                 }
             }
         }
         // 启用设备
         unsafe {
-            // 设置cmd寄存器，开启内存访问，开始相应dma请求
+            // 设置command寄存器：开启内存访问，开始相应dma请求
             let old = am.read16(dev.loc, 0x04);
             let new = old | 0x6;
             am.write16(dev.loc, 0x04, new);
@@ -359,6 +374,11 @@ pub fn scan_pci_device_to_trans() -> Option<PciTransport> {
         let r_oot = Box::new(root);
         // 注：将生命周期暴力改为static（会泄露内存），不过暂时不会有问题，因为不会反复调用
         let ref_root  = Box::leak(r_oot);
+        info!("creating transport for device: bus={:#x} dev={:#x} func={:#x}", 
+            dev.loc.bus,
+            dev.loc.device,
+            dev.loc.function
+        );
         return Some(
             PciTransport::new::<VirtioHal, CSpaceAccessMethod>(
                 ref_root,
@@ -366,6 +386,7 @@ pub fn scan_pci_device_to_trans() -> Option<PciTransport> {
             ).unwrap()
         );
     }
+    warn!("no target device found");
     None
 }
 

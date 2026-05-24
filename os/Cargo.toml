@@ -13,6 +13,7 @@ edition = "2021"
 
 [dependencies]
 bitflags = "1.2.1"
+smoltcp = { version = "0.11", default-features = false, features = ["alloc", "log", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "socket-icmp"] }
 buddy_system_allocator = "0.6"
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 spin = "0.9.8"
@@ -27,3 +28,9 @@ virtio-drivers = { git = "https://github.com/rcore-os/virtio-drivers", rev = "4e
 # pci = "0.0.1" # 已经导入项目中并按规范复制许可证等
 virtio-drivers-la = { package = "virtio-drivers", version = "0.12.0" } # 重命名以避免冲突
 
+[profile.dev]
+opt-level = 2
+debug = 2
+
+[profile.dev.package."*"]
+opt-level = 2

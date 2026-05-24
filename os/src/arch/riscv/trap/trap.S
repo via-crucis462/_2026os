@@ -8,15 +8,17 @@
     .section .text.trampoline
     .globl __alltraps
     .globl __restore
+    .global debug_info
     .align 2
 __alltraps:
     csrrw sp, sscratch, sp
     # now sp->*TrapContext in user space, sscratch->user stack
-    # save other general purpose registers
     sd x1, 1*8(sp)
-    # skip sp(x2), we will save it later
+    # x2是栈指针，要等数据都压入栈再最后压
     sd x3, 3*8(sp)
-    # skip tp(x4), application does not use it
+    sd x4, 4*8(sp)
+    # load kernel tp(hart id) from TrapContext extension field
+    ld x4, 37*8(sp)
     # save x5~x31
     .set n, 5
     .rept 27
@@ -35,19 +37,23 @@ __alltraps:
     ld t0, 34*8(sp)
     # load trap_handler into t1
     ld t1, 36*8(sp)
-    # move to kernel_sp
+    # move to kernel_sp 实际上是内核栈顶，初始化后不再变化，所以restore时不需要保存
     ld sp, 35*8(sp)
     # switch to kernel space
+    slli t2, t0, 4
+    srli t2, t2, 48
     csrw satp, t0
-    sfence.vma
+    sfence.vma zero, t2
     # jump to trap_handler
     jr t1
 
 __restore:
     # a0: *TrapContext in user space(Constant); a1: user space token
     # switch to user space
+    slli t2, a1, 4
+    srli t2, t2, 48
     csrw   satp, a1
-    sfence.vma
+    sfence.vma zero, t2
     csrw sscratch, a0
     mv sp, a0
     # now sp points to TrapContext in user space, start restoring based on it
@@ -56,14 +62,19 @@ __restore:
     ld t1, 33*8(sp)
     csrw sstatus, t0
     csrw sepc, t1
-    # restore general purpose registers except x0/sp/tp
+    # save kernel tp(hart id) for next trap entry before restoring user tp
+    sd x4, 37*8(sp)
+    ld x4, 4*8(sp)
+    # restore general purpose registers except x0/sp
     ld x1, 1*8(sp)
     ld x3, 3*8(sp)
+    
     .set n, 5
     .rept 27
         LOAD_GP %n
         .set n, n+1
     .endr
+    
     # back to user stack
     ld sp, 2*8(sp)
     sret

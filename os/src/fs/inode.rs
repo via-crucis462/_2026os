@@ -11,6 +11,10 @@ use crate::fs::file_tree::*;
 use super::VfsInode;
 use spin::Mutex;
 use crate::mm::UserBuffer;
+use crate::fs::TimeSpec;
+use crate::auth::PermStat;
+use core::any::Any;
+
 
 pub struct OSInode {
     readable: bool,
@@ -33,6 +37,9 @@ impl OSInode {
             inode,
             dentry,
         }
+    }
+    pub fn set_time(&self, atime: &TimeSpec, mtime: &TimeSpec) -> isize {
+        self.inode.set_time(atime, mtime)
     }
     pub fn read_all(&self) -> alloc::vec::Vec<u8> {
         // 1. 获取文件总大小
@@ -112,10 +119,20 @@ impl File for OSInode {
     fn get_dentry(&self) -> Option<Arc<super::Dentry>> {
         Some(self.dentry.clone())
     }
+
     fn pread(&self, offset: usize, buf: UserBuffer) -> usize {
         let read_len = self.read_at(offset, buf);
         read_len
     }
+
+    fn get_perm(&self) -> crate::auth::PermStat {
+        self.inode.get_perm()
+    }
+
+    fn set_perm(&self, perm: PermStat) -> bool {
+        self.inode.set_perm(perm)
+    }
+
     fn lseek(&self, offset: isize, whence: i32) -> isize {
         const SEEK_SET: i32 = 0; // 从文件开头算起
         const SEEK_CUR: i32 = 1; // 从当前位置算起
@@ -147,6 +164,8 @@ impl File for OSInode {
         // 5. 成功返回新的偏移量
         new_offset as isize
     }
+
+    fn as_any(&self) -> &dyn Any { self }
 }
 bitflags! {
     ///  The flags argument to the open() system call is constructed by ORing together zero or more of the following values:
@@ -237,7 +256,7 @@ pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
     let start = if path.starts_with('/') {
         ROOT_DENTRY.clone()
     } else {
-        current_task().unwrap().inner_exclusive_access().cwd.clone()
+        current_task().unwrap().process().inner_exclusive_access().cwd.clone()
     };
     // 从起点开始检查目标路径是否已存在
     if start.find_tree(path, true).is_some() {

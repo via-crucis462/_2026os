@@ -10,6 +10,7 @@ os/last-*
 #os/Cargo.lock
 os/.gdb_history
 os/target/*
+os/boot.log
 easy-fs/Cargo.lock
 easy-fs/target/*
 easy-fs-fuse/Cargo.lock
@@ -20,8 +21,8 @@ pushall.sh
 ci-user/
 user/
 # os/vendor/
-fs_img/la64*
-fs_img/riscv64*
+fs_img/la*
+fs_img/riscv*
 fs_img/*.img
 fs_img/la64/*
 fs_img/riscv64/*
@@ -34,3 +35,15 @@ kernel-*
 *.log
 sdcard-rv-structure/*
 sdcard-rv/*
+syscall_posix_kernel.md
+*.txt
+initproc*
+!initproc*.rs
+all_codes.txt
+my_sdcard/*
+ins.txt
+os/src/arch/riscv/initprocT
+os/src/arch/la/initproc.ltp
+os/src/arch/riscv/initprocT
+*.bak
+bak

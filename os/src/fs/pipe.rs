@@ -1,7 +1,11 @@
 use super::File;
-use crate::mm::UserBuffer;
+use crate::mm::{PageSize, UserBuffer};
 use crate::sync::MPSafeCell;
 use alloc::sync::{Arc, Weak};
+use crate::mm::{frame_alloc, FrameTracker}; 
+use crate::arch::config::PAGE_SIZE;
+use crate::auth::{PermStat, FileMode};
+use core::any::Any;
 
 use crate::task::suspend_current_and_run_next;
 
@@ -31,7 +35,7 @@ impl Pipe {
     }
 }
 
-const RING_BUFFER_SIZE: usize = 32;
+const RING_BUFFER_SIZE: usize = PAGE_SIZE * 16;
 
 #[derive(Copy, Clone, PartialEq)]
 enum RingBufferStatus {
@@ -41,7 +45,7 @@ enum RingBufferStatus {
 }
 
 pub struct PipeRingBuffer {
-    arr: [u8; RING_BUFFER_SIZE],
+    frames: alloc::vec::Vec<FrameTracker>,
     head: usize,
     tail: usize,
     status: RingBufferStatus,
@@ -51,8 +55,12 @@ pub struct PipeRingBuffer {
 
 impl PipeRingBuffer {
     pub fn new() -> Self {
+        let mut frames = alloc::vec::Vec::new();
+       for _ in 0..16 {
+            frames.push(frame_alloc(PageSize::Page4K).expect("Failed to alloc physical frame for pipe!"));
+        }
         Self {
-            arr: [0; RING_BUFFER_SIZE],
+            frames,
             head: 0,
             tail: 0,
             status: RingBufferStatus::Empty,
@@ -68,21 +76,38 @@ impl PipeRingBuffer {
     }
     pub fn write_byte(&mut self, byte: u8) {
         self.status = RingBufferStatus::Normal;
-        self.arr[self.tail] = byte;
+        
+        // 找到物理页中的真实位置，写入数据
+        *self.get_byte_mut(self.tail) = byte;
+        
         self.tail = (self.tail + 1) % RING_BUFFER_SIZE;
         if self.tail == self.head {
             self.status = RingBufferStatus::Full;
         }
     }
+    // 内部辅助方法：根据当前的 head 或 tail 索引，拿到物理页中对应字节的可变引用
+    fn get_byte_mut(&mut self, index: usize) -> &mut u8 {
+        let frame_idx = index / PAGE_SIZE; // 在第几个物理页（0 或 1）
+        let offset = index % PAGE_SIZE;    // 页内偏移
+        let ppn = self.frames[frame_idx].ppn;
+        
+        // 获取该物理页的全体字节数组，然后取对应偏移的字节
+        &mut ppn.get_bytes_array()[offset]
+    }
     pub fn read_byte(&mut self) -> u8 {
         self.status = RingBufferStatus::Normal;
-        let c = self.arr[self.head];
+        
+        // 从物理页中读取数据
+        let c = *self.get_byte_mut(self.head);
+        
         self.head = (self.head + 1) % RING_BUFFER_SIZE;
+        
         if self.head == self.tail {
             self.status = RingBufferStatus::Empty;
         }
         c
     }
+    
     pub fn available_read(&self) -> usize {
         if self.status == RingBufferStatus::Empty {
             0
@@ -124,6 +149,26 @@ impl File for Pipe {
     fn writable(&self) -> bool {
         self.writable
     }
+    // 👇 加上重写的 ready_to_read
+    fn ready_to_read(&self) -> bool {
+        if !self.readable { return false; }
+        let ring_buffer = self.buffer.exclusive_access();
+        // 有数据可读，或者写端全关了（EOF），都算可读就绪
+        ring_buffer.available_read() > 0 || ring_buffer.all_write_ends_closed()
+    }
+
+    // 👇 加上重写的 ready_to_write
+    fn ready_to_write(&self) -> bool {
+        if !self.writable { return false; }
+        let ring_buffer = self.buffer.exclusive_access();
+        let space = ring_buffer.available_write();
+        if space == 0 {
+            error!("[kernel] PIPE IS FULL! head={}, tail={}", ring_buffer.head, ring_buffer.tail);
+        }
+        // 有空间可写，或者读端全关了（BROKEN PIPE），都算可写就绪
+        ring_buffer.available_write() > 0 || ring_buffer.all_read_ends_closed()
+        
+    }
     fn read(&self, buf: UserBuffer) -> usize {
         assert!(self.readable());
         let want_to_read = buf.len();
@@ -136,7 +181,18 @@ impl File for Pipe {
                 if ring_buffer.all_write_ends_closed() {
                     return already_read;
                 }
+               //println!("[kernel] Pipe Read Empty: already_read={}, waiting...", already_read);
                 drop(ring_buffer);
+                //新增：检查是否被信号打断 
+                let task = crate::task::current_task().unwrap();
+                let task_inner = task.inner_exclusive_access();
+                let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
+                let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18));
+                drop(task_inner);
+
+                if pending != 0 || unmaskable != 0 {
+                    return already_read; 
+                }
                 suspend_current_and_run_next();
                 continue;
             }
@@ -145,7 +201,11 @@ impl File for Pipe {
                     unsafe {
                         *byte_ref = ring_buffer.read_byte();
                     }
+                   
                     already_read += 1;
+                    if already_read % 1024 == 0 {
+                     //   println!("[kernel] Pipe Read Progress: {} / {}", already_read, want_to_read);
+                    }
                     if already_read == want_to_read {
                         return want_to_read;
                     }
@@ -167,6 +227,7 @@ impl File for Pipe {
                 if ring_buffer.all_read_ends_closed() {
                     return already_write;
                 }
+              //  println!("[kernel] Pipe Write Full: already_write={}, waiting for consumer...", already_write);
                 drop(ring_buffer);
                 suspend_current_and_run_next();
                 continue;
@@ -179,6 +240,9 @@ impl File for Pipe {
                     }
                     ring_buffer.write_byte(unsafe { *byte_ref });
                     already_write += 1;
+                    if already_write % 1024 == 0 {
+                  //      println!("[kernel] Pipe Write Progress: {} / {}", already_write, want_to_write);
+                    }
                     if already_write == want_to_write {
                         return want_to_write;
                     }
@@ -204,8 +268,18 @@ impl File for Pipe {
         }
     }
 
+    fn get_perm(&self) -> crate::auth::PermStat {
+        let stat = self.get_stat();
+        let (mode, uid, gid) = (stat.mode, stat.uid, stat.gid);
+        let mode = FileMode::from_bits_truncate(mode as u16);
+        PermStat { mode, uid, gid }
+    }
+
+    
     fn getdents(&self, _buf: &mut [u8]) -> isize {
         trace!("Pipe: getdents called on a pipe, returning -1");
         -1
     }
+
+    fn as_any(&self) -> &dyn Any { self }
 }
