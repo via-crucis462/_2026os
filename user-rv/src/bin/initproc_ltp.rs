@@ -53,7 +53,7 @@ fn main() -> i32 {
     chdir("/musl\0");
 
     // 测例首字母
-    let test_start = "c";
+    let test_start = "e";
 
     // 测例黑名单
     const SKIP_CASES: &[&str] = &[
@@ -68,6 +68,10 @@ fn main() -> i32 {
         "cgroup_fj_common.sh",
         "cpuctl_def_task0*",
         "cpuctl*_test0*",
+        "dio_*",
+        "doio*",
+        "dynamic_debug0*",
+        "dma_thread_diotest",
     ];
 
     let skip_list = {

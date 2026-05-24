@@ -1931,26 +1931,29 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+    let fd_table = inner.fd_table.clone();
+
+    drop(inner);
 
     if op != EPOLL_CTL_DEL && event_ptr == 0 {
         return EFAULT.as_isize();
     }
     
 
-    if epfd >= inner.fd_table.len() || fd >= inner.fd_table.len() { 
+    if epfd >= fd_table.len() || fd >= fd_table.len() { 
         return EBADF.as_isize(); 
     }
     
 
-    let epoll_file_dyn = match &inner.fd_table[epfd].file {
+    let epoll_file_dyn = match &fd_table[epfd].file {
         Some(f) => f.clone(),
         None => return EBADF.as_isize(),
     };
-    let target_file_dyn = match &inner.fd_table[fd].file {
+    let target_file_dyn = match &fd_table[fd].file {
         Some(f) => f.clone(),
         None => return EBADF.as_isize(), 
     };
-    
 
     let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
         Some(ef) => ef,
@@ -1982,16 +1985,16 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
         in_degree.insert(fd, 1);
 
 
-        for i in 0..inner.fd_table.len() {
-            if let Some(f) = &inner.fd_table[i].file {
+        for i in 0..fd_table.len() {
+            if let Some(f) = &fd_table[i].file {
                 if let Some(ep) = f.as_any().downcast_ref::<EpollFile>() {
                     adj.entry(i).or_default();
                     in_degree.entry(i).or_insert(0);
 
                     let keys: Vec<usize> = ep.interest_list.lock().keys().copied().collect();
                     for target_fd in keys {
-                        if target_fd < inner.fd_table.len() {
-                            if let Some(t_file) = &inner.fd_table[target_fd].file {
+                        if target_fd < fd_table.len() {
+                            if let Some(t_file) = &fd_table[target_fd].file {
                                 if t_file.as_any().is::<EpollFile>() {
                                     adj.entry(i).or_default().push(target_fd);
                                     *in_degree.entry(target_fd).or_insert(0) += 1;
@@ -2055,7 +2058,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     }
 
 
-    let token = inner.memory_set.token();
+
     let event = if op != 2 { // 如果不是 EPOLL_CTL_DEL，就需要读取用户态传来的数据
         //   使用你提供的 translated_ref
         if let Some(ev) = try_translated_read(token, event_ptr as *const EpollEvent) {
