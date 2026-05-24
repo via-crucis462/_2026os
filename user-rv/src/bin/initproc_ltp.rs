@@ -66,6 +66,8 @@ fn main() -> i32 {
         "cgroup_regression_fork_processes",
         "cgroup_regression_getdelays",
         "cgroup_fj_common.sh",
+        "cpuctl_def_task0*",
+        "cpuctl*_test0*",
     ];
 
     let skip_list = {

@@ -3,7 +3,7 @@ use crate::net::socket::TcpSocket;
 use crate::process::*;
 use crate::syscall::Errno::*;
 use crate::syscall::Arc;
-use crate::mm::{translated_read, translated_ref, translated_write, translated_byte_buffer, UserBuffer};
+use crate::mm::{try_translated_read, translated_ref, try_translated_write, translated_byte_buffer, UserBuffer};
 use crate::syscall::errno::Errno;
 use alloc::vec;
 
@@ -54,19 +54,29 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         // 5. 写入用户空间
         unsafe {
             // 获取用户传进来的 addrlen 的值
-            let mut user_len = translated_read(token, addrlen);
+            let mut user_len = {
+                if let Some(ul) = try_translated_read(token, addrlen) {
+                    ul
+                } else {
+                    return EFAULT.as_isize();
+                }
+            };
             let copy_len = (user_len as usize).min(16);
 
             // 把字节拷贝到用户提供的 addr 指针去
             let mut current_addr = addr as usize;
             for i in 0..copy_len {
-                translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]);
+                if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                    return EFAULT.as_isize();
+                }
                 current_addr += 1;
             }
 
             // 更新 addrlen 为实际写入的大小
             user_len = 16;
-            translated_write(token, addrlen, user_len);
+            if !try_translated_write(token, addrlen, user_len) {
+                return EFAULT.as_isize();
+            }
         }
 
         return 0; // 成功
@@ -301,15 +311,25 @@ pub fn sys_recvfrom(
                 
 
                 unsafe {
-                    let mut user_len = translated_read(token, addrlen);
+                    let mut user_len = {
+                        if let Some(ul) = try_translated_read(token, addrlen) {
+                            ul
+                        } else {
+                            return EFAULT.as_isize();
+                        }
+                    };
                     let copy_len = (user_len as usize).min(16);
                     let mut current_addr = src_addr as usize;
                     for i in 0..copy_len {
-                        translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]);
+                        if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                            return EFAULT.as_isize();
+                        }
                         current_addr += 1;
                     }
                     user_len = 16;
-                    translated_write(token, addrlen, user_len);
+                    if !try_translated_write(token, addrlen, user_len) {
+                        return EFAULT.as_isize();
+                    }
                 }
             }
             return read_len as isize;
@@ -335,16 +355,26 @@ pub fn sys_recvfrom(
                 
 
                 unsafe {
-                    let mut user_len = translated_read(token, addrlen);
+                    let mut user_len = {
+                        if let Some(ul) = try_translated_read(token, addrlen) {
+                            ul
+                        } else {
+                            return EFAULT.as_isize();
+                        }
+                    };
                     let copy_len = (user_len as usize).min(16);
                     let mut current_addr = src_addr as usize;
                     
                     for i in 0..copy_len {
-                        translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]);
+                        if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                            return EFAULT.as_isize();
+                        }
                         current_addr += 1;
                     }
                     user_len = 16;
-                    translated_write(token, addrlen, user_len);
+                    if !try_translated_write(token, addrlen, user_len) {
+                        return EFAULT.as_isize();
+                    }
                 }
             }
         }
