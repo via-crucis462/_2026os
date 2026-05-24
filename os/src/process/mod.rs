@@ -219,14 +219,24 @@ struct InitProcData<T: ?Sized> {
 #[cfg(target_arch = "riscv64")]
 static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
     _align: [],
+    #[cfg(initproc = "default")]
     bytes: *include_bytes!("../arch/riscv/initproc"),
+    #[cfg(initproc = "sh")]
+    bytes: *include_bytes!("../arch/riscv/initproc_sh"),
+    #[cfg(initproc = "ltp")]
+    bytes: *include_bytes!("../arch/riscv/initproc_ltp")
 };
 
 #[link_section = ".data"]
 #[cfg(target_arch = "loongarch64")]
 static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
     _align: [],
+    #[cfg(initproc = "default")]
     bytes: *include_bytes!("../arch/la/initproc"),
+    #[cfg(initproc = "sh")]
+    bytes: *include_bytes!("../arch/la/initproc_sh"),
+    #[cfg(initproc = "ltp")]
+    bytes: *include_bytes!("../arch/la/initproc_ltp")
 };
 
 lazy_static! {

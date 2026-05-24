@@ -38,6 +38,7 @@ sdcard-rv/*
 syscall_posix_kernel.md
 *.txt
 initproc*
+!initproc*.rs
 all_codes.txt
 my_sdcard/*
 ins.txt
@@ -46,4 +47,3 @@ os/src/arch/la/initproc.ltp
 os/src/arch/riscv/initprocT
 *.bak
 bak
-user-*

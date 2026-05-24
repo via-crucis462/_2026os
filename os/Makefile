@@ -7,6 +7,8 @@ FS ?= EXT4
 ARCH ?= riscv64
 # Log level: ERROR, WARN, INFO, DEBUG, TRACE, OFF
 LOG ?= OFF
+# Initproc: default, busybox, ltp_tests
+INITPROC ?= default
 # BOARD
 BOARD := qemu
 SBI ?= rustsbi
@@ -57,7 +59,7 @@ $(KERNEL_BIN): kernel
 
 kernel:
 	@echo Platform: $(BOARD)
-	@LOG=$(LOG) cargo build --target riscv64gc-unknown-none-elf $(MODE_ARG)
+	@LOG=$(LOG) INITPROC=$(INITPROC) cargo build --target riscv64gc-unknown-none-elf $(MODE_ARG)
 
 clean:
 	@cargo clean
@@ -103,7 +105,7 @@ $(LA_KERNEL_BIN): kernel-la
 
 kernel-la:
 	@echo Building for loongarch64...
-	@LOG=$(LOG) cargo build --target loongarch64-unknown-none $(MODE_ARG)
+	@LOG=$(LOG) INITPROC=$(INITPROC) cargo build --target loongarch64-unknown-none $(MODE_ARG)
 
 build-la: env-la kernel-la
 
