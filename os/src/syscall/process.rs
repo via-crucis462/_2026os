@@ -29,7 +29,7 @@ lazy_static! {
 pub use crate::{
     arch::timer::{get_real_time_ns, get_time_ms, get_time_us, get_timer_ticks}, 
     fs::*, 
-    mm::{UserBuffer, mmap, translated_byte_buffer, translated_ref, translated_str, translated_byte_buffer_mut, translated_write}, 
+    mm::{UserBuffer, mmap, translated_byte_buffer, translated_str, translated_byte_buffer_mut, translated_write}, 
     process::{
         task::{
             MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_token, exit_current_and_run_next, suspend_current_and_run_next, 
@@ -2193,7 +2193,13 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
     if new_value == 0 {
         return EFAULT.as_isize(); 
     }
-    let new_timer = *crate::mm::translated_ref(token, new_value as *const ITimerVal);
+    let new_timer = {
+        if let Some(t) = try_translated_read(token, new_value as *const ITimerVal) {
+            t
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
 
   
     let delay_ms = new_timer.it_value.sec * 1000 + new_timer.it_value.usec / 1000;

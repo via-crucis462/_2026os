@@ -6,7 +6,6 @@ use crate::task::{current_task, current_user_token};
 use alloc::vec;
 use alloc::sync::Arc;
 use alloc::string::ToString;
-use crate::syscall::translated_ref;
 use crate::syscall::TIME_CACHE;
 use super::{errno::Errno::*, normalize_leading_dot_path};
 use crate::syscall::TmpfsFileInode;
