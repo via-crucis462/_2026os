@@ -1269,6 +1269,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
 /// 暂时使用旧逻辑
 /// 等待子进程退出
 pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
+    //println!("sys_wait4 called with pid={}, options={:#x}", pid, options);
     let task = current_task().unwrap();
     let proc = task.process();
     // 提前拿到当前进程的 pgid

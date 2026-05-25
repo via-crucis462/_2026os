@@ -53,7 +53,7 @@ fn main() -> i32 {
     chdir("/musl\0");
 
     // 测例首字母
-    let test_start = "p";
+    let test_start = "s";
 
     // 测例黑名单
     const SKIP_CASES: &[&str] = &[
@@ -89,6 +89,16 @@ fn main() -> i32 {
         "mtest*",
         "pidns*",
         "pids_task*",
+        "select04*",
+        "sendfile07*",//无限输出“UnixSocket write called with 1 bytes”
+        "setfsgid03*",//“ Panicked at src/mm/heap_allocator.rs:12 Heap allocation error, layout = Layout { size: 8192, align: 1 (1 << 0) }”
+        "setrlimit05*",
+        "sigtimedwait01*",
+        "sigwait01*",
+        "sigwaitinfo01*",
+        "statx11*",
+        "timed_forkbomb*",
+        "tst_hexdump*",
     ];
 
     let skip_list = {

@@ -365,8 +365,7 @@ pub fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
         return true;
     }
     if token != current_user_token() {
-        println!("prepare_user_write: token mismatch, token = {:#x}, current_user_token = {:#x}", token, current_user_token());
-        return false;
+        panic!("prepare_user_write: token mismatch, token = {:#x}, current_user_token = {:#x}", token, current_user_token());
     }
     let task = current_task().unwrap();
     let process = task.process();
