@@ -1808,7 +1808,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
     };
 
     // 
-    // 只有在非匿名且非共享（即传统的 MAP_PRIVATE 读文件到内存）时，执行你原有的手动读取
+    // 只有在非匿名且非共享（即传统的 MAP_PRIVATE 读文件到内存）时，执行手动读取
     if !is_anonymous && !is_shared {
         if let Some(file) = file_inner {
             if file.readable() {
