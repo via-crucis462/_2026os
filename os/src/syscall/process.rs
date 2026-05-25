@@ -135,10 +135,9 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         return EFAULT.as_isize(); // EFAULT
     }
 
-    // 1. 在进入循环前，一次性解析好超时时间，算出 Deadline
+    // 解析超时时间
     let has_timeout = tmo_p != 0;
     let mut deadline_ms: usize = 0;
-
     if has_timeout {
         let task = current_task().unwrap();
         // 获取一下 token 用来翻译用户态指针
@@ -166,6 +165,8 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         let timeout_ms = timespec.tv_sec.saturating_mul(1000).saturating_add(timespec.tv_nsec / 1_000_000);
         // 计算ddl
         deadline_ms = get_time_ms().saturating_add(timeout_ms);
+    } else {
+        deadline_ms = usize::MAX;
     }
 
     // 2. 备份原始掩码，并应用临时掩码
@@ -281,7 +282,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
             }
         }
         
-        // 6. 没超时或无限等待，乖乖让出 CPU 等待下一次调度
+        // 继续等待
         suspend_current_and_run_next();
     }
 }
@@ -1443,7 +1444,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
     };
 
     if pid > 0 {
-        // 正常逻辑：发送给单个指定 PID 的进程
+        // 发送给单pid
         // println!("sys_kill: sending signal {} to PID {}", signum, pid);
         if let Some(proc) = get_process(pid as usize) {
             if signum == 0 { return 0; } // 探测成功
@@ -1479,8 +1480,8 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         } else {
             return ESRCH.as_isize();
         }
-    } else if pid == 0 || pid < -1 {
-        //   进阶逻辑：广播给整个进程组！
+    } else if pid <= 0 {
+        // 发送给进程组， 目前的逻辑还有问题，暂时这样
         let target_pgid = if pid == 0 { current_pgid } else { (-pid) as usize };
 
         if signum == 0 {
@@ -1501,9 +1502,9 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         let flag = flag.unwrap();
         let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
 
-        //   Phase 1: 遍历 PID 空间，持 PCB 锁做进程级操作，收集首个线程 Arc
+        // 拿出所有进程的首个线程
         let mut matched_tasks: Vec<Arc<TaskControlBlock>> = Vec::new();
-        for i in 1..4096 {
+        for i in 2..4096 {
             if let Some(proc) = get_process(i) {
                 let mut inner = proc.inner_exclusive_access();
                 if inner.pgid == target_pgid {
@@ -1512,21 +1513,19 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
                         matched_tasks.push(first_task.clone());
                     }
                 }
-            } // PCB 锁在此释放
+            }
         }
-
+        // 目标不存在
         if matched_tasks.is_empty() {
-            return ESRCH.as_isize(); // 没有找到任何匹配的进程组
+            return ESRCH.as_isize();
         }
 
-        //   Phase 2: 无 PCB 锁，逐个拿 TCB 锁插入信号并唤醒
+        // 给进程组发信号
         for task_arc in matched_tasks.iter() {
             let mut t_inner = task_arc.inner_exclusive_access();
-
-            //   1. 无条件插入信号
+            // 插入信号
             t_inner.signals.insert(flag);
-
-            //   2. 判断屏蔽并决定是否唤醒
+            // 是否被屏蔽
             let is_unblocked = !t_inner.signal_mask.contains(flag);
 
             if is_unblocked || is_unmaskable {
@@ -2483,7 +2482,7 @@ pub fn sys_pselect6(
     _sigmask: *const usize,
 ) -> isize {
     let task = current_task().unwrap();
-    let process = task.process(); // 【修正】fd_table 和 Token 都在 PCB
+    let process = task.process();
     let token = process.inner_exclusive_access().get_user_token();
     
     let mut readfds = 0usize;
@@ -2562,7 +2561,6 @@ pub fn sys_pselect6(
         if has_timeout && get_time_ms() >= deadline_ms {
             return 0;
         }
-
         suspend_current_and_run_next();
     }
 }

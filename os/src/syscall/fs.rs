@@ -133,14 +133,13 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     if let Some(file) = &inner.fd_table[fd].file {
         let file = file.clone();
         let status = inner.fd_table[fd].status;
+        drop(inner);
         if !file.readable() {
             return EACCES.as_isize(); // 权限不足
         }
         if (status & (O_NONBLOCK | O_NDELAY)) != 0 && !file.ready_to_read() {
             return EAGAIN.as_isize();
         }
-        // release current task TCB manually to avoid multi-borrow
-        drop(inner);
         trace!("kernel:pid[{}] sys_read: fd={}, len={}", task.process().pid.0, fd, len);
         file.read(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
     } else {

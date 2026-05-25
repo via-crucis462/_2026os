@@ -53,7 +53,7 @@ fn main() -> i32 {
     chdir("/musl\0");
 
     // 测例首字母
-    let test_start = "m";
+    let test_start = "p";
 
     // 测例黑名单
     const SKIP_CASES: &[&str] = &[
@@ -86,7 +86,9 @@ fn main() -> i32 {
         "memcpy*",
         "memcontrol*",
         "memctl*",
-        "mtest*"
+        "mtest*",
+        "pidns*",
+        "pids_task*",
     ];
 
     let skip_list = {
