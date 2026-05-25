@@ -7,6 +7,8 @@ mod dir_entry;
 mod file_tree;
 mod procfs;
 mod devfs;
+pub mod memfd;
+pub use memfd::*;
 pub mod tmpfs;
 pub use tmpfs::setup_oscomp_env;
 pub use tmpfs::{TmpfsFileInode, TmpfsDirInode};

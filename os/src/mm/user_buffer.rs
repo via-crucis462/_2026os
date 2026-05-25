@@ -48,6 +48,42 @@ impl UserBuffer {
             current += copy_len;
         }
     }
+    /// buffer到buffer的版本，之前写东西实现的后来发现没必要，实际上很少用到
+    pub fn read_into_buffer(&self, mut data: Self) -> isize {
+        let mut i = 0;
+        let mut j = 0;
+        for buf in self.buffers.iter() {
+            for ch in buf.iter() {
+                if let Some(da) = data.buffers[i].get_mut(j) {
+                    *da = unsafe {*ch};
+                    i += 1;
+                } else {
+                    i = 0;
+                    j += 1;
+                    break;
+                }
+            }
+        }
+        data.len() as isize
+    }
+    /// buffer到buffer的版本
+    pub fn write_from_buffer(&mut self, data: Self) -> isize {
+        let mut i = 0;
+        let mut j = 0;
+        for buf in self.buffers.iter_mut() {
+            for ch in buf.iter_mut() {
+                if let Some(da) = data.buffers[i].get(j) {
+                    *ch = unsafe {*da};
+                    i += 1;
+                } else {
+                    i = 0;
+                    j += 1;
+                    break;
+                }
+            }
+        }
+        data.len() as isize
+    }
 }
 
 impl IntoIterator for UserBuffer {

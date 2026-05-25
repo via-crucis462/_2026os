@@ -4,7 +4,7 @@
 //! is determined according to the PID.
 
 use crate::arch::config::*;
-use crate::mm::{MapPermission, VirtAddr, KERNEL_SPACE};
+use crate::mm::{MapPermission, VirtAddr, KERNEL_SPACE, PageSize};
 use crate::sync::MPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
@@ -111,6 +111,7 @@ pub fn kstack_alloc() -> KernelStack {
         kstack_bottom.into(),
         kstack_top.into(),
         MapPermission::R | MapPermission::W,
+        PageSize::Page4K, // 内核栈用标准页
     );
     KernelStack(kstack_id)
 }

@@ -1,8 +1,9 @@
 MODE ?= debug
-RV_SMP ?= 4
+RV_SMP ?= 1
 LA_SMP ?= 4
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
+INIT ?= default
 RV_ELF ?= os/target/riscv64gc-unknown-none-elf/$(MODE)/os
 LA_ELF ?= os/target/loongarch64-unknown-none/$(MODE)/os
 
@@ -15,26 +16,36 @@ else
 endif
 
 
-all: build
+all: build-user copy-user build copy
 
 build-rv:
-	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG)
-
+	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INITPROC=$(INITPROC)
 build-la:
-	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG)
+	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INITPROC=$(INITPROC)
+
+build-user-rv:
+	cd user-rv && $(MAKE) build
+build-user-la:
+	cd user-la && $(MAKE) build
+build-user: build-user-rv build-user-la
 
 copy-rv:
 	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv
-
 copy-la:
 	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la
 
-copy: copy-rv copy-la
+copy-user-rv:
+	cd user-rv && find target/riscv64gc-unknown-none-elf/$(MODE)/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/riscv/ \;
+copy-user-la:
+	cd user-la && find target/loongarch64-unknown-none/$(MODE)/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/la/ \;
+copy-user: copy-user-rv copy-user-la
 
-build: build-rv build-la copy
+copy: copy-rv copy-la copy-user-rv copy-user-la
+
+build: build-rv build-la
 
 test-rv: MODE = release
-test-rv: build-rv copy-rv
+test-rv: build-user-rv copy-user-rv build-rv copy-rv
 	@rm -f kernel_output.log
 	@qemu-system-riscv64 -machine virt \
 	-kernel kernel-rv \
@@ -48,7 +59,7 @@ test-rv: build-rv copy-rv
 	| tee kernel_output.log
 
 test-la: MODE = release
-test-la: build-la copy-la
+test-la: build-user-la copy-user-la build-la copy-la
 	@rm -f kernel_output.log
 	@qemu-system-loongarch64 \
 	-kernel kernel-la \
@@ -62,7 +73,7 @@ test-la: build-la copy-la
 	-rtc base=utc \
 	| tee kernel_output.log
 
-debug-rv: build-rv copy-rv
+debug-rv: build-user-rv copy-user-rv build-rv copy-rv
 	@rm -f kernel_output.log
 	@qemu-system-riscv64 -machine virt \
 	-kernel kernel-rv \
@@ -76,7 +87,7 @@ debug-rv: build-rv copy-rv
 	-S -gdb tcp::$(RV_GDB_PORT) \
 	| tee kernel_output.log
 
-debug-la: build-la copy-la
+debug-la: build-user-la copy-user-la build-la copy-la
 	@rm -f kernel_output.log
 	@qemu-system-loongarch64 \
 	-machine virt \
@@ -101,7 +112,8 @@ gdb-rv:
 	-ex "set schedule-multiple on" \
 	-ex "target extended-remote :$(RV_GDB_PORT)" \
 	-ex "info threads" \
-	-ex "b os::syscall::process::sys_exec"
+
+#	-ex "b os::syscall::process::sys_exec"
 	
 #	-ex "b os::syscall::fs::sys_dup2"
     

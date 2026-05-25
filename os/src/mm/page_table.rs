@@ -2,11 +2,42 @@ use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAdd
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use riscv::addr::page;
 use crate::arch::config::PAGE_SIZE;
 use crate::arch::trap::{current_trap_cx_user_va, TrapContext};
+use crate::mm::MapArea;
 use crate::process::{current_task, current_user_token};
-#[allow(unused)]
 
+/// 页大小，单位Bytes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageSize {
+    Page4K = 1 << 12, // 4KB
+    Page2M = 1 << ( 12 + 9 ), // 2MB
+    Page1G = 1 << ( 12 + 9 + 9 ), // 1GB
+}
+    
+impl PageSize {
+    // 页大小对应的字节数
+    pub fn size(&self) -> usize {
+        self.clone() as usize
+    }
+    // 页大小对应的位数，如4KB对应12位
+    pub fn size_bits(&self) -> usize {
+        self.size().trailing_zeros() as usize
+    }
+    // 对应基本页的倍数
+    pub fn num_pages(&self) -> usize {
+        self.size() / PAGE_SIZE
+    }
+    // 页表层数，0表示根页表项直接映射
+    pub fn walk_level(&self) -> usize {
+        match self {
+            PageSize::Page4K => 2,
+            PageSize::Page2M => 1,
+            PageSize::Page1G => 0,
+        }
+    }
+}
 
 /// page table structure
 pub struct PageTable {
@@ -20,7 +51,7 @@ pub struct PageTable {
 impl PageTable {
     /// Create a new page table
     pub fn new() -> Self {
-        let frame = frame_alloc().unwrap();
+        let frame = frame_alloc(PageSize::Page4K).unwrap();
         PageTable {
             root_ppn: frame.ppn,
             frames: vec![frame],
@@ -41,19 +72,18 @@ impl PageTable {
     }
     /// Find PageTableEntry by VirtPageNum, create a frame for a 4KB page table if not exist
     #[cfg(target_arch = "riscv64")]
-    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {  
+    fn find_pte_create(&mut self, vpn: VirtPageNum, page_size: PageSize) -> Option<&mut PageTableEntry> {  
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
-            if i == 2 {
+            if i == page_size.walk_level() {
                 result = Some(pte);
                 break;
             }
             if !pte.is_valid() {
-
-                let frame = frame_alloc().unwrap();
+                let frame = frame_alloc(PageSize::Page4K).unwrap();
                 *pte = PageTableEntry::new(frame.ppn, PTEFlags::V);
                 self.frames.push(frame);
             }
@@ -63,18 +93,18 @@ impl PageTable {
     }
     #[cfg(target_arch = "loongarch64")]
     // 参考了loongarch rocre
-    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {  
+    fn find_pte_create(&mut self, vpn: VirtPageNum, page_size: PageSize) -> Option<&mut PageTableEntry> {  
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
-            if i == 2 {
+            if i == page_size.walk_level() {
                 result = Some(pte);
                 break;
             }
             if pte.is_empty() {
-                let frame = frame_alloc().unwrap();
+                let frame = frame_alloc(PageSize::Page4K).unwrap();
                 *pte = PageTableEntry::new_dir(frame.ppn);
                 self.frames.push(frame);
             }
@@ -85,26 +115,35 @@ impl PageTable {
 
     /// Find PageTableEntry by VirtPageNum
     #[cfg(target_arch = "riscv64")]
-    pub fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+    pub fn find_pte(&self, vpn: VirtPageNum) -> Option<(&mut PageTableEntry, PageSize)> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
-        let mut result: Option<&mut PageTableEntry> = None;
+        let mut pte_opt: Option<&mut PageTableEntry> = None;
+        let mut page_size: Option<PageSize> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
             //println!("find_pte: vpn = {:?}, i = {}", vpn, i);
-            if i == 2 {
-                result = Some(pte);
-                break;
+            if i == 2 || (pte.readable() || pte.writable() || pte.executable()) {
+                pte_opt = Some(pte);
+                page_size = Some(match i {
+                    0 => PageSize::Page1G,
+                    1 => PageSize::Page2M,
+                    2 => PageSize::Page4K,
+                    _ => unreachable!(),
+                });
+                return Some((pte_opt.unwrap(), page_size.unwrap()));
             }
+            // 如果不是叶子节点但无效，说明没有映射
             if !pte.is_valid() {
                 return None;
             }
             ppn = pte.ppn();
         }
-        result
+        None
+        
     }
     #[cfg(target_arch = "loongarch64")]
-    pub fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+    pub fn find_pte(&self, vpn: VirtPageNum, page_size: PageSize) -> Option<&mut PageTableEntry> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;
@@ -126,16 +165,16 @@ impl PageTable {
     /// set the map between virtual page number and physical page number
     #[allow(unused)]
     #[cfg(target_arch = "riscv64")]
-    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
-        let pte = self.find_pte_create(vpn).unwrap();
+    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags, page_size: PageSize) {
+        let pte = self.find_pte_create(vpn, page_size).unwrap();
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
     }
     #[allow(unused)]
     #[cfg(target_arch = "loongarch64")]
     
-    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
-        let pte = self.find_pte_create(vpn).unwrap();
+    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags, page_size: PageSize) {
+        let pte = self.find_pte_create(vpn, page_size).unwrap();
         assert!(pte.is_empty(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new_defualt(ppn);
         *pte = PageTableEntry { bits: pte.bits | from_riscv_flags(flags).bits() as usize};
@@ -146,29 +185,32 @@ impl PageTable {
     /// remove the map between virtual page number and physical page number
     #[allow(unused)]
     pub fn unmap(&mut self, vpn: VirtPageNum) {
-        let pte = self.find_pte(vpn).unwrap();
+        let (pte, page_size) = self.find_pte(vpn).unwrap();
         assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
         *pte = PageTableEntry::empty();
     }
     /// get the page table entry from the virtual page number
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
-        self.find_pte(vpn).map(|pte| *pte)
+        self.find_pte(vpn).map(|(pte, size)| *pte)
     }
-    pub fn translate_create(&mut self, vpn: VirtPageNum) -> Option<PageTableEntry> {
-        self.find_pte_create(vpn).map(|pte| *pte)
+    pub fn translate_and_get_size(&self, vpn: VirtPageNum) -> Option<(PageTableEntry, PageSize)> {
+        self.find_pte(vpn).map(|(pte, size)| (*pte, size))
     }
-    pub fn set_flags(&mut self, vpn: VirtPageNum, flags: PTEFlags) {
+    pub fn translate_create(&mut self, vpn: VirtPageNum, page_size: PageSize) -> Option<PageTableEntry> {
+        self.find_pte_create(vpn, page_size).map(|pte| *pte)
+    }
+    pub fn set_flags(&mut self, vpn: VirtPageNum, flags: PTEFlags, page_size: PageSize) {
         let ppn = self.translate(vpn).unwrap().ppn();
         self.set_entry(vpn, ppn, flags);
     }
     #[cfg(target_arch = "riscv64")]
     pub fn set_entry(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
-        let pte = self.find_pte(vpn).unwrap();
+        let (pte, size) = self.find_pte(vpn).unwrap();
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
     }
     #[cfg(target_arch = "loongarch64")]
-    pub fn set_entry(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
-        let pte = self.find_pte(vpn).unwrap();
+    pub fn set_entry(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags, page_size: PageSize) {
+        let (pte, size) = self.find_pte(vpn).unwrap();
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
         if (flags & PTEFlags::W) != PTEFlags::empty() {
             pte.set_dirty();
@@ -176,9 +218,10 @@ impl PageTable {
     }
     /// get the physical address from the virtual address
     pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
-        self.find_pte(va.clone().floor()).map(|pte| {
+        self.find_pte(va.clone().std_floor()).map(|(pte, size)| {
             let aligned_pa: PhysAddr = pte.ppn().into();
-            let offset = va.page_offset();
+            assert!(aligned_pa.actual_aligned(size), "translate_va: pa {:#x} is not aligned to page size {:#x}", aligned_pa.0, size.size());
+            let offset = va.actual_page_offset(size);
             let aligned_pa_usize: usize = aligned_pa.into();
             (aligned_pa_usize + offset).into()
         })
@@ -203,9 +246,9 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     let mut v = Vec::new();
     while start < end {
         let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.floor();
-        let ppn = match page_table.translate(vpn) {
-            Some(pte) if pte.is_valid() => pte.ppn(),
+        let mut vpn = start_va.std_floor();
+        let (ppn, size) = match page_table.translate_and_get_size(vpn) {
+            Some((pte, size)) if pte.is_valid() => (pte.ppn(), size),
             _ => {
                 if token != current_user_token() {
                     return Vec::new();
@@ -219,19 +262,20 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
                 let sp = trap_cx_pa.get_ref::<TrapContext>().get_sp();
                 let mut proc_inner = process.inner_exclusive_access();
                 if proc_inner.memory_set.handle_page_fault(start, sp) {
-                    page_table.translate(vpn).unwrap().ppn()
+                    let (pte, size) = page_table.find_pte(vpn).unwrap();
+                    (pte.ppn(), size)
                 } else {
                     return Vec::new();
                 }
             }
         };
-        vpn.step();
+        vpn.step_by(size.num_pages());
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
-        if end_va.page_offset() == 0 {
-            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..]);
+        if end_va.actual_page_offset(size) == 0 {
+            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..]);
         } else {
-            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..end_va.page_offset()]);
+            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..end_va.actual_page_offset(size)]);
         }
         start = end_va.into();
     }
@@ -248,15 +292,18 @@ fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
     let mut ready = true;
     while start < end {
         let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.floor();
-        match page_table.translate(vpn) {
-            Some(pte) if pte.is_valid() && pte.readable() => {}
+        let mut vpn = start_va.std_floor();
+        let p_s = page_table.find_pte(vpn);
+        let size = match p_s {
+            Some((pte, size)) if pte.is_valid() && pte.readable() => {
+                size
+            }
             _ => {
                 ready = false;
                 break;
             }
-        }
-        vpn.step();
+        };
+        vpn.step_by(size.num_pages());
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
         start = end_va.into();
@@ -293,15 +340,18 @@ fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
     let mut ready = true;
     while start < end {
         let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.floor();
-        match page_table.translate(vpn) {
-            Some(pte) if pte.is_valid() && pte.writable() => {}
+        let mut vpn = start_va.std_floor();
+        let p_s = page_table.find_pte(vpn);
+        let size = match p_s {
+            Some((pte, size)) if pte.is_valid() && pte.readable() => {
+                size
+            }
             _ => {
                 ready = false;
                 break;
             }
-        }
-        vpn.step();
+        };
+        vpn.step_by(size.num_pages());
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
         start = end_va.into();
@@ -392,7 +442,7 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
         .translate_va(VirtAddr::from(ptr as usize))
         .unwrap();
     debug!("translated_ref: start_pa = {:#x}, end_pa = {:#x}, len = {:#x}", pa.0, pa.0 + len - 1, len);
-    if pa.floor() == PhysAddr(pa.0 + len - 1).floor() {
+    if pa.std_floor() == PhysAddr(pa.0 + len - 1).std_floor() {
         pa.get_ref()
     } else {
         alloc::boxed::Box::leak(alloc::boxed::Box::new(translated_read(token, ptr)))
@@ -406,8 +456,9 @@ pub fn translated_read<T>(token: usize, ptr: *const T) -> T {
     let page_table = PageTable::from_token(token);
     let mut data = vec![0u8; len];
     let start_va = VirtAddr::from(ptr as usize);
+    let (pte, size) = page_table.find_pte(start_va.std_floor()).unwrap();
     // 页内快路径：保持原有低开销行为
-    if start_va.page_offset() + len <= PAGE_SIZE {
+    if start_va.std_page_offset() + len <= size.size() {
         let pa = page_table
             .translate_va(start_va)
             .unwrap();
@@ -427,6 +478,15 @@ pub fn translated_read<T>(token: usize, ptr: *const T) -> T {
     unsafe { core::ptr::read(data.as_ptr() as *const T) }
 }
 
+pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
+    let len = core::mem::size_of::<T>();
+    if !prepare_user_read(token, ptr as usize, len) {
+        return None;
+    }
+    Some(translated_read(token, ptr))
+}
+
+
 /// 将用户空间的T写入给定地址
 pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
     let len = core::mem::size_of::<T>();
@@ -434,8 +494,9 @@ pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
     let page_table = PageTable::from_token(token);
     let data = unsafe { core::slice::from_raw_parts((&value as *const T) as *const u8, len) };
     let start_va = VirtAddr::from(ptr as usize);
+    let (pte, size) = page_table.find_pte(start_va.std_floor()).unwrap();
     // 页内快路径：保持原有低开销行为
-    if start_va.page_offset() + len <= PAGE_SIZE {
+    if start_va.std_page_offset() + len <= size.size() {
         let pa = page_table
             .translate_va(start_va)
             .unwrap();
@@ -452,4 +513,13 @@ pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
             unsafe { *(pa.0 as *mut u8) = data[idx] };
         }
     }
+}
+
+pub fn try_translated_write<T>(token: usize, ptr: *mut T, value: T) -> bool {
+    let len = core::mem::size_of::<T>();
+    if !prepare_user_write(token, ptr as usize, len) {
+        return false;
+    }
+    translated_write(token, ptr, value);
+    true
 }

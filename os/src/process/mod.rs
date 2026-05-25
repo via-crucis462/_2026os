@@ -168,7 +168,6 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let mut orphan_children = alloc::vec::Vec::new();
     
     if proc_inner.is_zombie() {
-        crate::process::remove_process(pid);
         orphan_children = core::mem::take(&mut proc_inner.children);
         if !orphan_children.is_empty() {
             warn!("[kernel] Process {} orphans {} children to initproc", pid, orphan_children.len());
@@ -220,14 +219,24 @@ struct InitProcData<T: ?Sized> {
 #[cfg(target_arch = "riscv64")]
 static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
     _align: [],
+    #[cfg(initproc = "default")]
     bytes: *include_bytes!("../arch/riscv/initproc"),
+    #[cfg(initproc = "sh")]
+    bytes: *include_bytes!("../arch/riscv/initproc_sh"),
+    #[cfg(initproc = "ltp")]
+    bytes: *include_bytes!("../arch/riscv/initproc_ltp")
 };
 
 #[link_section = ".data"]
 #[cfg(target_arch = "loongarch64")]
 static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
     _align: [],
+    #[cfg(initproc = "default")]
     bytes: *include_bytes!("../arch/la/initproc"),
+    #[cfg(initproc = "sh")]
+    bytes: *include_bytes!("../arch/la/initproc_sh"),
+    #[cfg(initproc = "ltp")]
+    bytes: *include_bytes!("../arch/la/initproc_ltp")
 };
 
 lazy_static! {

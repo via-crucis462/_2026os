@@ -3,7 +3,7 @@ use crate::net::socket::TcpSocket;
 use crate::process::*;
 use crate::syscall::Errno::*;
 use crate::syscall::Arc;
-use crate::mm::{translated_read, translated_ref, translated_write, translated_byte_buffer, UserBuffer};
+use crate::mm::{try_translated_read, try_translated_write, translated_byte_buffer, UserBuffer};
 use crate::syscall::errno::Errno;
 use alloc::vec;
 use crate::net::MsgHdr;
@@ -57,19 +57,29 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         // 5. 写入用户空间
         unsafe {
             // 获取用户传进来的 addrlen 的值
-            let mut user_len = translated_read(token, addrlen);
+            let mut user_len = {
+                if let Some(ul) = try_translated_read(token, addrlen) {
+                    ul
+                } else {
+                    return EFAULT.as_isize();
+                }
+            };
             let copy_len = (user_len as usize).min(16);
 
             // 把字节拷贝到用户提供的 addr 指针去
             let mut current_addr = addr as usize;
             for i in 0..copy_len {
-                translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]);
+                if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                    return EFAULT.as_isize();
+                }
                 current_addr += 1;
             }
 
             // 更新 addrlen 为实际写入的大小
             user_len = 16;
-            translated_write(token, addrlen, user_len);
+            if !try_translated_write(token, addrlen, user_len) {
+                return EFAULT.as_isize();
+            }
         }
 
         return 0; // 成功
@@ -136,12 +146,13 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
         }
 
      
-        let mut family_bytes = [0u8; 2];
-        for i in 0..2 {
-           
-            let ptr = (addr as usize + i) as *const u8;
-            family_bytes[i] = unsafe { *crate::mm::translated_ref(token, ptr) };
-        }
+        let family_bytes = {
+            if let Some(b) = try_translated_read(token, addr as *const [u8; 2]) {
+                b
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
         
  
         let sa_family = u16::from_ne_bytes(family_bytes);
@@ -168,12 +179,13 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
         }
 
 
-        let mut sockaddr = [0u8; 16];
-        sockaddr[0..2].copy_from_slice(&family_bytes);
-        for i in 2..16 {
-            let ptr = (addr as usize + i) as *const u8;
-            sockaddr[i] = unsafe { *crate::mm::translated_ref(token, ptr) };
-        }
+        let sockaddr = {
+            if let Some(s) = try_translated_read(token, addr as *const [u8; 16]) {
+                s
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
         
       
         let port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
@@ -230,11 +242,13 @@ pub fn sys_sendto(
 
         // 2. 解析 dest_addr (C 语言的 sockaddr 结构体)
         if dest_addr as usize != 0 {
-            let mut sockaddr_bytes = [0u8; 16];
-            for i in 0..16 {
-                // 逐字节翻译并拷贝用户态内存
-                sockaddr_bytes[i] = *crate::mm::translated_ref(token, (dest_addr as usize + i) as *const u8);
-            }
+            let sockaddr_bytes = {
+                if let Some(s) = try_translated_read(token, dest_addr as *const [u8; 16]) {
+                    s
+                } else {
+                    return EFAULT.as_isize();
+                }
+            };
             // 解析出端口 (大端序转主机序)
             let port = u16::from_be_bytes([sockaddr_bytes[2], sockaddr_bytes[3]]);
             // 解析出 IPv4 地址
@@ -304,15 +318,25 @@ pub fn sys_recvfrom(
                 
 
                 unsafe {
-                    let mut user_len = translated_read(token, addrlen);
+                    let mut user_len = {
+                        if let Some(ul) = try_translated_read(token, addrlen) {
+                            ul
+                        } else {
+                            return EFAULT.as_isize();
+                        }
+                    };
                     let copy_len = (user_len as usize).min(16);
                     let mut current_addr = src_addr as usize;
                     for i in 0..copy_len {
-                        translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]);
+                        if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                            return EFAULT.as_isize();
+                        }
                         current_addr += 1;
                     }
                     user_len = 16;
-                    translated_write(token, addrlen, user_len);
+                    if !try_translated_write(token, addrlen, user_len) {
+                        return EFAULT.as_isize();
+                    }
                 }
             }
             return read_len as isize;
@@ -338,16 +362,26 @@ pub fn sys_recvfrom(
                 
 
                 unsafe {
-                    let mut user_len = translated_read(token, addrlen);
+                    let mut user_len = {
+                        if let Some(ul) = try_translated_read(token, addrlen) {
+                            ul
+                        } else {
+                            return EFAULT.as_isize();
+                        }
+                    };
                     let copy_len = (user_len as usize).min(16);
                     let mut current_addr = src_addr as usize;
                     
                     for i in 0..copy_len {
-                        translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]);
+                        if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                            return EFAULT.as_isize();
+                        }
                         current_addr += 1;
                     }
                     user_len = 16;
-                    translated_write(token, addrlen, user_len);
+                    if !try_translated_write(token, addrlen, user_len) {
+                        return EFAULT.as_isize();
+                    }
                 }
             }
         }
@@ -368,6 +402,16 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     // 2. 提取真正的 socket 核心类型 (屏蔽掉标志位)
     // 常见的值：1 = SOCK_STREAM (TCP), 2 = SOCK_DGRAM (UDP)
     let real_socket_type = socket_type & 0xff;
+
+    if domain != 2 && domain != 1 {
+        // We only support AF_INET(2) and AF_UNIX(1) for now
+        return crate::syscall::errno::Errno::EAFNOSUPPORT.as_isize();
+    }
+    
+    if real_socket_type == 3 {
+        // SOCK_RAW
+        return crate::syscall::errno::Errno::ESOCKTNOSUPPORT.as_isize();
+    }
     
     // 3. 寻找空闲 FD
     let mut allocated_fd = None;
@@ -420,22 +464,26 @@ pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
     drop(inner); // 提早释放锁
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         // 从 addr 中安全读取端口信息
-        let mut port_bytes = [0u8; 2];
-        port_bytes[0] = *crate::mm::translated_ref(token, (addr as usize + 2) as *const u8);
-        port_bytes[1] = *crate::mm::translated_ref(token, (addr as usize + 3) as *const u8);
-        let port = u16::from_be_bytes(port_bytes);
+        let port = {
+            if let Some(p) = try_translated_read(token, (addr as usize + 2) as *const u16) {
+                u16::from_be(p)
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
         
         // 绑定端口
         return udp_socket.bind(port);
     }
     if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
         // 1. 从用户态读取 16 字节的 sockaddr_in
-        let mut sockaddr = [0u8; 16];
-        let mut curr = addr as usize;
-        for i in 0..16 {
-            sockaddr[i] = unsafe { *crate::mm::translated_ref(token, curr as *const u8) };
-            curr += 1;
-        }
+        let sockaddr = {
+            if let Some(s) = try_translated_read(token, addr as *const [u8; 16]) {
+                s
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
         
         // 2. 解析大端序的端口号
         let port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);

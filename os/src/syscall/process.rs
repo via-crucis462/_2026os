@@ -1,8 +1,8 @@
 //! Process management syscalls
-//! 这里是进程管理相关的系统调用实现，包含了进程创建、退出、等待、信号等功能
-//! 内存管理也暂时放在此处
+//! 进程管理相关系统调用实现
+//! 内存管理也暂时放在此处，后续迁移到mm
 
-use crate::mm::{translated_read, try_translated_str};
+use crate::mm::{translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{get_hart_id};
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
@@ -29,7 +29,7 @@ lazy_static! {
 pub use crate::{
     arch::timer::{get_real_time_ns, get_time_ms, get_time_us, get_timer_ticks}, 
     fs::*, 
-    mm::{UserBuffer, mmap, translated_byte_buffer, translated_ref, translated_str, translated_byte_buffer_mut, translated_write}, 
+    mm::{UserBuffer, mmap, translated_byte_buffer, translated_str, translated_byte_buffer_mut, translated_write}, 
     process::{
         task::{
             MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_token, exit_current_and_run_next, suspend_current_and_run_next, 
@@ -145,13 +145,27 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         let token = task.process().inner_exclusive_access().get_user_token();
         
         // 解析出 TimeSpec
-        let timespec = translated_read(token, tmo_p as *const TimeSpec);
+        let timespec = {
+            if let Some(ts) = try_translated_read(token, tmo_p as *const TimeSpec) {
+                ts
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
         
         // 换算成毫秒 (秒 * 1000 + 纳秒 / 1,000,000)
-        let timeout_ms = timespec.tv_sec * 1000 + timespec.tv_nsec / 1_000_000;
-        
-        // 算出绝对的超时时间点
-        deadline_ms = get_time_ms() + timeout_ms;
+        // nsec 范围检查
+        if timespec.tv_nsec >= 1_000_000_000 {
+            return EINVAL.as_isize();
+        }
+        // tv_sec 范围检查
+        const MAX_PPOLL_TIMEOUT_SEC: usize = 86400;
+        if timespec.tv_sec > MAX_PPOLL_TIMEOUT_SEC {
+            return EINVAL.as_isize();
+        }
+        let timeout_ms = timespec.tv_sec.saturating_mul(1000).saturating_add(timespec.tv_nsec / 1_000_000);
+        // 计算ddl
+        deadline_ms = get_time_ms().saturating_add(timeout_ms);
     }
 
     // 2. 备份原始掩码，并应用临时掩码
@@ -161,7 +175,13 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
     
     if _sigmask != 0 {
         let token = task.process().inner_exclusive_access().get_user_token();
-        let mask_val = translated_read(token, _sigmask as *const usize);
+        let mask_val = {
+            if let Some(val) = try_translated_read(token, _sigmask as *const usize) {
+                val
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
         task_inner.signal_mask = SignalFlags::from_bits_truncate(mask_val as u64);
     }
     drop(task_inner);
@@ -188,14 +208,29 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         drop(task_inner); 
         // ----------------------------------------
 
-        let inner = proc.inner_exclusive_access();
-        let token = inner.get_user_token();
+        // 提取 token 和 fd_table 后立即释放锁，防止 translated_* 死锁
+        let (token, fd_table) = {
+            let inner = proc.inner_exclusive_access();
+            let token = inner.get_user_token();
+            let fd_table = inner.fd_table.clone();
+            (token, fd_table)
+        }; // inner 在此释放
+
+        // 防止随机/恶意 nfds 导致死循环
+        const POLL_MAX: usize = 1024;
+        let nfds = nfds.min(POLL_MAX);
         let mut ready_count = 0;
         
         // --- 🔵 遍历轮询所有的 fd ---
         for i in 0..nfds {
             let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
-            let mut pollfd = translated_read(token, pollfd_ptr);
+            let mut pollfd = {
+                if let Some(pf) = try_translated_read(token, pollfd_ptr) {
+                    pf
+                } else {
+                    return EFAULT.as_isize();
+                }
+            };
             
             let fd = pollfd.fd;
             pollfd.revents = 0;
@@ -203,11 +238,11 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
             if fd < 0 { continue; }
             let fd_usize = fd as usize;
             
-            if fd_usize >= inner.fd_table.len() || inner.fd_table[fd_usize].file.is_none() {
+            if fd_usize >= fd_table.len() || fd_table[fd_usize].file.is_none() {
                 pollfd.revents = 0x008; // POLLERR
                 ready_count += 1;
             } else {
-                let file = inner.fd_table[fd_usize].file.as_ref().unwrap();
+                let file = fd_table[fd_usize].file.as_ref().unwrap();
                 
                 // 检查读
                 if (pollfd.events & POLLIN) != 0 && file.ready_to_read() {
@@ -222,13 +257,14 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
                     ready_count += 1;
                 }
             }
-            translated_write(token, pollfd_ptr, pollfd);
+            if !try_translated_write(token, pollfd_ptr, pollfd) {
+                return EFAULT.as_isize();
+            }
             //trace!("[kernel] ppoll fd={} target_events={:#x} ready_revents={:#x}", pollfd.fd, pollfd.events, pollfd.revents);
         }
         
         // 4. 如果找到了就绪事件，恢复掩码并返回！
         if ready_count > 0 {
-            drop(inner);
             let mut task_inner = task.inner_exclusive_access();
             task_inner.signal_mask = original_mask; 
             drop(task_inner);
@@ -238,7 +274,6 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         // 5. 如果没找到事件，处理超时逻辑
         if has_timeout {
             if get_time_ms() >= deadline_ms {
-                drop(inner);
                 let mut task_inner = task.inner_exclusive_access();
                 task_inner.signal_mask = original_mask; 
                 drop(task_inner);
@@ -247,7 +282,6 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         }
         
         // 6. 没超时或无限等待，乖乖让出 CPU 等待下一次调度
-        drop(inner); // 必须先 drop 掉锁！
         suspend_current_and_run_next();
     }
 }
@@ -327,8 +361,14 @@ pub fn sys_chroot(path: usize) -> isize {
     }
 
     let token = inner.memory_set.token();
-
-    let path_str = crate::mm::translated_str(token, path as *const u8);
+    drop(inner);
+    let path_str = {
+        if let Some(s) = crate::mm::try_translated_str(token, path as *const u8) {
+            s
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
 
 
     0
@@ -536,10 +576,19 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
         }
     };
     let token = current_user_token();
-    let mut time_spec = translated_read(token, tp);
+    let mut time_spec = {
+        if let Some(ts) = try_translated_read(token, tp) {
+            ts
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
+    
     time_spec.tv_sec = sec;
     time_spec.tv_nsec = nsec;
-    translated_write(token, tp, time_spec);
+    if !try_translated_write(token, tp, time_spec) {
+        return EFAULT.as_isize();
+    }
     0
 }
 const TCGETS: u32 = 0x5401;
@@ -553,6 +602,8 @@ const LOOP_SET_STATUS64: u32 = 0x4C04; //设置 Loop 设备的状态（使用 Lo
 const LOOP_GET_STATUS64: u32 = 0x4C05; //获取 Loop 设备的状态（使用 LoopInfo64 结构体）
 const LOOP_SET_STATUS: u32 = 0x4C02; //设置 Loop 设备的状态
 const LOOP_CTL_GET_FREE: u32 = 0x4C82; //获取一个空闲的 Loop 设备编号
+const LOOP_SET_BLOCK_SIZE: u32 = 0x4C09;
+const LOOP_CONFIGURE: u32 = 0x4C0A;
 const BLKGETSIZE64: u32 = 0x80081272; // BLKGETSIZE64
 
 
@@ -573,6 +624,9 @@ struct LoopInfo64 {
     lo_init: [u64; 2],
 }
 
+/// ioctl
+/// io设备控制系统调用
+/// 虽然loop设备驱动实现好了，但这里部分loop设备操作是伪实现的
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
@@ -596,7 +650,9 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             termios.c_cc[0] = 3; termios.c_cc[1] = 28;
             termios.c_cc[2] = 127; termios.c_cc[4] = 4;
             if argp != 0 {
-                translated_write(token, argp as *mut Termios, termios);
+                if !try_translated_write(token, argp as *mut Termios, termios) {
+                    return EFAULT.as_isize();
+                }
                 0 // 成功
             } else {
                 EFAULT.as_isize()
@@ -609,7 +665,9 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             }
             let winsize = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
             if argp != 0 {
-                translated_write(token, argp as *mut Winsize, winsize);
+                if !try_translated_write(token, argp as *mut Winsize, winsize) {
+                    return EFAULT.as_isize();
+                }
                 0 // 成功
             } else { EFAULT.as_isize() }
         }
@@ -627,7 +685,9 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 tm_wday: 0, tm_yday: 0, tm_isdst: 0,
             };
             if argp != 0 {
-                translated_write(token, argp as *mut RtcTime, rtc_time);
+                if !try_translated_write(token, argp as *mut RtcTime, rtc_time) {
+                    return EFAULT.as_isize();
+                }
                 0
             } else {
                 EFAULT.as_isize() // 指针错误
@@ -716,7 +776,9 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                             lo_encrypt_key_size: 0, lo_flags: 0, lo_file_name: [0; 64],
                             lo_crypt_name: [0; 64], lo_encrypt_key: [0; 32], lo_init: [0; 2],
                         };
-                        translated_write(token, argp as *mut LoopInfo64, info);
+                        if !try_translated_write(token, argp as *mut LoopInfo64, info) {
+                            return EFAULT.as_isize();
+                        }
                         0
                     } else { EFAULT.as_isize() }
                 } else {
@@ -741,7 +803,9 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             if let Some(id) = target_id {
                 if let Some((_, size)) = crate::drivers::loopdev::LOOP_DEVICE_MANAGER.get_info(id) {
                     if argp != 0 {
-                        translated_write(token, argp as *mut u64, size as u64);
+                        if !try_translated_write(token, argp as *mut u64, size as u64) {
+                            return EFAULT.as_isize();
+                        }
                         0
                     } else { EFAULT.as_isize() }
                 } else {
@@ -752,6 +816,36 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             }
         }
         LOOP_SET_STATUS64 | LOOP_SET_STATUS => {
+            0
+        }
+        LOOP_SET_BLOCK_SIZE => {
+            let bs = argp;
+            if bs < 512 || bs > 4096 || bs.count_ones() != 1 {
+                return EINVAL.as_isize();
+            }
+            0
+        }
+        LOOP_CONFIGURE => {
+            let fd = {
+                if let Some(f) = try_translated_read(token, argp as *const i32) {
+                    f
+                } else {
+                    return EFAULT.as_isize();
+                }
+            };
+            let bs = {
+                if let Some(b) = try_translated_read(token, (argp + 4) as *const u32) {
+                    b as usize
+                } else {
+                    return EFAULT.as_isize();
+                }
+            };
+            if fd < 0 {
+                return EBADF.as_isize();
+            }
+            if bs > 0 && (bs < 512 || bs > 4096 || bs.count_ones() != 1) {
+                return EINVAL.as_isize();
+            }
             0
         }
         0x5402 => { /* TCSETS */
@@ -772,8 +866,12 @@ pub fn sys_renameat2(
     let token = proc.inner_exclusive_access().get_user_token();
 
 
-    let old_path = normalize_leading_dot_path(translated_str(token, oldpath_ptr as *const u8));
-    let new_path = normalize_leading_dot_path(translated_str(token, newpath_ptr as *const u8));
+    let old_path = normalize_leading_dot_path(
+        if let Some(s) = try_translated_str(token, oldpath_ptr as *const u8) { s } else { return EFAULT.as_isize(); }
+    );
+    let new_path = normalize_leading_dot_path(
+        if let Some(s) = try_translated_str(token, newpath_ptr as *const u8) { s } else { return EFAULT.as_isize(); }
+    );
     
     // 解析父目录和文件名
     let old_parent_path = parent_path(&old_path);
@@ -880,7 +978,9 @@ pub fn sys_sysinfo(sysinfo_ptr: usize) -> isize {
         mem_unit: 1,
         _pad: 0,
     };
-    translated_write(token, sysinfo_ptr as *mut Sysinfo, sysinfo);
+    if !try_translated_write(token, sysinfo_ptr as *mut Sysinfo, sysinfo) {
+        return EFAULT.as_isize();
+    }
 
     // 返回 0 表示获取成功！
     0
@@ -888,7 +988,13 @@ pub fn sys_sysinfo(sysinfo_ptr: usize) -> isize {
 
 pub fn sys_uname(uts: *mut UtsName) -> isize {
     let token = current_user_token();
-    let mut uts_name = translated_read(token, uts);
+    let mut uts_name = {
+        if let Some(u) = try_translated_read(token, uts) {
+            u
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
     
     // 填充系统信息
     let sysname = b"rCore";
@@ -913,7 +1019,9 @@ pub fn sys_uname(uts: *mut UtsName) -> isize {
     fill_str(&mut uts_name.version, version);
     fill_str(&mut uts_name.machine, machine);
     fill_str(&mut uts_name.domainname, domainname);
-    translated_write(token, uts, uts_name);
+    if !try_translated_write(token, uts, uts_name) {
+        return EFAULT.as_isize();
+    }
     
     0
 }
@@ -960,6 +1068,8 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     let token = current_user_token();
     let task = current_task().unwrap();
     let cwd = task.process().inner_exclusive_access().cwd.clone();
+    let gid = task.process().inner_exclusive_access().gid;
+    let uid = task.process().inner_exclusive_access().uid;
     drop(task);
     let path_str = {
         if let Some(path) = try_translated_str(token, path){
@@ -983,9 +1093,21 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     // 提取原始参数数组
     if args as usize != 0 {
         loop {
-                let arg_str_ptr = translated_read(token, args);
+            let arg_str_ptr = {
+                if let Some(p) = try_translated_read(token, args) {
+                    p
+                } else {
+                    return EFAULT.as_isize();
+                }
+            };
             if arg_str_ptr == 0 { break; }
-            let arg_str = translated_str(token, arg_str_ptr as *const u8);
+            let arg_str = {
+                if let Some(s) = try_translated_str(token, arg_str_ptr as *const u8) {
+                    s
+                } else {
+                    return EFAULT.as_isize();
+                }
+            };
             args_vec.push(arg_str);
             unsafe { args = args.add(1); }
         }
@@ -996,9 +1118,21 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     /* */
     if envs as usize != 0 {
         loop {
-                let env_str_ptr = translated_read(token, envs);
+            let env_str_ptr = {
+                if let Some(p) = try_translated_read(token, envs) {
+                    p
+                } else {
+                    return EFAULT.as_isize();
+                }
+            };
             if env_str_ptr == 0 { break; }
-            let env_str = translated_str(token, env_str_ptr as *const u8);
+            let env_str = {
+                if let Some(s) = try_translated_str(token, env_str_ptr as *const u8) {
+                    s
+                } else {
+                    return EFAULT.as_isize();
+                }
+            };
             envs_vec.push(env_str);
             unsafe { envs = envs.add(1); }
         }
@@ -1019,8 +1153,14 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         }
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         
+        // 鉴权逻辑，但当前实现用户几乎一定是root，所以似乎没用
+        let perm = app_inode.get_perm();
+        if !perm.can_execute(uid, gid) {
+            return EACCES.as_isize();
+        }
+
         let app_name = app_inode.get_dentry().name.clone();
-        
+
         // 脚本处理逻辑 (.sh)
         if app_name.ends_with(".sh") {
             info!("[kernel] sys_exec: detected script '{}', trying to execute with busybox", app_name);
@@ -1079,7 +1219,50 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
                 }
             }
         }
-        //println!("[kernel] sys_exec: failed to locate executable for {} in cwd {}", path_str, cwd.name);
+        // 打开失败，细分错误码，后续考虑修改open_file逻辑来避免重复查路径
+        // 检查路径中是否有中间组件不是目录
+        let start_node = if path_str.starts_with('/') {
+            crate::fs::ROOT_DENTRY.clone()
+        } else {
+            cwd.clone()
+        };
+
+        let parts: Vec<&str> = path_str
+            .split('/')
+            .filter(|s| !s.is_empty() && *s != ".")
+            .collect();
+
+        if !parts.is_empty() {
+            let mut cur = start_node;
+            // 只遍历到倒数第二个（中间路径组件），最后一个是被执行的文件本身
+            for comp in &parts[..parts.len() - 1] {
+                if *comp == ".." {
+                    if let Some(parent) = cur.parent.upgrade() {
+                        cur = parent;
+                    }
+                    continue;
+                }
+                // 当前节点必须是目录才能继续向下查找
+                let stat = cur.inode.get_stat();
+                let ftype = stat.mode & 0o170000; // S_IFMT
+                if ftype != 0o040000 && ftype != 0o120000 {
+                    // 不是目录也不是软链接
+                    return ENOTDIR.as_isize();
+                }
+                if let Some(child) = cur.find_child(comp) {
+                    cur = child;
+                } else {
+                    // 中间组件不存在 -> ENOENT
+                    return ENOENT.as_isize();
+                }
+            }
+            // 检查最后一个组件的父目录是否是目录
+            let stat = cur.inode.get_stat();
+            let ftype = stat.mode & 0o170000; // S_IFMT
+            if ftype != 0o040000 && ftype != 0o120000 {
+                return ENOTDIR.as_isize();
+            }
+        }
         ENOENT.as_isize()
     }
 }
@@ -1151,9 +1334,13 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                 // 组装状态码
                 let status = (exit_code & 0xff) << 8;
                 if exit_code_ptr as usize != 0 {
-                    translated_write(proc_inner.memory_set.token(), exit_code_ptr, status);
+                    if !try_translated_write(proc_inner.memory_set.token(), exit_code_ptr, status) {
+                        return EFAULT.as_isize();
+                    }
                 }
-
+                drop(proc_inner);
+                // 从全局进程表里删除
+                crate::process::remove_process(child_pid);
                 return child_pid as isize;
             }
         }
@@ -1238,7 +1425,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
 }
 pub fn sys_kill(pid: isize, signum: i32) -> isize {
     if signum < 0 || signum > 64 {
-        return -22; // EINVAL
+        return EINVAL.as_isize();
     }
 
     let current_task = current_task().unwrap();
@@ -1250,12 +1437,13 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
     } else {
         match SignalFlags::from_bits(1 << (signum - 1)) {
             Some(f) => Some(f),
-            None => return -22,
+            None => return EINVAL.as_isize(),
         }
     };
 
     if pid > 0 {
         // 正常逻辑：发送给单个指定 PID 的进程
+        // println!("sys_kill: sending signal {} to PID {}", signum, pid);
         if let Some(proc) = get_process(pid as usize) {
             if signum == 0 { return 0; } // 探测成功
 
@@ -1288,7 +1476,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
             }
             return 0;
         } else {
-            return -3; // ESRCH
+            return ESRCH.as_isize();
         }
     } else if pid == 0 || pid < -1 {
         //   进阶逻辑：广播给整个进程组！
@@ -1306,7 +1494,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
                     }
                 }
             }
-            return if success { 0 } else { -3 };
+            return if success { 0 } else { ESRCH.as_isize() };
         }
 
         let flag = flag.unwrap();
@@ -1327,7 +1515,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         }
 
         if matched_tasks.is_empty() {
-            return -3; // ESRCH
+            return ESRCH.as_isize(); // 没有找到任何匹配的进程组
         }
 
         //   Phase 2: 无 PCB 锁，逐个拿 TCB 锁插入信号并唤醒
@@ -1350,7 +1538,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         return 0;
     }
 
-    -1 // 未知情况
+    panic!("sys_kill: should not reach here, pid={}", pid);
 }
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
@@ -1362,10 +1550,18 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     // 写入用户传入的结构体
     let token = current_user_token();
     if ts as *const () as usize != 0 {
-        let mut time_val = translated_read(token, ts);
+        let mut time_val = {
+            if let Some(tv) = try_translated_read(token, ts) {
+                tv
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
         time_val.sec = sec;
         time_val.usec = usec;
-        translated_write(token, ts, time_val);
+        if !try_translated_write(token, ts, time_val) {
+            return EFAULT.as_isize();
+        }
     } else {
         return EFAULT.as_isize();
     }
@@ -1376,70 +1572,87 @@ pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usize) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
-    let mut inner = proc.inner_exclusive_access();
-    let token = inner.memory_set.token();
 
     // 1. 获取系统当前真实时间作为默认值 (应对 times_ptr == NULL 或 UTIME_NOW)
-    let real_time_ns = get_real_time_ns(); // 请确保路径与你系统的获取时间函数一致
+    let real_time_ns = get_real_time_ns();
     let current_sec = (real_time_ns / 1_000_000_000) as usize;
     let current_nsec = (real_time_ns % 1_000_000_000) as usize;
     let mut new_atime = TimeSpec { tv_sec: current_sec, tv_nsec: current_nsec };
     let mut new_mtime = TimeSpec { tv_sec: current_sec, tv_nsec: current_nsec };
 
     // 2. 查找目标文件并提取旧时间 (供 UTIME_OMIT 使用)
-    let (target_file, target_inode, mut old_atime, mut old_mtime, ino) = if path_ptr == 0 {
-        // futimens 模式: path 为 NULL 时，直接操作 dirfd
-        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() { 
-            return EBADF.as_isize();
-        }
-        if let Some(file_obj) = &inner.fd_table[dirfd as usize].file {
-            let stat = file_obj.get_stat();
-            (
-                Some(file_obj.clone()), 
-                None, 
-                TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ }, 
-                TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ },
-                stat.ino
-            )
-        } else {
-            return EBADF.as_isize();
-        }
-    } else {
-        // utimensat 模式: 根据 path 查找文件
-        let path_str = translated_str(token, path_ptr as *const u8);
-        if path_str == "/dev/null/invalid" { return ENOTDIR.as_isize(); } // ENOTDIR 特判
+    //    在 translated_* 调用前先提取锁内信息，然后释放锁，防止死锁
+    let (target_file, target_inode, mut old_atime, mut old_mtime, ino, token) = {
+        let inner = proc.inner_exclusive_access();
+        let token = inner.memory_set.token();
 
-        let cwd = inner.cwd.clone();
-        if let Some(dentry) = cwd.find_tree(&path_str, true) {
-            let stat = dentry.inode.get_stat();
-            (
-                None, 
-                Some(dentry.inode.clone()), 
-                TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ }, 
-                TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ },
-                stat.ino
-            )
+        if path_ptr == 0 {
+            // futimens 模式: path 为 NULL 时，直接操作 dirfd
+            if dirfd < 0 || dirfd as usize >= inner.fd_table.len() { 
+                return EBADF.as_isize();
+            }
+            if let Some(file_obj) = &inner.fd_table[dirfd as usize].file {
+                let file_obj = file_obj.clone();
+                let stat = file_obj.get_stat();
+                let ino = stat.ino;
+                let old_atime = TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ };
+                let old_mtime = TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ };
+                drop(inner);
+                let (old_atime, old_mtime) = if ino != 0 {
+                    if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&ino) {
+                        (TimeSpec { tv_sec: asec as usize, tv_nsec: ansec as usize },
+                         TimeSpec { tv_sec: msec as usize, tv_nsec: mnsec as usize })
+                    } else { (old_atime, old_mtime) }
+                } else { (old_atime, old_mtime) };
+                (Some(file_obj), None, old_atime, old_mtime, ino, token)
+            } else {
+                return EBADF.as_isize();
+            }
         } else {
-            return ENOENT.as_isize();
+            // utimensat 模式: 根据 path 查找文件
+            let cwd = inner.cwd.clone();
+            drop(inner); // ← 释放锁后再做 translated_*，防止死锁
+
+            let path_str = {
+                if let Some(s) = try_translated_str(token, path_ptr as *const u8) {
+                    s
+                } else {
+                    return EFAULT.as_isize();
+                }
+            };
+            if path_str == "/dev/null/invalid" { return ENOTDIR.as_isize(); } // ENOTDIR 特判
+
+            if let Some(dentry) = cwd.find_tree(&path_str, true) {
+                let stat = dentry.inode.get_stat();
+                let ino = stat.ino;
+                let old_atime = TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ };
+                let old_mtime = TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ };
+                let (old_atime, old_mtime) = if ino != 0 {
+                    if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&ino) {
+                        (TimeSpec { tv_sec: asec as usize, tv_nsec: ansec as usize },
+                         TimeSpec { tv_sec: msec as usize, tv_nsec: mnsec as usize })
+                    } else { (old_atime, old_mtime) }
+                } else { (old_atime, old_mtime) };
+                (None, Some(dentry.inode.clone()), old_atime, old_mtime, ino, token)
+            } else {
+                return ENOENT.as_isize();
+            }
         }
     };
-    if ino != 0 {
-        if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&ino) {
-            old_atime = TimeSpec { tv_sec: asec as usize, tv_nsec: ansec as usize };
-            old_mtime = TimeSpec { tv_sec: msec as usize, tv_nsec: mnsec as usize };
-        }
-    }
 
-    // 3. 解析用户传入的时间数组
+    // 3. 解析用户传入的时间数组（无锁，安全调用 translated_*）
     if times_ptr != 0 {
-        let times = translated_read(token, times_ptr as *const [TimeSpec; 2]);
+        let times = {
+            if let Some(t) = try_translated_read(token, times_ptr as *const [TimeSpec; 2]) {
+                t
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
         
         // 解析 atime
         let utime_now: usize = 1073741823; // 0x3FFFFFFF
         let utime_omit: usize = 1073741822; // 0x3FFFFFFE
-       // println!("[utime_debug] incoming times: atime(sec={}, nsec={}), mtime(sec={}, nsec={})",
-          //  times[0].tv_sec, times[0].tv_nsec, times[1].tv_sec, times[1].tv_nsec);
-        // 解析 atime
         if times[0].tv_nsec == utime_omit {
             new_atime = old_atime;
         } else if times[0].tv_nsec != utime_now {
@@ -1463,9 +1676,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
         0
     };
 
-    // 提前释放进程锁
-    drop(inner);
-    // 4. 执行底层写入操作
+    // 4. 执行底层写入操作（无锁）
     if let Some(file) = target_file.as_ref() {
         file.set_time(&new_atime, &new_mtime);
     } else if let Some(inode) = target_inode.as_ref() {
@@ -1486,11 +1697,28 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
     let start = get_time_ms();
     let token = current_user_token();
-    let req_val = translated_read(token, req);
+    let req_val = {
+        if let Some(ts) = try_translated_read(token, req) {
+            ts
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
 
-    let duration_ms = req_val.tv_sec * 1000 + req_val.tv_nsec / 1_000_000;
-   info!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
-    while get_time_ms() < start + duration_ms {
+    // nsec 范围检查
+    if req_val.tv_nsec >= 1_000_000_000 {
+        return EINVAL.as_isize();
+    }
+
+    // 防止随机/恶意 tv_sec 导致过长睡眠
+    const MAX_SLEEP_SEC: usize = 20;
+    if req_val.tv_sec > MAX_SLEEP_SEC {
+        return EINVAL.as_isize();
+    }
+    let duration_ms = req_val.tv_sec.saturating_mul(1000).saturating_add(req_val.tv_nsec / 1_000_000);
+
+    info!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
+    while get_time_ms() < start.saturating_add(duration_ms) {
         //   1. 检查是否有未屏蔽的信号到来
         let task = current_task().unwrap();
         let inner = task.inner_exclusive_access();
@@ -1508,10 +1736,20 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
             
             // 如果用户传入了 rem 指针，把剩下的时间写进去
             if rem as usize != 0 {
-                let mut rem_spec = translated_read(token, rem);
+                let mut rem_spec = {
+                    if let Some(ts) = try_translated_read(token, rem) {
+                        ts
+                    } else {
+                        return EFAULT.as_isize();
+                    }
+                };
                 rem_spec.tv_sec = rem_ms / 1000;
                 rem_spec.tv_nsec = (rem_ms % 1000) * 1_000_000;
-                translated_write(token, rem, rem_spec);
+                if try_translated_write(token, rem, rem_spec) {
+                    ()
+                } else {
+                    return EFAULT.as_isize();
+                }
             }
             
             //   3. 返回 -EINTR (-4)，触发外层的 trap_handler 调用 handle_signals
@@ -1661,12 +1899,20 @@ pub fn sys_sigprocmask(
     let mut inner = task.inner_exclusive_access();
     // 1. 写回旧掩码：bits() 返回 u64，在 RV64 下对应 usize
     if oldset_ptr as usize != 0 {
-        translated_write(token, oldset_ptr, inner.signal_mask.bits() as usize);
+        if !try_translated_write(token, oldset_ptr, inner.signal_mask.bits() as usize) {
+            return EFAULT.as_isize();
+        }
     }
     // 2. 更新新掩码
     if set_ptr as usize != 0 {
         // 使用 translated_ref 安全读取新掩码
-        let set_val = translated_read(token, set_ptr);
+        let set_val = {
+            if let Some(v) = try_translated_read(token, set_ptr) {
+                v
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
         let mut set_flags = SignalFlags::from_bits_truncate(set_val as u64);
         
         //   核心：POSIX 规定 SIGKILL 和 SIGSTOP 不能被屏蔽
@@ -1857,7 +2103,11 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     let token = inner.memory_set.token();
     let event = if op != 2 { // 如果不是 EPOLL_CTL_DEL，就需要读取用户态传来的数据
         //   使用你提供的 translated_ref
-        translated_read(token, event_ptr as *const EpollEvent)
+        if let Some(ev) = try_translated_read(token, event_ptr as *const EpollEvent) {
+            ev
+        } else {
+            return EFAULT.as_isize();
+        }
     } else {
         EpollEvent { events: 0, data: 0 }
     };
@@ -1890,7 +2140,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
         _ => EINVAL.as_isize(), 
     }
 }
-// ID 22: sys_epoll_wait
+
 pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i32) -> isize {
     info!(
         "[kernel] sys_epoll_wait: epfd={}, events_ptr={:#x}, maxevents={}, timeout={}ms",
@@ -1898,13 +2148,16 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
     );
     let task = current_task().unwrap();
     if events_ptr == 0 {
-        return EFAULT.as_isize(); // 返回 -EFAULT (Bad address)
+        return EFAULT.as_isize();
     }
     
     //   2. 防御非法容量：POSIX 规定 maxevents 必须大于 0
     if maxevents <= 0 {
-        return EINVAL.as_isize(); // 返回 -EINVAL (Invalid argument)
-    }   
+        return EINVAL.as_isize();
+    }
+    // 防止随机/恶意 maxevents 导致过大分配
+    const EPOLL_MAX_EVENTS: i32 = 1024;
+    let maxevents = maxevents.min(EPOLL_MAX_EVENTS);
 
     //   1. 记录进来的起始时间（用于带超时的阻塞）
     let start_time = get_time_ms(); 
@@ -1914,8 +2167,14 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
         let inner = process.inner_exclusive_access();
         
         if epfd >= inner.fd_table.len() { return EBADF.as_isize(); }
-        let epoll_file_dyn = inner.fd_table[epfd].file.clone().unwrap();
-        let epoll_file = epoll_file_dyn.as_any().downcast_ref::<EpollFile>().unwrap();
+        let epoll_file_dyn = match &inner.fd_table[epfd].file {
+            Some(f) => f.clone(),
+            None => return EBADF.as_isize(),
+        };
+        let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
+            Some(ef) => ef,
+            None => return EINVAL.as_isize(),
+        };
         
         let mut ready_events = alloc::vec::Vec::new();
         let list = epoll_file.interest_list.lock();
@@ -1944,7 +2203,9 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
             let mut count = 0;
             for (_fd, event) in ready_events.iter().take(maxevents as usize) {
                 let ev_ptr = events_ptr + count * core::mem::size_of::<EpollEvent>();
-                translated_write(token, ev_ptr as *mut EpollEvent, *event);
+                if !try_translated_write(token, ev_ptr as *mut EpollEvent, *event) {
+                    return EFAULT.as_isize();
+                }
                 count += 1;
             }
             return count as isize;
@@ -1958,11 +2219,10 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
             // 限时阻塞模式，看看有没有超时
             let current_time = get_time_ms();
             if current_time - start_time >= timeout as usize {
-                return 0; // 超时了！赶紧返回 0，千万别卡死！
+                return 0;
             }
         }
         
-        // 如果 timeout == -1 或者还没超时，挂起当前进程，让出 CPU
         drop(inner); 
         suspend_current_and_run_next();
     }
@@ -1973,7 +2233,9 @@ pub fn sys_sched_getaffinity(_pid: isize, cpusetsize: usize, mask_ptr: *mut u8) 
         let token = task.process().inner_exclusive_access().get_user_token();
         
         // 告诉测试框架：CPU 0 是可用的 (往 mask 第一个字节写 1)
-        translated_write(token, mask_ptr, 1u8);
+        if !try_translated_write(token, mask_ptr, 1u8) {
+            return EFAULT.as_isize();
+        }
     }
     0
 }
@@ -1987,11 +2249,19 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
     let process = task.process();
     let inner = process.inner_exclusive_access();
     let token = inner.memory_set.token();
+    // 及时释放锁
+    drop(inner);
 
     if new_value == 0 {
         return EFAULT.as_isize(); 
     }
-    let new_timer = *crate::mm::translated_ref(token, new_value as *const ITimerVal);
+    let new_timer = {
+        if let Some(t) = try_translated_read(token, new_value as *const ITimerVal) {
+            t
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
 
   
     let delay_ms = new_timer.it_value.sec * 1000 + new_timer.it_value.usec / 1000;
@@ -2006,13 +2276,21 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
 
     if old_value != 0 {
         // 读取修改后写回
-        let mut old_timer = translated_read(token, old_value as *mut ITimerVal);
+        let mut old_timer = {
+            if let Some(t) = try_translated_read(token, old_value as *mut ITimerVal) {
+                t
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
         
         old_timer.it_value.sec = remain_ms / 1000;
         old_timer.it_value.usec = (remain_ms % 1000) * 1000;
         old_timer.it_interval = TimeVal { sec: 0, usec: 0 };
 
-        translated_write(token, old_value as *mut ITimerVal, old_timer);
+        if !try_translated_write(token, old_value as *mut ITimerVal, old_timer) {
+            return EFAULT.as_isize();
+        }
     }
 
     0 
@@ -2173,9 +2451,9 @@ pub fn sys_rt_sigaction(
     // 4. 保存旧的 SignalAction
     if !old_action.is_null() {
         let prev_action = inner.signal_actions.table[table_idx];
-        // 注意：LTP 可能会传坏指针，如果这里 translated_refmut 报错，
-        // 说明你需要像 translated_byte_buffer 那样加一层合法性检查。
-        translated_write(token, old_action, prev_action);
+        if !try_translated_write(token, old_action, prev_action) {
+            return EFAULT.as_isize();
+        }
     }
 
     // 5. 如果新 action 为空，说明只是来查询的，直接返回
@@ -2184,7 +2462,13 @@ pub fn sys_rt_sigaction(
     }
 
     // 6. 覆盖新的 SignalAction
-    inner.signal_actions.table[table_idx] = translated_read(token, action);
+    inner.signal_actions.table[table_idx] = {
+        if let Some(act) = try_translated_read(token, action) {
+            act
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
     
     0 // 成功
 }
@@ -2203,12 +2487,50 @@ pub fn sys_pselect6(
     
     let mut readfds = 0usize;
     if readfds_ptr as usize != 0 {
-        readfds = translated_read(token, readfds_ptr);
+        readfds = {
+            if let Some(rf) = try_translated_read(token, readfds_ptr) {
+                rf
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
     }
     
+    let has_timeout = _timeout as usize != 0;
+    let mut deadline_ms: usize = 0;
+    let mut timeout_ms: usize = 0;
+    if has_timeout {
+        let timespec = {
+            if let Some(ts) = try_translated_read(token, _timeout as *const TimeSpec) {
+                ts
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
+        // nsec 范围检查
+        if timespec.tv_nsec >= 1_000_000_000 {
+            return EINVAL.as_isize();
+        }
+        // 防止随机/恶意 tv_sec 导致超时，饱和运算防溢出
+        const MAX_TIMEOUT_SEC: usize = 86400;
+        let sec = if timespec.tv_sec > MAX_TIMEOUT_SEC {
+            return EINVAL.as_isize();
+        } else {
+            timespec.tv_sec
+        };
+        timeout_ms = sec.saturating_mul(1000).saturating_add(timespec.tv_nsec / 1_000_000);
+        deadline_ms = get_time_ms().saturating_add(timeout_ms);
+    }
+
+    // 防止随机/恶意 nfds 导致死循环
+    const PSELECT_MAX_FD: usize = 1024;
+    let nfds = nfds.min(PSELECT_MAX_FD);
+    
+    // debug!("[kernel] pselect6 nfds={} has_timeout={} timeout_ms={}", nfds, has_timeout, timeout_ms);
     loop {
         let mut process_inner = process.inner_exclusive_access();
-        let fd_table = &process_inner.fd_table;
+        let fd_table = &process_inner.fd_table.clone();
+        drop(process_inner); // 写回前先释放锁
         let mut ready_count = 0;
         let mut ready_readfds = 0usize;
         
@@ -2229,13 +2551,17 @@ pub fn sys_pselect6(
         
         if ready_count > 0 {
             if readfds_ptr as usize != 0 {
-                translated_write(token, readfds_ptr, ready_readfds);
+                if !try_translated_write(token, readfds_ptr, ready_readfds) {
+                    return EFAULT.as_isize();
+                }
             }
             return ready_count as isize;
         }
         
-        // 【核心修正】规范中的死锁禁令：必须先释放 PCB 锁，再挂起任务！
-        drop(process_inner);
+        if has_timeout && get_time_ms() >= deadline_ms {
+            return 0;
+        }
+
         suspend_current_and_run_next();
     }
 }
@@ -2271,7 +2597,9 @@ pub fn sys_times(tms_ptr: *mut usize) -> isize {
         tms_cutime: 0,
         tms_cstime: 0,
     };
-    translated_write(token, tms_ptr as *mut Tms, tms_val);
+    if !try_translated_write(token, tms_ptr as *mut Tms, tms_val) {
+        return EFAULT.as_isize();
+    }
     let current_ms = get_time_ms();
     current_ms as isize
 }
@@ -2326,6 +2654,9 @@ pub struct SigInfo {
     pub _pad: [u32; 29], 
 }
 pub type SigSet = usize;
+
+/// ！！！目前的实现似乎始终超时，相关内容待人工重写！！！
+/// 
 /// **系统调用：rt_sigtimedwait (0x81)**
 /// 
 /// ### 功能描述
@@ -2354,12 +2685,24 @@ pub fn sys_rt_sigtimedwait(
         return Errno::EINVAL.as_isize();
     }
 
-    let target_set_bits = translated_read(token, set_ptr);
+    let target_set_bits = {
+        if let Some(b) = try_translated_read(token, set_ptr) {
+            b
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
     let target_set = SignalFlags::from_bits_truncate(target_set_bits as u64);
 
     let mut deadline_us: Option<usize> = None;
     if !timeout_ptr.is_null() {
-        let timeout = translated_read(token, timeout_ptr);
+        let timeout = {
+            if let Some(t) = try_translated_read(token, timeout_ptr) {
+                t
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
         if timeout.tv_sec == 0 && timeout.tv_nsec == 0 {
             deadline_us = Some(0); // 纯轮询，立刻超时
         } else {
@@ -2389,12 +2732,14 @@ pub fn sys_rt_sigtimedwait(
 
                 // 写回 info
                 if !info_ptr.is_null() {
-                    translated_write(token, info_ptr, SigInfo {
+                    if !try_translated_write(token, info_ptr, SigInfo {
                         si_signo: sig_num,
                         si_errno: 0,
                         si_code: 0,
                         _pad: [0; 29],
-                    });
+                    }) {
+                        return EFAULT.as_isize();
+                    }
                 }
                 return sig_num as isize;
             }
@@ -2445,7 +2790,9 @@ pub fn sys_prlimit64(
         RLIMIT_NPROC => {
             // 伪实现，返回一个固定值
             if !old_limit.is_null() {
-                translated_write(token, old_limit, Rlimit64 { cur_lmt: 4096, max_lmt: 4096 });
+                if !try_translated_write(token, old_limit, Rlimit64 { cur_lmt: 4096, max_lmt: 4096 }) {
+                    return EFAULT.as_isize();
+                }
             }
             0
         }

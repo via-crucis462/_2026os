@@ -2,9 +2,9 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
+use spin::{Mutex, lazy};
 use crate::fs::ROOT_DENTRY;
-use crate::mm::user_buffer;
+use crate::mm::{PageSize, user_buffer};
 use alloc::vec;
 use crate::fs::devfs::NullInode;
 use crate::fs::devfs::ZeroInode;
@@ -19,7 +19,13 @@ use crate::mm::frame_alloc;
 
 use crate::PAGE_SIZE;
 // 全局唯一的 Inode 分配器
-static TMPFS_INO_COUNTER: AtomicUsize = AtomicUsize::new(10000);
+pub static TMPFS_INO_COUNTER: AtomicUsize = AtomicUsize::new(10000);
+
+use lazy_static::lazy_static;
+/// 大页目录
+lazy_static! {
+    pub static ref HUGEPAGES_DENTRY: Arc<super::Dentry> = mount_hugepages();
+}
 
 /// 临时文件inode
 pub struct TmpfsFileInode {
@@ -346,6 +352,17 @@ pub fn setup_oscomp_env() {
     let usr_bin_dentry = usr_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let lib_dentry = root.insert("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let lib64_dentry = root.insert("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    
+    // loop测例检查的文件
+    let lib_modules = lib_dentry.insert("modules".to_string(), Arc::new(TmpfsDirInode::new()));
+    let lib_modules_rcore = lib_modules.insert("5.10.0-rcore".to_string(), Arc::new(TmpfsDirInode::new()));
+    lib_modules_rcore.insert("modules.builtin".to_string(), Arc::new(TmpfsFileInode::new_with_data(b"kernel/drivers/block/loop.ko\n")));
+    lib_modules_rcore.insert("modules.dep".to_string(), Arc::new(TmpfsFileInode::new_with_data(b"")));
+    
+    // loop测例检查的文件
+    let sys_dentry = root.insert("sys".to_string(), Arc::new(TmpfsDirInode::new()));
+    let sys_module_dentry = sys_dentry.insert("module".to_string(), Arc::new(TmpfsDirInode::new()));
+    sys_module_dentry.insert("loop".to_string(), Arc::new(TmpfsDirInode::new()));
 
     // 3. 将 Busybox 和 libc 的真实 Inode 映射进虚拟目录
     if let Some(musl_dir) = root.find_tree("/musl", true) {
@@ -447,4 +464,32 @@ pub fn setup_oscomp_env() {
     } else {
         error!("DEBUG: /dev/shm path is BROKEN!");
     }
+    mount_hugepages();
+    info!("[VFS] setup_oscomp_env done.");
+}
+
+fn mount_hugepages() -> Arc<super::Dentry> {
+    let root = ROOT_DENTRY.clone();
+    let sys_dentry = if let Some(sys) = root.find_tree("/sys", true) {
+        sys
+    } else {
+        root.insert("sys".to_string(), Arc::new(TmpfsDirInode::new()))
+    };
+    let kernel_dentry = if let Some(kernel) = sys_dentry.find_tree("/sys/kernel", true) {
+        kernel
+    } else {
+        sys_dentry.insert("kernel".to_string(), Arc::new(TmpfsDirInode::new()))
+    };
+    let mm_dentry = if let Some(mm) = kernel_dentry.find_tree("/sys/kernel/mm", true) {
+        mm
+    } else {
+        kernel_dentry.insert("mm".to_string(), Arc::new(TmpfsDirInode::new()))
+    };
+    let hugepages_dentry = if let Some(hugepages) = mm_dentry.find_tree("/sys/kernel/mm/hugepages", true) {
+        hugepages
+    } else {
+        mm_dentry.insert("hugepages".to_string(), Arc::new(TmpfsDirInode::new()))
+    };
+    info!("[VFS] Mounted /dev/hugepages");
+    hugepages_dentry
 }

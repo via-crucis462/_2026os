@@ -1,11 +1,11 @@
 //! File and filesystem-related syscalls
+use crate::PAGE_SIZE;
 use crate::fs::{OpenFlags, ROOT_DENTRY, Stat, Statx, file_name, make_dir, make_pipe, open_file, parent_path};
-use crate::mm::{translated_byte_buffer, translated_read, translated_str, translated_write, UserBuffer};
+use crate::mm::{PageSize, UserBuffer, translated_byte_buffer, try_translated_read, try_translated_str, try_translated_write};
 use crate::task::{current_task, current_user_token};
 use alloc::vec;
 use alloc::sync::Arc;
 use alloc::string::ToString;
-use crate::syscall::translated_ref;
 use crate::syscall::TIME_CACHE;
 use super::{errno::Errno::*, normalize_leading_dot_path};
 use crate::syscall::TmpfsFileInode;
@@ -52,7 +52,13 @@ pub struct Statfs {
 }
 pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
     let token = current_user_token();
-    let path_str = translated_str(token, path);
+    let path_str = {
+        if let Some(s) = try_translated_str(token, path) {
+            s
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
     trace!("kernel:pid[{}] sys_statfs path={}", current_task().unwrap().process().pid.0, path_str);
 
     if buf.is_null() {
@@ -72,7 +78,9 @@ pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
     let stat = target_dentry.inode.statfs();
 
     // 3. 将真实数据写入用户空间
-    translated_write(token, buf, stat);
+    if !try_translated_write(token, buf, stat) {
+        return EFAULT.as_isize();
+    }
     
     0 // Success!
 }
@@ -140,6 +148,9 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     }
 }
 pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
+    // 防止随机/恶意 iovcnt 导致死循环或 DOS
+    const IOV_MAX: usize = 1024;
+    let iovcnt = iovcnt.min(IOV_MAX);
     let task = current_task().unwrap();
     let proc = task.process();
     let inner = proc.inner_exclusive_access();
@@ -156,18 +167,27 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     for i in 0..iovcnt {
         let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
         // 从虚拟地址解引
-        let iovec: IoVec = translated_read(token, iov_addr as *const IoVec);
+        let iovec: IoVec = {
+            if let Some(io) = try_translated_read(token, iov_addr as *const IoVec) {
+                io
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
         if iovec.len == 0 {
             continue;
         }
+        // 防止随机/恶意 iovec.len 导致堆分配溢出
+        const IOV_BUF_MAX: usize = 1024 * 1024; // 1MB
+        let iovec_len = iovec.len.min(IOV_BUF_MAX);
         // 写入缓冲区
         let user_buffer = crate::mm::UserBuffer {
-            buffers: crate::mm::translated_byte_buffer_mut(token, iovec.base as *const u8, iovec.len),
+            buffers: crate::mm::translated_byte_buffer_mut(token, iovec.base as *const u8, iovec_len),
         };
         let read_bytes = file.read(user_buffer);
         total_read += read_bytes;
         // 读到底了
-        if read_bytes < iovec.len {
+        if read_bytes < iovec_len {
             break;
         }
     }
@@ -181,7 +201,9 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
     let task = current_task().unwrap();
     let proc = task.process();
     let token = current_user_token();
-    let path_str = normalize_leading_dot_path(translated_str(token, path));
+    let path_str = normalize_leading_dot_path(
+        if let Some(s) = try_translated_str(token, path) { s } else { return EFAULT.as_isize(); }
+    );
     trace!("kernel:pid[{}] tid[{}] sys_openat, dirfd={}, path={}", task.process().pid.0, task.gettid(), dirfd, path_str);
     //debug!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
     const O_TMPFILE: u32 = 0x400000;
@@ -288,8 +310,10 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, mode: u32, _flags: u32) -> is
     let task = current_task().unwrap();
     let proc = task.process();
     let token = current_user_token();
-    let path_str = normalize_leading_dot_path(translated_str(token, path));
-    debug!("kernel:pid[{}] sys_accessat: dirfd={}, path={}, mode={}", task.process().pid.0, dirfd, path_str, mode);
+    let path_str = normalize_leading_dot_path(
+        if let Some(s) = try_translated_str(token, path) { s } else { return EFAULT.as_isize(); }
+    );
+    info!("kernel:pid[{}] sys_accessat: dirfd={}, path={}, mode={}", task.process().pid.0, dirfd, path_str, _mode);
 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
@@ -365,8 +389,12 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     drop(inner);
     // User ABI for pipe is int pipefd[2], i.e. two 32-bit entries.
     let pipe_u32 = pipe as *mut u32;
-    translated_write(token, pipe_u32, read_fd as u32);
-    translated_write(token, unsafe { pipe_u32.add(1) }, write_fd as u32);
+    if !try_translated_write(token, pipe_u32, read_fd as u32) {
+        return EFAULT.as_isize();
+    }
+    if !try_translated_write(token, unsafe { pipe_u32.add(1) }, write_fd as u32) {
+        return EFAULT.as_isize();
+    }
     //println!("pipe done");
     0
 }
@@ -454,7 +482,9 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
         let inner = proc.inner_exclusive_access();
         let token = inner.memory_set.token();
          drop(inner);
-        translated_write(token, st, stat);
+        if !try_translated_write(token, st, stat) {
+            return EFAULT.as_isize();
+        }
         0
     } else {
         return EBADF.as_isize();
@@ -467,6 +497,11 @@ pub struct IoVec {
 }
 
 pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
+    // 参数合法性检查
+    const IOV_MAX: usize = 1024;
+    if iovcnt > IOV_MAX {
+        return EINVAL.as_isize();
+    }
     let task = current_task().unwrap();
     let proc = task.process();
     let inner = proc.inner_exclusive_access();
@@ -480,15 +515,26 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     let mut total_written = 0;
     for i in 0..iovcnt {
         let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
-        let iovec: IoVec = translated_read(token, iov_addr as *const IoVec);
+        let iovec: IoVec = {
+            if let Some(io) = try_translated_read(token, iov_addr as *const IoVec) {
+                io
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
         if iovec.len == 0 {
             continue; 
         }
+        const IOV_BUF_MAX: usize = 1024;
+        if iovec.len > IOV_BUF_MAX {
+            return EFAULT.as_isize();
+        }
+        let iovec_len = iovec.len.min(IOV_BUF_MAX);
         let user_buffer = UserBuffer {
-            buffers: translated_byte_buffer(token, iovec.base as *const u8, iovec.len),
+            buffers: translated_byte_buffer(token, iovec.base as *const u8, iovec_len),
         };
         let written = file.write(user_buffer);
-        if written == 0 && iovec.len > 0 {
+        if written == 0 && iovec_len > 0 {
             warn!("pid[{}] [sys_writev] FATAL: Underlying file returned 0 on write! fd={}", proc.pid.0, fd);
         }
         total_written += written;
@@ -500,7 +546,13 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
     let task = current_task().unwrap();
     let token = current_user_token();
     let proc = task.process();
-    let path_str = translated_str(token, path);
+    let path_str = {
+        if let Some(s) = try_translated_str(token, path) {
+            s
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
     trace!("kernel:pid[{}] sys_statx: dirfd={}, path={}, flags={:#x}, mask={:#x}", task.process().pid.0, dirfd, path_str, flags, mask);
     const AT_EMPTY_PATH: u32 = 0x1000;
     if path_str.is_empty() {
@@ -523,7 +575,9 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
                     statx_data.stx_mtime.tv_sec = msec;
                     statx_data.stx_mtime.tv_nsec = mnsec as u32;
                 }
-                translated_write(token, st, statx_data);
+                if !try_translated_write(token, st, statx_data) {
+                    return EFAULT.as_isize();
+                }
                 return 0;
             }
         }
@@ -561,7 +615,9 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
             stat.stx_mtime.tv_nsec = mnsec as u32;
         }
 
-        translated_write(token, st, stat);
+        if !try_translated_write(token, st, stat) {
+            return EFAULT.as_isize();
+        }
         0
     } else {
         return ENOENT.as_isize(); // 文件不存在
@@ -570,7 +626,9 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
 
 pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
     let token = current_user_token();
-    let path = normalize_leading_dot_path(translated_str(token, path));
+    let path = normalize_leading_dot_path(
+        if let Some(s) = try_translated_str(token, path) { s } else { return EFAULT.as_isize(); }
+    );
     debug!("kernel:pid[{}] sys_mkdir: path={}", current_task().unwrap().process().pid.0, path);
     
     if let Some(_) = make_dir(path.as_str(), _mode) {
@@ -599,7 +657,9 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
     }
     // 路径获取
     let token = current_user_token();
-    let path_str = normalize_leading_dot_path(translated_str(token, _path));
+    let path_str = normalize_leading_dot_path(
+        if let Some(s) = try_translated_str(token, _path) { s } else { return EFAULT.as_isize(); }
+    );
     if path_str.is_empty() {
         return ENOENT.as_isize();
     }
@@ -711,7 +771,13 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
 /// YOUR JOB: Implement unlinkat.
 pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
     let token = current_user_token();
-    let path_str = translated_str(token, path);
+    let path_str = {
+        if let Some(s) = try_translated_str(token, path) {
+            s
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
     trace!("kernel:pid[{}] sys_unlinkat dirfd={} path={} flags={:#x}", current_task().unwrap().process().pid.0, dirfd, path_str, flags);
 
     let task = current_task().unwrap();
@@ -842,6 +908,21 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usiz
     total_transferred as isize
 }
 
+/// copy_file_range syscall stub — not yet implemented.
+/// Returns ENOSYS so LTP tests get a clear "not supported" rather than an
+/// "unimplemented syscall" warning.
+pub fn sys_copy_file_range(
+    _fd_in: usize,
+    _off_in: *mut i64,
+    _fd_out: usize,
+    _off_out: *mut i64,
+    _len: usize,
+    _flags: u32,
+) -> isize {
+    warn!("[kernel] sys_copy_file_range: not implemented");
+    ENOSYS.as_isize()
+}
+
 pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
@@ -857,7 +938,11 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
             return EACCES.as_isize(); // 权限不足
         }
         trace!("kernel:pid[{}] sys_getdents: fd={}, count={}", task.process().pid.0, fd, count);
-        file.getdents(translated_byte_buffer(token, dirp, count).remove(0)) as isize
+        let mut bufs = translated_byte_buffer(token, dirp, count);
+        if bufs.is_empty() {
+            return EFAULT.as_isize();
+        }
+        file.getdents(bufs.remove(0)) as isize
     } else {
         return EBADF.as_isize();
     }
@@ -892,7 +977,17 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
 
 pub fn sys_chdir(path: *const u8) -> isize {
     let token = current_user_token();
-    let path_str = normalize_leading_dot_path(translated_str(token, path));
+    let path_str = try_translated_str(token, path);
+    
+    let path_str = if let Some(path_str) = path_str {
+        if path_str.len() > 255 {
+            return ENAMETOOLONG.as_isize();
+        }
+        normalize_leading_dot_path(path_str)
+    } else {
+        return EFAULT.as_isize();
+    };
+
     debug!("kernel:pid[{}] sys_chdir: path={}", current_task().unwrap().process().pid.0, path_str);
     
     let task = current_task().unwrap();
@@ -926,16 +1021,28 @@ pub fn sys_chdir(path: *const u8) -> isize {
 
 pub fn sys_mount(source: *const u8, target: *const u8, filesystemtype: *const u8, mountflags: u32) -> isize {
     let token = current_user_token();
-    let source_str = normalize_leading_dot_path(translated_str(token, source));
-    let target_str = normalize_leading_dot_path(translated_str(token, target));
-    let filesystemtype_str = translated_str(token, filesystemtype);
+    let source_str = normalize_leading_dot_path(
+        if let Some(s) = try_translated_str(token, source) { s } else { return EFAULT.as_isize(); }
+    );
+    let target_str = normalize_leading_dot_path(
+        if let Some(s) = try_translated_str(token, target) { s } else { return EFAULT.as_isize(); }
+    );
+    let filesystemtype_str = {
+        if let Some(s) = try_translated_str(token, filesystemtype) {
+            s
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
     debug!("kernel:pid[{}] sys_mount: source={}, target={}, filesystemtype={}, mountflags={}", current_task().unwrap().process().pid.0, source_str, target_str, filesystemtype_str, mountflags);
     return 0; // 目前仅支持 ext4 文件系统的挂载
 }
 
 pub fn sys_umount(target: *const u8) -> isize {
     let token = current_user_token();
-    let target_str = normalize_leading_dot_path(translated_str(token, target));
+    let target_str = normalize_leading_dot_path(
+        if let Some(s) = try_translated_str(token, target) { s } else { return EFAULT.as_isize(); }
+    );
     debug!("kernel:pid[{}] sys_umount: target={}", current_task().unwrap().process().pid.0, target_str);
     return 0;
 }
@@ -946,7 +1053,11 @@ pub fn sys_fremovexattr(_fd: isize, _name: *const u8) -> isize {
         String::new()
     } else {
         let token = current_user_token();
-        translated_str(token, _name)
+        if let Some(s) = try_translated_str(token, _name) {
+            s
+        } else {
+            return EFAULT.as_isize();
+        }
     };
     debug!("kernel:pid[{}] sys_fremovexattr: fd={}, name={}", current_task().unwrap().process().pid.0, _fd, name_str);
     return 0; // 目前不支持扩展属性，直接返回成功
@@ -954,7 +1065,13 @@ pub fn sys_fremovexattr(_fd: isize, _name: *const u8) -> isize {
 
 pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
     let token = current_user_token();
-    let path_str = crate::mm::translated_str(token, path_ptr); 
+    let path_str = {
+        if let Some(s) = crate::mm::try_translated_str(token, path_ptr) {
+            s
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
     trace!("kernel:pid[{}] sys_fstatat dirfd={} path={}", current_task().unwrap().process().pid.0, dirfd, path_str);
 
     let task = current_task().unwrap();
@@ -1032,7 +1149,13 @@ pub fn sys_fchmodat(dirfd: isize, path_ptr: *const u8, mode: u32) -> isize {
     let euid = inner.uid;
     drop(inner);
     
-    let path = translated_str(token, path_ptr);
+    let path = {
+        if let Some(s) = try_translated_str(token, path_ptr) {
+            s
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
 
     match ROOT_DENTRY.find_tree(path.as_str(), true) {
         Some(dentry) => {
@@ -1104,7 +1227,13 @@ pub fn sys_fchownat(dirfd: isize, path_ptr: *const u8, owner: u32, group: u32) -
     let euid = inner.uid;
     drop(inner);
     info!("pid[{}] sys_fchownat: dirfd={}, owner={}, group={}", task.process().pid.0, dirfd, owner, group);
-    let path = translated_str(token, path_ptr);
+    let path = {
+        if let Some(s) = try_translated_str(token, path_ptr) {
+            s
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
     info!("pid[{}] sys_fchownat: path '{}'", task.process().pid.0, path);
 
     match ROOT_DENTRY.find_tree(path.as_str(), true) {
@@ -1181,3 +1310,85 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: i64, len: i64) -> isize {
 
     EBADF.as_isize()
 }
+
+// memfd flags
+bitflags::bitflags! {
+    pub struct MemfdFlags: u32 {
+        const MFD_CLOEXEC       = 0x0001;
+        const MFD_ALLOW_SEALING = 0x0002;
+        const MFD_HUGETLB       = 0x0004;
+        const MFD_NOEXEC_SEAL   = 0x0008;
+        const MFD_EXEC          = 0x0010;
+        
+        // 巨页大页掩码
+        const MFD_HUGE_MASK     = 0x3f << 26;
+        
+        // 常见的巨页大小
+        const MFD_HUGE_64KB     = 16 << 26;
+        const MFD_HUGE_512KB    = 19 << 26;
+        const MFD_HUGE_1MB      = 20 << 26;
+        const MFD_HUGE_2MB      = 21 << 26;
+        const MFD_HUGE_8MB      = 23 << 26;
+        const MFD_HUGE_16MB     = 24 << 26;
+        const MFD_HUGE_32MB     = 25 << 26;
+        const MFD_HUGE_256MB    = 28 << 26;
+        const MFD_HUGE_512MB    = 29 << 26;
+        const MFD_HUGE_1GB      = 30 << 26;
+        const MFD_HUGE_2GB      = 31 << 26;
+        const MFD_HUGE_16GB     = 34 << 26;
+    }
+}
+
+/// 创建匿名内存文件
+pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
+    let flags = match MemfdFlags::from_bits(flags) {
+        Some(f) => f,
+        None => return EINVAL.as_isize(),
+    };
+
+    // 解析页大小
+    let page_size = {
+        if flags.contains(MemfdFlags::MFD_HUGETLB) {
+            match flags.intersection(MemfdFlags::MFD_HUGE_MASK) {
+                // 不支持的巨页大小
+                MemfdFlags::MFD_HUGE_64KB | MemfdFlags::MFD_HUGE_512KB | MemfdFlags::MFD_HUGE_1MB | 
+                MemfdFlags::MFD_HUGE_8MB | MemfdFlags::MFD_HUGE_16MB |
+                MemfdFlags::MFD_HUGE_32MB | MemfdFlags::MFD_HUGE_256MB | MemfdFlags::MFD_HUGE_512MB |
+                MemfdFlags::MFD_HUGE_2GB | MemfdFlags::MFD_HUGE_16GB => {
+                    return ENODEV.as_isize(); // 不支持的巨页大小返回没有设备
+                },
+                MemfdFlags::MFD_HUGE_2MB => PageSize::Page2M,
+                MemfdFlags::MFD_HUGE_1GB => PageSize::Page1G,
+                _ => return EINVAL.as_isize(),
+            }
+        } else {
+            PageSize::Page4K
+        }
+    };
+
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let token = proc.inner_exclusive_access().get_user_token();
+    let name_str = {
+        if let Some(s) = try_translated_str(token, name) {
+            s
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
+
+    // 创建 memfd 文件（只创建 inode + dentry，不映射 VPN）
+    let file = crate::fs::memfd::create_memfd(&name_str, page_size);
+
+    let mut inner = proc.inner_exclusive_access();
+    let fd = match inner.alloc_fd() {
+        Some(fd) => fd,
+        None => return EMFILE.as_isize(),
+    };
+    inner.set_fd(fd, file, flags.contains(MemfdFlags::MFD_CLOEXEC), 0);
+
+    trace!("kernel:pid[{}] sys_memfd_create: name='{}', page_size={:?}, fd={}",
+        task.process().pid.0, name_str, page_size, fd);
+    fd as isize
+}
+

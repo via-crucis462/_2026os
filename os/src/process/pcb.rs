@@ -9,7 +9,7 @@ use crate::{
     arch::trap::{TrapContext, trap_handler, trap_cx_va_by_kernel_stack},
     fs::{open_file, Dentry, File, OpenFlags, ROOT_DENTRY,Stdin, Stdout, Stderr},
     mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, 
-        translated_write, MapArea, MapPermission, MapType},
+        translated_write, MapArea, MapPermission, MapType, PageSize},
     sync::{MPSafeCell, WaitQueue},
 };
 use alloc::{
@@ -110,10 +110,16 @@ impl ProcessControlBlock {
             trap_cx_va = trap_cx_va_by_kernel_stack(&kernel_stack).into();
             info!("TaskControlBlock::new: calculated trap_cx_va = {:#x}", trap_cx_va.0);
             memory_set.push(
-                MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
-                    MapType::Framed, MapPermission::R | MapPermission::W),
+                MapArea::new(
+                    trap_cx_va,
+                     VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
+                    MapType::Framed,
+                    MapPermission::R | MapPermission::W,
+                    PageSize::Page4K // 初始化进程默认用标准页
+                ),
                 None,
                 trap_cx_va.0,
+
             );
             trap_cx_addr = {
                 let trap_cx_ppn = memory_set
@@ -247,6 +253,7 @@ impl ProcessControlBlock {
                     VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
                     MapType::Framed,
                     MapPermission::R | MapPermission::W,
+                    PageSize::Page4K // trap上下文映射页默认用标准页
                 ),
                 None,
                 trap_cx_va.0,
@@ -270,9 +277,9 @@ impl ProcessControlBlock {
             final_entry_point, user_sp
         );
 
-        
+        let stack_page_size = PageSize::Page4K; // 默认用标准页映射用户程序
         let memory_top = heap_bottom;
-        // 压入具体的字符串内容（高地址）
+        // 压入具体的字符串内容（高地址），默认用标准页
         let mut argv_ptrs: Vec<usize> = Vec::new();
         for arg in args.iter() {
             user_sp -= arg.len() + 1; // +1 是为了结尾的 '\0'
@@ -428,8 +435,13 @@ impl ProcessControlBlock {
         #[cfg(target_arch = "riscv64")]{
         let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(&kernel_stack).into();
             memory_set.push(
-                MapArea::new(trap_cx_va, VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
-                    MapType::Framed, MapPermission::R | MapPermission::W),
+                MapArea::new(
+                    trap_cx_va,
+                    VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
+                    MapType::Framed,
+                    MapPermission::R | MapPermission::W,
+                    PageSize::Page4K // fork的trap上下文映射页默认用标准页
+                ),
                 None,
                 trap_cx_va.0,
             );
@@ -545,6 +557,7 @@ impl ProcessControlBlock {
                     VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
                     MapType::Framed,
                     MapPermission::R | MapPermission::W,
+                    PageSize::Page4K // trap上下文映射页默认用标准页
                 ),
                 None,
                 trap_cx_va.0,

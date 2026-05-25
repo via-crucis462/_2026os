@@ -1,4 +1,6 @@
 //! 多核安全数据管理器
+//! 保留这个的目的是避免修改原有UPSafeCell包装
+//! 本质上是spin::Mutex
 #[cfg(target_arch = "riscv64")]
 use riscv::register::sstatus;
 use super::*;

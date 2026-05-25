@@ -19,6 +19,7 @@ pub mod mmap;
 pub mod user_buffer;
 pub mod address;
 pub mod page_table;
+pub mod shm;
 
 
 use address::VPNRange;
