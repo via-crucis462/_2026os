@@ -16,7 +16,27 @@ pub struct VirtioNetDevice;
 pub struct RxToken {
     buffer: Vec<u8>,
 }
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct IoVec {
+    pub iov_base: usize, // 指向缓冲区的指针
+    pub iov_len: usize,  // 缓冲区长度
+}
 
+/// recvmsg / sendmsg 的核心控制结构体
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MsgHdr {
+    pub msg_name: usize,       // 目标/源地址指针 (sockaddr)
+    pub msg_namelen: u32,      // 地址长度
+    pub _pad1: u32,            // 64 位对齐填充位
+    pub msg_iov: usize,        // IoVec 数组指针
+    pub msg_iovlen: usize,     // IoVec 数组的元素个数
+    pub msg_control: usize,    // 辅助数据指针 (不用管它)
+    pub msg_controllen: usize, // 辅助数据长度
+    pub msg_flags: i32,        // 接收标志位
+    pub _pad2: i32,
+}
 pub struct TxToken;
 
 impl Device for VirtioNetDevice {

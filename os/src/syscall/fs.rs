@@ -197,7 +197,7 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
 
 const AT_FDCWD: isize = -100;
 
-pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isize {
+pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
     let token = current_user_token();
@@ -225,7 +225,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
             return ENOTDIR.as_isize(); // 不是目录，报错
         }
         // 3. 将 VfsInode 包装成你的 OSInode / File 结构
-        let anon_vfs_inode = Arc::new(TmpfsFileInode::new());
+        let anon_vfs_inode = Arc::new(TmpfsFileInode::new(0o777));
         let anon_dentry =Dentry::new(
         String::from(""), 
         anon_vfs_inode.clone(), 
@@ -250,6 +250,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
         
         return fd as isize;
     }
+    
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {
@@ -271,7 +272,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, _mode: u32) -> isiz
     };
 
     let open_flags = OpenFlags::from_bits_truncate(flags);
-    if let Some(inode) = open_file(start_dentry, path_str.as_str(), open_flags) {
+    if let Some(inode) = open_file(start_dentry, path_str.as_str(), open_flags, mode) {
         if open_flags.should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
             trace!("kernel:pid[{}] VFS: sys_openat failed - '{}' is not a directory", task.process().pid.0, path_str);
             return ENOTDIR.as_isize(); // 目标文件不是目录
@@ -305,14 +306,14 @@ pub fn sys_close(fd: usize) -> isize {
     0
 }
 
-pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> isize {
+pub fn sys_accessat(dirfd: isize, path: *const u8, mode: u32, _flags: u32) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
     let token = current_user_token();
     let path_str = normalize_leading_dot_path(
         if let Some(s) = try_translated_str(token, path) { s } else { return EFAULT.as_isize(); }
     );
-    info!("kernel:pid[{}] sys_accessat: dirfd={}, path={}, mode={}", task.process().pid.0, dirfd, path_str, _mode);
+    info!("kernel:pid[{}] sys_accessat: dirfd={}, path={}, mode={}", task.process().pid.0, dirfd, path_str, mode);
 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
@@ -338,9 +339,24 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> i
         }
     };
 
-    if let Some(_inode) = open_file(start_dentry, path_str.as_str(), OpenFlags::RDONLY) {
-        0
-    } else {
+    if let Some(os_inode) = open_file(start_dentry, path_str.as_str(), OpenFlags::RDONLY, 0) {
+        if mode == 0 {
+            return 0;
+        }
+        let stat = os_inode.inode.get_stat();
+        let file_mode = stat.mode & 0o777; 
+        if (mode & 4) != 0 && (file_mode & 0o444) == 0 {
+            return EACCES.as_isize(); 
+        }
+
+        if (mode & 2) != 0 && (file_mode & 0o222) == 0 {
+            return EACCES.as_isize(); 
+        }
+        if (mode & 1) != 0 && (file_mode & 0o111) == 0 {
+            return EACCES.as_isize(); 
+        }
+        0 
+    }else {
         ENOENT.as_isize() // 文件不存在
     }
 }
@@ -994,7 +1010,7 @@ pub fn sys_chdir(path: *const u8) -> isize {
         p
     };
 
-    if let Some(inode) = open_file(cwd, full_path.as_str(), OpenFlags::DIRECTORY) {
+    if let Some(inode) = open_file(cwd, full_path.as_str(), OpenFlags::DIRECTORY,0) {
         let mut inner = proc.inner_exclusive_access();
         inner.cwd = inode.get_dentry();
         0

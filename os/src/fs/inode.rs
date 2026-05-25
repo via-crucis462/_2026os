@@ -14,6 +14,7 @@ use crate::mm::UserBuffer;
 use crate::fs::TimeSpec;
 use crate::auth::PermStat;
 use core::any::Any;
+use crate::mm::PhysPageNum;
 
 
 pub struct OSInode {
@@ -166,6 +167,10 @@ impl File for OSInode {
     }
 
     fn as_any(&self) -> &dyn Any { self }
+    fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
+        // 转发给底层的具体文件系统 Inode
+        self.inode.get_shared_page(page_offset)
+    }
 }
 bitflags! {
     ///  The flags argument to the open() system call is constructed by ORing together zero or more of the following values:
@@ -208,7 +213,7 @@ impl OpenFlags {
         self.contains(Self::NOFOLLOW)
     }
 }
-pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
+pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> Option<Arc<OSInode>> {
     debug!("VFS: open_file - path='{}', flags={:?},cwd={}", path, flags, base.name);
     let start_node = if path.starts_with('/') {
         ROOT_DENTRY.clone() // 绝对路径，从根开始
@@ -231,7 +236,7 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags) -> Option<Arc<O
         let parent_path = parent_path(path);
         let parent_dentry = start_node.find_tree(&parent_path, true)?;
         let file_name = file_name(path);
-        let new_dentry = create_file_in_dentry(&parent_dentry, file_name);
+        let new_dentry = create_file_in_dentry(&parent_dentry, file_name, mode);
         let (readable, writable) = flags.read_write();
         return Some(Arc::new(OSInode::new(
             readable,

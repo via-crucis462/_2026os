@@ -26,6 +26,8 @@ pub mod epoll;
 pub use epoll::{EpollFile, EpollEvent}; 
 use crate::syscall::fs::Statfs;
 use crate::auth::{FileMode, PermSet, PermStat};
+use crate::mm::PhysPageNum;
+
 /// trait File for all file types
 pub trait File: Send + Sync {
     /// the file readable?
@@ -69,6 +71,11 @@ pub trait File: Send + Sync {
     }
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
         0
+    }
+    // 获取该文件指定页偏移的物理页号。
+    // 如果没有，文件内部负责分配一个并存起来。
+    fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
+        None // 默认不支持
     }
 }
 
@@ -232,6 +239,9 @@ pub trait VfsInode: Send + Sync {
             f_namelen: 255, f_frsize: 0, f_flags: 0, f_spare: [0; 4],
         }
     }
+    fn get_shared_page(&self, _page_offset: usize) -> Option<PhysPageNum> {
+        None
+    }
 
 }
 
@@ -258,8 +268,8 @@ pub use stdio::{Stdin, Stdout, Stderr};
 
 pub fn init_test_env() {
     println!("[VFS] Mounting true Tmpfs directories in memory...");
-    ROOT_DENTRY.insert(String::from("tmp"), Arc::new(TmpfsDirInode::new()));
-    ROOT_DENTRY.insert(String::from("var"), Arc::new(TmpfsDirInode::new()));
+    ROOT_DENTRY.insert(String::from("tmp"), Arc::new(TmpfsDirInode::new(0o777)));
+    ROOT_DENTRY.insert(String::from("var"), Arc::new(TmpfsDirInode::new(0o777)));
 }
 
 const MAX_SYMLINK_DEPTH: usize = 8; // 地雷1：防止无限递归导致内核栈溢出

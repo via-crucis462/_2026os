@@ -78,7 +78,7 @@ pub struct Winsize {
     pub ws_ypixel: u16, // 像素高度 (通常不用，填 0)
 }
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
@@ -537,6 +537,24 @@ pub fn sys_setsid() -> isize {
     inner.pgid = pid;
     
     pid as isize // 成功时返回新的会话 ID
+}
+// 系统调用号 148: getresuid
+// 让用户态程序查询自己当前拥有的 RUID、EUID、SUID。
+// 内核需要把查到的 Root UID (0) 写进用户态传入的指针里。
+pub fn sys_getresuid(ruid_ptr: *mut u32, euid_ptr: *mut u32, suid_ptr: *mut u32) -> isize {
+    // 获取当前进程的物理/虚拟内存翻译 Token
+    let token = current_user_token();
+    let root_uid: u32 = 0;
+    if ruid_ptr as usize != 0 {
+        translated_write(token, ruid_ptr, root_uid);
+    }
+    if euid_ptr as usize != 0 {
+        translated_write(token, euid_ptr, root_uid);
+    }
+    if suid_ptr as usize != 0 {
+        translated_write(token, suid_ptr, root_uid);
+    }
+    0 
 }
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
@@ -1060,11 +1078,16 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             return EFAULT.as_isize();
         }
     };
-    if path_str.len() > 255 {
-        return ENAMETOOLONG.as_isize();
+     if path_str.len() >= 4096 { // PATH_MAX
+        return ENAMETOOLONG.as_isize(); 
     }
+    for comp in path_str.split('/') {
+        if comp.len() > 255 {
+            return ENAMETOOLONG.as_isize(); 
+        }
+    }
+    //println!("exec: normalized path: '{}'", path_str);
 
-    // println!("exec: normalized path: '{}'", path_str);
 
     let mut args_vec: Vec<String> = Vec::new();
     // 提取原始参数数组
@@ -1118,10 +1141,16 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     trace!("[kernel] sys_exec: before open_file");
     
     // 1. 尝试正常打开主程序
-    let mut app_inode_opt = open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY);
+    let mut app_inode_opt = open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY,0);
 
     // 2. 继续执行逻辑
     if let Some(mut app_inode) = app_inode_opt {
+        let stat = app_inode.inode.get_stat();
+        let is_dir = (stat.mode & 0o170000) == 0o040000; 
+        let can_exec = (stat.mode & 0o111) != 0;        
+        if is_dir || !can_exec {
+            return EACCES.as_isize();
+        }
         debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         
         // 鉴权逻辑，但当前实现用户几乎一定是root，所以似乎没用
@@ -1136,7 +1165,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         if app_name.ends_with(".sh") {
             info!("[kernel] sys_exec: detected script '{}', trying to execute with busybox", app_name);
             let busybox = "/musl/busybox";
-            if let Some(inode) = open_file(cwd.clone(), busybox, OpenFlags::RDONLY) {
+            if let Some(inode) = open_file(cwd.clone(), busybox, OpenFlags::RDONLY,0) {
                 let mut new_args = vec!["musl/busybox".to_string(), "sh".to_string()];
                 // 如果脚本没带参数，把脚本路径加进去
                 if args_vec.len() <= 1 { new_args.push(path_str.clone()); }
@@ -1171,6 +1200,25 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         // exec 成功后不会回到旧程序，返回 0 可避免 trap 收尾把 argc 写进新程序 a0。
         0
     } else {
+        let mut check_path = alloc::string::String::new();
+        if path_str.starts_with('/') { check_path.push('/'); }
+        
+        let comps: alloc::vec::Vec<&str> = path_str.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+        for i in 0..comps.len() {
+            if i > 0 && !check_path.ends_with('/') { check_path.push('/'); }
+            check_path.push_str(comps[i]);
+            // 如果当前不是最后一段路径，或者原路径明确以 '/' 结尾（如 testfile/），这一段必须是目录
+            let require_dir = i < comps.len() - 1 || path_str.ends_with('/');
+            if require_dir {
+                if let Some(node) = cwd.find_tree(&check_path, true) {
+                    let stat = node.inode.get_stat();
+                    let is_dir = (stat.mode & 0o170000) == 0o040000;
+                    if !is_dir {
+                        return ENOTDIR.as_isize(); // ENOTDIR: 路径中间遇到了非目录文件
+                    }
+                }
+            }
+        }
         // 打开失败，细分错误码，后续考虑修改open_file逻辑来避免重复查路径
         // 检查路径中是否有中间组件不是目录
         let start_node = if path_str.starts_with('/') {
@@ -1726,39 +1774,23 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
     let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
     let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
 
-    // 分配内存并映射
-    let ret = match mmap::do_mmap(start, len, mmap_prot , mmap_flags) {
-        Ok(addr) => addr,
-        Err(_) => {
-            //debug!("[kernel] sys_mmap: do_mmap failed for start={:#x}, len={:#x}, prot={:?}, flags={:?}", start, len, mmap_prot, mmap_flags);
-            return Errno::ENOMEM.as_isize(); // 内存不足
-        }
-    };
+    let is_anonymous = mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS);
+    let is_shared = mmap_flags.contains(mmap::MMapFlags::MAP_SHARED);
+    let mut file_inner = None;
 
-    // 如果是文件映射（非匿名映射）且 FD 合法，读取内容
-    if !mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS) {
-        if fd >= 0 {
-            //debug!("[kernel] sys_mmap: file mapping requested for fd={}, start={:#x}, len={:#x}, prot={:?}, flags={:?}", fd, start, len, mmap_prot, mmap_flags);
-            let task = current_task().unwrap();
-            let process = task.process();
-            let token = current_user_token();
-            let inner = process.inner_exclusive_access();
-            let fd_usize = fd as usize;
-            if fd_usize < inner.fd_table.len() {
-                let fd_obj = &inner.fd_table[fd_usize];
-                if let Some(file) = &fd_obj.file {
-                    if file.readable() {
-                        let file = file.clone();
-                        // 释放锁避免阻塞
-                        drop(inner);
-                        // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
-                        let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
-                        // 使用 read_at 确保不受 FD 当前 offset 影响，并使用系统调用传入的 _off
-                        file.read_at(_off, user_buf);
-                    }
-                } else {
-                    return Errno::EBADF.as_isize(); // 无效的文件描述符
-                }
+    // 前置检查并提取文件对象
+    if !is_anonymous {
+        if fd < 0 {
+            return Errno::EBADF.as_isize();
+        }
+        let task = current_task().unwrap();
+        let process = task.process();
+        let inner = process.inner_exclusive_access();
+        let fd_usize = fd as usize;
+        
+        if fd_usize < inner.fd_table.len() {
+            if let Some(file) = &inner.fd_table[fd_usize].file {
+                file_inner = Some(file.clone()); // 拿到文件的 Arc 强引用
             } else {
                 return Errno::EBADF.as_isize();
             }
@@ -1766,15 +1798,28 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
             return Errno::EBADF.as_isize();
         }
     }
-    /*
-    let task = current_task().unwrap();
-    let process = task.process();
-    let token = current_user_token();
-    let inner = process.inner_exclusive_access();
-    for i in inner.memory_set.areas().iter() {
-        debug!("after map: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+
+    //将 file_inner 和 _off 逐层转发给 do_mmap
+    let ret = match mmap::do_mmap(start, len, mmap_prot, mmap_flags, file_inner.clone(), _off) {
+        Ok(addr) => addr,
+        Err(_) => {
+            return Errno::ENOMEM.as_isize(); // 内存不足
+        }
+    };
+
+    // 
+    // 只有在非匿名且非共享（即传统的 MAP_PRIVATE 读文件到内存）时，执行你原有的手动读取
+    if !is_anonymous && !is_shared {
+        if let Some(file) = file_inner {
+            if file.readable() {
+                let token = current_user_token();
+                // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
+                let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
+                // 使用 read_at 确保不受 FD 当前 offset 影响
+                file.read_at(_off, user_buf);
+            }
+        }
     }
-     */
     debug!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
     ret as isize
 }
@@ -2315,7 +2360,44 @@ pub fn sys_sigreturn() -> isize {
 const SIG_BLOCK: usize = 0;
 const SIG_UNBLOCK: usize = 1;
 const SIG_SETMASK: usize = 2;
-
+#[repr(C)]
+#[derive(Debug,Clone, Copy, Default)]
+pub struct Rusage {
+    pub ru_utime: TimeVal, // 用户态运行时间
+    pub ru_stime: TimeVal, // 内核态运行时间
+    pub ru_maxrss: isize,  // 最大驻留集大小 (最大使用内存)
+    pub ru_ixrss: isize,   // 共享内存大小
+    pub ru_idrss: isize,   // 非共享数据大小
+    pub ru_isrss: isize,   // 非共享栈大小
+    pub ru_minflt: isize,  // 软缺页异常次数
+    pub ru_majflt: isize,  // 硬缺页异常次数
+    pub ru_nswap: isize,   // 交换出内存的次数
+    pub ru_inblock: isize, // 块输入操作次数
+    pub ru_oublock: isize, // 块输出操作次数
+    pub ru_msgsnd: isize,  // 发送 IPC 消息次数
+    pub ru_msgrcv: isize,  // 接收 IPC 消息次数
+    pub ru_nsignals: isize,// 收到的信号次数
+    pub ru_nvcsw: isize,   // 主动上下文切换次数
+    pub ru_nivcsw: isize,  // 被动上下文切换次数
+}
+pub fn sys_getrusage(who: i32, usage_ptr: *mut Rusage) -> isize {
+    // 常见的 who 参数定义：
+    const RUSAGE_SELF: i32 = 0;       // 请求当前进程的资源使用情况
+    const RUSAGE_CHILDREN: i32 = -1;  // 请求那些已经被回收的子进程的资源使用情况
+    const RUSAGE_THREAD: i32 = 1;     // 请求当前线程的资源使用情况
+    // 参数校验
+    if who != RUSAGE_SELF && who != RUSAGE_CHILDREN && who != RUSAGE_THREAD {
+        return EINVAL.as_isize(); 
+    }
+    if usage_ptr as usize == 0 {
+        return EFAULT.as_isize(); 
+    }
+    let token = current_user_token();
+    // 返回全 0 的结构体
+    let usage = Rusage::default();
+    crate::mm::translated_write(token, usage_ptr, usage);
+    0 
+}
 #[allow(dead_code)]
 fn check_sigaction_error(signal: SignalFlags) -> bool {
     if signal == SignalFlags::SIGKILL || signal == SignalFlags::SIGSTOP

@@ -232,7 +232,7 @@ impl ProcessControlBlock {
         let Some((mut memory_set, heap_bottom, mut user_sp, final_entry_point, main_entry_point, phdr_addr, phnum, phent, interp_base)) =
             MemorySet::from_elf_with_interp_loader(elf_data, |interp_path| {
                 debug!("[kernel] sys_exec: loading interpreter at '{}'", interp_path);
-                open_file(cwd.clone(), interp_path, OpenFlags::RDONLY).map(|inode| {
+                open_file(cwd.clone(), interp_path, OpenFlags::RDONLY,0).map(|inode| {
                     has_interp = true;
                     inode.read_all()
                 })
@@ -694,10 +694,12 @@ impl ProcessControlBlock {
         addr: usize,
         length: usize,
         prot: mmap::MMapProt,
-        flags: mmap::MMapFlags
+        flags: mmap::MMapFlags,
+        file_inner: Option<Arc<dyn File + Send + Sync>>,
+        offset: usize,
     ) -> Result<usize, i32> {
         let mut inner = self.inner_exclusive_access();
-        inner.memory_set.mmap(addr, length, prot, flags)
+        inner.memory_set.mmap(addr, length, prot, flags, file_inner, offset)
     }
     /// 处理munmap
     pub fn munmap(&self, addr: usize, length: usize) -> Result<(), i32> {
