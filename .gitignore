@@ -1,6 +1,7 @@
 .*/*
 !.github/*
 !.vscode/settings.json
+!.cargo/config.toml
 .idea
 #Cargo.lock
 target

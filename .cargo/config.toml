@@ -12,11 +12,3 @@ registry = "sparse+https://rsproxy.cn/index/"
 
 [source.aliyun]
 registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
-
-[build]
-target = "riscv64gc-unknown-none-elf"
-
-[target.riscv64gc-unknown-none-elf]
-rustflags = [
-    "-Clink-args=-Tsrc/linker.ld",
-]
