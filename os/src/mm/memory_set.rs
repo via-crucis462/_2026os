@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use lazy_static::*;
 use crate::fs::File;
+use crate::mm::PageSize::Page4K;
 
 #[cfg(target_arch = "riscv64")]
 use riscv::register::satp;
@@ -942,12 +943,13 @@ impl MemorySet {
             let file = file_inner.as_ref().unwrap();
 
             let area = MapArea {
-                vpn_range: VPNRange::new(VirtAddr::from(start_va).floor(), VirtAddr::from(start_va + length).ceil()),
+                vpn_range: VPNRange::new(VirtAddr::from(start_va).std_floor(), VirtAddr::from(start_va + length).std_ceil()),
                 data_frames: BTreeMap::new(), 
                 map_type: MapType::Framed, 
                 map_perm: permission,
                 is_shared: true,
                 backing_file: file_inner.clone(), 
+                page_size:Page4K
             };
 
             let start_vpn = start_va / PAGE_SIZE;
@@ -963,7 +965,7 @@ impl MemorySet {
                     }
 
                     let pte_flags = PTEFlags::from_bits(permission.bits).unwrap();
-                    self.page_table.map(VirtPageNum::from(vpn), shared_ppn, pte_flags);
+                    self.page_table.map(VirtPageNum::from(vpn), shared_ppn, pte_flags,Page4K);
                 } else {
                     return Err(-1);
                 }
@@ -1275,6 +1277,7 @@ impl MapArea {
             map_perm: another.map_perm,
             is_shared: another.is_shared,
             backing_file: another.backing_file.clone(),
+            page_size: another.page_size,
         }
     }
     /// 仅解除页表映射
@@ -1297,7 +1300,7 @@ impl MapArea {
             map_perm: self.map_perm,
             is_shared: self.is_shared,               
             backing_file: self.backing_file.clone(),
-            page_size: another.page_size,
+            page_size: self.page_size,
         }
     }
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum, page_size: PageSize) {

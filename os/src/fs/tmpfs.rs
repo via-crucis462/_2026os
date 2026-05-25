@@ -16,6 +16,7 @@ use crate::auth::{PermStat, FileMode};
 use crate::drivers::loopdev::*;
 use crate::mm::{FrameTracker, PhysPageNum };
 use crate::mm::frame_alloc;
+use crate::mm::PageSize::Page4K;
 
 use crate::PAGE_SIZE;
 // 全局唯一的 Inode 分配器
@@ -100,7 +101,7 @@ impl super::VfsInode for TmpfsFileInode {
             
             // 如果这一页还没创建，直接调用内核页分配器占领一个物理页
             let frame = pages.entry(page_idx).or_insert_with(|| {
-                crate::mm::frame_alloc().expect("[Tmpfs] Failed to allocate physical page frame")
+                crate::mm::frame_alloc(Page4K).expect("[Tmpfs] Failed to allocate physical page frame")
             });
             
             let dest = &mut frame.ppn.get_bytes_array()[page_inner_offset..page_inner_offset + bytes_to_write];
@@ -123,7 +124,7 @@ impl super::VfsInode for TmpfsFileInode {
         let mut frames = self.pages.lock();
         // 如果 mmap 映射的页超出了当前文件大小，Linux 允许直接分配空白页给它
         let frame = frames.entry(page_offset).or_insert_with(|| {
-            let f = frame_alloc().unwrap();
+            let f = frame_alloc(Page4K).unwrap();
             let page_kvaddr = f.ppn.0 << 12;
             unsafe { core::slice::from_raw_parts_mut(page_kvaddr as *mut u8, PAGE_SIZE).fill(0); }
             f
@@ -354,15 +355,15 @@ pub fn setup_oscomp_env() {
     let lib64_dentry = root.insert("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     
     // loop测例检查的文件
-    let lib_modules = lib_dentry.insert("modules".to_string(), Arc::new(TmpfsDirInode::new()));
-    let lib_modules_rcore = lib_modules.insert("5.10.0-rcore".to_string(), Arc::new(TmpfsDirInode::new()));
+    let lib_modules = lib_dentry.insert("modules".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let lib_modules_rcore = lib_modules.insert("5.10.0-rcore".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     lib_modules_rcore.insert("modules.builtin".to_string(), Arc::new(TmpfsFileInode::new_with_data(b"kernel/drivers/block/loop.ko\n")));
     lib_modules_rcore.insert("modules.dep".to_string(), Arc::new(TmpfsFileInode::new_with_data(b"")));
     
     // loop测例检查的文件
-    let sys_dentry = root.insert("sys".to_string(), Arc::new(TmpfsDirInode::new()));
-    let sys_module_dentry = sys_dentry.insert("module".to_string(), Arc::new(TmpfsDirInode::new()));
-    sys_module_dentry.insert("loop".to_string(), Arc::new(TmpfsDirInode::new()));
+    let sys_dentry = root.insert("sys".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let sys_module_dentry = sys_dentry.insert("module".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    sys_module_dentry.insert("loop".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
 
     // 3. 将 Busybox 和 libc 的真实 Inode 映射进虚拟目录
     if let Some(musl_dir) = root.find_tree("/musl", true) {
@@ -473,22 +474,22 @@ fn mount_hugepages() -> Arc<super::Dentry> {
     let sys_dentry = if let Some(sys) = root.find_tree("/sys", true) {
         sys
     } else {
-        root.insert("sys".to_string(), Arc::new(TmpfsDirInode::new()))
+        root.insert("sys".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
     let kernel_dentry = if let Some(kernel) = sys_dentry.find_tree("/sys/kernel", true) {
         kernel
     } else {
-        sys_dentry.insert("kernel".to_string(), Arc::new(TmpfsDirInode::new()))
+        sys_dentry.insert("kernel".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
     let mm_dentry = if let Some(mm) = kernel_dentry.find_tree("/sys/kernel/mm", true) {
         mm
     } else {
-        kernel_dentry.insert("mm".to_string(), Arc::new(TmpfsDirInode::new()))
+        kernel_dentry.insert("mm".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
     let hugepages_dentry = if let Some(hugepages) = mm_dentry.find_tree("/sys/kernel/mm/hugepages", true) {
         hugepages
     } else {
-        mm_dentry.insert("hugepages".to_string(), Arc::new(TmpfsDirInode::new()))
+        mm_dentry.insert("hugepages".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
     info!("[VFS] Mounted /dev/hugepages");
     hugepages_dentry
