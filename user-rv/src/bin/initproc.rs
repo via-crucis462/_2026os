@@ -142,5 +142,7 @@ echo \"#### OS COMP TEST GROUP END ltp-musl ####\"
 
     // Init (PID 1) must never exit — otherwise the kernel panics.
     // Loop forever, reaping any zombie children.
+    let mut _status: i32 = 0;
     waitpid((-1isize) as usize, &mut _status);
+    0
 }

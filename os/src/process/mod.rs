@@ -163,6 +163,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // fix:再获取pcb锁
     let mut proc_inner = proc.inner_exclusive_access();
 
+    // 从 tasks 中移除自己，回收线程资源
+    proc_inner.tasks.retain(|t| t.gettid() != task.gettid());
+
     // Decrease the number of alive tasks
     proc_inner.alive_task_count -= 1;
     //let parent_to_wake = proc_inner.parent.as_ref().and_then(|p| p.upgrade());

@@ -137,7 +137,7 @@ pub fn trap_handler() -> ! {
                 drop(process);
                 drop(task);
             } else {
-                println!(
+                error!(
                     "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}, sp={:#x}",
                     crate::task::current_task().unwrap().process().pid.0,
                     scause.cause(),
@@ -156,7 +156,7 @@ pub fn trap_handler() -> ! {
             }
         }
         _ => {
-            println!(
+            error!(
                 "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
                 crate::task::current_task().unwrap().process().pid.0,
                 scause.cause(),

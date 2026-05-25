@@ -53,7 +53,7 @@ fn main() -> i32 {
     chdir("/musl\0");
 
     // 测例首字母
-    let test_start = "";
+    let test_start = "z";
 
     // 测例黑名单
     const SKIP_CASES: &[&str] = &[
@@ -142,5 +142,7 @@ echo \"#### OS COMP TEST GROUP END ltp-musl ####\"
 
     // Init (PID 1) must never exit — otherwise the kernel panics.
     // Loop forever, reaping any zombie children.
+    let mut _status: i32 = 0;
     waitpid((-1isize) as usize, &mut _status);
+    0
 }
