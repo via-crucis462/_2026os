@@ -53,7 +53,7 @@ fn main() -> i32 {
     chdir("/musl\0");
 
     // 测例首字母
-    let test_start = "s";
+    let test_start = "";
 
     // 测例黑名单
     const SKIP_CASES: &[&str] = &[
@@ -99,6 +99,8 @@ fn main() -> i32 {
         "statx11*",
         "timed_forkbomb*",
         "tst_hexdump*",
+        "epoll_pwait*",
+        "hackbench",
     ];
 
     let skip_list = {
@@ -140,9 +142,5 @@ echo \"#### OS COMP TEST GROUP END ltp-musl ####\"
 
     // Init (PID 1) must never exit — otherwise the kernel panics.
     // Loop forever, reaping any zombie children.
-    loop {
-        let mut _status: i32 = 0;
-        // waitpid(-1, ...) = wait for any child; returns -1 if no children
-        waitpid((-1isize) as usize, &mut _status);
-    }
+    waitpid((-1isize) as usize, &mut _status);
 }

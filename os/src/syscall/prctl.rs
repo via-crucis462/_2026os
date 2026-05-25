@@ -1,7 +1,8 @@
 #![allow(unused)]
-use crate::process;
-
+use crate::{mm::try_translated_str, process};
+use crate::mm::try_translated_write;
 use super::process::*;
+use super::errno::Errno::*;
 
 // 进程名
 const PR_SETNAME: usize = 15;
@@ -47,9 +48,13 @@ pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5:
     match option {
         PR_SETNAME => {
             // 将buff的内容写进pname字段
-            let buff = crate::mm::translated_read::<[u8; 16]>(current_user_token(), _arg2 as *const [u8; 16]);
+            let name = if let Some(name) = try_translated_str(current_user_token(), _arg2 as *const u8) {
+                name
+            } else {
+                return -EINVAL;
+            };
             let mut name_bytes = String::new();
-            for &b in buff.iter() {
+            for &b in name.as_bytes().iter() {
                 if b == 0 {
                     break;
                 }
@@ -66,13 +71,15 @@ pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5:
             let task = current_task().unwrap();
             let process = task.process();
             let inner = process.inner_exclusive_access();
-            let name = inner.pname.as_bytes();
-            let len = inner.pname.len().min(15);
+            let name = inner.pname.clone();
+            drop(inner);
             let mut out = [0u8; 16];
-            if len > 0 {
-                out[..len].copy_from_slice(&name[..len]);
+            for (i, &b) in name.as_bytes().iter().take(15).enumerate() {
+                out[i] = b;
             }
-            crate::mm::translated_write(current_user_token(), _arg2 as *mut [u8; 16], out);
+            if !try_translated_write(current_user_token(), _arg2 as *mut [u8; 16], out){
+                return EFAULT.as_isize();
+            };
             0
         },
         PR_GET_SECCOMP => {

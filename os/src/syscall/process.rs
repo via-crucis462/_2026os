@@ -2479,6 +2479,13 @@ pub fn sys_pselect6(
     _timeout: *const usize,
     _sigmask: *const usize,
 ) -> isize {
+
+    // 大于64会导致超出usize
+    const PSELECT_MAX_FD: usize = 64;
+    if nfds > PSELECT_MAX_FD {
+        return EINVAL.as_isize();
+    }
+
     let task = current_task().unwrap();
     let process = task.process();
     let token = process.inner_exclusive_access().get_user_token();
@@ -2509,7 +2516,7 @@ pub fn sys_pselect6(
         if timespec.tv_nsec >= 1_000_000_000 {
             return EINVAL.as_isize();
         }
-        // 防止随机/恶意 tv_sec 导致超时，饱和运算防溢出
+        // 防溢出&非法值
         const MAX_TIMEOUT_SEC: usize = 86400;
         let sec = if timespec.tv_sec > MAX_TIMEOUT_SEC {
             return EINVAL.as_isize();
@@ -2520,10 +2527,6 @@ pub fn sys_pselect6(
         deadline_ms = get_time_ms().saturating_add(timeout_ms);
     }
 
-    // 防止随机/恶意 nfds 导致死循环
-    const PSELECT_MAX_FD: usize = 1024;
-    let nfds = nfds.min(PSELECT_MAX_FD);
-    
     // debug!("[kernel] pselect6 nfds={} has_timeout={} timeout_ms={}", nfds, has_timeout, timeout_ms);
     loop {
         let mut process_inner = process.inner_exclusive_access();
@@ -2534,12 +2537,11 @@ pub fn sys_pselect6(
         
         // 遍历轮询用户关心的 FD
         for fd in 0..nfds {
-            if (readfds & (1 << fd)) != 0 {
-                // 【修正】遵循规范：fd_table[fd].file 是 Option<Arc<dyn File>>
+            if (readfds & (1usize << fd)) != 0 {
                 if fd < fd_table.len() {
                     if let Some(file) = &fd_table[fd].file {
                         if file.readable() {
-                            ready_readfds |= 1 << fd;
+                            ready_readfds |= 1usize << fd;
                             ready_count += 1;
                         }
                     }
