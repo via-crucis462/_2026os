@@ -7,8 +7,9 @@ use super::id::*;
 #[allow(unused)]
 use crate::arch::config::*;
 use crate::arch::trap::current_trap_cx_user_va;
-use crate::mm::mmap;
+use crate::mm::{get_free_frames, mmap};
 use crate::sync::MPSafeCell;
+use crate::syscall::errno::Errno;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -118,7 +119,7 @@ impl MemorySet {
         permission: MapPermission,
         page_size: PageSize,
     ) {
-        self.push(
+        self.push( // 页的映射发生在push时
             MapArea::new(
                 start_va,
                 end_va,
@@ -891,33 +892,53 @@ impl MemorySet {
         length: usize,
         prot: mmap::MMapProt,
         mmap_flags: mmap::MMapFlags,
-    ) -> Result<usize, i32> {
+    ) -> Result<usize, isize> {
+        // 指针检查
+        if (addr as isize) < 0 {
+            return Err(Errno::EINVAL.as_isize());
+        }
+        // 最少分配一页
+        let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        // 检查剩余内存是否足够
+        let free = get_free_frames();
+        if free < length / PAGE_SIZE {
+            warn!(
+                "mmap failed: not enough free frames (need {}, have {})",
+                length / PAGE_SIZE,
+                free
+            );
+            return Err(Errno::ENOMEM.as_isize());
+        }
+
+        // 找合适起始地址
         let mut start_va = addr;
         if start_va == 0 {
             if let Some(new_addr) = self.find_free_area(length) {
                 start_va = new_addr;
             } else {
                 //println!("[kernel] mmap failed: no suitable free area found for length {:#x}", length);
-                return Err(-1);
+                return Err(Errno::ENOMEM.as_isize());
             }
         }
         else {
-                // 最少分配一页
-                let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-                // 检查冲突
-                if self.has_conflict(start_va, length) {
-                    if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED) {
-                        if let Ok(_ret) = self.munmap(start_va, length) {
-                            // Handle the result if needed
-                            //println!("[kernel] mmap: MAP_FIXED flag set, unmapped conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
-                        }else {
-                            //println!("[kernel] mmap: MAP_FIXED flag set, but failed to unmap conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
-                            return Err(-1);
-                        }
+            // 检查冲突
+            if self.has_conflict(start_va, length) {
+                if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED) {
+                    if let Ok(_ret) = self.munmap(start_va, length) {
+                        // Handle the result if needed
+                        //println!("[kernel] mmap: MAP_FIXED flag set, unmapped conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
+                    }else {
+                        //println!("[kernel] mmap: MAP_FIXED flag set, but failed to unmap conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
+                        return Err(Errno::ENOMEM.as_isize());
                     }
+                } else {
+                    //println!("[kernel] mmap failed: address range [{:#x}, {:#x}) conflicts with existing mapping", start_va, start_va + length);
+                    return Err(Errno::ENOMEM.as_isize());
                 }
             }
-            // 设置权限
+        }
+
+        // 设置权限
         let mut permission = MapPermission::empty();
         if prot.contains(mmap::MMapProt::PROT_READ) {
             permission |= MapPermission::R;
@@ -995,7 +1016,7 @@ impl MemorySet {
     }
     /// munmap的实现
     /// 注意：不允许取消映射brk之前的区域
-    pub fn munmap(&mut self, start: usize, length: usize) -> Result<(), i32> {
+    pub fn munmap(&mut self, start: usize, length: usize) -> Result<(), isize> {
         let brk_idx = self.brk_index;
         let brk_area = &self.areas[brk_idx];
         let brk_end = brk_area.vpn_range.get_end().0 * PAGE_SIZE;

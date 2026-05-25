@@ -33,14 +33,14 @@ pub fn do_brk(addr: usize) -> Result<usize, i32> {
 }
 
 /// 处理mmap系统调用的分配部分
-pub fn do_mmap(addr: usize, length: usize, prot: MMapProt, flags: MMapFlags) -> Result<usize, i32> {
+pub fn do_mmap(addr: usize, length: usize, prot: MMapProt, flags: MMapFlags) -> Result<usize, isize> {
     //println!("do_mmap: addr = {:#x}, length = {}, prot = {:?}", addr, length, prot);
     let task = current_processor().current().unwrap();
     let proc = task.process();
     proc.mmap(addr, length, prot, flags)
 }
 
-pub fn do_munmap(addr: usize, length: usize) -> Result<(), i32> {
+pub fn do_munmap(addr: usize, length: usize) -> Result<(), isize> {
     let task = current_processor().current().unwrap();
     let proc = task.process();
     proc.munmap(addr, length)

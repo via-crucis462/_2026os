@@ -174,9 +174,12 @@ use mm::*;
 use alloc::string::String;
 
 use crate::get_hart_id;
+use crate::mm::try_translated_str;
 use crate::syscall::net::*;
 
 use crate::{fs::Stat, task::{SignalAction, current_task}};
+
+const PATH_MAX_LEN: usize = 256;
 
 pub(crate) fn normalize_leading_dot_path(path: String) -> String {
     if !path.starts_with('.') {
@@ -193,6 +196,19 @@ pub(crate) fn normalize_leading_dot_path(path: String) -> String {
         return alloc::format!("{}/{}", cwd, rest);
     }
     path.replacen('.', cwd.as_str(), 1)
+}
+
+
+pub fn translate_path(token: usize, path: *const u8) -> Result<String, Errno> {
+    let str = try_translated_str(token, path);
+    if let Some(s) = str {
+        if s.len() > PATH_MAX_LEN {
+            return Err(Errno::ENAMETOOLONG);
+        }
+        Ok(s)
+    } else {
+        Err(Errno::EFAULT)
+    }
 }
 
 #[no_mangle]
@@ -231,6 +247,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         inner.info_map_areas();
     }*/
     // println!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
+    trace!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
@@ -374,5 +391,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         );
     }*/
     // println!("[K] hart[{}] PID{} finished syscall {} with return value {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
+    trace!("[K] hart[{}] PID{} finished syscall {} with return value {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
     ret
 }

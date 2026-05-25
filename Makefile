@@ -35,9 +35,9 @@ copy-la:
 	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la
 
 copy-user-rv:
-	cd user-rv && find target/riscv64gc-unknown-none-elf/$(MODE)/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/riscv/ \;
+	cd user-rv && find target/riscv64gc-unknown-none-elf/release/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/riscv/ \;
 copy-user-la:
-	cd user-la && find target/loongarch64-unknown-none/$(MODE)/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/la/ \;
+	cd user-la && find target/loongarch64-unknown-none/release/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/la/ \;
 copy-user: copy-user-rv copy-user-la
 
 copy: copy-rv copy-la copy-user-rv copy-user-la

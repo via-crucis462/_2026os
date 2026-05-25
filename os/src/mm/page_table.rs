@@ -282,13 +282,15 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     v
 }
 
-fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
+pub fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
     if len == 0 {
         return true;
     }
     let page_table = PageTable::from_token(token);
     let mut start = ptr;
-    let end = start + len;
+    let Some(end) = start.checked_add(len) else {
+        return false;
+    };
     let mut ready = true;
     while start < end {
         let start_va = VirtAddr::from(start);
@@ -330,13 +332,15 @@ fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
     proc_inner.memory_set.ensure_readable_user_range(ptr, len, sp)
 }
 
-fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
+pub fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
     if len == 0 {
         return true;
     }
     let page_table = PageTable::from_token(token);
     let mut start = ptr;
-    let end = start + len;
+    let Some(end) = start.checked_add(len) else {
+        return false;
+    };
     let mut ready = true;
     while start < end {
         let start_va = VirtAddr::from(start);
@@ -410,6 +414,9 @@ pub fn translated_str(token: usize, ptr: *const u8) -> String {
 
 /// +错误处理
 pub fn try_translated_str(token: usize, ptr: *const u8) -> Option<String> {
+    if ptr as isize <= 0 {
+        return None;
+    }
     if !prepare_user_read(token, ptr as usize, 1) {
         return None;
     }
@@ -480,6 +487,9 @@ pub fn translated_read<T>(token: usize, ptr: *const T) -> T {
 
 pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
     let len = core::mem::size_of::<T>();
+    if ptr as isize <= 0 {
+        return None;
+    }
     if !prepare_user_read(token, ptr as usize, len) {
         return None;
     }
@@ -517,6 +527,9 @@ pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
 
 pub fn try_translated_write<T>(token: usize, ptr: *mut T, value: T) -> bool {
     let len = core::mem::size_of::<T>();
+    if ptr as isize <= 0 {
+        return false;
+    }
     if !prepare_user_write(token, ptr as usize, len) {
         return false;
     }
