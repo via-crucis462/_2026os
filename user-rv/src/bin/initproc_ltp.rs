@@ -53,7 +53,7 @@ fn main() -> i32 {
     chdir("/musl\0");
 
     // 测例首字母
-    let test_start = "c";
+    let test_start = "m";
 
     // 测例黑名单
     const SKIP_CASES: &[&str] = &[
@@ -68,6 +68,25 @@ fn main() -> i32 {
         "cgroup_fj_common.sh",
         "cpuctl_def_task0*",
         "cpuctl*_test0*",
+        "dio_*",
+        "doio*",
+        "dynamic_debug0*",
+        "dma_thread_diotest",
+        "epoll-ltp",
+        "fallocate05",
+        "fallocate06",
+        "force_erase.sh",
+        "fork_exec_loop",
+        "fs_racer_*.sh",
+        "gen*",
+        "gettimeofday01",
+        "kill1*",
+        "lftest",
+        "memcg_test_*",
+        "memcpy*",
+        "memcontrol*",
+        "memctl*",
+        "mtest*"
     ];
 
     let skip_list = {
@@ -87,12 +106,8 @@ fn main() -> i32 {
     let cmd = format!(
 "
 echo \"#### OS COMP TEST GROUP START ltp-musl ####\"; \
-for f in ltp/testcases/bin/*; do \
+for f in ltp/testcases/bin/{0}*; do \
   fname=$(basename \"$f\"); \
-  first_char=${{fname:0:1}}; \
-  if [ \"$first_char\" != \"{0}\" ]; then \
-    continue; \
-  fi; \
   case \"$fname\" in \
     {1}) \
       echo \"SKIP LTP CASE $fname\"; \

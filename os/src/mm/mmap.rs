@@ -42,13 +42,14 @@ pub fn do_mmap(
     flags: MMapFlags,
     file_inner: Option<Arc<dyn File + Send + Sync>>,
     offset: usize,                     
-) -> Result<usize, i32> {
+) -> Result<usize, isize> {
     let task = current_processor().current().unwrap();
     let proc = task.process();
     // 继续向下转发
     proc.mmap(addr, length, prot, flags, file_inner, offset) 
 }
-pub fn do_munmap(addr: usize, length: usize) -> Result<(), i32> {
+
+pub fn do_munmap(addr: usize, length: usize) -> Result<(), isize> {
     let task = current_processor().current().unwrap();
     let proc = task.process();
     proc.munmap(addr, length)

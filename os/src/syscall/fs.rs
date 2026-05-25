@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::sync::Arc;
 use alloc::string::ToString;
 use crate::syscall::TIME_CACHE;
-use super::{errno::Errno::*, normalize_leading_dot_path};
+use super::{errno::Errno::*, normalize_leading_dot_path, translate_path};
 use crate::syscall::TmpfsFileInode;
 use crate::syscall::OSInode;
 use crate::syscall::Dentry;
@@ -626,15 +626,40 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
 
 pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
     let token = current_user_token();
-    let path = normalize_leading_dot_path(
-        if let Some(s) = try_translated_str(token, path) { s } else { return EFAULT.as_isize(); }
-    );
+
+    let path = translate_path(token, path);
+    let path = if let Ok(path) = path {
+        if path.is_empty() {
+            return EINVAL.as_isize(); // 无效路径
+        }
+        normalize_leading_dot_path(path)
+    } else {
+        return path.err().unwrap().as_isize();
+    };
+
     debug!("kernel:pid[{}] sys_mkdir: path={}", current_task().unwrap().process().pid.0, path);
     
+    let start = if path.starts_with('/') {
+        ROOT_DENTRY.clone()
+    } else {
+        current_task().unwrap().process().inner_exclusive_access().cwd.clone()
+    };
+
+    // 目标存在
+    if start.find_tree(&path, true).is_some() {
+        return EEXIST.as_isize();
+    }
+
+    // 父目录不存在
+    let parent = parent_path(&path);
+    if start.find_tree(&parent, true).is_none() {
+        return ENOENT.as_isize();
+    }
+
     if let Some(_) = make_dir(path.as_str(), _mode) {
         0
     } else {
-        EACCES.as_isize() // 权限不足或父目录不存在
+        EACCES.as_isize() // 权限不足
     }
 }
 
@@ -762,7 +787,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             inner.fd_table[fd].status = (old & O_ACCMODE) | (arg & !O_ACCMODE);
             0
         }
-        _ => ENOSYS.as_isize(),
+        _ => EINVAL.as_isize(),
     }
 }
 

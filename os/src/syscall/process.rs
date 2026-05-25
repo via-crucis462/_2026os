@@ -2,7 +2,7 @@
 //! 进程管理相关系统调用实现
 //! 内存管理也暂时放在此处，后续迁移到mm
 
-use crate::mm::{translated_read, try_translated_str, try_translated_read, try_translated_write};
+use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{get_hart_id};
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
@@ -1053,7 +1053,8 @@ pub fn sys_clone(flags: usize, stack: usize, _ptid: usize) -> isize {
     //println!("sys_clone called with flags={:#x}, stack={:#x}, ptid={:#x}", flags, stack, _ptid);
     if flags & CLONE_THREAD != 0 {
         println!("sys_clone: CLONE_THREAD flag is set, cloning a thread with stack={:#x} and ptid={:#x}", stack, _ptid);
-        do_clone_thread(0, stack, flags, _ptid)
+        //do_clone_thread(0, stack, flags, _ptid)
+        return EINVAL.as_isize()
     } else {
         //println!("sys_clone: CLONE_THREAD flag is not set, cloning a process with stack={:#x} and ptid={:#x}", stack, _ptid);
         _sys_fork((stack != 0).then_some(stack))
@@ -1540,33 +1541,30 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
 
     panic!("sys_kill: should not reach here, pid={}", pid);
 }
-/// YOUR JOB: get time with second and microsecond
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TimeVal`] is splitted by two pages ?
+
+/// 获取当前时间
 pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     let total_us = get_time_us();
     let sec = total_us / 1_000_000;
     let usec = total_us % 1_000_000;
-    // 写入用户传入的结构体
     let token = current_user_token();
-    if ts as *const () as usize != 0 {
-        let mut time_val = {
-            if let Some(tv) = try_translated_read(token, ts) {
-                tv
-            } else {
-                return EFAULT.as_isize();
-            }
-        };
-        time_val.sec = sec;
-        time_val.usec = usec;
-        if !try_translated_write(token, ts, time_val) {
+
+    // 校验 tz 指针
+    if _tz != 0 {
+        if !prepare_user_write(token, _tz, 8) {
             return EFAULT.as_isize();
         }
-    } else {
+    }
+
+    let time_val = TimeVal { sec, usec };
+
+    // 校验&写入
+    if  !try_translated_write(token, ts, time_val) {
         return EFAULT.as_isize();
     }
     0
 }
+
 pub const UTIME_NOW: usize = 0x3fffffff;
 pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usize) -> isize {
@@ -1976,26 +1974,29 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+    let fd_table = inner.fd_table.clone();
+
+    drop(inner);
 
     if op != EPOLL_CTL_DEL && event_ptr == 0 {
         return EFAULT.as_isize();
     }
     
 
-    if epfd >= inner.fd_table.len() || fd >= inner.fd_table.len() { 
+    if epfd >= fd_table.len() || fd >= fd_table.len() { 
         return EBADF.as_isize(); 
     }
     
 
-    let epoll_file_dyn = match &inner.fd_table[epfd].file {
+    let epoll_file_dyn = match &fd_table[epfd].file {
         Some(f) => f.clone(),
         None => return EBADF.as_isize(),
     };
-    let target_file_dyn = match &inner.fd_table[fd].file {
+    let target_file_dyn = match &fd_table[fd].file {
         Some(f) => f.clone(),
         None => return EBADF.as_isize(), 
     };
-    
 
     let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
         Some(ef) => ef,
@@ -2027,16 +2028,16 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
         in_degree.insert(fd, 1);
 
 
-        for i in 0..inner.fd_table.len() {
-            if let Some(f) = &inner.fd_table[i].file {
+        for i in 0..fd_table.len() {
+            if let Some(f) = &fd_table[i].file {
                 if let Some(ep) = f.as_any().downcast_ref::<EpollFile>() {
                     adj.entry(i).or_default();
                     in_degree.entry(i).or_insert(0);
 
                     let keys: Vec<usize> = ep.interest_list.lock().keys().copied().collect();
                     for target_fd in keys {
-                        if target_fd < inner.fd_table.len() {
-                            if let Some(t_file) = &inner.fd_table[target_fd].file {
+                        if target_fd < fd_table.len() {
+                            if let Some(t_file) = &fd_table[target_fd].file {
                                 if t_file.as_any().is::<EpollFile>() {
                                     adj.entry(i).or_default().push(target_fd);
                                     *in_degree.entry(target_fd).or_insert(0) += 1;
@@ -2100,7 +2101,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     }
 
 
-    let token = inner.memory_set.token();
+
     let event = if op != 2 { // 如果不是 EPOLL_CTL_DEL，就需要读取用户态传来的数据
         //   使用你提供的 translated_ref
         if let Some(ev) = try_translated_read(token, event_ptr as *const EpollEvent) {
@@ -2569,19 +2570,17 @@ pub fn sys_pselect6(
 
 
 pub fn sys_add_key(_type: *const u8, _desc: *const u8, _payload: *const u8, _plen: usize, _ringid: i32) -> isize {
-    // 假装成功生成了一个密钥，返回一个随机的密钥序列号 (比如 9999)
-    9999
+    // 待实现
+    ENOSYS.as_isize()
 }
 
-// ID 218: request_key
 pub fn sys_request_key(_type: *const u8, _desc: *const u8, _callout_info: *const u8, _ringid: i32) -> isize {
-    9999
+    // 待实现
+    ENOSYS.as_isize()
 }
 
-// ID 219: keyctl
 pub fn sys_keyctl(_operation: i32, _arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
-    // 假装所有对密钥的操作都完美执行
-    0
+    ENOSYS.as_isize()
 }
 pub fn sys_msync(_addr: usize, _len: usize, _flags: u32) -> isize {
     // 我们的 shm 是纯内存文件系统，数据实时可见，不需要刷盘，直接伪装成功！
