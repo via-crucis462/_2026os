@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+mod timer_common;
+
 #[cfg(target_arch = "riscv64")]
 pub mod riscv;
 #[cfg(target_arch = "loongarch64")]

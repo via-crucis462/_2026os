@@ -47,20 +47,13 @@ pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5:
     match option {
         PR_SETNAME => {
             // 将buff的内容写进pname字段
-            let buff = translated_byte_buffer(current_user_token(), _arg2 as *const u8, 16);
+            let buff = crate::mm::translated_read::<[u8; 16]>(current_user_token(), _arg2 as *const [u8; 16]);
             let mut name_bytes = String::new();
-            let mut flag = false;
-            for buf in buff.iter() {
-                for &b in buf.iter() {
-                    if b == 0 {
-                        flag = true;
-                        break;
-                    }
-                    name_bytes.push(b as char);
-                }
-                if flag {
+            for &b in buff.iter() {
+                if b == 0 {
                     break;
                 }
+                name_bytes.push(b as char);
             }
             let task = current_task().unwrap();
             let process = task.process();
@@ -70,23 +63,16 @@ pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5:
         },
         PR_GETNAME => {
             // 与set相反
-            let mut buff = crate::mm::translated_byte_buffer_mut(current_user_token(), _arg2 as *const u8, 16);
             let task = current_task().unwrap();
             let process = task.process();
             let inner = process.inner_exclusive_access();
             let name = inner.pname.as_bytes();
             let len = inner.pname.len().min(15);
-            let mut i = 0;
-            for buf in buff.iter_mut() {
-                for b in buf.iter_mut() {
-                    if i >= len {
-                        *b = 0;
-                    } else {
-                        *b = name[i];
-                        i += 1;
-                    }
-                }
+            let mut out = [0u8; 16];
+            if len > 0 {
+                out[..len].copy_from_slice(&name[..len]);
             }
+            crate::mm::translated_write(current_user_token(), _arg2 as *mut [u8; 16], out);
             0
         },
         PR_GET_SECCOMP => {

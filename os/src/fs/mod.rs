@@ -16,6 +16,7 @@ pub use procfs::mount_procfs;
 pub use dir_entry::DirEntry;
 pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
 pub use file_tree::{Dentry};
+pub use crate::arch::timer::TimeSpec;
 use crate::mm::UserBuffer;
 use crate::syscall::errno::Errno;
 use alloc::sync::Arc;
@@ -154,12 +155,6 @@ pub struct StatxTimestamp {
     pub tv_sec: i64,
     pub tv_nsec: u32,
     pub __reserved: i32,
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct TimeSpec {
-    pub tv_sec: usize,
-    pub tv_nsec: usize,
 }
 pub const UTIME_NOW: usize = 0x3fffffff;
 pub const UTIME_OMIT: usize = 0x3ffffffe;

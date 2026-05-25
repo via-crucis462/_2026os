@@ -45,5 +45,12 @@ ins.txt
 os/src/arch/riscv/initprocT
 os/src/arch/la/initproc.ltp
 os/src/arch/riscv/initprocT
+<<<<<<< HEAD
 *.bak
 bak
+=======
+bak
+GPATH
+GRTAGS
+GTAGS
+>>>>>>> wbt3
