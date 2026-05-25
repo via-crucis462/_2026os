@@ -136,6 +136,7 @@ pub fn wake_up_one(mut wait_queue: MutexGuard<WaitQueue>) {
 pub const IDLE_PID: usize = 1;
 
 /// Exit the current 'Running' task and run the next task in task list.
+/// 注意，永不返回，所以每次调用前需要drop掉所有arc等
 pub fn exit_current_and_run_next(exit_code: i32) {
     // 改为暂时不take，schedule到runtasks中统一处理
     let task = current_task().unwrap();

@@ -281,6 +281,8 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
             // crate::process::wake_up_task(thread.clone());
         }
     }
+    
+    drop(tasks); // 先前没有这行，会导致内存泄露
 
     // 退出进程  // 先放掉锁，避免后续迭代时死锁
     let mut proc_inner = proc.inner_exclusive_access();

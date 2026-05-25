@@ -398,6 +398,8 @@ impl ProcessControlBlock {
             proc_inner.pname = argv0.clone();
         }
         // 内核栈无须改变（fork时已经分配了新的）但需要重新映射
+        // 先回收旧的 memory_set 资源，避免物理页泄露
+        proc_inner.memory_set.recycle_data_pages();
         proc_inner.memory_set = memory_set;
 
         // 修改trap上下文
@@ -418,9 +420,23 @@ impl ProcessControlBlock {
         task_inner.trap_cx_addr = trap_cx_addr;
         *task_inner.get_trap_cx() = trap_cx;
 
-        // 删除其他线程（如果有）
+        // 删除其他线程（如果有），先收集要移除的旧线程
+        let old_tasks: Vec<Arc<TaskControlBlock>> = proc_inner.tasks
+            .iter()
+            .filter(|t| !Arc::ptr_eq(t, &caller_task))
+            .cloned()
+            .collect();
         proc_inner.tasks.retain(|t: &Arc<TaskControlBlock>| Arc::ptr_eq(t, &caller_task));
         proc_inner.alive_task_count = 1;
+
+        // 清理旧线程在全局结构中的引用，防止 Arc 泄露
+        for old_task in &old_tasks {
+            panic!("[exec] cleaning up old thread tid={}", old_task.gettid());
+            let _lock = crate::task::lock_dispatch();
+            remove_from_tid2task(old_task.gettid());
+            remove_task_from_all_local_queues(old_task.gettid());
+            remove_task_from_global_pool(old_task.gettid());
+        }
         /*for i in proc_inner.memory_set.areas().iter() {
             println!("exec: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
         }*/
