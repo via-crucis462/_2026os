@@ -116,6 +116,8 @@ const SYSCALL_GETSOCKNAME: usize = 204;
 const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_SETSOCKOPT: usize = 208;
+const SYSCALL_SENDMSG: usize = 211;
+const SYSCALL_RECVMSG: usize = 212;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_ADD_KEY: usize = 217;
 const SYSCALL_REQUEST_KEY: usize = 218;
@@ -165,6 +167,7 @@ use fs::*;
 use process::*;
 use prctl::*;
 use alloc::string::String;
+use crate::net::MsgHdr;
 
 use crate::get_hart_id;
 use crate::syscall::net::*;
@@ -309,7 +312,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[0], args[1], args[2] as i32, 
             args[3] as i32, args[4] as i32, args[5]
         ),
-        
+        SYSCALL_SENDMSG => sys_sendmsg(args[0], args[1] as *const MsgHdr, args[2] as i32),
+        SYSCALL_RECVMSG => sys_recvmsg(args[0], args[1] as *mut MsgHdr, args[2] as i32),
         SYSCALL_PRLIMIT64 => {use crate::process::Rlimit64; sys_prlimit64(args[0], args[1] as i32, args[2] as *const Rlimit64, args[3] as *mut Rlimit64)},
         SYSCALL_FCNTL => sys_fcntl(args[0], args[1], args[2]),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),

@@ -6,6 +6,9 @@ use crate::syscall::Arc;
 use crate::mm::{translated_read, translated_ref, translated_write, translated_byte_buffer, UserBuffer};
 use crate::syscall::errno::Errno;
 use alloc::vec;
+use crate::net::MsgHdr;
+use crate::net::IoVec;
+
 
 /// 获取指定 Socket 的本地地址和端口信息。
 /// 将内核中 Socket 的 local_endpoint 信息格式化为 sockaddr_in 结构并拷贝回用户空间。 asd
@@ -376,7 +379,7 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     }
     
     // 4. 根据类型分配不同的 Socket！
-    // 🌟 这里是重点：我们开始区分 TCP 和 UDP
+
     let socket_file: Arc<dyn crate::fs::File> = if real_socket_type == 2 {
         // 如果是 UDP，分配 UdpSocket (我们等会儿去建这个结构体)
         Arc::new(crate::net::socket::UdpSocket::new()) 
@@ -507,4 +510,79 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     } else {
         Errno::ENOTSOCK.as_isize()
     }
+}
+/// 发送复杂消息 (Scatter IO)
+/// 系统调用号: 211
+pub fn sys_sendmsg(fd: usize, msg_ptr: *const MsgHdr, _flags: i32) -> isize {
+    let task = crate::task::current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+        return crate::syscall::errno::Errno::EBADF.as_isize();
+    }
+    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    drop(inner);
+    if !file.writable() {
+        return crate::syscall::errno::Errno::EACCES.as_isize();
+    }
+    let msg = crate::mm::translated_read(token, msg_ptr);
+    let mut buffers = alloc::vec::Vec::new();
+    for i in 0..msg.msg_iovlen {
+        let iov_ptr = (msg.msg_iov + i * core::mem::size_of::<IoVec>()) as *const IoVec;
+        let iov = crate::mm::translated_read(token, iov_ptr);
+        
+        if iov.iov_len > 0 {
+
+            let mut iov_bufs = crate::mm::translated_byte_buffer(token, iov.iov_base as *const u8, iov.iov_len);
+            buffers.append(&mut iov_bufs);
+        }
+    }
+
+
+    let user_buf = crate::mm::UserBuffer::new(buffers);
+    file.write(user_buf) as isize
+}
+
+/// 接收复杂消息 (Gather IO)
+/// 系统调用号: 212
+pub fn sys_recvmsg(fd: usize, msg_ptr: *mut MsgHdr, _flags: i32) -> isize {
+    let task = crate::task::current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+        return crate::syscall::errno::Errno::EBADF.as_isize();
+    }
+    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    drop(inner);
+
+    if !file.readable() {
+        return crate::syscall::errno::Errno::EACCES.as_isize();
+    }
+
+    // 1. 读出 MsgHdr 控制结构
+    let msg = crate::mm::translated_read(token, msg_ptr);
+
+    // 2. 遍历提取用户的读缓冲 (IoVec)
+    let mut buffers = alloc::vec::Vec::new();
+    for i in 0..msg.msg_iovlen {
+        let iov_ptr = (msg.msg_iov + i * core::mem::size_of::<IoVec>()) as *const IoVec;
+        let iov = crate::mm::translated_read(token, iov_ptr);
+        
+        if iov.iov_len > 0 {
+
+            let mut iov_bufs = crate::mm::translated_byte_buffer_mut(token, iov.iov_base as *mut u8, iov.iov_len);
+            buffers.append(&mut iov_bufs);
+        }
+    }
+
+
+    let user_buf = crate::mm::UserBuffer::new(buffers);
+    let read_len = file.read(user_buf);
+
+
+    read_len as isize
 }
