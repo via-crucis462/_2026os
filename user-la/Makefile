@@ -1,3 +1,6 @@
+export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
+export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
+
 TARGET := loongarch64-unknown-none
 MODE := release
 APP_DIR := src/bin
