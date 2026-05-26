@@ -211,6 +211,7 @@ impl ProcessControlBlock {
                 frozen: false,
                 trap_ctx_backup: None,
                 exit_code: 0,
+                errno: 0,
                 signals: SignalFlags::empty(),
                 clear_child_tid: 0,
 
@@ -526,6 +527,7 @@ impl ProcessControlBlock {
                 frozen: false,
                 trap_ctx_backup: None,
                 exit_code: 0,
+                errno: 0,
                 signals: SignalFlags::empty(),
                 clear_child_tid: 0,
             }),
@@ -606,6 +608,7 @@ impl ProcessControlBlock {
                 task_status: TaskStatus::Ready,
                 owner_hart: None,
                 exit_code: 0,
+                errno: 0,
                 signals: SignalFlags::empty(),
                 signal_mask: caller_inner.signal_mask,
                 handling_sig: caller_inner.handling_sig,

@@ -1269,7 +1269,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
 }
 
 /// 等待子进程退出
-pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
+pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
     //println!("[wait4] Called with pid={}, options={:#x}", pid, options);
     let task = current_task().unwrap();
     let proc = task.process();
@@ -1323,7 +1323,22 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                 }
             }
             pid if pid < -1 => {
-                return EINVAL.as_isize();
+                if pid == i32::MIN {
+                    return ESRCH.as_isize();
+                }
+                let target_pgid = (-pid) as usize;
+                for (idx, child) in proc_inner.children.iter().enumerate() {
+                    let child_pgid = child.inner_exclusive_access().pgid;
+                    if child_pgid == target_pgid {
+                        has_match = true;
+                        if child.inner_exclusive_access().is_zombie() {
+                            exit_code = child.inner_exclusive_access().exit_code;
+                            child_pid = child.getpid();
+                            child_idx = Some(idx);
+                            break;
+                        }
+                    }
+                }
             }
             _ => unreachable!(),
         }

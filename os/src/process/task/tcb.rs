@@ -59,6 +59,7 @@ impl TaskControlBlock {
 
         let mut inner = self.inner_exclusive_access();
         inner.exit_code = exit_code;
+        inner.errno = 0;
         inner.task_status = TaskStatus::Zombie;
         inner.signals = SignalFlags::empty();
         inner.signal_mask_backup = None;
@@ -85,6 +86,7 @@ pub struct TaskControlBlockInner {
 
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
+    pub errno: i32,
     pub signals: SignalFlags,
     pub signal_mask: SignalFlags,
     // the signal which is being handling
