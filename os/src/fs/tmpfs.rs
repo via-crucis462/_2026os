@@ -331,28 +331,28 @@ pub fn setup_oscomp_env() {
     let root = ROOT_DENTRY.clone();
 
     // 1. 挂载 /tmp 
-    root.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    root.mount_child("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     info!("[VFS] Mounted /tmp");
 
     // 2. 挂载 bin, sbin, usr 等虚拟目录
-    let etc_dentry = root.insert("etc".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let etc_dentry = root.mount_child("etc".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let passwd_content = "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
     let group_content = "root:x:0:\nnobody:x:65534:\n";
     
     etc_dentry.insert("passwd".to_string(), Arc::new(TmpfsFileInode::new_with_data(passwd_content.as_bytes())));
     etc_dentry.insert("group".to_string(), Arc::new(TmpfsFileInode::new_with_data(group_content.as_bytes())));
 
-    let var_dentry = root.insert("var".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let var_dentry = root.mount_child("var".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     var_dentry.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     var_dentry.insert("run".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let bin_dentry = root.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let sbin_dentry = root.insert("sbin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let usr_dentry = root.insert("usr".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let bin_dentry = root.mount_child("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let sbin_dentry = root.mount_child("sbin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let usr_dentry = root.mount_child("usr".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let usr_local_dentry = usr_dentry.insert("local".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let usr_local_bin_dentry = usr_local_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let usr_bin_dentry = usr_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let lib_dentry = root.insert("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let lib64_dentry = root.insert("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let lib_dentry = root.mount_child("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let lib64_dentry = root.mount_child("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     
     // loop测例检查的文件
     let lib_modules = lib_dentry.insert("modules".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
@@ -361,7 +361,7 @@ pub fn setup_oscomp_env() {
     lib_modules_rcore.insert("modules.dep".to_string(), Arc::new(TmpfsFileInode::new_with_data(b"")));
     
     // loop测例检查的文件
-    let sys_dentry = root.insert("sys".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let sys_dentry = root.mount_child("sys".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let sys_module_dentry = sys_dentry.insert("module".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     sys_module_dentry.insert("loop".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
 
@@ -386,7 +386,7 @@ pub fn setup_oscomp_env() {
             dev
         } else {
             // 理论上不会走到这
-            root.insert("dev".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+            root.mount_child("dev".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
         };
 
         // 挂载shm到/dev/shm
@@ -474,7 +474,7 @@ fn mount_hugepages() -> Arc<super::Dentry> {
     let sys_dentry = if let Some(sys) = root.find_tree("/sys", true) {
         sys
     } else {
-        root.insert("sys".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+        root.mount_child("sys".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
     let kernel_dentry = if let Some(kernel) = sys_dentry.find_tree("/sys/kernel", true) {
         kernel

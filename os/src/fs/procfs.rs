@@ -741,7 +741,7 @@ pub fn mount_procfs() {
     
     proc_root.insert_static(String::from("self"), Arc::new(ProcSelfSymlinkInode));
     // 4. 正式把完整的动态 /proc 挂载到操作系统的 ROOT_DENTRY！
-    ROOT_DENTRY.insert(String::from("proc"), proc_root);
+    ROOT_DENTRY.mount_child(String::from("proc"), proc_root);
    
     
     info!("[VFS] /proc/meminfo, mounts, and /proc/self/maps mounted successfully!");

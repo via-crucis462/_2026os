@@ -10,6 +10,7 @@ pub struct Dentry {
     pub inode: Arc<dyn VfsInode>,
     pub parent: Weak<Dentry>,
     pub children: Mutex<BTreeMap<String, Arc<Dentry>>>,
+    pub mounted_children: Mutex<BTreeMap<String, Arc<Dentry>>>,
 }
 
 impl Dentry {
@@ -23,16 +24,24 @@ impl Dentry {
             inode,
             parent,
             children: Mutex::new(BTreeMap::new()),
+            mounted_children: Mutex::new(BTreeMap::new()),
         })
     }
     pub fn find(self: &Arc<Self>, name: &str) -> Arc<dyn VfsInode> {
-        // 1. 尝试从当前节点的缓存中获取
+        // 1. 挂载点优先
+        let mounted_children = self.mounted_children.lock();
+        if let Some(child) = mounted_children.get(name) {
+            return child.inode.clone();
+        }
+        drop(mounted_children);
+
+        // 2. 尝试从当前节点的缓存中获取
         let mut children = self.children.lock();
         if let Some(child) = children.get(name) {
             return child.inode.clone();
         }
 
-        // 2. 缓存未击中，调用底层磁盘接口查找
+        // 3. 缓存未击中，调用底层磁盘接口查找
         // 注意：这里调用 self.inode.find 是 VfsInode 特征定义的磁盘查找接口
         if let Some(vfs_inode) = self.inode.find(name) {
             // 找到了，将其包装成 Dentry 并插入缓存树
@@ -45,7 +54,7 @@ impl Dentry {
             return vfs_inode;
         }
 
-        // 3. 磁盘也没找到，按照要求 panic
+        // 4. 磁盘也没找到，按照要求 panic
         panic!("VFS: File '{}' not found in directory '{}'", name, self.name);
     }
     pub fn insert(self: &Arc<Self>, name: String, inode: Arc<dyn VfsInode>) -> Arc<Self> {
@@ -63,6 +72,25 @@ impl Dentry {
         
         children.insert(name, new_child.clone());
         new_child
+    }
+    //专用于虚拟文件夹挂载，区别于普通的 insert，insert 是在当前目录下创建一个新文件，而 mount_child 是将另一个完整的 Dentry 树挂载到当前目录下
+    pub fn mount_child(self: &Arc<Self>, name: String, inode: Arc<dyn VfsInode>) -> Arc<Self> {
+        let mut mounted_children = self.mounted_children.lock();
+        if let Some(child) = mounted_children.get(&name) {
+            return child.clone();
+        }
+
+        let new_child = Self::new(
+            name.clone(),
+            inode,
+            Arc::downgrade(self),
+        );
+
+        mounted_children.insert(name, new_child.clone());
+        new_child
+    }
+    pub fn mounted_children_snapshot(self: &Arc<Self>) -> alloc::vec::Vec<Arc<Dentry>> {
+        self.mounted_children.lock().values().cloned().collect()
     }
     /// 递归查找完整路径，例如 "bin/sh" 或 "/bin/sh"
     /// 将self作为起点，不考虑路径是否以'/'开头
@@ -143,6 +171,13 @@ impl Dentry {
     /// 查找子节点（单级）：返回的是 Dentry 包装，以便继续向下查找
     pub fn find_child(self: &Arc<Self>, name: &str) -> Option<Arc<Dentry>> {
         trace!("[kernel] Dentry::find_child: parent={}, name={}", self.name, name);
+        //先看虚拟挂载点
+        let mounted_children = self.mounted_children.lock();
+        if let Some(child) = mounted_children.get(name) {
+            return Some(child.clone());
+        }
+        drop(mounted_children);
+
         let mut children = self.children.lock();
         // 1. 尝试从当前节点的缓存中获取
         if let Some(child) = children.get(name) {
