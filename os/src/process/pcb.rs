@@ -823,6 +823,15 @@ impl ProcessControlBlockInner {
     pub fn set_rlimit64(&mut self, new_rlmt: Rlimit64) {
         self.fd_rlmt = new_rlmt;
     }
+    //回收进程资源，返回子进程组，用于给initproc回收
+    pub fn recycle_on_exit(&mut self, exit_code: i32) -> Vec<Arc<ProcessControlBlock>> {
+        self.exit_code = exit_code;
+        self.memory_set.recycle_data_pages();
+        self.fd_table.clear();
+        self.signals = SignalFlags::empty();
+        core::mem::take(&mut self.children)
+    }
+
     pub fn is_zombie(&self) -> bool {
         self.alive_task_count == 0
     }

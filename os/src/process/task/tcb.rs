@@ -53,6 +53,20 @@ impl TaskControlBlock {
     pub fn gettid(&self) -> usize {
         self.tid.0
     }
+
+    pub fn recycle_on_exit(&self, exit_code: i32) {
+        remove_from_tid2task(self.gettid());
+
+        let mut inner = self.inner_exclusive_access();
+        inner.exit_code = exit_code;
+        inner.task_status = TaskStatus::Zombie;
+        inner.signals = SignalFlags::empty();
+        inner.signal_mask_backup = None;
+        inner.trap_ctx_backup = None;
+        inner.handling_sig = -1;
+        inner.killed = false;
+        inner.frozen = false;
+    }
 }
 
 pub struct TaskControlBlockInner {

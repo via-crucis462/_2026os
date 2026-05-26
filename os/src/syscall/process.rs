@@ -1031,6 +1031,7 @@ pub fn _sys_fork(stack: Option<usize>) -> isize {
     let proc = current_task.process();
     let (new_proc, new_task) = proc.fork(stack, current_task);//此处添加了一个 None 参数
     let new_pid = new_proc.pid.0;
+    println!("sys_fork: created new process with PID {}", new_pid);
     // modify trap context of new_task, because it returns immediately after switching
     let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
     // we do not have to move to next instruction since we have done it before
@@ -1313,6 +1314,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
             has_match = true;
             let child_inner = child.inner_exclusive_access();
             if child_inner.is_zombie() {
+                println!("[wait4] P{} found a zombie child P{} with exit code {}", current_pgid, child_pid, child_inner.exit_code);
                 zombie_child = Some((child_pid, child_inner.exit_code));
                 break;
             }
