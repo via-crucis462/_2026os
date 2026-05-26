@@ -6,6 +6,7 @@ use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_tran
 use crate::{get_hart_id};
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
+use alloc::collections::btree_map::Values;
 use alloc::vec;
 use crate::syscall::EPOLL_CTL_DEL;
 use crate::syscall::EPOLL_CTL_ADD;
@@ -1031,7 +1032,7 @@ pub fn _sys_fork(stack: Option<usize>) -> isize {
     let proc = current_task.process();
     let (new_proc, new_task) = proc.fork(stack, current_task);//此处添加了一个 None 参数
     let new_pid = new_proc.pid.0;
-    println!("sys_fork: created new process with PID {}", new_pid);
+    //println!("sys_fork: created new process with PID {}", new_pid);
     // modify trap context of new_task, because it returns immediately after switching
     let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
     // we do not have to move to next instruction since we have done it before
@@ -1267,11 +1268,85 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     }
 }
 
-/// 暂时使用旧逻辑
 /// 等待子进程退出
 pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
-    //println!("sys_wait4 called with pid={}, options={:#x}", pid, options);
     let task = current_task().unwrap();
+    let proc = task.process();
+    let mut child_pid: usize = 0;
+    let mut exit_code = -1;
+    loop {
+        let mut proc_inner = proc.inner_exclusive_access();
+        let mut child_idx: Option<usize> = None;
+        match pid {
+            -1 => {
+                for (idx, child) in proc_inner.children.iter().enumerate() {
+                    if child.inner_exclusive_access().is_zombie() {
+                        //println!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
+                        exit_code = child.inner_exclusive_access().exit_code;
+                        child_pid = child.getpid();
+                        child_idx = Some(idx);
+                        break;
+                    }
+                }
+            }
+            0 => {
+                for (idx, child) in proc_inner.children.iter().enumerate() {
+                    let child_pgid = child.inner_exclusive_access().pgid;
+                    if child_pgid == proc_inner.pgid && child.inner_exclusive_access().is_zombie() {
+                        //println!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
+                        exit_code = child.inner_exclusive_access().exit_code;
+                        child_pid = child.getpid();
+                        child_idx = Some(idx);
+                        break;
+                    }
+                }
+            }
+            value if value > 0 => {
+                for (idx, child) in proc_inner.children.iter().enumerate() {
+                    if child.getpid() == value as usize && child.inner_exclusive_access().is_zombie() {
+                        //println!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
+                        exit_code = child.inner_exclusive_access().exit_code;
+                        child_pid = child.getpid();
+                        child_idx = Some(idx);
+                        break;
+                    }
+                }
+            }
+            pid if pid < -1 => {
+                return EINVAL.as_isize();
+            }
+            _ => unreachable!(),
+        }
+        //非阻塞或者没有找到符合条件的僵尸子进程的处理
+        if child_pid == 0 {
+            if options & 0x1 != 0 {
+                return 0;
+            }
+            drop(proc_inner);
+            suspend_current_and_run_next();
+            continue;
+        }else{
+            //从父进程的孩子列表里摘除这个僵尸子进程
+            if let Some(idx) = child_idx {
+                 proc_inner.children.remove(idx);
+            }else{
+                panic!("sys_wait4: logic error, child_pid is set but child_idx is None?");
+            }
+            if exit_code_ptr as usize != 0 {
+                //println!("[wait4] Writing exit code {} to user space for child P{}", exit_code, child_pid);
+                let status = (exit_code & 0xff) << 8;
+                if !try_translated_write(proc_inner.memory_set.token(), exit_code_ptr, status) {
+                    return EFAULT.as_isize();
+                }
+            }
+            drop(proc_inner);
+            // 从全局进程表里删除这个子进程
+            crate::process::remove_process(child_pid);
+            return child_pid as isize;
+        }
+    }
+    //println!("sys_wait4 called with pid={}, options={:#x}", pid, options);
+/*    let task = current_task().unwrap();
     let proc = task.process();
     // 提前拿到当前进程的 pgid
     let current_pgid = proc.inner_exclusive_access().pgid; 
@@ -1289,12 +1364,14 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
             info!("[wait4] P{} has no children at all", current_pgid);
             return ECHILD.as_isize(); // 没有任何子进程
         }
-
+        //是否找到匹配子进程
         let mut has_match = false;
         let mut zombie_child: Option<(usize, i32)> = None;
         for child in proc_inner.children.iter() {
+
+            //判断是否pid匹配
             let child_pid = child.getpid();
-            let matches = if pid == -1 {
+            has_match = if pid == -1 {
                 true
             } else if pid > 0 {
                 child_pid == pid as usize
@@ -1307,7 +1384,8 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                 }
             };
 
-            if !matches {
+            //若没有则继续找下一个孩子
+            if !has_match {
                 continue;
             }
 
@@ -1326,7 +1404,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
             return ECHILD.as_isize(); // 真的是一个匹配的都没有，才返回 ECHILD
         }
     
-        // 2. 尝试找一个“已经死掉”的僵尸孩子
+        // 2. 判断该匹配的子进程是否已经是僵尸了，如果是僵尸了就收尸退出；如果不是僵尸了就睡眠等待
         if let Some((zombie_pid, exit_code)) = zombie_child {
             if let Some(idx) = proc_inner.children.iter().position(|child| child.getpid() == zombie_pid) {
                 let child = proc_inner.children.remove(idx);
@@ -1423,7 +1501,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                     }
                 }
         }
-    } */ 
+    } */ */
 }
 pub fn sys_kill(pid: isize, signum: i32) -> isize {
     if signum < 0 || signum > 64 {

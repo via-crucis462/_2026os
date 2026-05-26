@@ -41,8 +41,11 @@ impl ProcessManager{
 
     pub fn remove_process(&mut self, pid: usize){
         info!("ProcessManager::try to remove_process: pid={}", pid);
+        /*for i in &self.process_pool{
+            println!("pid in pool: {}", i.0);
+        }*/
         if self.process_pool.remove(&pid).is_none(){
-            panic!("cannot find pid {} in process pool!", pid);
+            panic!("cannot find pid {} in process pool! hart_id={}", pid , get_hart_id());
         }
         info!("ProcessManager::remove_process: pid={} removed", pid);
     }
