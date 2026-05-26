@@ -113,7 +113,10 @@ impl StackFrameAllocator {
     /// 注意是标准页
     pub fn free_frames(&self) -> usize {
         // 未曾分配过的页框数 (end - current) + 已经被释放回收的页框数
-        self.end - self.current + self.recycled_std.len() + self.recycled_mega.len() + self.recycled_giga.len()
+        (self.end - self.current)/PageSize::Page4K.size() +
+        self.recycled_std.len()*PageSize::Page4K.num_pages() +
+        self.recycled_mega.len()*PageSize::Page2M.num_pages() +
+        self.recycled_giga.len()*PageSize::Page1G.num_pages()
     }
 }
 pub fn get_free_frames() -> usize {

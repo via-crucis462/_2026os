@@ -44,6 +44,8 @@ pub struct FileDescriptor {
     pub status: usize,
 }
 
+const FD_STATUS_RESERVED: usize = 1usize << (usize::BITS as usize - 1);
+
 impl FileDescriptor {
     pub fn empty() -> Self {
         Self {
@@ -57,8 +59,20 @@ impl FileDescriptor {
         Self {
             file: Some(file),
             cloexec,
-            status,
+            status: status & !FD_STATUS_RESERVED,
         }
+    }
+
+    pub fn reserved() -> Self {
+        Self {
+            file: None,
+            cloexec: false,
+            status: FD_STATUS_RESERVED,
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.file.is_none() && (self.status & FD_STATUS_RESERVED) == 0
     }
 }
 
@@ -697,12 +711,12 @@ impl ProcessControlBlock {
         flags: mmap::MMapFlags,
         file_inner: Option<Arc<dyn File + Send + Sync>>,
         offset: usize,
-    ) -> Result<usize, i32> {
+    ) -> Result<usize, isize> {
         let mut inner = self.inner_exclusive_access();
         inner.memory_set.mmap(addr, length, prot, flags, file_inner, offset)
     }
     /// 处理munmap
-    pub fn munmap(&self, addr: usize, length: usize) -> Result<(), i32> {
+    pub fn munmap(&self, addr: usize, length: usize) -> Result<(), isize> {
         let mut inner = self.inner_exclusive_access();
         inner.memory_set.munmap(addr, length)
     }
@@ -772,9 +786,9 @@ impl ProcessControlBlockInner {
     }
     pub fn alloc_fd(&mut self) -> Option<usize> {
         // 1. 先尝试在现有的表中寻找被 close 空出来的坑位
-        if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].file.is_none()) {
+        if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_available()) {
             self.fd_table[fd].cloexec = false;
-            self.fd_table[fd].status = 0;
+            self.fd_table[fd].status = FD_STATUS_RESERVED;
             return Some(fd);
         } 
         
@@ -784,7 +798,7 @@ impl ProcessControlBlockInner {
         }
         
         // 3. 没到上限，扩充 fd_table
-        self.fd_table.push(FileDescriptor::empty());
+        self.fd_table.push(FileDescriptor::reserved());
         Some(self.fd_table.len() - 1)
     }
     pub fn clear_fd(&mut self, fd: usize) {
@@ -801,7 +815,7 @@ impl ProcessControlBlockInner {
     }
     /// 回收被close的fd，压缩fd_table
     pub fn recycle_fd(&mut self) {
-        self.fd_table.retain(|fd| fd.file.is_some());
+        self.fd_table.retain(|fd| fd.file.is_some() || (fd.status & FD_STATUS_RESERVED) != 0);
     }
     pub fn get_rlimit64(&self) -> Rlimit64 {
         self.fd_rlmt.clone()

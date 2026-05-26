@@ -2,7 +2,7 @@
 //! 进程管理相关系统调用实现
 //! 内存管理也暂时放在此处，后续迁移到mm
 
-use crate::mm::{translated_read, try_translated_str, try_translated_read, try_translated_write};
+use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{get_hart_id};
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
@@ -27,7 +27,7 @@ lazy_static! {
 }
 
 pub use crate::{
-    arch::timer::{get_real_time_ns, get_time_ms, get_time_us, get_timer_ticks}, 
+    arch::timer::{ADJ_ESTERROR, ADJ_FREQUENCY, ADJ_MAXERROR, ADJ_MICRO, ADJ_NANO, ADJ_OFFSET, ADJ_OFFSET_SINGLESHOT, ADJ_OFFSET_SS_READ, ADJ_SETOFFSET, ADJ_STATUS, ADJ_TAI, ADJ_TICK, ADJ_TIMECONST, CLOCK_ADJ_ALLOWED_MODES, CLOCK_ADJ_RW_STATUS, CLOCK_ADJ_STATE, CLOCK_ADJ_VALID_STATUS, CLOCK_REALTIME_OFFSET_NS, ITimerVal, RtcTime, STA_CLOCKERR, STA_CLK, STA_DEL, STA_FLL, STA_FREQHOLD, STA_INS, STA_MODE, STA_NANO, STA_PLL, STA_PPSERROR, STA_PPSFREQ, STA_PPSJITTER, STA_PPSSIGNAL, STA_PPSTIME, STA_PPSWANDER, STA_UNSYNC, TIME_ERROR, TIME_OK, TimeSpec, TimeVal, Timex, get_real_time_ns, get_time_ms, get_time_us, get_timer_ticks}, 
     fs::*, 
     mm::{UserBuffer, mmap, translated_byte_buffer, translated_str, translated_byte_buffer_mut, translated_write}, 
     process::{
@@ -57,19 +57,6 @@ pub struct Termios {
     pub c_cc: [u8; 19], // 控制字符数组
 }
 #[repr(C)]
-pub struct RtcTime {
-    pub tm_sec: i32,
-    pub tm_min: i32,
-    pub tm_hour: i32,
-    pub tm_mday: i32,
-    pub tm_mon: i32,
-    pub tm_year: i32,
-    pub tm_wday: i32,
-    pub tm_yday: i32,
-    pub tm_isdst: i32,
-}
-
-#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Winsize {
     pub ws_row: u16,    // 行数
@@ -77,27 +64,6 @@ pub struct Winsize {
     pub ws_xpixel: u16, // 像素宽度 (通常不用，填 0)
     pub ws_ypixel: u16, // 像素高度 (通常不用，填 0)
 }
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TimeVal {
-    pub sec: usize,
-    pub usec: usize,
-}
-
-
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct ITimerVal {
-    pub it_interval: TimeVal, // 周期触发间隔（如果是0代表单次触发）
-    pub it_value: TimeVal,    // 首次触发的剩余时间
-}
-
-
-
-
-
-
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -135,10 +101,9 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         return EFAULT.as_isize(); // EFAULT
     }
 
-    // 1. 在进入循环前，一次性解析好超时时间，算出 Deadline
+    // 解析超时时间
     let has_timeout = tmo_p != 0;
     let mut deadline_ms: usize = 0;
-
     if has_timeout {
         let task = current_task().unwrap();
         // 获取一下 token 用来翻译用户态指针
@@ -166,6 +131,8 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         let timeout_ms = timespec.tv_sec.saturating_mul(1000).saturating_add(timespec.tv_nsec / 1_000_000);
         // 计算ddl
         deadline_ms = get_time_ms().saturating_add(timeout_ms);
+    } else {
+        deadline_ms = usize::MAX;
     }
 
     // 2. 备份原始掩码，并应用临时掩码
@@ -281,7 +248,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
             }
         }
         
-        // 6. 没超时或无限等待，乖乖让出 CPU 等待下一次调度
+        // 继续等待
         suspend_current_and_run_next();
     }
 }
@@ -558,14 +525,45 @@ pub fn sys_getresuid(ruid_ptr: *mut u32, euid_ptr: *mut u32, suid_ptr: *mut u32)
 }
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
+fn clock_adj_has_invalid_mode_bits(modes: u32) -> bool {
+    let allowed = CLOCK_ADJ_ALLOWED_MODES | ADJ_OFFSET_SINGLESHOT | ADJ_OFFSET_SS_READ;
+    modes & !allowed != 0
+}
+
+fn clock_adj_write_status(old_status: i32, new_status: i32) -> i32 {
+    let preserved = old_status & !CLOCK_ADJ_RW_STATUS;
+    preserved | (new_status & CLOCK_ADJ_RW_STATUS)
+}
+
+fn clock_adj_result_from_status(status: i32) -> isize {
+    if status & STA_UNSYNC != 0 {
+        TIME_ERROR
+    } else {
+        TIME_OK
+    }
+}
+
+fn current_wallclock_ns() -> i64 {
+    let base_ns = get_real_time_ns() as i128;
+    let offset_ns = *CLOCK_REALTIME_OFFSET_NS.lock() as i128;
+    let adjusted = base_ns + offset_ns;
+
+    if adjusted <= 0 {
+        0
+    } else if adjusted > i64::MAX as i128 {
+        i64::MAX
+    } else {
+        adjusted as i64
+    }
+}
+
 pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
     if tp as usize == 0 {
         return EFAULT.as_isize();
     }
     let (sec, nsec) = match clock_id {
         CLOCK_REALTIME => {
-            // 
-            let total_ns = get_real_time_ns() as usize; 
+            let total_ns = current_wallclock_ns() as usize;
             (total_ns / 1_000_000_000, total_ns % 1_000_000_000)
             
         }
@@ -1053,7 +1051,8 @@ pub fn sys_clone(flags: usize, stack: usize, _ptid: usize) -> isize {
     //println!("sys_clone called with flags={:#x}, stack={:#x}, ptid={:#x}", flags, stack, _ptid);
     if flags & CLONE_THREAD != 0 {
         println!("sys_clone: CLONE_THREAD flag is set, cloning a thread with stack={:#x} and ptid={:#x}", stack, _ptid);
-        do_clone_thread(0, stack, flags, _ptid)
+        //do_clone_thread(0, stack, flags, _ptid)
+        return EINVAL.as_isize()
     } else {
         //println!("sys_clone: CLONE_THREAD flag is not set, cloning a process with stack={:#x} and ptid={:#x}", stack, _ptid);
         _sys_fork((stack != 0).then_some(stack))
@@ -1270,6 +1269,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
 /// 暂时使用旧逻辑
 /// 等待子进程退出
 pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
+    //println!("sys_wait4 called with pid={}, options={:#x}", pid, options);
     let task = current_task().unwrap();
     let proc = task.process();
     // 提前拿到当前进程的 pgid
@@ -1442,7 +1442,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
     };
 
     if pid > 0 {
-        // 正常逻辑：发送给单个指定 PID 的进程
+        // 发送给单pid
         // println!("sys_kill: sending signal {} to PID {}", signum, pid);
         if let Some(proc) = get_process(pid as usize) {
             if signum == 0 { return 0; } // 探测成功
@@ -1478,8 +1478,8 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         } else {
             return ESRCH.as_isize();
         }
-    } else if pid == 0 || pid < -1 {
-        //   进阶逻辑：广播给整个进程组！
+    } else if pid <= 0 {
+        // 发送给进程组， 目前的逻辑还有问题，暂时这样
         let target_pgid = if pid == 0 { current_pgid } else { (-pid) as usize };
 
         if signum == 0 {
@@ -1500,9 +1500,9 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         let flag = flag.unwrap();
         let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
 
-        //   Phase 1: 遍历 PID 空间，持 PCB 锁做进程级操作，收集首个线程 Arc
+        // 拿出所有进程的首个线程
         let mut matched_tasks: Vec<Arc<TaskControlBlock>> = Vec::new();
-        for i in 1..4096 {
+        for i in 2..4096 {
             if let Some(proc) = get_process(i) {
                 let mut inner = proc.inner_exclusive_access();
                 if inner.pgid == target_pgid {
@@ -1511,21 +1511,19 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
                         matched_tasks.push(first_task.clone());
                     }
                 }
-            } // PCB 锁在此释放
+            }
         }
-
+        // 目标不存在
         if matched_tasks.is_empty() {
-            return ESRCH.as_isize(); // 没有找到任何匹配的进程组
+            return ESRCH.as_isize();
         }
 
-        //   Phase 2: 无 PCB 锁，逐个拿 TCB 锁插入信号并唤醒
+        // 给进程组发信号
         for task_arc in matched_tasks.iter() {
             let mut t_inner = task_arc.inner_exclusive_access();
-
-            //   1. 无条件插入信号
+            // 插入信号
             t_inner.signals.insert(flag);
-
-            //   2. 判断屏蔽并决定是否唤醒
+            // 是否被屏蔽
             let is_unblocked = !t_inner.signal_mask.contains(flag);
 
             if is_unblocked || is_unmaskable {
@@ -1540,33 +1538,30 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
 
     panic!("sys_kill: should not reach here, pid={}", pid);
 }
-/// YOUR JOB: get time with second and microsecond
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TimeVal`] is splitted by two pages ?
+
+/// 获取当前时间
 pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     let total_us = get_time_us();
     let sec = total_us / 1_000_000;
     let usec = total_us % 1_000_000;
-    // 写入用户传入的结构体
     let token = current_user_token();
-    if ts as *const () as usize != 0 {
-        let mut time_val = {
-            if let Some(tv) = try_translated_read(token, ts) {
-                tv
-            } else {
-                return EFAULT.as_isize();
-            }
-        };
-        time_val.sec = sec;
-        time_val.usec = usec;
-        if !try_translated_write(token, ts, time_val) {
+
+    // 校验 tz 指针
+    if _tz != 0 {
+        if !prepare_user_write(token, _tz, 8) {
             return EFAULT.as_isize();
         }
-    } else {
+    }
+
+    let time_val = TimeVal { sec, usec };
+
+    // 校验&写入
+    if  !try_translated_write(token, ts, time_val) {
         return EFAULT.as_isize();
     }
     0
 }
+
 pub const UTIME_NOW: usize = 0x3fffffff;
 pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usize) -> isize {
@@ -1976,26 +1971,29 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+    let fd_table = inner.fd_table.clone();
+
+    drop(inner);
 
     if op != EPOLL_CTL_DEL && event_ptr == 0 {
         return EFAULT.as_isize();
     }
     
 
-    if epfd >= inner.fd_table.len() || fd >= inner.fd_table.len() { 
+    if epfd >= fd_table.len() || fd >= fd_table.len() { 
         return EBADF.as_isize(); 
     }
     
 
-    let epoll_file_dyn = match &inner.fd_table[epfd].file {
+    let epoll_file_dyn = match &fd_table[epfd].file {
         Some(f) => f.clone(),
         None => return EBADF.as_isize(),
     };
-    let target_file_dyn = match &inner.fd_table[fd].file {
+    let target_file_dyn = match &fd_table[fd].file {
         Some(f) => f.clone(),
         None => return EBADF.as_isize(), 
     };
-    
 
     let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
         Some(ef) => ef,
@@ -2027,16 +2025,16 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
         in_degree.insert(fd, 1);
 
 
-        for i in 0..inner.fd_table.len() {
-            if let Some(f) = &inner.fd_table[i].file {
+        for i in 0..fd_table.len() {
+            if let Some(f) = &fd_table[i].file {
                 if let Some(ep) = f.as_any().downcast_ref::<EpollFile>() {
                     adj.entry(i).or_default();
                     in_degree.entry(i).or_insert(0);
 
                     let keys: Vec<usize> = ep.interest_list.lock().keys().copied().collect();
                     for target_fd in keys {
-                        if target_fd < inner.fd_table.len() {
-                            if let Some(t_file) = &inner.fd_table[target_fd].file {
+                        if target_fd < fd_table.len() {
+                            if let Some(t_file) = &fd_table[target_fd].file {
                                 if t_file.as_any().is::<EpollFile>() {
                                     adj.entry(i).or_default().push(target_fd);
                                     *in_degree.entry(target_fd).or_insert(0) += 1;
@@ -2100,7 +2098,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     }
 
 
-    let token = inner.memory_set.token();
+
     let event = if op != 2 { // 如果不是 EPOLL_CTL_DEL，就需要读取用户态传来的数据
         //   使用你提供的 translated_ref
         if let Some(ev) = try_translated_read(token, event_ptr as *const EpollEvent) {
@@ -2482,7 +2480,7 @@ pub fn sys_pselect6(
     _sigmask: *const usize,
 ) -> isize {
     let task = current_task().unwrap();
-    let process = task.process(); // 【修正】fd_table 和 Token 都在 PCB
+    let process = task.process();
     let token = process.inner_exclusive_access().get_user_token();
     
     let mut readfds = 0usize;
@@ -2561,7 +2559,6 @@ pub fn sys_pselect6(
         if has_timeout && get_time_ms() >= deadline_ms {
             return 0;
         }
-
         suspend_current_and_run_next();
     }
 }
@@ -2569,19 +2566,17 @@ pub fn sys_pselect6(
 
 
 pub fn sys_add_key(_type: *const u8, _desc: *const u8, _payload: *const u8, _plen: usize, _ringid: i32) -> isize {
-    // 假装成功生成了一个密钥，返回一个随机的密钥序列号 (比如 9999)
-    9999
+    // 待实现
+    ENOSYS.as_isize()
 }
 
-// ID 218: request_key
 pub fn sys_request_key(_type: *const u8, _desc: *const u8, _callout_info: *const u8, _ringid: i32) -> isize {
-    9999
+    // 待实现
+    ENOSYS.as_isize()
 }
 
-// ID 219: keyctl
 pub fn sys_keyctl(_operation: i32, _arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
-    // 假装所有对密钥的操作都完美执行
-    0
+    ENOSYS.as_isize()
 }
 pub fn sys_msync(_addr: usize, _len: usize, _flags: u32) -> isize {
     // 我们的 shm 是纯内存文件系统，数据实时可见，不需要刷盘，直接伪装成功！
@@ -2603,7 +2598,166 @@ pub fn sys_times(tms_ptr: *mut usize) -> isize {
     let current_ms = get_time_ms();
     current_ms as isize
 }
+pub fn sys_clock_adjtime(which_clock: i32, tp: *mut Timex) -> isize {
+    if tp.is_null() {
+        return EFAULT.as_isize();
+    }
+    if which_clock != CLOCK_REALTIME as i32 {
+        return EINVAL.as_isize();
+    }
 
+    let token = current_user_token();
+    let Some(mut tx) = try_translated_read(token, tp as *const Timex) else {
+        return EFAULT.as_isize();
+    };
+
+    if clock_adj_has_invalid_mode_bits(tx.modes) {
+        return EINVAL.as_isize();
+    }
+
+    if tx.status & !CLOCK_ADJ_VALID_STATUS != 0 {
+        return EINVAL.as_isize();
+    }
+
+    let requires_privilege = tx.modes != 0 && tx.modes != ADJ_OFFSET_SS_READ;
+    if requires_privilege {
+        let task = current_task().unwrap();
+        let proc = task.process();
+        if proc.inner_exclusive_access().euid != 0 {
+            return EPERM.as_isize();
+        }
+    }
+
+    let mut state = CLOCK_ADJ_STATE.lock();
+    if tx.modes == ADJ_OFFSET_SS_READ {
+        tx.offset = state.pending_single_shot;
+    } else {
+        if tx.modes & ADJ_OFFSET_SINGLESHOT == ADJ_OFFSET_SINGLESHOT {
+            state.pending_single_shot = tx.offset;
+            state.offset = tx.offset;
+        }
+
+        if tx.modes & ADJ_OFFSET != 0 {
+            if !(-512_000..=512_000).contains(&tx.offset) {
+                return EINVAL.as_isize();
+            }
+            state.offset = tx.offset;
+        }
+        if tx.modes & ADJ_FREQUENCY != 0 {
+            if !(-32_768_000..=32_768_000).contains(&tx.freq) {
+                return EINVAL.as_isize();
+            }
+            state.freq = tx.freq;
+        }
+        if tx.modes & ADJ_MAXERROR != 0 {
+            state.maxerror = tx.maxerror;
+        }
+        if tx.modes & ADJ_ESTERROR != 0 {
+            state.esterror = tx.esterror;
+        }
+        if tx.modes & ADJ_STATUS != 0 {
+            state.status = clock_adj_write_status(state.status, tx.status);
+        }
+        if tx.modes & ADJ_TIMECONST != 0 {
+            state.constant = tx.constant;
+        }
+        if tx.modes & ADJ_TAI != 0 {
+            state.tai = tx.tai;
+        }
+        if tx.modes & ADJ_NANO != 0 {
+            state.is_nano = true;
+            state.status |= STA_NANO;
+        }
+        if tx.modes & ADJ_MICRO != 0 {
+            state.is_nano = false;
+            state.status &= !STA_NANO;
+        }
+        if tx.modes & ADJ_TICK != 0 {
+            if !(9_000..=11_000).contains(&tx.tick) {
+                return EINVAL.as_isize();
+            }
+            state.tick = tx.tick;
+        }
+        if tx.modes & ADJ_SETOFFSET != 0 {
+            state.offset = tx.time.tv_sec.saturating_mul(1_000_000) + tx.time.tv_usec;
+        }
+    }
+
+    let now_ns = current_wallclock_ns();
+    tx.offset = state.offset;
+    tx.freq = state.freq;
+    tx.maxerror = state.maxerror;
+    tx.esterror = state.esterror;
+    tx.status = state.status;
+    tx.constant = state.constant;
+    tx.precision = if state.is_nano { 1 } else { 1_000 };
+    tx.tolerance = 32768000;
+    tx.time.tv_sec = now_ns / 1_000_000_000;
+    tx.time.tv_usec = if state.is_nano {
+        now_ns % 1_000_000_000
+    } else {
+        (now_ns % 1_000_000_000) / 1_000
+    };
+    tx.tick = state.tick;
+    tx.ppsfreq = 0;
+    tx.jitter = 0;
+    tx.shift = 0;
+    tx.stabil = 0;
+    tx.jitcnt = 0;
+    tx.calcnt = 0;
+    tx.errcnt = 0;
+    tx.stbcnt = 0;
+    tx.tai = state.tai;
+
+    if !try_translated_write(token, tp, tx) {
+        return EFAULT.as_isize();
+    }
+
+    clock_adj_result_from_status(state.status)
+}
+pub fn sys_clock_settime(which_clock: i32, tp: *const TimeSpec) -> isize {
+    if tp.is_null() {
+        return EFAULT.as_isize();
+    }
+    if which_clock != CLOCK_REALTIME as i32 {
+        return EINVAL.as_isize();
+    }
+
+    let token = current_user_token();
+    let timespec = match try_translated_read(token, tp) {
+        Some(ts) => ts,
+        None => return EFAULT.as_isize(),
+    };
+
+    if timespec.tv_nsec >= 1_000_000_000 {
+        return EINVAL.as_isize();
+    }
+
+    let task = current_task().unwrap();
+    let proc = task.process();
+    if proc.inner_exclusive_access().euid != 0 {
+        return EPERM.as_isize();
+    }
+
+    let requested_ns = (timespec.tv_sec as i128)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(timespec.tv_nsec as i128);
+    let base_ns = get_real_time_ns() as i128;
+    let offset_ns = requested_ns.saturating_sub(base_ns);
+    let offset_ns = offset_ns.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+
+    *CLOCK_REALTIME_OFFSET_NS.lock() = offset_ns;
+
+    let mut state = CLOCK_ADJ_STATE.lock();
+    state.status &= !STA_UNSYNC;
+    if state.is_nano {
+        state.status |= STA_NANO;
+    } else {
+        state.status &= !STA_NANO;
+    }
+
+    0
+}
 pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> isize {
     let token = current_user_token();
     let mut user_buf = translated_byte_buffer(token, buf, len);

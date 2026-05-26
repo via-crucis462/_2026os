@@ -1,5 +1,7 @@
 //! RISC-V timer-related functionality
 
+pub use crate::arch::timer_common::*;
+
 use crate::arch::config::CLOCK_FREQ;
 use crate::arch::sbi::set_timer;
 

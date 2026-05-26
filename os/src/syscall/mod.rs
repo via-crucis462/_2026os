@@ -66,6 +66,7 @@ const SYSCALL_GET_ROBUST_LIST: usize = 100;
 
 const SYSCALL_SLEEP:usize =101;
 const SYSCALL_SETITIMER: usize = 103;
+const SYSCALL_CLOCK_SETTIME: usize = 112;
 const SYSCALL_SYSLOG: usize = 116;
 /// yield syscall
 const SYSCALL_SCHED_GETAFFINITY: usize = 123;
@@ -110,6 +111,7 @@ const SYSCALL_SYSINFO: usize = 179;
 const SYSCALL_SHMGET: usize = 194;
 
 const SYSCALL_SOCKET: usize = 198;
+const SYSCALL_SOCKETPAIR: usize = 199;
 /// brk syscall
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_LISTEN: usize = 201;
@@ -122,11 +124,11 @@ const SYSCALL_SETSOCKOPT: usize = 208;
 const SYSCALL_SENDMSG: usize = 211;
 const SYSCALL_RECVMSG: usize = 212;
 const SYSCALL_BRK: usize = 214;
+/// munmap syscall
+const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_ADD_KEY: usize = 217;
 const SYSCALL_REQUEST_KEY: usize = 218;
 const SYSCALL_KEYCTL: usize = 219;
-/// munmap syscall
-const SYSCALL_MUNMAP: usize = 215;
 /// clone syscall
 const SYSCALL_CLONE: usize = 220;
 /// exec syscall
@@ -138,6 +140,7 @@ const SYSCALL_MSYNC: usize = 227;
 /// waitpid syscall
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
+const SYSCALL_CLOCK_ADJTIME: usize = 266;
 /// statx syscall
 const SYSCALL_STATX: usize = 291;
 /// spawn syscall
@@ -161,11 +164,14 @@ const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_MEMFD_CREATE: usize = 279;
 /// copy_file_range syscall (Linux riscv64)
 const SYSCALL_COPY_FILE_RANGE: usize = 285;
+const SYSCALL_BPF: usize = 280;
 /// resq
 const SYSCALL_RESQ: usize = 293;
 /// accessat syscall
 const SYSCALL_ACCESSAT: usize = 48;
+pub mod bpf;
 pub mod fs;
+use bpf::*;
 mod process;
 mod prctl;
 pub mod errno;
@@ -179,9 +185,12 @@ use alloc::string::String;
 use crate::net::MsgHdr;
 
 use crate::get_hart_id;
+use crate::mm::try_translated_str;
 use crate::syscall::net::*;
 
 use crate::{fs::Stat, task::{SignalAction, current_task}};
+
+const PATH_MAX_LEN: usize = 256;
 
 pub(crate) fn normalize_leading_dot_path(path: String) -> String {
     if !path.starts_with('.') {
@@ -198,6 +207,19 @@ pub(crate) fn normalize_leading_dot_path(path: String) -> String {
         return alloc::format!("{}/{}", cwd, rest);
     }
     path.replacen('.', cwd.as_str(), 1)
+}
+
+
+pub fn translate_path(token: usize, path: *const u8) -> Result<String, Errno> {
+    let str = try_translated_str(token, path);
+    if let Some(s) = str {
+        if s.len() > PATH_MAX_LEN {
+            return Err(Errno::ENAMETOOLONG);
+        }
+        Ok(s)
+    } else {
+        Err(Errno::EFAULT)
+    }
 }
 
 #[no_mangle]
@@ -236,6 +258,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         inner.info_map_areas();
     }*/
     // println!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
+    trace!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
@@ -305,6 +328,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0] as isize, args[1], args[2] as *mut u8),
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as i32, args[1] as *const usize, args[2] as *mut usize, args[3] as usize),
         SYSCALL_STATFS=> sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
+        SYSCALL_SOCKETPAIR => sys_socketpair(args[0], args[1], args[2], args[3] as *mut u8),
         SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
         SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
         SYSCALL_SYSLOG => sys_syslog(args[0], args[1], args[2]),
@@ -351,6 +375,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_UMOUNT => sys_umount(args[0] as *const u8),
         SYSCALL_STATX => sys_statx(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32, args[4] as *mut Statx),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2] as u32),
+        SYSCALL_BPF => sys_bpf(args[0], args[1] as *const u8, args[2]),
         SYSCALL_PRCTL => sys_prctl(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_SET_ROBUST_LIST => sys_robust_list(),
         SYSCALL_GET_ROBUST_LIST => sys_get_robust_list(),
@@ -360,6 +385,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
         SYSCALL_COPY_FILE_RANGE => sys_copy_file_range(args[0], args[1] as *mut i64, args[2], args[3] as *mut i64, args[4], args[5] as u32),
         SYSCALL_SHMGET => sys_shmget(args[0] as i32, args[1], args[2] as i32),
+        SYSCALL_CLOCK_ADJTIME => sys_clock_adjtime(args[0] as i32, args[1] as *mut Timex),
+        SYSCALL_CLOCK_SETTIME => sys_clock_settime(args[0] as i32, args[1] as *const TimeSpec),
         _ => {
             warn!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
@@ -375,12 +402,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             println!("after exec memory syscall mmap area: {:#x} - {:#x} ", i.get_vpn_range().get_start().0 << 12, i.get_vpn_range().get_end().0 << 12);
         }
     }*/
-    /*if syscall_id != SYSCALL_WRITE && syscall_id != SYSCALL_READ && syscall_id != SYSCALL_WRITEV && syscall_id != SYSCALL_READV {
-        debug!(
-            "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}] | Ret: {}", 
-            syscall_id, args[0], args[1], args[2], ret
-        );
-    }*/
-    // println!("[K] hart[{}] PID{} finished syscall {} with return value {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
+        /*println!(
+            "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}] | Ret: {}", 
+            syscall_id, args[0], args[1], args[2], args[3], args[4], ret
+        );*/
+    //println!("[K] hart[{}] PID{} finished syscall {} with return value {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
+    trace!("[K] hart[{}] PID{} finished syscall {} with return value {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
     ret
 }

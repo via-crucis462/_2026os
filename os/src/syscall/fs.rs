@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::sync::Arc;
 use alloc::string::ToString;
 use crate::syscall::TIME_CACHE;
-use super::{errno::Errno::*, normalize_leading_dot_path};
+use super::{errno::Errno::*, normalize_leading_dot_path, translate_path};
 use crate::syscall::TmpfsFileInode;
 use crate::syscall::OSInode;
 use crate::syscall::Dentry;
@@ -133,14 +133,13 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     if let Some(file) = &inner.fd_table[fd].file {
         let file = file.clone();
         let status = inner.fd_table[fd].status;
+        drop(inner);
         if !file.readable() {
             return EACCES.as_isize(); // 权限不足
         }
         if (status & (O_NONBLOCK | O_NDELAY)) != 0 && !file.ready_to_read() {
             return EAGAIN.as_isize();
         }
-        // release current task TCB manually to avoid multi-borrow
-        drop(inner);
         trace!("kernel:pid[{}] sys_read: fd={}, len={}", task.process().pid.0, fd, len);
         file.read(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
     } else {
@@ -626,15 +625,40 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
 
 pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
     let token = current_user_token();
-    let path = normalize_leading_dot_path(
-        if let Some(s) = try_translated_str(token, path) { s } else { return EFAULT.as_isize(); }
-    );
+
+    let path = translate_path(token, path);
+    let path = if let Ok(path) = path {
+        if path.is_empty() {
+            return EINVAL.as_isize(); // 无效路径
+        }
+        normalize_leading_dot_path(path)
+    } else {
+        return path.err().unwrap().as_isize();
+    };
+
     debug!("kernel:pid[{}] sys_mkdir: path={}", current_task().unwrap().process().pid.0, path);
     
+    let start = if path.starts_with('/') {
+        ROOT_DENTRY.clone()
+    } else {
+        current_task().unwrap().process().inner_exclusive_access().cwd.clone()
+    };
+
+    // 目标存在
+    if start.find_tree(&path, true).is_some() {
+        return EEXIST.as_isize();
+    }
+
+    // 父目录不存在
+    let parent = parent_path(&path);
+    if start.find_tree(&parent, true).is_none() {
+        return ENOENT.as_isize();
+    }
+
     if let Some(_) = make_dir(path.as_str(), _mode) {
         0
     } else {
-        EACCES.as_isize() // 权限不足或父目录不存在
+        EACCES.as_isize() // 权限不足
     }
 }
 
@@ -762,7 +786,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             inner.fd_table[fd].status = (old & O_ACCMODE) | (arg & !O_ACCMODE);
             0
         }
-        _ => ENOSYS.as_isize(),
+        _ => EINVAL.as_isize(),
     }
 }
 
@@ -1084,8 +1108,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
         let mut stat: Stat = unsafe { core::mem::zeroed() };
         stat.mode = 0o100755; // 假装它是个普通空文件，让 du 闭嘴
         stat.size = 0;
-        let mut user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, st as *const u8, core::mem::size_of::<Stat>()) );
-        user_buf.write(unsafe {core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())});
+        crate::mm::translated_write(token, st, stat);
         return 0;
     }
     let base_dir = if path_str.starts_with('/') {
@@ -1108,8 +1131,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
     match target_dentry {
         Some(dentry) => {
             let stat = dentry.inode.get_stat();
-            let mut user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, st as *const u8, core::mem::size_of::<Stat>()) );
-            user_buf.write(unsafe {core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<Stat>())});
+            crate::mm::translated_write(token, st, stat);
             0
         }
         None => {

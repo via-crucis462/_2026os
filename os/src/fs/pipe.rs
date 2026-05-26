@@ -213,6 +213,8 @@ impl File for Pipe {
                     return already_read;
                 }
             }
+            // 不阻塞，返回已经读到的字节数
+            return already_read;
         }
     }
     fn write(&self, buf: UserBuffer) -> usize {

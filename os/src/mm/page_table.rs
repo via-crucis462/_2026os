@@ -123,7 +123,8 @@ impl PageTable {
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
             //println!("find_pte: vpn = {:?}, i = {}", vpn, i);
-            if i == 2 || (pte.readable() || pte.writable() || pte.executable()) {
+            // 标准页叶子节点需要v，大页叶子节点有rwx任一即可
+            if (i == 2 && pte.is_valid()) || (i < 2 && (pte.readable() || pte.writable() || pte.executable())) {
                 pte_opt = Some(pte);
                 page_size = Some(match i {
                     0 => PageSize::Page1G,
@@ -282,13 +283,15 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     v
 }
 
-fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
+pub fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
     if len == 0 {
         return true;
     }
     let page_table = PageTable::from_token(token);
     let mut start = ptr;
-    let end = start + len;
+    let Some(end) = start.checked_add(len) else {
+        return false;
+    };
     let mut ready = true;
     while start < end {
         let start_va = VirtAddr::from(start);
@@ -330,13 +333,15 @@ fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
     proc_inner.memory_set.ensure_readable_user_range(ptr, len, sp)
 }
 
-fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
+pub fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
     if len == 0 {
         return true;
     }
     let page_table = PageTable::from_token(token);
     let mut start = ptr;
-    let end = start + len;
+    let Some(end) = start.checked_add(len) else {
+        return false;
+    };
     let mut ready = true;
     while start < end {
         let start_va = VirtAddr::from(start);
@@ -360,8 +365,7 @@ fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
         return true;
     }
     if token != current_user_token() {
-        println!("prepare_user_write: token mismatch, token = {:#x}, current_user_token = {:#x}", token, current_user_token());
-        return false;
+        panic!("prepare_user_write: token mismatch, token = {:#x}, current_user_token = {:#x}", token, current_user_token());
     }
     let task = current_task().unwrap();
     let process = task.process();
@@ -410,6 +414,9 @@ pub fn translated_str(token: usize, ptr: *const u8) -> String {
 
 /// +错误处理
 pub fn try_translated_str(token: usize, ptr: *const u8) -> Option<String> {
+    if ptr as isize <= 0 {
+        return None;
+    }
     if !prepare_user_read(token, ptr as usize, 1) {
         return None;
     }
@@ -434,7 +441,7 @@ pub fn try_translated_str(token: usize, ptr: *const u8) -> Option<String> {
 }
 
 /// Translate a ptr[u8] array through page table and return a reference of T
-pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
+/*pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
     let len = core::mem::size_of::<T>();
     assert!(prepare_user_read(token, ptr as usize, len), "translated_ref: user ptr is not readable");
     let page_table = PageTable::from_token(token);
@@ -447,12 +454,18 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
     } else {
         alloc::boxed::Box::leak(alloc::boxed::Box::new(translated_read(token, ptr)))
     }
-}
+}*/
 
 /// 从给定地址读取数据并返回T
 pub fn translated_read<T>(token: usize, ptr: *const T) -> T {
+    try_translated_read(token, ptr).unwrap_or_else(|| unsafe { core::mem::zeroed() })
+}
+
+pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
     let len = core::mem::size_of::<T>();
-    assert!(prepare_user_read(token, ptr as usize, len), "translated_read: user ptr is not readable");
+    if !prepare_user_read(token, ptr as usize, len) {
+        return None;
+    }
     let page_table = PageTable::from_token(token);
     let mut data = vec![0u8; len];
     let start_va = VirtAddr::from(ptr as usize);
@@ -471,26 +484,22 @@ pub fn translated_read<T>(token: usize, ptr: *const T) -> T {
         // 跨页路径：按虚拟地址逐字节翻译，避免假设物理地址连续
         for idx in 0..len {
             let va = VirtAddr::from((ptr as usize) + idx);
-            let pa = page_table.translate_va(va).unwrap();
+            let Some(pa) = page_table.translate_va(va) else {
+                return None;
+            };
             data[idx] = unsafe { *(pa.0 as *const u8) };
         }
     }
-    unsafe { core::ptr::read(data.as_ptr() as *const T) }
+    Some(unsafe { core::ptr::read(data.as_ptr() as *const T) })
 }
-
-pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
-    let len = core::mem::size_of::<T>();
-    if !prepare_user_read(token, ptr as usize, len) {
-        return None;
-    }
-    Some(translated_read(token, ptr))
-}
-
 
 /// 将用户空间的T写入给定地址
-pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
+
+pub fn try_translated_write<T>(token: usize, ptr: *mut T, value: T) -> bool {
     let len = core::mem::size_of::<T>();
-    assert!(prepare_user_write(token, ptr as usize, len), "translated_write: user ptr is not writable");
+    if !prepare_user_write(token, ptr as usize, len) {
+        return false;
+    }
     let page_table = PageTable::from_token(token);
     let data = unsafe { core::slice::from_raw_parts((&value as *const T) as *const u8, len) };
     let start_va = VirtAddr::from(ptr as usize);
@@ -509,17 +518,16 @@ pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
         // 跨页路径：按虚拟地址逐字节翻译，避免假设物理地址连续
         for idx in 0..len {
             let va = VirtAddr::from((ptr as usize) + idx);
-            let pa = page_table.translate_va(va).unwrap();
+            let Some(pa) = page_table.translate_va(va) else {
+                return false;
+            };
             unsafe { *(pa.0 as *mut u8) = data[idx] };
         }
     }
+
+    true
 }
 
-pub fn try_translated_write<T>(token: usize, ptr: *mut T, value: T) -> bool {
-    let len = core::mem::size_of::<T>();
-    if !prepare_user_write(token, ptr as usize, len) {
-        return false;
-    }
-    translated_write(token, ptr, value);
-    true
+pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
+    try_translated_write(token, ptr, value);
 }
