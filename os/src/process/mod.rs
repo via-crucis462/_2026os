@@ -151,6 +151,7 @@ pub fn exit_current_and_run_next(exit_code: i32){
     //若线程是最后一个存活线程，则将其线程码写入进程退出码,并回收进程资源
     //同时将子进程移交给initproc
     let process = task.process();
+    //println!("[kernel] Process {} is exiting with code {} ...", process.getpid(), exit_code);
     drop(task);
     let mut proc_inner = process.inner_exclusive_access();
     proc_inner.alive_task_count -= 1;

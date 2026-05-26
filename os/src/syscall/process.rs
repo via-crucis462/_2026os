@@ -1270,10 +1270,12 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
 
 /// 等待子进程退出
 pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
+    //println!("[wait4] Called with pid={}, options={:#x}", pid, options);
     let task = current_task().unwrap();
     let proc = task.process();
     let mut child_pid: usize = 0;
     let mut exit_code = -1;
+    let mut has_match = false;
     loop {
         let mut proc_inner = proc.inner_exclusive_access();
         let mut child_idx: Option<usize> = None;
@@ -1285,6 +1287,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                         exit_code = child.inner_exclusive_access().exit_code;
                         child_pid = child.getpid();
                         child_idx = Some(idx);
+                        has_match = true;
                         break;
                     }
                 }
@@ -1297,6 +1300,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                         exit_code = child.inner_exclusive_access().exit_code;
                         child_pid = child.getpid();
                         child_idx = Some(idx);
+                        has_match = true;
                         break;
                     }
                 }
@@ -1308,6 +1312,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                         exit_code = child.inner_exclusive_access().exit_code;
                         child_pid = child.getpid();
                         child_idx = Some(idx);
+                        has_match = true;
                         break;
                     }
                 }
@@ -1317,8 +1322,11 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
             }
             _ => unreachable!(),
         }
-        //非阻塞或者没有找到符合条件的僵尸子进程的处理
+        //非阻塞或者没有找到符合条件的僵尸子进程的处理,区分不存在pid在子进程和存在但未退出两种情况
         if child_pid == 0 {
+            if has_match == false {
+                return ECHILD.as_isize(); // 没有任何匹配的子进程
+            }
             if options & 0x1 != 0 {
                 return 0;
             }
@@ -1346,7 +1354,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
         }
     }
     //println!("sys_wait4 called with pid={}, options={:#x}", pid, options);
-/*    let task = current_task().unwrap();
+/*  let task = current_task().unwrap();
     let proc = task.process();
     // 提前拿到当前进程的 pgid
     let current_pgid = proc.inner_exclusive_access().pgid; 

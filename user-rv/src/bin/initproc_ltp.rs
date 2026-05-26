@@ -53,7 +53,7 @@ fn main() -> i32 {
     chdir("/musl\0");
 
     // 测例首字母
-    let test_start = "s";
+    let test_start = "w";
 
     // 测例黑名单
     const SKIP_CASES: &[&str] = &[
