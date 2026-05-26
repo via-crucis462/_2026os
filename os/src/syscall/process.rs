@@ -1270,7 +1270,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
 
 /// 等待子进程退出
 pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
-    println!("[wait4] Called with pid={}, options={:#x}", pid, options);
+    //println!("[wait4] Called with pid={}, options={:#x}", pid, options);
     let task = current_task().unwrap();
     let proc = task.process();
     loop {
@@ -1284,7 +1284,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                 has_match = !proc_inner.children.is_empty();
                 for (idx, child) in proc_inner.children.iter().enumerate() {
                     if child.inner_exclusive_access().is_zombie() {
-                        println!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
+                        //println!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
                         exit_code = child.inner_exclusive_access().exit_code;
                         child_pid = child.getpid();
                         child_idx = Some(idx);
@@ -1298,7 +1298,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                     if child_pgid == proc_inner.pgid {
                         has_match = true;
                         if child.inner_exclusive_access().is_zombie() {
-                            println!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
+                            //println!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
                             exit_code = child.inner_exclusive_access().exit_code;
                             child_pid = child.getpid();
                             child_idx = Some(idx);
@@ -1313,7 +1313,7 @@ pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: usize) -> isize {
                     if child.getpid() == value as usize {
                         has_match = true;
                         if child.inner_exclusive_access().is_zombie() {
-                            println!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
+                            //println!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
                             exit_code = child.inner_exclusive_access().exit_code;
                             child_pid = child.getpid();
                             child_idx = Some(idx);

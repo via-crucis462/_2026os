@@ -5,10 +5,67 @@ use crate::fs::{TmpfsDirInode, TmpfsFileInode, stat_to_statx};
 use core::fmt::{self, Write};
 use crate::mm::get_free_frames;
 use crate::task::get_process;
+use crate::process::list_pids;
 use crate::syscall::fs::Statfs;
 use core::sync::atomic::Ordering;
 use alloc::format;
 use crate::mm::MapPermission;
+use crate::fs::DirEntry;
+use crate::process::TaskStatus;
+
+fn dirent_type_from_mode(mode: u32) -> u8 {
+    match mode & 0o170000 {
+        0o040000 => 4,
+        0o100000 => 8,
+        0o120000 => 10,
+        _ => 0,
+    }
+}
+
+fn write_dirents(offset: &mut usize, buf: &mut [u8], entries: &[(String, u32, u8)]) -> isize {
+    let mut buf_offset = 0usize;
+    while *offset < entries.len() {
+        let (name, ino, d_type) = &entries[*offset];
+        let mut dirent = DirEntry::new(name.clone(), *ino, *d_type);
+        let reclen = dirent.d_reclen as usize;
+        if buf_offset + reclen > buf.len() {
+            break;
+        }
+        dirent.d_off = (*offset + 1) as i64;
+        buf[buf_offset..buf_offset + 8].copy_from_slice(&dirent.d_ino.to_ne_bytes());
+        buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&dirent.d_off.to_ne_bytes());
+        buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&dirent.d_reclen.to_ne_bytes());
+        buf[buf_offset + 18] = dirent.d_type;
+        let name_len = name.len().min(255);
+        buf[buf_offset + 19..buf_offset + 19 + name_len]
+            .copy_from_slice(&dirent.d_name[..name_len]);
+        for byte in &mut buf[buf_offset + 19 + name_len..buf_offset + reclen] {
+            *byte = 0;
+        }
+        buf_offset += reclen;
+        *offset += 1;
+    }
+    buf_offset as isize
+}
+
+fn proc_state_char(pid: usize) -> char {
+    let Some(process) = get_process(pid) else {
+        return 'Z';
+    };
+    let task = {
+        let inner = process.inner_exclusive_access();
+        inner.tasks.first().cloned()
+    };
+    let Some(task) = task else {
+        return 'Z';
+    };
+    let status = task.inner_exclusive_access().task_status;
+    match status {
+        TaskStatus::Running => 'R',
+        TaskStatus::Zombie => 'Z',
+        TaskStatus::Ready | TaskStatus::Blocked | TaskStatus::WaitSaving | TaskStatus::UnInit => 'S',
+    }
+}
 
 macro_rules! impl_default_statx {
     () => {
@@ -70,6 +127,7 @@ impl VfsInode for ProcPidDirInode {
         match name {
             // 当查找 oom_score_adj 时，返回一个绑定了该 PID 的特殊文件
             "oom_score_adj" => Some(Arc::new(OomScoreAdjInode { pid: self.pid })),
+            "stat" => Some(Arc::new(ProcStatInode { pid: self.pid })),
             
 
             "status" => Some(Arc::new(ProcStatusInode { pid: self.pid })),
@@ -105,7 +163,78 @@ impl VfsInode for ProcPidDirInode {
         }
     }
     impl_default_statx!();
-    impl_unsupported_ops!(0);
+    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
+    fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
+        let entries = [
+            (String::from("maps"), 8888u32, 8u8),
+            (String::from("ns"), 2u32, 4u8),
+            (String::from("oom_score_adj"), 998u32, 8u8),
+            (String::from("stat"), (11000 + self.pid) as u32, 8u8),
+            (String::from("status"), 999u32, 8u8),
+        ];
+        write_dirents(offset, buf, &entries)
+    }
+}
+pub struct ProcStatInode {
+    pub pid: usize,
+}
+
+impl VfsInode for ProcStatInode {
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        let Some(process) = get_process(self.pid) else {
+            return 0;
+        };
+        let (pname, ppid) = {
+            let inner = process.inner_exclusive_access();
+            let ppid = inner
+                .parent
+                .as_ref()
+                .and_then(|p| p.upgrade())
+                .map(|parent| parent.getpid())
+                .unwrap_or(0);
+            (inner.pname.clone(), ppid)
+        };
+        let state = proc_state_char(self.pid);
+        let stat_line = format!(
+            "{} ({}) {} {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+            self.pid,
+            pname,
+            state,
+            ppid,
+        );
+        let data = stat_line.as_bytes();
+        if offset >= data.len() {
+            return 0;
+        }
+        let read_len = core::cmp::min(buf.len(), data.len() - offset);
+        buf[..read_len].copy_from_slice(&data[offset..offset + read_len]);
+        read_len
+    }
+
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn get_size(&self) -> usize { 0 }
+    fn get_stat(&self) -> super::Stat {
+        super::Stat {
+            dev: 0,
+            ino: (11000 + self.pid) as u64,
+            mode: 0o100444,
+            nlink: 1,
+            uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
+            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
+        }
+    }
+    fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
+    impl_default_statx!();
+    impl_unsupported_ops!(-1);
+    fn statfs(&self) -> Statfs {
+        Statfs {
+            f_type: 0x01021994, f_bsize: 4096, f_blocks: 0,
+            f_bfree: 0, f_bavail: 0, f_files: 0, f_ffree: 0,
+            f_fsid: [0, 0], f_namelen: 255, f_frsize: 4096, f_flags: 0, f_spare: [0; 4],
+        }
+    }
 }
 pub struct OomScoreAdjInode {
     pub pid: usize,
@@ -284,7 +413,25 @@ impl VfsInode for ProcRootInode {
     }
     
     impl_default_statx!();
-    impl_unsupported_ops!(0);
+    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
+    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
+    fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
+        let mut entries: alloc::vec::Vec<(String, u32, u8)> = self
+            .static_entries
+            .entries_snapshot()
+            .into_iter()
+            .map(|(name, inode)| {
+                let stat = inode.get_stat();
+                (name, stat.ino as u32, dirent_type_from_mode(stat.mode))
+            })
+            .collect();
+        for pid in list_pids() {
+            entries.push((pid.to_string(), (10000 + pid) as u32, 4u8));
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        write_dirents(offset, buf, &entries)
+    }
     
     fn statfs(&self) -> Statfs {
         Statfs {

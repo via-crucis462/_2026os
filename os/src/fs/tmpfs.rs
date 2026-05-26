@@ -224,6 +224,15 @@ impl TmpfsDirInode {
         self.entries.lock().insert(name, inode.clone());
         inode
     }
+
+    // 返回当前目录项快照，避免调用方在目录枚举期间长期持有 entries 锁。
+    pub fn entries_snapshot(&self) -> alloc::vec::Vec<(String, Arc<dyn VfsInode>)> {
+        self.entries
+            .lock()
+            .iter()
+            .map(|(name, inode)| (name.clone(), inode.clone()))
+            .collect()
+    }
 }
 
 impl super::VfsInode for TmpfsDirInode {

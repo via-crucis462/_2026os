@@ -39,6 +39,10 @@ impl ProcessManager{
         self.process_pool.get(&pid).map(Arc::clone)
     }
 
+    pub fn list_pids(&self) -> alloc::vec::Vec<usize> {
+        self.process_pool.keys().copied().collect()
+    }
+
     pub fn remove_process(&mut self, pid: usize){
         info!("ProcessManager::try to remove_process: pid={}", pid);
         /*for i in &self.process_pool{
@@ -58,6 +62,10 @@ pub fn add_process(process: Arc<ProcessControlBlock>){
 
 pub fn get_process(pid: usize) -> Option<Arc<ProcessControlBlock>>{
     PROCESS_MANAGER.exclusive_access().get_process(pid)
+}
+
+pub fn list_pids() -> alloc::vec::Vec<usize> {
+    PROCESS_MANAGER.exclusive_access().list_pids()
 }
 
 pub fn remove_process(pid: usize){
