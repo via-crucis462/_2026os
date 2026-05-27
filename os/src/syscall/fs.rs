@@ -86,6 +86,11 @@ pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
 }
 
 fn ensure_fd_slots(inner: &mut crate::process::ProcessControlBlockInner, target_len: usize) {
+    // 上限检查
+    if target_len > inner.fd_rlmt.cur_lmt {
+        warn!("ensure_fd_slots: target_len {} exceeds fd_rlmt {}", target_len, inner.fd_rlmt.cur_lmt);
+        return;
+    }
     while inner.fd_table.len() < target_len {
         inner.fd_table.push(crate::process::FileDescriptor::empty());
     }
@@ -755,12 +760,20 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             if !fd_valid {
                 return EBADF.as_isize();
             }
+            // 防溢出
+            if arg >= inner.fd_rlmt.cur_lmt {
+                return EBADF.as_isize();
+            }
             let mut new_fd = arg;
             while new_fd < inner.fd_table.len() {
                 if inner.fd_table[new_fd].file.is_none() {
                     break;
                 }
                 new_fd += 1;
+            }
+            // 再次检查
+            if new_fd >= inner.fd_rlmt.cur_lmt {
+                return EBADF.as_isize();
             }
             ensure_fd_slots(&mut inner, new_fd + 1);
             let file = Arc::clone(inner.fd_table[fd].file.as_ref().unwrap());

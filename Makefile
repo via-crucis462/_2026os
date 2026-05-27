@@ -6,7 +6,8 @@ RV_SMP ?= 1
 LA_SMP ?= 4
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
-INIT ?= default
+# default, sh, ltp
+INIT ?= ltp
 RV_ELF ?= os/target/riscv64gc-unknown-none-elf/$(MODE)/os
 LA_ELF ?= os/target/loongarch64-unknown-none/$(MODE)/os
 
@@ -22,9 +23,9 @@ endif
 all: build-user copy-user build copy
 
 build-rv:
-	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INITPROC=$(INITPROC)
+	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)
 build-la:
-	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INITPROC=$(INITPROC)
+	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)
 
 build-user-rv:
 	cd user-rv && $(MAKE) build

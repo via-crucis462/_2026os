@@ -145,12 +145,20 @@ pub fn exit_current_and_run_next(exit_code: i32){
             return;
         }
     };
+    
     // 线程级资源由 TCB 回收接口统一处理。
     task.recycle_on_exit(exit_code);
     
     //若线程是最后一个存活线程，则将其线程码写入进程退出码,并回收进程资源
     //同时将子进程移交给initproc
     let process = task.process();
+
+    // 运行完自动退出内核
+    if process.getpid() == IDLE_PID {
+        println!("[kernel] Idle process exit with exit_code {} ...", exit_code);
+        panic!("All applications completed!");
+    }
+
     //println!("[kernel] Process {} is exiting with code {} ...", process.getpid(), exit_code);
     drop(task);
     let mut proc_inner = process.inner_exclusive_access();
