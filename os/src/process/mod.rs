@@ -22,7 +22,7 @@ pub use pcb::*;
 use crate::{console::print, mm::translated_byte_buffer};
 
 use manager::*;
-pub use manager::{get_process, pop_process, remove_process};
+pub use manager::{get_process, list_pids, pop_process, remove_process};
 use crate::sync::*;
 
 /// 任务处理器，改为pub供外部调用
@@ -136,9 +136,49 @@ pub fn wake_up_one(mut wait_queue: MutexGuard<WaitQueue>) {
 pub const IDLE_PID: usize = 1;
 
 /// Exit the current 'Running' task and run the next task in task list.
-/// 注意，永不返回，所以每次调用前需要drop掉所有arc等
-pub fn exit_current_and_run_next(exit_code: i32) {
-    // 改为暂时不take，schedule到runtasks中统一处理
+pub fn exit_current_and_run_next(exit_code: i32){
+    let task = match current_task() {
+        Some(t) => t,
+        None => {
+            println!("No current task found in exit_current_and_run_next!");
+            schedule(&mut TaskContext::zero_init() as *mut _);
+            return;
+        }
+    };
+    // 线程级资源由 TCB 回收接口统一处理。
+    task.recycle_on_exit(exit_code);
+    
+    //若线程是最后一个存活线程，则将其线程码写入进程退出码,并回收进程资源
+    //同时将子进程移交给initproc
+    let process = task.process();
+    //println!("[kernel] Process {} is exiting with code {} ...", process.getpid(), exit_code);
+    drop(task);
+    let mut proc_inner = process.inner_exclusive_access();
+    proc_inner.alive_task_count -= 1;
+
+    if proc_inner.alive_task_count > 0 {
+        // 还有其他线程存活，不回收进程资源，直接调度下一个线程
+        drop(proc_inner);
+        schedule(&mut TaskContext::zero_init() as *mut _);
+    }else{
+        // 最后一个线程退出，回收进程资源,并将子进程移交给initproc
+        let orphan_children = proc_inner.recycle_on_exit(exit_code);
+        drop(proc_inner);
+        // 如果有子进程，移交给initproc
+        if !orphan_children.is_empty() {
+            println!("[kernel] Process {} orphans {} children to initproc", process.getpid(), orphan_children.len());
+            let initproc = INITTASK.process();
+            for child in orphan_children.iter() {
+                child.inner_exclusive_access().parent = Some(Arc::downgrade(&initproc));
+            }
+            let mut initproc_inner = initproc.inner_exclusive_access();
+            initproc_inner.children.extend(orphan_children);
+        }
+        drop(process);
+        schedule(&mut TaskContext::zero_init() as *mut _);
+    }  
+}
+    /*// 改为暂时不take，schedule到runtasks中统一处理
     let task = current_task().unwrap();
     // remove from tid2task
     remove_from_tid2task(task.gettid());
@@ -211,8 +251,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     
     // schedule next task
     let mut _unused = TaskContext::zero_init();
-    schedule(&mut _unused as *mut _);
-}   
+    println!("[kernel] Process {} exits with code {}, switching to next task ...", pid, exit_code);*/
 #[repr(C)]
 struct InitProcData<T: ?Sized> {
     pub _align: [u64; 0],

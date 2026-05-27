@@ -53,6 +53,21 @@ impl TaskControlBlock {
     pub fn gettid(&self) -> usize {
         self.tid.0
     }
+
+    pub fn recycle_on_exit(&self, exit_code: i32) {
+        remove_from_tid2task(self.gettid());
+
+        let mut inner = self.inner_exclusive_access();
+        inner.exit_code = exit_code;
+        inner.errno = 0;
+        inner.task_status = TaskStatus::Zombie;
+        inner.signals = SignalFlags::empty();
+        inner.signal_mask_backup = None;
+        inner.trap_ctx_backup = None;
+        inner.handling_sig = -1;
+        inner.killed = false;
+        inner.frozen = false;
+    }
 }
 
 pub struct TaskControlBlockInner {
@@ -71,6 +86,7 @@ pub struct TaskControlBlockInner {
 
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
+    pub errno: i32,
     pub signals: SignalFlags,
     pub signal_mask: SignalFlags,
     // the signal which is being handling

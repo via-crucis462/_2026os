@@ -82,6 +82,11 @@ pub fn trap_handler() -> ! {
                 cx.x[17], 
                 [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]]
             );
+            current_task().unwrap().inner_exclusive_access().errno = if result < 0 {
+                (-result) as i32
+            } else {
+                0
+            };
             if result < 0 {
                 warn!("pid[{}] syscall {} returned error code {}", current_task().unwrap().process().pid.0, cx.x[17], result);
             }

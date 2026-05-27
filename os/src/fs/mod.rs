@@ -263,8 +263,8 @@ pub use stdio::{Stdin, Stdout, Stderr};
 
 pub fn init_test_env() {
     println!("[VFS] Mounting true Tmpfs directories in memory...");
-    ROOT_DENTRY.insert(String::from("tmp"), Arc::new(TmpfsDirInode::new(0o777)));
-    ROOT_DENTRY.insert(String::from("var"), Arc::new(TmpfsDirInode::new(0o777)));
+    ROOT_DENTRY.mount_child(String::from("tmp"), Arc::new(TmpfsDirInode::new(0o777)));
+    ROOT_DENTRY.mount_child(String::from("var"), Arc::new(TmpfsDirInode::new(0o777)));
 }
 
 const MAX_SYMLINK_DEPTH: usize = 8; // 地雷1：防止无限递归导致内核栈溢出
