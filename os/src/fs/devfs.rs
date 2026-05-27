@@ -122,13 +122,8 @@ impl super::VfsInode for TtyInode {
     }
     // 终端输出
     fn write_at(&self, _offset: usize, buf: &[u8]) -> usize { 
-        if let Ok(s) = core::str::from_utf8(buf) {
-            print!("{}", s);
-        } else {
-            for &b in buf {
-                print!("{}", b as char);
-            }
-        }
+        let str = core::str::from_utf8(buf).unwrap_or("<invalid utf-8>");
+        print!("{}", str);
         buf.len()
     }
     fn get_size(&self) -> usize { 0 }
