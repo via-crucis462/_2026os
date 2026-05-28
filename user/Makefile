@@ -1,13 +1,25 @@
 export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
 export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
 
-TARGET := riscv64gc-unknown-none-elf
+# Architecture: riscv64 or loongarch64
+ARCH ?= riscv64
+
+ifeq ($(ARCH), riscv64)
+	TARGET := riscv64gc-unknown-none-elf
+	ARCH_NAME := riscv64
+else ifeq ($(ARCH), loongarch64)
+	TARGET := loongarch64-unknown-none
+	ARCH_NAME := loongarch64
+else
+	$(error Unsupported ARCH: $(ARCH). Use riscv64 or loongarch64)
+endif
+
 MODE := release
 APP_DIR := src/bin
 TARGET_DIR := target/$(TARGET)/$(MODE)
-BUILD_DIR := build
-OBJDUMP := rust-objdump --arch-name=riscv64
-OBJCOPY := rust-objcopy --binary-architecture=riscv64
+BUILD_DIR := build/$(ARCH)
+OBJDUMP := rust-objdump --arch-name=$(ARCH_NAME)
+OBJCOPY := rust-objcopy --binary-architecture=$(ARCH_NAME)
 PY := python3
 
 ifeq ($(MODE), release)
@@ -15,7 +27,7 @@ ifeq ($(MODE), release)
 endif
 
 BASE ?= 0
-CHAPTER ?= 0
+CHAPTER = 7
 TEST ?= $(CHAPTER)
 
 ifeq ($(TEST), 0) # No test, deprecated, previously used in v3
@@ -38,7 +50,7 @@ ELFS := $(patsubst $(APP_DIR)/%.rs, $(TARGET_DIR)/%, $(APPS))
 binary:
 	@echo $(ELFS)
 	@if [ ${CHAPTER} -gt 3 ]; then \
-		cargo build $(MODE_ARG) ;\
+		cargo build --target $(TARGET) $(MODE_ARG) ;\
 	else \
 		CHAPTER=$(CHAPTER) python3 build.py ;\
 	fi

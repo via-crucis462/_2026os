@@ -28,9 +28,9 @@ build-la:
 	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)
 
 build-user-rv:
-	cd user-rv && $(MAKE) build
+	cd user && $(MAKE) build ARCH=riscv64
 build-user-la:
-	cd user-la && $(MAKE) build
+	cd user && $(MAKE) build ARCH=loongarch64
 build-user: build-user-rv build-user-la
 
 copy-rv:	
@@ -39,9 +39,9 @@ copy-la:
 	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la
 
 copy-user-rv:
-	cd user-rv && find target/riscv64gc-unknown-none-elf/release/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/riscv/ \;
+	cd user && find target/riscv64gc-unknown-none-elf/release/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/riscv/ \;
 copy-user-la:
-	cd user-la && find target/loongarch64-unknown-none/release/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/la/ \;
+	cd user && find target/loongarch64-unknown-none/release/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/la/ \;
 copy-user: copy-user-rv copy-user-la
 
 copy: copy-rv  copy-user-rv copy-la  copy-user-la
