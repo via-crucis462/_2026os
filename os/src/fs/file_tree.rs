@@ -57,13 +57,15 @@ impl Dentry {
         // 4. 磁盘也没找到，按照要求 panic
         panic!("VFS: File '{}' not found in directory '{}'", name, self.name);
     }
+
+    /// 创建新节点，将其作为self的子节点插入树
+    /// bug/特性：getdents不遍历children，只遍历mounted_children
     pub fn insert(self: &Arc<Self>, name: String, inode: Arc<dyn VfsInode>) -> Arc<Self> {
         let mut children = self.children.lock();
         if let Some(child) = children.get(&name) {
             return child.clone();
         }
         
-        // 创建新节点，并将 parent 指向当前节点（self）
         let new_child = Self::new(
             name.clone(),
             inode,
@@ -73,7 +75,9 @@ impl Dentry {
         children.insert(name, new_child.clone());
         new_child
     }
-    //专用于虚拟文件夹挂载，区别于普通的 insert，insert 是在当前目录下创建一个新文件，而 mount_child 是将另一个完整的 Dentry 树挂载到当前目录下
+
+    /// 在目前的实现中，专用于虚拟文件夹挂载
+    /// bug/特性：getdents不遍历children，只遍历mounted_children
     pub fn mount_child(self: &Arc<Self>, name: String, inode: Arc<dyn VfsInode>) -> Arc<Self> {
         let mut mounted_children = self.mounted_children.lock();
         if let Some(child) = mounted_children.get(&name) {

@@ -4,6 +4,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, lazy};
 use crate::fs::ROOT_DENTRY;
+use crate::fs::Dentry;
 use crate::mm::{PageSize, user_buffer};
 use alloc::vec;
 use crate::fs::devfs::NullInode;
@@ -335,6 +336,53 @@ impl super::VfsInode for TmpfsDirInode {
     }
 }
 
+/// 通过 getdents 枚举目录项，将源目录下所有条目的 inode 映射到目标 lib/lib64
+fn populate_lib_from_dentries(
+    src: &Arc<Dentry>,
+    lib: &Arc<Dentry>,
+    lib64: &Arc<Dentry>,
+) {
+    let mut buf = vec![0u8; 4096];
+    let mut offset: usize = 0;
+    // 循环调用getdents枚举目录项
+    loop {
+        let n = src.inode.getdents(&mut offset, &mut buf);
+        if n <= 0 {
+            break;
+        }
+        let data = &buf[..n as usize];
+        let mut pos = 0;
+        while pos + 19 <= data.len() {
+            // 结构体解析
+            let d_ino = u64::from_ne_bytes(data[pos..pos + 8].try_into().unwrap());
+            let d_reclen =
+                u16::from_ne_bytes(data[pos + 16..pos + 18].try_into().unwrap()) as usize;
+            if d_reclen == 0 || pos + d_reclen > data.len() {
+                break;
+            }
+            // 处理目录项，跳过 "." 和 ".."
+            if d_ino != 0 {
+                let name_start = pos + 19;
+                let name_max = pos + d_reclen;
+                let name_len = data[name_start..name_max]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(name_max - name_start);
+                if let Ok(name) = core::str::from_utf8(&data[name_start..name_start + name_len]) {
+                    if name != "." && name != ".." {
+                        if let Some(child) = src.find_child(name) {
+                            println!("[VFS] Mounted lib entry: {}", name);
+                            lib.mount_child(name.to_string(), child.inode.clone());
+                            lib64.mount_child(name.to_string(), child.inode.clone());
+                        }
+                    }
+                }
+            }
+            pos += d_reclen;
+        }
+    }
+}
+
 pub fn setup_oscomp_env() {
     info!("[VFS] INFO: Start setup_oscomp_env...");
     let root = ROOT_DENTRY.clone();
@@ -419,61 +467,36 @@ pub fn setup_oscomp_env() {
 
         info!("[VFS] Mounted /dev/shm safely");
         if root.find_tree("/dev/shm", true).is_some() {
-        info!("DEBUG: /dev/shm path is VALID");
+            info!("DEBUG: /dev/shm path is VALID");
         } else {
             error!("DEBUG: /dev/shm path is BROKEN!");
-        }
-        // --- 挂载动态链接库 ---
-        // musl
-        if let Some(libc_node) = root.find_tree("/musl/libc.so", true).or_else(|| root.find_tree("/musl/lib/libc.so", true)) {
-            #[cfg(target_arch = "riscv64")]
-            {
-                lib_dentry.insert("ld-musl-riscv64.so.1".to_string(), libc_node.inode.clone());
-            }
-            
-            #[cfg(target_arch = "loongarch64")]
-            {
-                lib_dentry.insert("ld-musl-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
-                lib64_dentry.insert("ld-musl-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
-            }
-            
-            lib_dentry.insert("libc.so".to_string(), libc_node.inode.clone());
-            lib64_dentry.insert("libc.so".to_string(), libc_node.inode.clone());
-            info!("[VFS] Populated libc.so symlinks");
-        }
-        
+        }        
     } else {
         warn!("[VFS] WARNING: /musl not found, skipped busybox mapping.");
     }
-    // mount glibc ld
-    if let Some(glibc_dir) = root.find_tree("/glibc", true) {
-        #[cfg(target_arch = "loongarch64")]
-        {
-            if let Some(libc_node) = root.find_tree("/glibc/lib/ld-linux-loongarch-lp64d.so.1", true) {
-                lib_dentry.insert("ld-linux-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
-            }
-            if let Some(libc_node) = root.find_tree("/glibc/lib/libc.so.6", true) {
-                lib_dentry.insert("libc.so.6".to_string(), libc_node.inode.clone());
-            }
-            if let Some(libc_node) = root.find_tree("/glibc/lib/libm.so.6", true) {
-                lib_dentry.insert("libm.so.6".to_string(), libc_node.inode.clone());
-            }
-        }
-        #[cfg(target_arch = "riscv64")]
-        {
-            if let Some(libc_node) = root.find_tree("/glibc/lib/ld-linux-riscv64-lp64d.so.1", true) {
-                lib_dentry.insert("ld-linux-riscv64-lp64d.so.1".to_string(), libc_node.inode.clone());
-            }
-            if let Some(libc_node) = root.find_tree("/glibc/lib/libc.so.6", true) {
-                lib_dentry.insert("libc.so.6".to_string(), libc_node.inode.clone());
-            }
-            if let Some(libc_node) = root.find_tree("/glibc/lib/libm.so.6", true) {
-                lib_dentry.insert("libm.so.6".to_string(), libc_node.inode.clone());
-            }
-        }
-    } else {
-        warn!("[VFS] WARNING: /glibc not found, skipped glibc mapping.");
+
+    // --- 挂载 动态链接库 & 加载器 ---
+    // musl
+    let libc_node = root.find_tree("/musl/lib", true).unwrap();
+    populate_lib_from_dentries(&libc_node, &lib_dentry, &lib64_dentry);
+    let ld = libc_node.find_child("libc.so").unwrap();
+    #[cfg(target_arch = "loongarch64")]
+    {
+        lib64_dentry.mount_child("ld-musl-loongarch-lp64d.so.1".to_string(), ld.inode.clone());
+        lib_dentry.mount_child("ld-musl-loongarch-lp64d.so.1".to_string(), ld.inode.clone());
     }
+    #[cfg(target_arch = "riscv64")]
+    {
+        lib64_dentry.mount_child("ld-musl-riscv64.so.1".to_string(), ld.inode.clone());
+        lib_dentry.mount_child("ld-musl-riscv64.so.1".to_string(), ld.inode.clone());
+    }
+    info!("[VFS] Populated musl lib symlinks");
+
+    // glibc
+    let libc_node = root.find_tree("/glibc/lib", true).unwrap();
+    populate_lib_from_dentries(&libc_node, &lib_dentry, &lib64_dentry);
+    info!("[VFS] Populated glibc lib symlinks");
+
 
     if root.find_tree("/dev/shm", true).is_some() {
         info!("DEBUG: /dev/shm path is VALID");
@@ -484,6 +507,7 @@ pub fn setup_oscomp_env() {
     info!("[VFS] setup_oscomp_env done.");
 }
 
+// 挂载 /sys/kernel/mm/hugepages
 fn mount_hugepages() -> Arc<super::Dentry> {
     let root = ROOT_DENTRY.clone();
     let sys_dentry = if let Some(sys) = root.find_tree("/sys", true) {
@@ -506,6 +530,6 @@ fn mount_hugepages() -> Arc<super::Dentry> {
     } else {
         mm_dentry.insert("hugepages".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
-    info!("[VFS] Mounted /dev/hugepages");
+    info!("[VFS] Mounted /sys/kernel/mm/hugepages");
     hugepages_dentry
 }
