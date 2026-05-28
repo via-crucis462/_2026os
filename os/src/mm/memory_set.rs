@@ -253,6 +253,7 @@ impl MemorySet {
                     (ekernel_addr + DMA_SIZE).into(),
                     MapType::Identical,
                     MapPermission::R | MapPermission::W,
+                    PageSize::Page4K
                 ),
                 None,
                 ekernel_addr,
@@ -265,6 +266,7 @@ impl MemorySet {
                     (MEMORY_END - 0x100_0000).into(),
                     MapType::Identical,
                     MapPermission::R | MapPermission::W,
+                    PageSize::Page4K
                 ),
                 None,
                 ekernel_addr + DMA_SIZE,
@@ -818,14 +820,7 @@ impl MemorySet {
     }
     #[cfg(target_arch = "loongarch64")]
     pub fn set_pte_dirty(&mut self, vpn: VirtPageNum) -> bool {
-        let page_size = self.areas.iter().find_map(|area| {
-            if vpn >= area.vpn_range.get_start() && vpn < area.vpn_range.get_end() {
-                Some(area.page_size)
-            } else {
-                None
-            }
-        })?;
-        if let Some(pte) = self.page_table.find_pte(vpn, page_size) {
+        if let Some((pte, _)) = self.page_table.find_pte(vpn) {
             pte.set_dirty();
             true
         } else {
@@ -1349,7 +1344,7 @@ impl MapArea {
         #[cfg(target_arch = "loongarch64")]
         // la64在内核态不需要用页表
         if self.map_type !=  MapType::Identical{
-            page_table.map(vpn, ppn, pte_flags);
+            page_table.map(vpn, ppn, pte_flags, page_size);
         }
         #[cfg(target_arch = "riscv64")]
         page_table.map(vpn, ppn, pte_flags, page_size);

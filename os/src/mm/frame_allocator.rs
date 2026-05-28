@@ -4,7 +4,6 @@ use crate::arch::config::{DMA_SIZE, MEMORY_END};
 use crate::sync::MPSafeCell;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use riscv::addr::page;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
 

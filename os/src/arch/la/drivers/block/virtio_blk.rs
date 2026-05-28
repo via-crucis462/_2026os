@@ -44,7 +44,7 @@ extern "C"{
 lazy_static!{
     pub static ref QUEUE_FRAMES: MPSafeCell<DmaMemManager> = unsafe { MPSafeCell::new(DmaMemManager {
         start_ppn: PhysPageNum(ekernel as *const() as usize / PAGE_SIZE),
-        end_ppn: PhysAddr(ekernel as *const() as usize + DMA_SIZE).floor(),
+        end_ppn: PhysAddr(ekernel as *const() as usize + DMA_SIZE).std_floor(),
         allocated: Vec::new(),
     }) };
 }
@@ -138,7 +138,7 @@ unsafe impl Hal for VirtioHal {
         let paddr = paddr as usize & 0x00FF_FFFF_FFFF_FFFF;// 应对传入的是窗口地址的情况
         info!("deallocating DMA memory starts at {:#x} , end: {:#x} pages.", paddr, pages);
         let mut manager = QUEUE_FRAMES.exclusive_access();
-        let start_ppn = PhysAddr(paddr as usize).floor() ;
+        let start_ppn = PhysAddr(paddr as usize).std_floor(); // 硬件统一使用标准页
         let end_ppn = PhysPageNum(start_ppn.0 + pages);
         // 简化实现：只要有交集的块就直接整个删除
         if let Some(pos) = manager.allocated.iter().position(|&r| 

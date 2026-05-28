@@ -13,11 +13,17 @@ bitflags!{
         const D = 1 << 1;
         const PLV0 = 1 << 2;
         const PLV1 = 1 << 3;
-        const MAT0 =  1 << 4;
-        const MAT1 =  1 << 5;
-        const G =  1 << 6;
-        const P =  1 << 7;
-        const W =  1 << 8;
+        const MAT0 = 1 << 4;
+        const MAT1 = 1 << 5;
+        const G = 1 << 6;
+        // H位与G位复用第6位，需结合页表级别来区分大页和全局属性
+        // 详细来说，如果页表还没走到叶子，但发现第6位被设置，则说明这是一个大页
+        // 此时全局位在12位
+        const H = 1 << 6;
+        const P = 1 << 7;
+        const W = 1 << 8;
+        // 大页的G位
+        const HG = 1 << 12;
         const NR = 1 << 61;
         const NX = 1 << 62;
         const RPLV = 1 << 63;
@@ -117,9 +123,16 @@ impl PageTableEntry {
     pub fn executable(&self) -> bool {
         (self.flags() & PTEFlagsLA64::NX) == PTEFlagsLA64::empty()
     }
-    //设置脏位
+    // 设置脏位
     pub fn set_dirty(&mut self) {
         self.bits |= PTEFlagsLA64::D.bits() as usize;
+    }
+    // 大页标志
+    pub fn is_huge_page(&self) -> bool {
+        (self.flags() & PTEFlagsLA64::H) != PTEFlagsLA64::empty()
+    }
+    pub fn set_huge_page(&mut self) {
+        self.bits |= PTEFlagsLA64::H.bits() as usize;
     }
 }
 

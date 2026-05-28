@@ -2,7 +2,6 @@ use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAdd
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use riscv::addr::page;
 use crate::arch::config::PAGE_SIZE;
 use crate::arch::trap::{current_trap_cx_user_va, TrapContext};
 use crate::mm::MapArea;
@@ -66,7 +65,7 @@ impl PageTable {
             #[cfg(target_arch = "riscv64")]
             root_ppn: PhysPageNum::from(token & ((1usize << 44) - 1)),
             #[cfg(target_arch = "loongarch64")]
-            root_ppn: PhysAddr(token).floor(),
+            root_ppn: PhysAddr(token).std_floor(),
             frames: Vec::new(),
         }
     }
@@ -100,6 +99,10 @@ impl PageTable {
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
             if i == page_size.walk_level() {
+                if i != 2 {
+                    // 页表提前结束，设置大页
+                    pte.set_huge_page();
+                }
                 result = Some(pte);
                 break;
             }
@@ -112,7 +115,7 @@ impl PageTable {
         }
         result
     }
-
+ 
     /// Find PageTableEntry by VirtPageNum
     #[cfg(target_arch = "riscv64")]
     pub fn find_pte(&self, vpn: VirtPageNum) -> Option<(&mut PageTableEntry, PageSize)> {
@@ -141,10 +144,9 @@ impl PageTable {
             ppn = pte.ppn();
         }
         None
-        
     }
     #[cfg(target_arch = "loongarch64")]
-    pub fn find_pte(&self, vpn: VirtPageNum, page_size: PageSize) -> Option<&mut PageTableEntry> {
+    pub fn find_pte(&self, vpn: VirtPageNum,) -> Option<(&mut PageTableEntry, PageSize)> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;
@@ -155,13 +157,20 @@ impl PageTable {
                 //println!("find_pte: vpn = {:?}, i = {}, pte is empty", vpn, i);
                 return None;
             }
-            if i == 2 {
-                result = Some(pte);
-                break;
+            if i == 2 || (pte.is_huge_page()){
+                return Some((
+                    pte, 
+                    match i {
+                        0 => PageSize::Page1G,
+                        1 => PageSize::Page2M,
+                        2 => PageSize::Page4K,
+                        _ => unreachable!(),
+                    }
+                ));
             }
             ppn = pte.ppn();
         }
-        result
+        None
     }
     /// set the map between virtual page number and physical page number
     #[allow(unused)]
@@ -210,7 +219,7 @@ impl PageTable {
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
     }
     #[cfg(target_arch = "loongarch64")]
-    pub fn set_entry(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags, page_size: PageSize) {
+    pub fn set_entry(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let (pte, size) = self.find_pte(vpn).unwrap();
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
         if (flags & PTEFlags::W) != PTEFlags::empty() {

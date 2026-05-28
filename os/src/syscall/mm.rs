@@ -2,7 +2,6 @@
 
 use super::*;
 use Errno::*;
-use riscv::register::satp::Mode;
 use crate::{auth::{PermSet, PermStat, FileMode}, mm::shm::*};
 use bitflags::bitflags;
 

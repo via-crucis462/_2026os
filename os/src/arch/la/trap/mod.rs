@@ -334,7 +334,7 @@ pub fn trap_handler() -> ! {
                 let proc = task.process();
                 let mut inner = proc.inner_exclusive_access();
                 let sp = current_trap_cx().r[3];
-                let vpn = VirtAddr::from(badv).floor();
+                let vpn = VirtAddr::from(badv).std_floor();
                 if ecode == 4 {
                     if let Some(pte) = inner.memory_set.translate(vpn) {
                         if pte.is_valid() && pte.writable() && inner.memory_set.set_pte_dirty(vpn) {
