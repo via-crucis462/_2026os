@@ -370,7 +370,8 @@ fn populate_lib_from_dentries(
                     .unwrap_or(name_max - name_start);
                 if let Ok(name) = core::str::from_utf8(&data[name_start..name_start + name_len]) {
                     if name != "." && name != ".." {
-                        if let Some(child) = src.find_child(name) {
+                        // 用 find_tree 跟随符号链接，拿到真实文件 inode
+                        if let Some(child) = src.find_tree(name, true) {
                             println!("[VFS] Mounted lib entry: {}", name);
                             lib.mount_child(name.to_string(), child.inode.clone());
                             lib64.mount_child(name.to_string(), child.inode.clone());
@@ -494,6 +495,10 @@ pub fn setup_oscomp_env() {
 
     // glibc
     let libc_node = root.find_tree("/glibc/lib", true).unwrap();
+    let user_lib64_dentry = usr_dentry.mount_child("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let user_lib_dentry = usr_dentry.mount_child("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    // 同时挂载到 /lib* 和 /usr/lib*
+    populate_lib_from_dentries(&libc_node, &user_lib_dentry, &user_lib64_dentry);
     populate_lib_from_dentries(&libc_node, &lib_dentry, &lib64_dentry);
     info!("[VFS] Populated glibc lib symlinks");
 
