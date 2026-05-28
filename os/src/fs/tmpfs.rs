@@ -427,12 +427,18 @@ pub fn setup_oscomp_env() {
         // musl
         if let Some(libc_node) = root.find_tree("/musl/libc.so", true).or_else(|| root.find_tree("/musl/lib/libc.so", true)) {
             #[cfg(target_arch = "riscv64")]
-            lib_dentry.insert("ld-musl-riscv64.so.1".to_string(), libc_node.inode.clone());
+            {
+                lib_dentry.insert("ld-musl-riscv64.so.1".to_string(), libc_node.inode.clone());
+            }
             
             #[cfg(target_arch = "loongarch64")]
-            lib_dentry.insert("ld-musl-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
+            {
+                lib_dentry.insert("ld-musl-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
+                lib64_dentry.insert("ld-musl-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
+            }
             
             lib_dentry.insert("libc.so".to_string(), libc_node.inode.clone());
+            lib64_dentry.insert("libc.so".to_string(), libc_node.inode.clone());
             info!("[VFS] Populated libc.so symlinks");
         }
         

@@ -7,7 +7,7 @@ LA_SMP ?= 4
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
 # default, sh, ltp
-INIT ?= ltp
+INIT ?= 	sh
 RV_ELF ?= os/target/riscv64gc-unknown-none-elf/$(MODE)/os
 LA_ELF ?= os/target/loongarch64-unknown-none/$(MODE)/os
 
@@ -31,10 +31,9 @@ build-user-rv:
 	cd user-rv && $(MAKE) build
 build-user-la:
 	cd user-la && $(MAKE) build
-build-user: build-user-rv 
-#build-user-la
+build-user: build-user-rv build-user-la
 
-copy-rv:
+copy-rv:	
 	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv
 copy-la:
 	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la
@@ -43,12 +42,9 @@ copy-user-rv:
 	cd user-rv && find target/riscv64gc-unknown-none-elf/release/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/riscv/ \;
 copy-user-la:
 	cd user-la && find target/loongarch64-unknown-none/release/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/la/ \;
-copy-user: copy-user-rv 
-#copy-user-la
+copy-user: copy-user-rv copy-user-la
 
-copy: copy-rv  copy-user-rv 
-# copy-la
-# copy-user-la
+copy: copy-rv  copy-user-rv copy-la  copy-user-la
 
 build: build-rv 
 # build-la

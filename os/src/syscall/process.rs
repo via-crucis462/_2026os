@@ -1201,6 +1201,9 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             false,
         );
         // exec 成功后不会回到旧程序，返回 0 可避免 trap 收尾把 argc 写进新程序 a0。
+        #[cfg(target_arch = "loongarch64")]
+        // la应该手动刷新指令缓存
+        unsafe { core::arch::asm!("ibar 0"); }
         0
     } else {
         let mut check_path = alloc::string::String::new();
@@ -1925,6 +1928,10 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
             }
         }
     }
+    #[cfg(target_arch = "loongarch64")]
+    // 手动刷新指令缓存
+    unsafe { core::arch::asm!("ibar 0"); }
+    
     debug!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
     ret as isize
 }

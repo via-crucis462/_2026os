@@ -67,9 +67,9 @@ impl TrapContext {
             entry, sp
         );
         // app启动需设置特权级为用户态，也就是plv=3
-        // 另，开启中断使能，开启分页
+        // 另，开启分页在这里是无效的，高位是保留位
         // 注意，_restore函数会将prmd的值写入prmd寄存器，然后才ertn，所以不应该设置到crmd寄存器中，否则出问题
-        let default_status: usize  = 0b0001_0111; 
+        let default_status: usize  = 0b0000_0111; 
         
         let mut cx = Self {
             r: [0; 32],
