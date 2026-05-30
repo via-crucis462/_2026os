@@ -78,6 +78,7 @@ test-la: build-user-la copy-user-la build-la copy-la
 	-rtc base=utc \
 	| tee kernel_output.log
 
+debug-rv: MODE = debug
 debug-rv: build-user-rv copy-user-rv build-rv copy-rv
 	@rm -f kernel_output.log
 	@qemu-system-riscv64 -machine virt \
@@ -92,6 +93,7 @@ debug-rv: build-user-rv copy-user-rv build-rv copy-rv
 	-S -gdb tcp::$(RV_GDB_PORT) \
 	| tee kernel_output.log
 
+debug-la: MODE = debug
 debug-la: build-user-la copy-user-la build-la copy-la
 	@rm -f kernel_output.log
 	@qemu-system-loongarch64 \
