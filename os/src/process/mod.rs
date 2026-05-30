@@ -311,6 +311,8 @@ pub fn add_initproc() {
     info!("add_initproc: pid={}", INITTASK.getpid());
 }
 
+
+/* rcore（小幅修改）的旧实现，留作参考
 /// Check if the current task has any signal to handle
 pub fn check_signals_error_of_current() -> Option<(i32, &'static str)> {
     let task = current_task().unwrap();
@@ -325,18 +327,8 @@ pub fn check_signals_error_of_current() -> Option<(i32, &'static str)> {
     task_inner.signals.check_error()
 }
 
-/// Add signal to the current task
-pub fn current_add_signal(signal: SignalFlags) {
-    let task = current_task().unwrap();
-    let mut task_inner = task.inner_exclusive_access();
-    task_inner.signals |= signal;
-    // println!(
-    //     "[K] current_add_signal:: current task sigflag {:?}",
-    //     task_inner.signals
-    // );
-}
-
 /// call kernel signal handler
+/// 由内核处理信号
 fn call_kernel_signal_handler(signal: SignalFlags) {
     let task = current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
@@ -360,49 +352,52 @@ fn call_kernel_signal_handler(signal: SignalFlags) {
         }
     }
 }
+*/
+
+/// Add signal to the current task
+/// 给当前任务加上信号
+pub fn current_add_signal(signal: SignalFlags) {
+    let task = current_task().unwrap();
+    let mut task_inner = task.inner_exclusive_access();
+    task_inner.signals |= signal;
+    // println!(
+    //     "[K] current_add_signal:: current task sigflag {:?}",
+    //     task_inner.signals
+    // );
+}
+
+/// 处理信号
+/// bug：目前的实现一次只处理一个信号，效率可能较低
 pub fn handle_signals() {
     let task = current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
-    //--------------------调试信息----------------
-    let raw_signals = task_inner.signals.bits();
-    let raw_mask = task_inner.signal_mask.bits();
-    /*println!(
-        "[SIG_DEBUG] PID: {} | Pending: {:#x} | Mask: {:#x}", 
-        task.getpid(), 
-        raw_signals, 
-        raw_mask
-    );*/
-    //--------------------调试信息----------------
-    
-    // 2. 检查是否有未屏蔽的信号 (或者不可屏蔽的 SIGKILL/SIGSTOP)
-    let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
-    let unmaskable = task_inner.signals.bits()
-        & (SignalFlags::SIGKILL.bits() | SignalFlags::SIGSTOP.bits());
-    let final_pending = pending | unmaskable;
-    //--------------------调试信息----------------
-   /*  if raw_signals != 0 {
-        println!(
-            "[SIG_DEBUG] Final Pending: {:#x} (Unmaskable: {:#x})", 
-            final_pending, 
-            unmaskable
-        );
-    }*/
-    //--------------------调试信息----------------
-    if final_pending != 0 {
-        // 3. 取出第一个需要处理的信号编号 (1-based)
-       
-        let sig = final_pending.trailing_zeros() as usize + 1;
-        let flag = SignalFlags::from_bits(1 << (sig - 1)).unwrap();
-       
-       
-        info!("[SIG PROBE] Calling handler for sig: {}, final_pending: {:#x}", sig, final_pending);
-        //  核心：必须先放锁，再调用你写好的处理函数！
-        drop(task_inner); 
 
-       
-        call_user_signal_handler(sig, flag);
-    }else {
+    // 不可被屏蔽的信号集
+    let unmaskable = (SignalFlags::SIGKILL | SignalFlags::SIGSTOP);
+    // 从掩码中移除不可屏蔽
+    task_inner.signal_mask.remove(unmaskable);
+    // 未决（待处理）信号 = 进程信号 & ~掩码（屏蔽的信号）
+    let raw = task_inner.signals.clone();
+    let pending = {
+        let mut copy = raw;
+        copy.remove(task_inner.signal_mask);
+        copy
+    };
+    let pending_bits = pending.bits();
 
+    if pending_bits != 0 {
+        // m号信号flag刚好对应尾部m个0
+        let sig = pending_bits.trailing_zeros() as usize;
+        let flag = SignalFlags::from_bits(1 << sig).unwrap();
+        // 将当前处理的信号从待处理中移除
+        task_inner.signals.remove(flag);
+        // 释放锁
+        drop(task_inner);
+        info!("[SIG PROBE] Calling handler for sig: {}, final_pending: {:#x}", sig, pending_bits);
+        // 跳到用户态的处理函数
+        call_signal_handler(sig, flag);
+    } else {
+        // 无待处理信号
         let raw_signals = task_inner.signals.bits();
         let raw_mask = task_inner.signal_mask.bits();
         if raw_signals != 0 {
@@ -410,8 +405,10 @@ pub fn handle_signals() {
         }
     }
 }
+
 /// call user signal handler
-fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
+/// 跳到用户态的信号处理函数
+fn call_signal_handler(sig: usize, signal: SignalFlags) {
     let task = current_task().unwrap();
     let proc = task.process();
     
@@ -420,10 +417,6 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
         proc_inner.signal_actions.table[sig - 1]
     };  
     let handler = action.handler;
-    let restorer = action.restorer;
-
-    const SIG_DFL: usize = 0;
-    const SIG_IGN: usize = 1;
     
     let mut task_inner = task.inner_exclusive_access();
     let before_bits = task_inner.signals.bits();
@@ -434,14 +427,18 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
         task.getpid(), signal, sig, before_bits, after_bits
     );
 
+    // handler如果是0，1 表示默认/忽略
+    // 默认，表示由内核处理
+    const SIG_DFL: usize = 0;
+    // 忽略
+    const SIG_IGN: usize = 1;
 
     if handler == SIG_IGN {
-        return; // 直接返回，无事发生，绝不修改 handling_sig！
-    } 
-
-    else if handler != SIG_DFL {
-
-        
+        return; // 返回，正常trap_return
+    }
+    
+    if handler != SIG_DFL {
+        // 非默认，回到用户态处理
         let trap_ctx = task_inner.get_trap_cx();
         task_inner.trap_ctx_backup = Some(*trap_ctx);
         task_inner.signal_mask_backup = Some(task_inner.signal_mask);
@@ -451,41 +448,41 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
         // 临时屏蔽当前信号，防止处理时被同一个信号再次打断
         task_inner.signal_mask.insert(signal);
         
-
         trap_ctx.set_rt(handler);
         trap_ctx.set_a0(sig);
 
         // 设置返回地址 (ra)
+        /* 阅读前人代码发现riscv和loongarch根本不需要设置（会炸），保留注释留作提醒
         if restorer != 0 {
             trap_ctx.set_ra(restorer);
         } else {
-
             warn!("[KERNEL WARNING] restorer is 0! Injecting trampoline on stack...");
-
         }
-
-    } 
-  
-    else {
+        */
+    } else { 
+        // 由内核处理
         match signal {
             SignalFlags::SIGCHLD | SignalFlags::SIGURG | SignalFlags::SIGWINCH => {
-                // 默认忽略的信号，直接打个日志就行
+                // 目前的实现这些默认忽略
                 // trace!("[K] ignore default signal {:?}", signal);
             }
              SignalFlags::SIGSTOP => {
                 task_inner.frozen = true;
             }
-            SignalFlags::SIGCONT => {
+            SignalFlags::SIGCONT => { // continue
                 task_inner.frozen = false;
             }
             _ => {
-                // 默认终止进程的信号
+                // 其他信号默认杀死任务
+                // 此处标注为kill后稍后会调用exit_current_and_run_next，这里不直接调用
                 task_inner.killed = true;
                 // println!("[K] default terminate for signal {:?}", signal);
             }
         }
     }
 }   
+
+/* rcore的实现修改而来，目前不被调用了，留作参考
 /// Check if the current task has any signal to handle
 /// 仅部分修改
 fn check_pending_signals() {
@@ -495,7 +492,6 @@ fn check_pending_signals() {
     let signals = task_inner.signals.bits();
     let mask = task_inner.signal_mask.bits();
     let handling = task_inner.handling_sig;
-    
 
     if signals != 0 {
         info!("[PROBE 3.1] check_pending: signals={:#x}, mask={:#x}, handling_sig={}", signals, mask, handling);
@@ -522,16 +518,13 @@ fn check_pending_signals() {
             if !is_masked {
                 let mut masked = false;
                 if task_inner.handling_sig != -1 {
-           
                     masked = true; 
                     info!("[PROBE 3.3] skipped sig {} because currently handling {}", sig, task_inner.handling_sig);
                 }
-                
                 if !masked {
                     info!("[PROBE 3.4] delivering sig {} to user handler!", sig);
-                    drop(task_inner);
                     drop(proc_inner);
-                    
+                    drop(task_inner);
                     if signal == SignalFlags::SIGKILL || signal == SignalFlags::SIGSTOP || signal == SignalFlags::SIGCONT {
                         call_kernel_signal_handler(signal);
                     } else {
@@ -542,4 +535,4 @@ fn check_pending_signals() {
             }
         }
     }
-}
+}*/

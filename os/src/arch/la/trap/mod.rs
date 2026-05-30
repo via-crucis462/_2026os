@@ -8,7 +8,10 @@ use crate::mm::{PageTable, VirtAddr};
 use crate::syscall::syscall;
 use crate::arch::mm::flush_tlb_for_asid;
 use crate::task::{
-    KernelStack, SignalFlags, check_signals_error_of_current, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token, exit_current_and_run_next, handle_signals, suspend_current_and_run_next
+    KernelStack, SignalFlags,
+    current_add_signal, current_task, current_tid, current_trap_cx,
+    current_user_token, exit_current_and_run_next,
+    suspend_current_and_run_next, handle_signals
 };
 use crate::arch::timer::set_next_trigger;
 use crate::net::net_poll;
@@ -480,11 +483,13 @@ pub fn trap_handler() -> ! {
         "[trap_handler] after handle_signals: cause={:?}, estat={:#x}, era={:#x}, badv={:#x}, badi={:#x}",
         cause, estat, era, badv, badi
     );*/
+    /* 
     // check error signals (if error then exit)
     if let Some((errno, msg)) = check_signals_error_of_current() {
         trace!("[kernel] trap_handler: .. check signals {}", msg);
         exit_current_and_run_next(errno);
     }
+    */
     /*println!(
         "[trap_return] estat={:#x}, era_csr={:#x}, badv={:#x}, badi={:#x}, next_era={:#x}, ra={:#x}, sp={:#x}",
         estat,
@@ -505,6 +510,7 @@ pub fn trap_handler() -> ! {
 pub fn trap_return() -> ! {
     //set_user_trap_entry();
     // 直接用物理地址
+    handle_signals();
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
     let id = current_user_asid();

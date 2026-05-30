@@ -40,8 +40,7 @@ bitflags! {
         const SIGPWR    = 1 << (30 - 1);  // 电源故障
         const SIGSYS    = 1 << (31 - 1);  // 系统调用参数错误
 
-        /* --- 实时信号 (Real-time Signals) --- */
-        /* Linux 规范中 SIGRTMIN 通常是 34, 这里定义全部 32 个位 */
+        // 实时信号
         const SIGRTMIN    = 1 << (32 - 1);
         const SIGRT_33    = 1 << (33 - 1);
         const SIGRT_34    = 1 << (34 - 1);
@@ -58,7 +57,7 @@ bitflags! {
         const SIGRT_45    = 1 << (45 - 1);
         const SIGRT_46    = 1 << (46 - 1);
         const SIGRT_47    = 1 << (47 - 1);
-        const SIGRT_48    = 1 << (48 - 1); // LTP kill02 正在测试的信号
+        const SIGRT_48    = 1 << (48 - 1); // LTP kill02 测试的信号
         const SIGRT_49    = 1 << (49 - 1);
         const SIGRT_50    = 1 << (50 - 1);
         const SIGRT_51    = 1 << (51 - 1);
@@ -73,9 +72,11 @@ bitflags! {
         const SIGRT_60    = 1 << (60 - 1);
         const SIGRT_61    = 1 << (61 - 1);
         const SIGRT_62    = 1 << (62 - 1);
+        const SIGRT_63    = 1 << (63 - 1); // 增加一行填满64位，方便遍历
         const SIGRTMAX    = 1 << (64 - 1);
     }
 }
+
 impl SignalFlags {
     /// Check if there is an error in the signal flags
     pub fn check_error(&self) -> Option<(i32, &'static str)> {
@@ -95,5 +96,14 @@ impl SignalFlags {
             // warn!("[kernel] signalflags check_error  {:?}", self);
             None
         }
+    }
+    /// 转换为用户态定义的信号编号
+    pub fn number(&self) -> Option<usize> {
+        for i in 0..=MAX_SIG {
+            if self.contains(SignalFlags::from_bits(1 << i).unwrap()) {
+                return Some(i + 1); // 返回用户传入的1-based编号
+            }
+        }
+        None
     }
 }

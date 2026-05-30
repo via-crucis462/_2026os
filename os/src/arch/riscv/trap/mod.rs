@@ -18,7 +18,9 @@ use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 use crate::mm::VirtAddr;
 use crate::syscall::syscall;
 use crate::task::{
-    KernelStack, SignalFlags, check_signals_error_of_current, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token, exit_current_and_run_next, handle_signals, suspend_current_and_run_next
+    KernelStack, SignalFlags,current_task, current_tid, 
+    current_trap_cx, current_user_token, exit_current_and_run_next,
+    suspend_current_and_run_next, handle_signals, current_add_signal
 };
 use crate::arch::timer::get_time_ms;
 use alloc::sync::Arc;
@@ -205,8 +207,7 @@ pub fn trap_cx_va_by_kernel_stack(kernel_stack: &KernelStack) -> usize {
 #[no_mangle]
 /// return to user space
 pub fn trap_return() -> ! {
-
-    crate::process::handle_signals();
+    handle_signals();
     if current_task().unwrap().inner_exclusive_access().killed {
         info!("[SIG PROBE] EXECUTING DEATH SENTENCE FOR PID!");
         exit_current_and_run_next(-1); 
