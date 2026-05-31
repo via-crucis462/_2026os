@@ -4,7 +4,7 @@ use bitflags::*;
 pub const MAX_SIG: usize = 64;
 
 bitflags! {
-    /// Linux 信号定义
+    /// 内核态的信号位图
     /// 补充：用户传入的是1based的整数编号，内核使用0-based的位图，所以定义时都减1
     pub struct SignalFlags: u64 {
         //                      * 星号一列是用户传入的值

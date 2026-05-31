@@ -9,6 +9,7 @@
     .section .text.trampoline
     .globl __alltraps
     .globl __restore
+    .globl __call_sig_rt
     .globl csr_info 
     .align 4
 __alltraps:
@@ -83,3 +84,7 @@ __restore:
     csrwr $sp, 0x502
     # now sp->user_stack, 0x502->*TrapContext
     ertn
+
+__call_sig_rt:
+    li.d $a7, 139
+    syscall 0

@@ -62,9 +62,8 @@ impl TaskControlBlock {
         inner.errno = 0;
         inner.task_status = TaskStatus::Zombie;
         inner.signals = SignalFlags::empty();
-        inner.signal_mask_backup = None;
-        inner.trap_ctx_backup = None;
-        inner.handling_sig = -1;
+        inner.signal_mask_backup.clear();
+        inner.trap_ctx_backup.clear();
         inner.killed = false;
         inner.frozen = false;
     }
@@ -89,14 +88,14 @@ pub struct TaskControlBlockInner {
     pub errno: i32,
     pub signals: SignalFlags,
     pub signal_mask: SignalFlags,
-    // the signal which is being handling
-    pub handling_sig: isize,
-    pub signal_mask_backup: Option<SignalFlags>,
+    /// 信号嵌套处理时的掩码栈（当前未完全验证行为是否正确，初步测试没问题）
+    pub signal_mask_backup: Vec<SignalFlags>,
     // if the task is killed
     pub killed: bool,
     // if the task is frozen by a signal
     pub frozen: bool,
-    pub trap_ctx_backup: Option<TrapContext>,
+    /// 信号嵌套处理时的上下文栈（当前未完全验证行为是否正确，初步测试没问题）
+    pub trap_ctx_backup: Vec<TrapContext>,
 
     pub clear_child_tid: usize,// 线程清理指针
 }

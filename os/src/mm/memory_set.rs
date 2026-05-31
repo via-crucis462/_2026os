@@ -32,7 +32,6 @@ extern "C" {
     fn sbss_with_stack();
     fn ebss();
     fn ekernel();
-    #[cfg(target_arch = "riscv64")]
     fn strampoline();
 }
 
@@ -178,6 +177,17 @@ impl MemorySet {
             PageSize::Page4K // 默认标准页大小
         );
     }
+
+    // 用户态使用的跳板页（主要用于信号处理后恢复）
+    fn map_user_trampoline(&mut self) {
+        info!("mapping user trampoline");
+        self.page_table.map(
+            VirtAddr::from(USER_TRAMPOLINE).into(),
+            PhysAddr::from(strampoline as *const () as usize).into(),// 高位0x9...被截断
+            PTEFlags::R | PTEFlags::X | PTEFlags::U,
+            PageSize::Page4K // 默认标准页大小
+        );
+    }
     /// Without kernel stacks.
     pub fn new_kernel() -> Self {
         let mut memory_set = Self::new_bare();
@@ -193,8 +203,10 @@ impl MemorySet {
         // 映射跳板页
         // la64下不映射到内核空间
         #[cfg(target_arch = "riscv64")]
+        {
         memory_set.map_trampoline();
-
+        memory_set.map_user_trampoline();
+        }
         info!("mapping .text section");
         memory_set.push(
             MapArea::new(
@@ -327,6 +339,9 @@ impl MemorySet {
         // riscv映射跳板
         #[cfg(target_arch = "riscv64")]
         memory_set.map_trampoline();
+
+        // 用户态信号处理后恢复跳板
+        memory_set.map_user_trampoline();
         
         //读取elf头部，获取程序头表等信息
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
@@ -587,6 +602,8 @@ impl MemorySet {
         // map trampoline
         #[cfg(target_arch = "riscv64")]
         memory_set.map_trampoline();
+        // 用户态信号恢复跳板
+        memory_set.map_user_trampoline();
         
         // copy data sections/trap_context/user_stack
         for idx in 0..user_space.areas.len() {

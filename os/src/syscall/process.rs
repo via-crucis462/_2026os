@@ -2,6 +2,8 @@
 //! 进程管理相关系统调用实现
 //! 内存管理也暂时放在此处，后续迁移到mm
 
+use core::panic;
+
 use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{get_hart_id};
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
@@ -343,26 +345,11 @@ pub fn sys_chroot(path: usize) -> isize {
 
     0
 }
+/// 信号处理后的恢复
 pub fn sys_rt_sigreturn() -> isize {
-    let task = current_task().unwrap();
-    let mut inner = task.inner_exclusive_access();
-    
-    // 1. 清除当前正在处理的信号标记
-    inner.handling_sig = -1;
-    
-    // 2. 还原被打断时的上下文
-    if let Some(backup) = inner.trap_ctx_backup.take() {
-        *inner.get_trap_cx() = backup;
-    }
-    
-    // 3. 还原被打断前原有的信号掩码屏蔽集
-    if let Some(mask_backup) = inner.signal_mask_backup.take() {
-        inner.signal_mask = mask_backup;
-    }
-    
-    // 返回原有的 a0
-    inner.get_trap_cx().get_a0() as isize
+    sys_sigreturn()
 }
+
 pub fn sys_getuid() -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
@@ -1276,9 +1263,9 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
 /// 等待子进程退出
 pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
     //println!("[wait4] Called with pid={}, options={:#x}", pid, options);
-    let task = current_task().unwrap();
-    let proc = task.process();
     loop {
+        let task = current_task().unwrap();
+        let proc = task.process();
         let mut child_pid: usize = 0;
         let mut exit_code = -1;
         let mut has_match = false;
@@ -1356,6 +1343,8 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
                 return 0;
             }
             drop(proc_inner);
+            drop(proc);
+            drop(task);
             suspend_current_and_run_next();
             continue;
         }else{
@@ -1537,16 +1526,16 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
     } */ */
 }
 pub fn sys_kill(pid: isize, signum: i32) -> isize {
-    if signum < 0 || signum > 64 {
+    if signum < 0 || signum as usize > MAX_SIG {
         return EINVAL.as_isize();
     }
 
     let current_task = current_task().unwrap();
     let current_pgid = current_task.process().inner_exclusive_access().pgid;
 
-    // 提前解析出信号 Flag
     let flag = if signum == 0 {
-        None // 0 号信号不发实体信号，只用于探测
+        // 忽略0号信号
+        None
     } else {
         match SignalFlags::from_bits(1 << (signum - 1)) {
             Some(f) => Some(f),
@@ -2438,40 +2427,29 @@ pub fn sys_ftruncate(fd: usize, _len: usize) -> isize {
     // FD 为空（被 close 了或者没分配）
     EBADF.as_isize() // -EBADF
 }
+
+/// 信号处理完成后的恢复
 pub fn sys_sigreturn() -> isize {
-    info!("[SIG_RET] ENTERED sys_sigreturn!");
+    warn!("[SIG_RET] ENTERED sys_sigreturn!");
     
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
-    
-    //   测试 1：检查修改前的状态
-    let old_sig = inner.handling_sig;
-    
-    // 执行修改
-    inner.handling_sig = -1;
-    
-    //   测试 2：立刻回读，确认内存写入成功
-    let new_sig = inner.handling_sig;
-    info!("[SIG_RET] State Change: {} -> {}", old_sig, new_sig);
-    if let Some(mask_backup) = inner.signal_mask_backup.take() {
-        inner.signal_mask = mask_backup;
-        info!("[SIG_RET] Mask restored to: {:#x}", inner.signal_mask.bits());
-    }
-    // 恢复 trap 上下文
-    if let Some(backup) = inner.trap_ctx_backup.take() {
+
+    // 从trap_ctx备份栈取出上一层备份来恢复
+    if let Some(backup) = inner.trap_ctx_backup.pop() {
         let trap_ctx = inner.get_trap_cx();
         *trap_ctx = backup;
-        
-        //   测试 3：检查恢复后的 PC 指针和 a0
-        // 这能告诉你程序准备跳回到原来的哪一行执行
-        info!("[SIG_RET] Restoration: PC={:#x}, a0={}", trap_ctx.get_rt(), trap_ctx.get_a0());
-        
+        if let Some(mask_backup) = inner.signal_mask_backup.pop() {
+            inner.signal_mask = mask_backup;
+        }
         trap_ctx.get_a0() as isize
     } else {
-        info!("[SIG_RET] ERROR: No backup context found for PID {}", task.getpid());
-        -1
+        // 不应没有备份
+        error!("sys_sigreturn: No trap context backup found!");
+        EPERM.as_isize()
     }
 }
+
 const SIG_BLOCK: usize = 0;
 const SIG_UNBLOCK: usize = 1;
 const SIG_SETMASK: usize = 2;
@@ -2513,6 +2491,7 @@ pub fn sys_getrusage(who: i32, usage_ptr: *mut Rusage) -> isize {
     crate::mm::translated_write(token, usage_ptr, usage);
     0 
 }
+
 #[allow(dead_code)]
 fn check_sigaction_error(signal: SignalFlags) -> bool {
     if signal == SignalFlags::SIGKILL || signal == SignalFlags::SIGSTOP
@@ -2538,32 +2517,29 @@ pub fn sys_rt_sigaction(
     old_action: *mut SignalAction,
     sigsetsize: usize,
 ) -> isize {
-    // 1. 校验 sigsetsize
     if sigsetsize < core::mem::size_of::<u32>() {
-        return EINVAL.as_isize(); // EINVAL
-    }
-    
-    // 2. 校验信号编号范围 (1~64)
-    if signum <= 0 || signum as usize > MAX_SIG {
-        return EINVAL.as_isize(); // EINVAL
+        return EINVAL.as_isize();
+    } else if signum <= 0 || signum as usize > MAX_SIG {
+        return EINVAL.as_isize();
     }
 
-    // 3. 正规操作：绝对禁止修改 SIGKILL(9) 和 SIGSTOP(19)
-    if signum == 9 || signum == 19 {
-        return EINVAL.as_isize(); // EINVAL (POSIX 规定此处返回 EINVAL)
+    // 用户态编号从1开始，内核态从0开始，减一
+    let table_idx = (signum - 1) as usize;
+    let signal = SignalFlags::from_bits_truncate(1u64 << table_idx);
+
+    // 不允许修改kill和stop的处理方式
+    if check_sigaction_error(signal) {
+        return EINVAL.as_isize();
     }
 
     let task = current_task().unwrap();
     let proc = task.process();
-    // trace!("kernel:pid[{}] sys_sigaction", proc.pid.0); // 调试时可打开
+    // trace!("kernel:pid[{}] sys_sigaction", proc.pid.0);
     
     let mut inner = proc.inner_exclusive_access();
     let token = inner.memory_set.token();
 
-    //   核心修复：数组下标必须从 0 开始，所以是 signum - 1
-    let table_idx = (signum - 1) as usize;
-
-    // 4. 保存旧的 SignalAction
+    // 把旧的信号处理行为写进用户空间
     if !old_action.is_null() {
         let prev_action = inner.signal_actions.table[table_idx];
         if !try_translated_write(token, old_action, prev_action) {
@@ -2571,21 +2547,21 @@ pub fn sys_rt_sigaction(
         }
     }
 
-    // 5. 如果新 action 为空，说明只是来查询的，直接返回
+    // 仅查询
     if action.is_null() {
         return 0;
     }
 
-    // 6. 覆盖新的 SignalAction
+    // 修改tcb的信号处理行为
     inner.signal_actions.table[table_idx] = {
-        if let Some(act) = try_translated_read(token, action) {
+        if let Some(act) = try_translated_read(token, action) { 
             act
         } else {
             return EFAULT.as_isize();
         }
     };
     
-    0 // 成功
+    0
 }
 
 pub fn sys_pselect6(

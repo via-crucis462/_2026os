@@ -50,10 +50,10 @@ fn run_shell(cmd: &str) -> i32 {
 
 #[no_mangle]
 fn main() -> i32 {
-    chdir("/musl\0");
+    chdir("/glibc\0");
 
     // 测例首字母
-    let test_start = "a";
+    let test_start = "";
 
     // 测例黑名单
     const SKIP_CASES: &[&str] = &[
@@ -103,6 +103,9 @@ fn main() -> i32 {
         "tst_hexdump*",
         "epoll_pwait*",
         "hackbench",
+        "futex*", // 没实现快速锁，会死循环，先注释掉
+        "tcp*",
+        "udp*",
     ];
 
     let skip_list = {

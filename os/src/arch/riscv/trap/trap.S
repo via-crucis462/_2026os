@@ -8,6 +8,7 @@
     .section .text.trampoline
     .globl __alltraps
     .globl __restore
+    .globl __call_sig_rt
     .global debug_info
     .align 2
 __alltraps:
@@ -78,3 +79,8 @@ __restore:
     # back to user stack
     ld sp, 2*8(sp)
     sret
+
+# 信号处理后恢复原本上下文
+__call_sig_rt:
+    li a7, 139
+    ecall

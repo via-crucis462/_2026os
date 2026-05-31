@@ -19,8 +19,9 @@ pub use id::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle};
 use spin::{Mutex, MutexGuard};
 pub use task::*;
 pub use pcb::*;
-use crate::{console::print, mm::translated_byte_buffer};
-
+use crate::mm::translated_write;
+use crate::{arch::trap, console::print, mm::translated_byte_buffer};
+use crate::process::trap::TrapContext;
 use manager::*;
 pub use manager::{get_process, list_pids, pop_process, remove_process};
 use crate::sync::*;
@@ -372,60 +373,53 @@ pub fn handle_signals() {
     let task = current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
 
+
     // 不可被屏蔽的信号集
     let unmaskable = (SignalFlags::SIGKILL | SignalFlags::SIGSTOP);
     // 从掩码中移除不可屏蔽
     task_inner.signal_mask.remove(unmaskable);
     // 未决（待处理）信号 = 进程信号 & ~掩码（屏蔽的信号）
-    let raw = task_inner.signals.clone();
+    let raw_signals = task_inner.signals;
+    let mask = task_inner.signal_mask;
     let pending = {
-        let mut copy = raw;
-        copy.remove(task_inner.signal_mask);
+        let mut copy = raw_signals;
+        copy.remove(mask);
         copy
     };
+    
     let pending_bits = pending.bits();
 
     if pending_bits != 0 {
-        // m号信号flag刚好对应尾部m个0
+        // 内核m号信号flag刚好对应尾部m个0
+        // 内核的处理函数统一用减一后的编号
         let sig = pending_bits.trailing_zeros() as usize;
         let flag = SignalFlags::from_bits(1 << sig).unwrap();
-        // 将当前处理的信号从待处理中移除
-        task_inner.signals.remove(flag);
+        task_inner.signals.remove(flag); // 把信号从 pending 队列中拿走
         // 释放锁
         drop(task_inner);
-        info!("[SIG PROBE] Calling handler for sig: {}, final_pending: {:#x}", sig, pending_bits);
-        // 跳到用户态的处理函数
+        // 跳到处理函数
         call_signal_handler(sig, flag);
     } else {
         // 无待处理信号
-        let raw_signals = task_inner.signals.bits();
-        let raw_mask = task_inner.signal_mask.bits();
-        if raw_signals != 0 {
-            warn!("[SIG PROBE] Signals exist ({:#x}) but fully masked ({:#x})", raw_signals, raw_mask);
+        if raw_signals.bits() != 0 {
+            warn!("[SIG PROBE] Signals exist ({:#x}) but fully masked ({:#x})", raw_signals, mask);
         }
     }
 }
 
 /// call user signal handler
 /// 跳到用户态的信号处理函数
-fn call_signal_handler(sig: usize, signal: SignalFlags) {
+fn  call_signal_handler(sig: usize, signal: SignalFlags) {
+    info!("[SIG PROBE] Calling handler for sig: {}", sig);
     let task = current_task().unwrap();
     let proc = task.process();
-    
+    let mut task_inner = task.inner_exclusive_access();
     let action = {
         let proc_inner = proc.inner_exclusive_access();
-        proc_inner.signal_actions.table[sig - 1]
+        proc_inner.signal_actions.table[sig] // table和内核态的信号位图起点是一致的，都是第0号对应信号1,不应减一
     };  
     let handler = action.handler;
-    
-    let mut task_inner = task.inner_exclusive_access();
-    let before_bits = task_inner.signals.bits();
-    task_inner.signals.remove(signal); // 把信号从 pending 队列中拿走
-    let after_bits = task_inner.signals.bits(); 
-    info!(
-        "[SIG_EVENT] Process: {} | Signal: {:?}({}) | Pending: {:#x} -> {:#x}", 
-        task.getpid(), signal, sig, before_bits, after_bits
-    );
+    let mask = action.mask;
 
     // handler如果是0，1 表示默认/忽略
     // 默认，表示由内核处理
@@ -439,26 +433,21 @@ fn call_signal_handler(sig: usize, signal: SignalFlags) {
     
     if handler != SIG_DFL {
         // 非默认，回到用户态处理
-        let trap_ctx = task_inner.get_trap_cx();
-        task_inner.trap_ctx_backup = Some(*trap_ctx);
-        task_inner.signal_mask_backup = Some(task_inner.signal_mask);
+        // 先保存 mask 和上下文
+        let cur_mask = task_inner.signal_mask;
+        task_inner.signal_mask_backup.push(cur_mask);
         
-        // 设置当前正在处理的信号
-        task_inner.handling_sig = sig as isize;
-        // 临时屏蔽当前信号，防止处理时被同一个信号再次打断
+        // 屏蔽 action 中指定的掩码 + 当前信号自身
+        task_inner.signal_mask |= mask;
         task_inner.signal_mask.insert(signal);
         
+        let trap_ctx = task_inner.get_trap_cx();
+        task_inner.trap_ctx_backup.push(*trap_ctx);
+        
         trap_ctx.set_rt(handler);
-        trap_ctx.set_a0(sig);
-
-        // 设置返回地址 (ra)
-        /* 阅读前人代码发现riscv和loongarch根本不需要设置（会炸），保留注释留作提醒
-        if restorer != 0 {
-            trap_ctx.set_ra(restorer);
-        } else {
-            warn!("[KERNEL WARNING] restorer is 0! Injecting trampoline on stack...");
-        }
-        */
+        trap_ctx.set_a0(sig + 1 /* 内核编号->用户编号 */);
+        // 保证信号处理完恢复
+        set_sig_ret(trap_ctx);
     } else { 
         // 由内核处理
         match signal {
@@ -480,7 +469,12 @@ fn call_signal_handler(sig: usize, signal: SignalFlags) {
             }
         }
     }
-}   
+}
+
+fn set_sig_ret(trap_ctx: &mut TrapContext) {
+    use crate::arch::config::*;
+    trap_ctx.set_ra(*SIG_RT_ADDR);
+}
 
 /* rcore的实现修改而来，目前不被调用了，留作参考
 /// Check if the current task has any signal to handle

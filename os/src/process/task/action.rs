@@ -30,13 +30,13 @@ impl Default for SignalAction {
 #[derive(Clone)]
 pub struct SignalActions {
     /// Signal actions table
-    pub table: [SignalAction; MAX_SIG + 1],
+    pub table: [SignalAction; MAX_SIG],
 }
 
 impl Default for SignalActions {
     fn default() -> Self {
         Self {
-            table: [SignalAction::default(); MAX_SIG + 1],
+            table: [SignalAction::default(); MAX_SIG],
         }
     }
 }

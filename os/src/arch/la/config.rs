@@ -41,10 +41,21 @@ pub const MMIO: &[(usize, usize)] = &[
     (0x8000_0000_4000_0000, 0x1000_0000), // PCI MMIO
 ]; 
 
-/// 调试用:低位地址似乎不允许被访问?
+/// 调试用，暂不删除
 pub const OFFSET_FOR_USER_APP: usize = 0;
 pub const USER_APP_BASE: usize = 0x1_2000_0000;
-pub const USER_APP_MAX_SIZE: usize = 0x40_0000_0000;
 pub const USER_STACK_TOP: usize = USER_APP_MAX_SIZE;
 
 pub const CPU_CORE_NUM: usize = 4;
+
+/// sv39用户地址空间end
+pub const USER_APP_MAX_SIZE: usize = 1<<38;
+pub const USER_TRAMPOLINE: usize = USER_APP_MAX_SIZE - PAGE_SIZE;
+extern "C" {
+    fn __call_sig_rt();
+}
+
+use lazy_static::lazy_static;
+lazy_static! {
+    pub static ref SIG_RT_ADDR: usize = __call_sig_rt as *const () as usize % PAGE_SIZE + USER_TRAMPOLINE;
+}
