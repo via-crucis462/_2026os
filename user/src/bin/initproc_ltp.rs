@@ -68,6 +68,7 @@ fn main() -> i32 {
         "cgroup_fj_common.sh",
         "cpuctl_def_task0*",
         "cpuctl*_test0*",
+        "cpuset*",
         "clock_gettime01",
         "cve-*",
         "dio_*",

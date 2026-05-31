@@ -2,7 +2,7 @@
 //! 进程管理相关系统调用实现
 //! 内存管理也暂时放在此处，后续迁移到mm
 
-use core::panic;
+use core::{panic, result};
 
 use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{get_hart_id};
@@ -1955,19 +1955,16 @@ pub fn sys_brk(addr: usize) -> isize {
     }
 
     drop(inner); 
-    if let Ok(new_brk) = mmap::do_brk(addr) {
-        /* do_brk内部有修改了
-        let mut inner = process.inner_exclusive_access();
-        inner.program_brk = new_brk;
-         */
-        // println!("sys_brk: successfully set brk to {:#x}", new_brk);
-        new_brk as isize
-    } else {
-        /* 失败的话，返回原来的 brk
-        current_brk as isize
-        */
-        error!("sys_brk: failed to set brk to {:#x}, current_brk remains at {:#x}", addr, current_brk);
-        EINVAL.as_isize() // 请求的地址不合法
+    let result = mmap::do_brk(addr);
+    match result {
+        Ok(new_brk) => {
+            info!("sys_brk: updated brk to {:#x}", new_brk);
+            new_brk as isize
+        },
+        Err(no) => {
+            warn!("sys_brk: failed to update brk to {:#x}", addr);
+            no as isize
+        }
     }
 }
 /// YOUR JOB: Implement spawn.

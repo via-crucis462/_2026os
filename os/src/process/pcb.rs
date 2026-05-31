@@ -5,12 +5,14 @@ use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, SignalAc
 use schedule::*;
 use core::sync::atomic::{AtomicI32, Ordering};
 
+use crate::mm::get_free_frames;
 use crate::{
     arch::trap::{TrapContext, trap_handler, trap_cx_va_by_kernel_stack},
     fs::{open_file, Dentry, File, OpenFlags, ROOT_DENTRY,Stdin, Stdout, Stderr},
     mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, 
         translated_write, MapArea, MapPermission, MapType, PageSize},
     sync::{MPSafeCell, WaitQueue},
+    syscall::errno::Errno::*,
 };
 use alloc::{
     string::String,
@@ -680,8 +682,12 @@ impl ProcessControlBlock {
             // 返回当前断点
             return Ok(self.inner_exclusive_access().program_brk);
         }
-        // 超范围panic
         let size: isize = addr as isize - self.inner_exclusive_access().program_brk as isize;
+        let fa = get_free_frames();
+        if size > 0 && fa < ((size as usize + PAGE_SIZE - 1) / PAGE_SIZE) {
+            // 没有足够的物理页了
+            return Err(ENOMEM.as_isize() as i32);
+        }
         let mut inner = self.inner_exclusive_access();
         let heap_bottom = inner.memory_set.areas()[inner.memory_set.brk_index()].get_vpn_range().get_start().0 * PAGE_SIZE;
         //let heap_bottom = inner.heap_bottom;
@@ -689,7 +695,7 @@ impl ProcessControlBlock {
         let _old_break = inner.program_brk;
         let new_brk = addr as isize;
         if new_brk < heap_bottom as isize {
-            return Err(-1);
+            return Err(ENOMEM.as_isize() as i32);
         }
         let result = if size < 0 {
             debug!("change_program_brk: before shrink_to, heap_bottom={:#x}, new_brk={:#x}", heap_bottom, new_brk);
