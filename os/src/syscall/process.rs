@@ -1379,7 +1379,16 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
             }
             if exit_code_ptr as usize != 0 {
                 //println!("[wait4] Writing exit code {} to user space for child P{}", exit_code, child_pid);
-                let status = (exit_code & 0xff) << 8;
+                let status = if exit_code >= 0 {
+                    (exit_code & 0xff) << 8
+                } else {
+                    let signal = -exit_code;
+                    let mut status = signal & 0x7f;
+                    if signal == 8 || signal == 11 || signal == 4 || signal == 6 || signal == 24 || signal == 25 || signal == 31 || signal == 5 {
+                        status |= 0x80;
+                    }
+                    status
+                };
                 if !try_translated_write(proc_inner.memory_set.token(), exit_code_ptr, status) {
                     return EFAULT.as_isize();
                 }
@@ -1793,6 +1802,54 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
     }
 
     panic!("sys_kill: should not reach here, pid={}", pid);
+}
+
+pub fn sys_tkill(tid: usize, signum: i32) -> isize {
+    if signum < 0 || signum as usize > MAX_SIG {
+        return EINVAL.as_isize();
+    }
+
+    let Some(task) = tid2task(tid) else {
+        return ESRCH.as_isize();
+    };
+
+    if signum == 0 {
+        return 0;
+    }
+
+    let Some(flag) = SignalFlags::from_bits(1 << (signum - 1)) else {
+        return EINVAL.as_isize();
+    };
+    let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
+
+    {
+        let process = task.process();
+        let mut proc_inner = process.inner_exclusive_access();
+        proc_inner.signals.insert(flag);
+    }
+
+    let mut task_inner = task.inner_exclusive_access();
+    task_inner.signals.insert(flag);
+    let is_unblocked = !task_inner.signal_mask.contains(flag);
+    drop(task_inner);
+
+    if is_unblocked || is_unmaskable {
+        crate::process::wake_up_task(task);
+    }
+
+    0
+}
+
+pub fn sys_tgkill(tgid: usize, tid: usize, signum: i32) -> isize {
+    let Some(task) = tid2task(tid) else {
+        return ESRCH.as_isize();
+    };
+
+    if task.process().getpid() != tgid {
+        return ESRCH.as_isize();
+    }
+
+    sys_tkill(tid, signum)
 }
 
 /// 获取当前时间
@@ -3194,6 +3251,7 @@ pub fn sys_prlimit64(
     const RLIMIT_NPROC: i32 = 3;
     const RLIMIT_NOFILE: i32 = 7;
     const RLIMIT_MEMLOCK: i32 = 8;
+    const RLIMIT_CORE: i32 = 4;
     info!("sys_prlimit64 called with pid={}, resource={}, new_limit={:#x}, old_limit={:#x}", pid, resource, new_limit as usize, old_limit as usize);
     if pid != 0 {
         return Errno::EPERM.as_isize(); // 不允许修改其他进程
@@ -3229,6 +3287,13 @@ pub fn sys_prlimit64(
             // 锁定内存限制，伪实现
             if !old_limit.is_null() {
                 translated_write(token, old_limit, Rlimit64 { cur_lmt: 0x40_0000, max_lmt: 0x40_0000 });
+            }
+            0
+        }
+        RLIMIT_CORE => {
+            // core dump 文件大小限制，伪实现
+            if !old_limit.is_null() {
+                translated_write(token, old_limit, Rlimit64 { cur_lmt: 0, max_lmt: 0 });
             }
             0
         }

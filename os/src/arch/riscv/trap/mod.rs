@@ -156,10 +156,7 @@ pub fn trap_handler() -> ! {
                 drop(process_inner);
                 drop(process);
                 drop(task);
-                // 取消原来的 current_add_signal(SignalFlags::SIGSEGV);
-                // 发信号压栈死循环。
-                // 直接以 11 (SIGSEGV的默认信号值) 退出码击毙当前进程！
-                crate::task::exit_current_and_run_next(11);
+                current_add_signal(SignalFlags::SIGSEGV);
             }
         }
         _ => {
@@ -208,9 +205,18 @@ pub fn trap_cx_va_by_kernel_stack(kernel_stack: &KernelStack) -> usize {
 /// return to user space
 pub fn trap_return() -> ! {
     handle_signals();
-    if current_task().unwrap().inner_exclusive_access().killed {
+    let term_signal = {
+        let task = current_task().unwrap();
+        let inner = task.inner_exclusive_access();
+        if inner.killed {
+            inner.term_signal.unwrap_or(1)
+        } else {
+            0
+        }
+    };
+    if term_signal != 0 {
         info!("[SIG PROBE] EXECUTING DEATH SENTENCE FOR PID!");
-        exit_current_and_run_next(-1); 
+        exit_current_and_run_next(-term_signal);
     }
     set_user_trap_entry();
     let trap_cx_ptr = current_trap_cx_user_va();

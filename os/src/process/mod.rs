@@ -465,6 +465,7 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
                 // 其他信号默认杀死任务
                 // 此处标注为kill后稍后会调用exit_current_and_run_next，这里不直接调用
                 task_inner.killed = true;
+                task_inner.term_signal = Some(sig as i32 + 1);
                 // println!("[K] default terminate for signal {:?}", signal);
             }
         }

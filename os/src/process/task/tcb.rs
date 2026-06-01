@@ -65,6 +65,7 @@ impl TaskControlBlock {
         inner.signal_mask_backup.clear();
         inner.trap_ctx_backup.clear();
         inner.killed = false;
+        inner.term_signal = None;
         inner.frozen = false;
     }
 }
@@ -92,6 +93,7 @@ pub struct TaskControlBlockInner {
     pub signal_mask_backup: Vec<SignalFlags>,
     // if the task is killed
     pub killed: bool,
+    pub term_signal: Option<i32>,
     // if the task is frozen by a signal
     pub frozen: bool,
     /// 信号嵌套处理时的上下文栈（当前未完全验证行为是否正确，初步测试没问题）
