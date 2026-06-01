@@ -49,6 +49,7 @@ ELFS := $(patsubst $(APP_DIR)/%.rs, $(TARGET_DIR)/%, $(APPS))
 
 binary:
 	@echo $(ELFS)
+	@rustup target add $(TARGET)
 	@if [ ${CHAPTER} -gt 3 ]; then \
 		cargo build --target $(TARGET) $(MODE_ARG) ;\
 	else \
@@ -75,7 +76,7 @@ build: clean pre binary
 	@$(foreach t, $(ELFS), cp $(t).elf $(BUILD_DIR)/elf/;)
 
 clean:
-	@cargo clean
+	@rm -rf target/$(TARGET)
 	@rm -rf $(BUILD_DIR)
 
 all: build

@@ -362,7 +362,7 @@ pub fn trap_handler() -> ! {
                 }
                 match inner.memory_set.translate(vpn) {
                     Some(pte) => {
-                        println!(
+                        trace!(
                             "[kernel] user_fault_pte: current hart id={}, estat={:#x}, ecode={}({:#x}), esubcode={:#x}, era={:#x}, badv={:#x}, badi={:#x}, ra={:#x}, sp={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
                             get_hart_id(),
                             estat,
@@ -383,7 +383,7 @@ pub fn trap_handler() -> ! {
                         );
                     }
                     None => {
-                        println!(
+                        trace!(
                             "[kernel] user_fault_pte: current hart id={}, estat={:#x}, ecode={}({:#x}), esubcode={:#x}, era={:#x}, badv={:#x}, badi={:#x}, ra={:#x}, sp={:#x}, vpn={:#x}, pte=<none>",
                             get_hart_id(),
                             estat,
@@ -460,16 +460,16 @@ pub fn trap_handler() -> ! {
             if let Some(task) = current_task() {
                 let proc = task.process();
                 let inner = proc.inner_exclusive_access();
-                println!(
+                trace!(
                     "[kernel] trap_handler: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
                     task.getpid(),
                     task.gettid(),
                     inner.heap_bottom,
                     inner.program_brk,
                 );
-                inner.memory_set.debug_dump_areas(Some(badv), Some(era));
+                // inner.memory_set.debug_dump_areas(Some(badv), Some(era));
             } else {
-                println!("[kernel] trap_handler: no current task");
+                trace!("[kernel] trap_handler: no current task");
             }
             current_add_signal(SignalFlags::SIGSEGV);
         }
