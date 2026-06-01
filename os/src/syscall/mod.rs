@@ -392,7 +392,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_WAITID => sys_waitid(args[0] as i32, args[1] as i32, args[2] as *mut SigInfo, args[3] as i32),
         SYSCALL_FUTEX => sys_futex(args[0] as *mut i32, args[1] as i32, args[2] as i32),
         _ => {
-            println!(
+            warn!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
                 syscall_id
             );
