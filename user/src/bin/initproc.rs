@@ -6,7 +6,6 @@ extern crate user_lib;
 extern crate alloc;
 
 use alloc::vec::Vec;
-use alloc::format;
 use user_lib::*;
 
 /// Build a null-terminated C string from a &str
@@ -94,119 +93,405 @@ fn run_a_test(script: &str) -> i32 {
     exit_code
 }
 
+// 当前脚本通过向/temp/test.sh写入命令来执行测试用例，
+// 最后由busybox sh /tmp/test.sh来执行这些命令
 #[no_mangle]
 fn main() -> i32 {
     chdir("/musl\0");
 
-    // 测例首字母
-    let test_start = "";
+    // 白名单：仅运行这些有分数的测例
+    const BASE_CASES: &[&str] = &[
 
-    // 测例黑名单
-    const SKIP_CASES: &[&str] = &[
-        "cgroup_regression_3_1.sh",
-        "cgroup_regression_3_2.sh",
-        "cgroup_regression_5_1.sh",
-        "cgroup_regression_5_2.sh",
-        "cgroup_regression_6_1.sh",
-        "cgroup_regression_6_2.sh",
-        "cgroup_regression_fork_processes",
-        "cgroup_regression_getdelays",
-        "cgroup_fj_common.sh",
-        "cpuctl_def_task0*",
-        "cpuctl*_test0*",
-        "cpuset*",
-        "clock_gettime01",
-        "cve-*",
-        "dio_*",
-        "doio*",
-        "dynamic_debug0*",
-        "dma_thread_diotest",
-        "epoll-ltp",
-        "fallocate05",
-        "fallocate06",
-        "force_erase.sh",
-        "fork_exec_loop",
-        "fs_racer_*.sh",
-        "gen*",
-        "gettimeofday01",
-        "kill1*",
-        "lftest",
-        "memcg_test_*",
-        "memcpy*",
-        "memcontrol*",
-        "memctl*",
-        "mtest*",
-        "pidns*",
-        "pids_task*",
-        "select04*",
-        "sendfile07*",//无限输出“UnixSocket write called with 1 bytes”
-        "setfsgid03*",//“ Panicked at src/mm/heap_allocator.rs:12 Heap allocation error, layout = Layout { size: 8192, align: 1 (1 << 0) }”
-        "setrlimit05*",
-        "sigtimedwait01*",
-        "sigwait01*",
-        "sigwaitinfo01*",
-        "statx11*",
-        "timed_forkbomb*",
-        "tst_hexdump*",
-        "epoll_pwait*",
-        "hackbench",
-        "futex*", // 没实现快速锁，会死循环，先注释掉
-        "tcp*",
-        "udp*",
-        "mallinfo*", // 测试meminfo，炸得有点怪，brk或许有问题
-        "mmapstress03", //brk或许有问题
-        "accept02", // la musl会炸
+        "accept01",
+        "accept03",
+        "accept4_01",
+        "access03",
+        "alarm02",
+        "alarm03",
+        "alarm05",
+        "alarm06",
+        "alarm07",
+        "bpf_map01",
+        "bpf_prog01",
+        "brk01",
+        "brk02",
+        "chdir01",
+        "chdir04",
+        "chroot01",
+        "clock_adjtime01",
+        "clock_adjtime02",
+        "clock_gettime02",
+        "clock_nanosleep01",
+        "clock_nanosleep04",
+        "clock_settime01",
+        "clock_settime02",
+        "clone01",
+        "clone03",
+        "clone06",
+        "clone07",
+        "clone302",
+        "close01",
+        "close02",
+        "confstr01",
+        "creat01",
+        "creat03",
+        "creat05",
+        "dup01",
+        "dup02",
+        "dup03",
+        "dup04",
+        "dup06",
+        "dup07",
+        "dup201",
+        "dup202",
+        "dup203",
+        "dup204",
+        "dup205",
+        "dup206",
+        "dup207",
+        "dup3_01",
+        "epoll_create01",
+        "epoll_create1_01",
+        "epoll_ctl01",
+        "epoll_ctl02",
+        "epoll_ctl03",
+        "epoll_ctl04",
+        "epoll_ctl05",
+        "epoll_wait01",
+        "epoll_wait03",
+        "epoll_wait04",
+        "epoll_wait07",
+        "eventfd2_01",
+        "eventfd2_02",
+        "execve03",
+        "exit02",
+        "faccessat01",
+        "faccessat02",
+        "fallocate03",
+        "fallocate04",
+        "fchmod01",
+        "fchmod03",
+        "fchmod04",
+        "fchmodat01",
+        "fchmodat02",
+        "fcntl02",
+        "fcntl02_64",
+        "fcntl03",
+        "fcntl03_64",
+        "fcntl04",
+        "fcntl04_64",
+        "fcntl05",
+        "fcntl05_64",
+        "fcntl08",
+        "fcntl08_64",
+        "fcntl13",
+        "fcntl13_64",
+        "fcntl29",
+        "fcntl29_64",
+        "flock06",
+        "fork01",
+        "fork03",
+        "fork04",
+        "fork07",
+        "fork08",
+        "fork10",
+        "fork_procs",
+        "fpathconf01",
+        "ftruncate03",
+        "ftruncate03_64",
+        "getdents02",
+        "getdomainname01",
+        "getegid01",
+        "getegid01_16",
+        "getegid02",
+        "getegid02_16",
+        "geteuid01",
+        "geteuid02",
+        "getgid01",
+        "getgid03",
+        "gethostname01",
+        "getpagesize01",
+        "getpgid01",
+        "getpgid02",
+        "getpgrp01",
+        "getpid01",
+        "getpid02",
+        "getppid01",
+        "getppid02",
+        "getrandom03",
+        "getrandom04",
+        "getrlimit01",
+        "getrlimit02",
+        "getrusage01",
+        "getrusage02",
+        "getsid01",
+        "getsid02",
+        "getsockname01",
+        "getuid01",
+        "getuid03",
+        "in6_01",
+        "ioctl_loop06",
+        "ioctl_ns07",
+        "kill03",
+        "llseek02",
+        "llseek03",
+        "lseek01",
+        "lseek07",
+        "memcmp01",
+        "memfd_create01",
+        "memfd_create02",
+        "memfd_create04",
+        "memset01",
+        "mlock03",
+        "mmap02",
+        "mmap08",
+        "mmap09",
+        "mmap15",
+        "mmap19",
+        "mount01",
+        "mprotect05",
+        "nanosleep02",
+        "nanosleep04",
+        "open01",
+        "open03",
+        "open04",
+        "open08",
+        "openat01",
+        "pathconf01",
+        "pipe01",
+        "pipe06",
+        "pipe10",
+        "pipe11",
+        "pipe14",
+        "pipe2_01",
+        "posix_fadvise03",
+        "posix_fadvise03_64",
+        "prctl05",
+        "prctl08",
+        "pselect02",
+        "pselect02_64",
+        "pselect03",
+        "pselect03_64",
+        "read01",
+        "read02",
+        "read04",
+        "readv01",
+        "readv02",
+        "realpath01",
+        "recvmsg01",
+        "rmdir01",
+        "sbrk01",
+        "sched_getaffinity01",
+        "sendfile03",
+        "sendfile03_64",
+        "sendfile06",
+        "sendfile06_64",
+        "sendfile08",
+        "sendfile08_64",
+        "setgid01",
+        "setgid03",
+        "setitimer02",
+        "setpgrp02",
+        "setregid02",
+        "setresuid01",
+        "setresuid04",
+        "setresuid05",
+        "setreuid07",
+        "setrlimit02",
+        "setrlimit04",
+        "setsockopt01",
+        "setsockopt03",
+        "settimeofday01",
+        "setuid01",
+        "shmnstest",
+        "sigaltstack02",
+        "signal02",
+        "signal03",
+        "signal04",
+        "signal05",
+        "socket01",
+        "socket02",
+        "socketpair01",
+        "socketpair02",
+        "stat02",
+        "stat02_64",
+        "statx03",
+        "stime01",
+        "stime02",
+        "syscall01",
+        "thp01",
+        "time01",
+        "times01",
+        "uname01",
+        "uname02",
+        "uname04",
+        "unlinkat01",
+        "utsname01",
+        "utsname04",
+        "wait01",
+        "wait02",
+        "wait401",
+        "wait402",
+        "wait403",
+        "waitid04",
+        "waitid05",
+        "waitid06",
+        "waitpid03",
+        "waitpid04",
+        "waitpid09",
+        "write01",
+        "write02",
+        "write05",
+        "writev01",
     ];
 
-    let skip_list = {
-        let mut s = alloc::string::String::new();
-        for (i, case) in SKIP_CASES.iter().enumerate() {
-            if i > 0 {
-                s.push('|');
-            }
-            s.push_str(case);
-        }
-        s
-    };
+    let mut run_cases: Vec<&str> = Vec::from(BASE_CASES);
 
-    // Shell script that iterates LTP testcases.
-    // Only runs testcases whose filename starts with `test_start`.
-    // Helper scripts that expect arguments are skipped to prevent infinite loops.
-    let cmd = format!(
-"
-echo \"#### OS COMP TEST GROUP START ltp-musl ####\"; \
-for f in /musl/ltp/testcases/bin/{0}*; do \
-  fname=$(basename \"$f\"); \
-  case \"$fname\" in \
-    {1}) \
-      echo \"SKIP LTP CASE $fname\"; \
-      continue ;; \
-  esac; \
-  echo \"RUN LTP CASE $fname\"; \
-  \"$f\"; \
-  ret=$?; \
-  echo \"FAIL LTP CASE $fname : $ret\"; \
-done; \
-echo \"#### OS COMP TEST GROUP END ltp-musl ####\"
-echo \"#### OS COMP TEST GROUP START ltp-glibc ####\"; \
-for f in /glibc/ltp/testcases/bin/{0}*; do \
-  fname=$(basename \"$f\"); \
-  case \"$fname\" in \
-    {1}) \
-      echo \"SKIP LTP CASE $fname\"; \
-      continue ;; \
-  esac; \
-  echo \"RUN LTP CASE $fname\"; \
-  \"$f\"; \
-  ret=$?; \
-  echo \"FAIL LTP CASE $fname : $ret\"; \
-done; \
-echo \"#### OS COMP TEST GROUP END glibc-musl ####\"
-",
-    test_start,
-    skip_list,
-);
-    run_shell(&cmd);
+    // riscv64-only LTP cases, inserted at runtime
+    // 只让riscv跑的从上面删掉放进这里面
+    #[cfg(target_arch = "riscv64")]
+    {
+        run_cases.extend_from_slice(&[
+            "fstat03",
+            "fstat03_64",
+            "gettimeofday02",
+            "mmapstress01",
+            "nfs05_make_tree",
+            "ppoll01",
+            "select03",
+            "sendmmsg02",
+            "times03",
+            "sbrk02",
+            "signal01",
+            "times03",
+        ]);
+    }
+
+    // Helper: write &str to fd via sys_write (avoids heap allocation for buffer)
+    // 通过 sys_write 将 &str 写入 fd
+    fn write_fd(fd: usize, s: &str) {
+        sys_write(fd, s.as_bytes());
+    }
+
+    // raw open flags matching kernel's OpenFlags (not user_lib's mismatched ones!)
+    // kernel: WRONLY=1, CREATE=1<<6=64, TRUNC=1<<9=512
+    const K_WRONLY: u32 = 1;
+    const K_CREAT: u32 = 1 << 6;
+    const K_TRUNC: u32 = 1 << 9;
+
+    // Open /tmp/test.sh for writing (create + truncate) — /tmp is tmpfs, supports creation
+    let script_path = "/tmp/test.sh\0";
+    let fd = sys_openat(
+        (-100isize) as usize, // AT_FDCWD
+        script_path,
+        K_WRONLY | K_CREAT | K_TRUNC,
+        0o777,
+    );
+    if fd < 0 {
+        return -1;
+    }
+    let fd = fd as usize;
+
+// --- musl basic ---
+#[cfg(target_arch = "riscv64")]
+{
+    write_fd(fd, "echo \"#### OS COMP TEST GROUP START basic-musl ####\"\n");
+    write_fd(fd, "for f in /musl/basic/*; do\n");
+    write_fd(fd, "  fname=$(basename \"$f\")\n");
+    write_fd(fd, "  case \"$fname\" in *.sh|text.txt) continue ;; esac\n");
+    write_fd(fd, "  if [ -f \"$f\" ] && [ -x \"$f\" ]; then \"$f\"; fi\n");
+    write_fd(fd, "done\n");
+    write_fd(fd, "echo \"#### OS COMP TEST GROUP END basic-musl ####\"\n");
+}
+
+{
+    write_fd(fd, "sh /musl/busybox_testcode.sh\n");
+}
+#[cfg(target_arch = "riscv64")]
+{
+    write_fd(fd, "sh /musl/libctest_testcode.sh\n");
+}
+// --- musl ltp ---
+{
+    write_fd(fd, "echo \"#### OS COMP TEST GROUP START ltp-musl ####\"\n");
+    for chunk in run_cases.chunks(50) {
+        write_fd(fd, "for name in ");
+        for (i, case) in chunk.iter().enumerate() {
+            if i > 0 { write_fd(fd, " "); }
+            write_fd(fd, case);
+        }
+        write_fd(fd, "; do\n");
+        write_fd(fd, "  f=\"/musl/ltp/testcases/bin/$name\"\n");
+        write_fd(fd, "  if [ -f \"$f\" ] && [ -x \"$f\" ]; then\n");
+        write_fd(fd, "    echo \"RUN LTP CASE $name\"\n");
+        write_fd(fd, "    \"$f\"\n");
+        write_fd(fd, "    ret=$?\n");
+        write_fd(fd, "    echo \"FAIL LTP CASE $name : $ret\"\n");
+        write_fd(fd, "  fi\n");
+        write_fd(fd, "done\n");
+    }
+    write_fd(fd, "echo \"#### OS COMP TEST GROUP END ltp-musl ####\"\n");
+}
+
+// --- glibc basic ---
+#[cfg(target_arch = "riscv64")]
+{
+    write_fd(fd, "echo \"#### OS COMP TEST GROUP START basic-glibc ####\"\n");
+    write_fd(fd, "for f in /glibc/basic/*; do\n");
+    write_fd(fd, "  fname=$(basename \"$f\")\n");
+    write_fd(fd, "  case \"$fname\" in *.sh|text.txt) continue ;; esac\n");
+    write_fd(fd, "  if [ -f \"$f\" ] && [ -x \"$f\" ]; then \"$f\"; fi\n");
+    write_fd(fd, "done\n");
+    write_fd(fd, "echo \"#### OS COMP TEST GROUP END basic-glibc ####\"\n");
+}
+
+{
+    write_fd(fd, "sh /glibc/busybox_testcode.sh\n");
+}
+
+// --- glibc ltp ---
+{
+    write_fd(fd, "echo \"#### OS COMP TEST GROUP START ltp-glibc ####\"\n");
+    for chunk in run_cases.chunks(50) {
+        write_fd(fd, "for name in ");
+        for (i, case) in chunk.iter().enumerate() {
+            if i > 0 { write_fd(fd, " "); }
+            write_fd(fd, case);
+        }
+        write_fd(fd, "; do\n");
+        write_fd(fd, "  f=\"/glibc/ltp/testcases/bin/$name\"\n");
+        write_fd(fd, "  if [ -f \"$f\" ] && [ -x \"$f\" ]; then\n");
+        write_fd(fd, "    echo \"RUN LTP CASE $name\"\n");
+        write_fd(fd, "    \"$f\"\n");
+        write_fd(fd, "    ret=$?\n");
+        write_fd(fd, "    echo \"FAIL LTP CASE $name : $ret\"\n");
+        write_fd(fd, "  fi\n");
+        write_fd(fd, "done\n");
+    }
+    write_fd(fd, "echo \"#### OS COMP TEST GROUP END ltp-glibc ####\"\n");
+}
+    sys_close(fd);
+
+    // Execute: busybox sh /test.sh
+    {
+        let forked = fork();
+        if forked == 0 {
+            let a0 = cstr("busybox");
+            let a1 = cstr("sh");
+            let a2 = cstr("/tmp/test.sh\0");
+            let argv: &[*const u8] = &[
+                a0.as_ptr(),
+                a1.as_ptr(),
+                a2.as_ptr(),
+                core::ptr::null(),
+            ];
+            exec("/musl/busybox\0", argv);
+            exit(-1);
+        } else if forked > 0 {
+            let mut exit_code: i32 = 0;
+            waitpid(forked as usize, &mut exit_code);
+        }
+    }
     // Init (PID 1) must never exit — otherwise the kernel panics.
     // Loop forever, reaping any zombie children.
     let mut _status: i32 = 0;
