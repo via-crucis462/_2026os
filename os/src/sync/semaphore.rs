@@ -56,6 +56,9 @@ impl WaitQueue {
     pub fn pop_front(&mut self) -> Option<Arc<TaskControlBlock>> {
         self.queue.pop_front()
     }
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
 }
 
 pub struct SemaphoreGuard<'a, T> {

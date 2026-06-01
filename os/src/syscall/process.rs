@@ -27,12 +27,20 @@ pub static TIME_CACHE: Mutex<BTreeMap<u64, (i64, i64, i64, i64)>> = Mutex::new(B
 lazy_static! {
     /// 专门用于进程死等信号的全局等待队列
     pub static ref SIGNAL_WAIT_QUEUE: Mutex<WaitQueue> = Mutex::new(WaitQueue::new());
+    pub static ref FUTEX_WAIT_QUEUES: Mutex<BTreeMap<usize, Arc<Mutex<WaitQueue>>>> =
+        Mutex::new(BTreeMap::new());
 }
-
+fn get_futex_wait_queue(uaddr: usize) -> Arc<Mutex<WaitQueue>> {
+    let mut queues = FUTEX_WAIT_QUEUES.lock();
+    queues
+        .entry(uaddr)
+        .or_insert_with(|| Arc::new(Mutex::new(WaitQueue::new())))
+        .clone()
+}
 pub use crate::{
     arch::timer::{ADJ_ESTERROR, ADJ_FREQUENCY, ADJ_MAXERROR, ADJ_MICRO, ADJ_NANO, ADJ_OFFSET, ADJ_OFFSET_SINGLESHOT, ADJ_OFFSET_SS_READ, ADJ_SETOFFSET, ADJ_STATUS, ADJ_TAI, ADJ_TICK, ADJ_TIMECONST, CLOCK_ADJ_ALLOWED_MODES, CLOCK_ADJ_RW_STATUS, CLOCK_ADJ_STATE, CLOCK_ADJ_VALID_STATUS, CLOCK_REALTIME_OFFSET_NS, ITimerVal, RtcTime, STA_CLOCKERR, STA_CLK, STA_DEL, STA_FLL, STA_FREQHOLD, STA_INS, STA_MODE, STA_NANO, STA_PLL, STA_PPSERROR, STA_PPSFREQ, STA_PPSJITTER, STA_PPSSIGNAL, STA_PPSTIME, STA_PPSWANDER, STA_UNSYNC, TIME_ERROR, TIME_OK, TimeSpec, TimeVal, Timex, get_real_time_ns, get_time_ms, get_time_us, get_timer_ticks}, 
     fs::*, 
-    mm::{UserBuffer, mmap, translated_byte_buffer, translated_str, translated_byte_buffer_mut, translated_write}, 
+    mm::{PageTable, UserBuffer, VirtAddr, mmap, translated_byte_buffer, translated_str, translated_byte_buffer_mut, translated_write}, 
     process::{
         task::{
             MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_token, exit_current_and_run_next, suspend_current_and_run_next, 
@@ -1259,6 +1267,21 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         ENOENT.as_isize()
     }
 }
+///wait系的参数
+const P_ALL: i32 = 0;
+const P_PID: i32 = 1;
+const P_PGID: i32 = 2;
+
+const WNOHANG: i32 = 0x0000_0001;
+const WSTOPPED: i32 = 0x0000_0002;
+const WEXITED: i32 = 0x0000_0004;
+const WCONTINUED: i32 = 0x0000_0008;
+const WNOWAIT: i32 = 0x0100_0000;
+
+const CLD_EXITED: i32 = 1;
+const CLD_KILLED: i32 = 2;
+const CLD_DUMPED: i32 = 3;
+const SIGCHLD_NUM: i32 = 17;
 
 /// 等待子进程退出
 pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
@@ -1339,7 +1362,7 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
             if has_match == false {
                 return ECHILD.as_isize(); // 没有任何匹配的子进程
             }
-            if options & 0x1 != 0 {
+            if options & WNOHANG as usize != 0 {
                 return 0;
             }
             drop(proc_inner);
@@ -1524,6 +1547,137 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
                 }
         }
     } */ */
+}
+
+
+pub fn sys_waitid(idtype: i32, id: i32, infop: *mut SigInfo, options: i32) -> isize {
+    if infop.is_null() {
+        return EFAULT.as_isize();
+    }
+
+    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0 {
+        return EINVAL.as_isize();
+    }
+
+    let supported = WEXITED | WNOHANG | WNOWAIT;
+    if options & !supported != 0 {
+        return EINVAL.as_isize();
+    }
+
+    if options & WEXITED == 0 {
+        return EINVAL.as_isize();
+    }
+
+    loop {
+        let task = current_task().unwrap();
+        let proc = task.process();
+        let mut proc_inner = proc.inner_exclusive_access();
+        let token = proc_inner.memory_set.token();
+        let mut child_pid: usize = 0;
+        let mut exit_code = 0;
+        let mut child_idx: Option<usize> = None;
+        let mut has_match = false;
+
+        for (idx, child) in proc_inner.children.iter().enumerate() {
+            let child_pid_now = child.getpid();
+            //是否找到匹配选项
+            let matches = match idtype {
+                P_ALL => true,
+                P_PID => child_pid_now == id as usize,
+                P_PGID => child.inner_exclusive_access().pgid == id as usize,
+                _ => return EINVAL.as_isize(),
+            };
+
+            if !matches {
+                continue;
+            }
+
+            has_match = true;
+            let child_inner = child.inner_exclusive_access();
+            if child_inner.is_zombie() {
+                child_pid = child_pid_now;
+                exit_code = child_inner.exit_code;
+                child_idx = Some(idx);
+                break;
+            }
+        }
+        //若未匹配上
+        if child_pid == 0 {
+            if !has_match {
+                return ECHILD.as_isize();
+            }
+            //非阻塞选项的处理
+            if options & WNOHANG != 0 {
+                /// 需要写入一个全零的 siginfo 结构体
+                if infop.is_null() {
+                return 0;
+                }
+                let info = SigInfo {
+                    si_signo: 0,
+                    si_errno: 0,
+                    si_code: 0,
+                    _pad0: 0,
+                    si_pid: 0,
+                    si_uid: 0,
+                    si_status: 0,
+                    _pad1: 0,
+                    _pad: [0; 12],
+                };
+                if try_translated_write(token, infop, info) {
+                    return 0;
+                } else {
+                    return EFAULT.as_isize();
+                }
+            }
+            drop(proc_inner);
+            drop(proc);
+            drop(task);
+            suspend_current_and_run_next();
+            continue;
+        }
+
+        let info = {
+            let (si_code, si_status) = if exit_code >= 0 {
+                //正常退出，sicode为1
+                (1, exit_code)
+            } else {
+                let signal = -exit_code;
+                let code = if signal == 8 || signal == 11 {
+                    3//core_dumped
+                } else {
+                    2//killed
+                };
+                (code, signal)
+            };
+
+            SigInfo {
+                si_signo: 17,//神必规范(?SIGCHLD_NUM),
+                si_errno: 0,
+                si_code,
+                _pad0: 0,
+                si_pid: child_pid as i32,
+                si_uid: 0,
+                si_status,
+                _pad1: 0,
+                _pad: [0; 12],
+            }
+        };
+        if !try_translated_write(token, infop, info) {
+            return EFAULT.as_isize();
+        }
+
+        if options & WNOWAIT == 0 {
+            if let Some(idx) = child_idx {
+                proc_inner.children.remove(idx);
+            } else {
+                panic!("sys_waitid: logic error, child_pid is set but child_idx is None?");
+            }
+            drop(proc_inner);
+            crate::process::remove_process(child_pid);
+        }
+
+        return 0;
+    }
 }
 pub fn sys_kill(pid: isize, signum: i32) -> isize {
     if signum < 0 || signum as usize > MAX_SIG {
@@ -2899,8 +3053,13 @@ pub struct SigInfo {
     pub si_signo: i32, // 信号编号
     pub si_errno: i32, // 错误码
     pub si_code: i32,  // 信号发送原因
-    // 后面是一大堆 union，为了 C ABI 兼容和不越界，通常填充到 128 字节
-    pub _pad: [u32; 29], 
+    pub _pad0: i32,
+    pub si_pid: i32,
+    pub si_uid: u32,
+    pub si_status: i32,
+    pub _pad1: i32,
+    // 余下部分保留给 C ABI 中的 union 字段，整结构保持 128 字节。
+    pub _pad: [u64; 12],
 }
 pub type SigSet = usize;
 
@@ -2985,7 +3144,12 @@ pub fn sys_rt_sigtimedwait(
                         si_signo: sig_num,
                         si_errno: 0,
                         si_code: 0,
-                        _pad: [0; 29],
+                        _pad0: 0,
+                        si_pid: 0,
+                        si_uid: 0,
+                        si_status: 0,
+                        _pad1: 0,
+                        _pad: [0; 12],
                     }) {
                         return EFAULT.as_isize();
                     }
@@ -3070,5 +3234,80 @@ pub fn sys_prlimit64(
         }
         // 其他请求暂不支持
         _ => Errno::EINVAL.as_isize()
+    }
+}
+
+const FUTEX_WAIT: i32 = 0;
+const FUTEX_WAKE: i32 = 1;
+const FUTEX_PRIVATE_FLAG: i32 = 128;
+const FUTEX_CLOCK_REALTIME: i32 = 256;
+const FUTEX_CMD_MASK: i32 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+
+
+///作用：用户空间会传进去一个地址，内核解引用地址获取值后，如果和用户指定的val相等，则睡眠或唤醒对应等待队列的一个元素。
+/// 实际上，FUTEX就是管理所有信号量以及其等待队列的元素，信号量底层会用这个syscall。
+/// FUTEX的键是物理地址，值是这个信号量对应的等待队列
+pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32) -> isize {
+    if uaddr.is_null() {
+        return EFAULT.as_isize();
+    }
+
+    let cmd = op & FUTEX_CMD_MASK;
+    let token = current_user_token();
+
+    match cmd {
+        FUTEX_WAIT => {
+            let Some(current_val) = try_translated_read(token, uaddr as *const i32) else {
+                return EFAULT.as_isize();
+            };
+
+            if current_val != val {
+                return EAGAIN.as_isize();
+            }
+            //获取地址对应的等待队列，放入当前任务并睡眠
+            let token = current_user_token();
+            let page_table = PageTable::from_token(token);
+            let Some(pa) = page_table.translate_va(VirtAddr::from(uaddr as usize)) else {
+                return EFAULT.as_isize();
+            };
+            let queue = get_futex_wait_queue(pa.0);
+            let guard = queue.lock();
+            current_task_to_sleep(guard);
+            0
+        }
+        FUTEX_WAKE => {
+            if val <= 0 {
+                return 0;
+            }
+
+            let token = current_user_token();
+            let page_table = PageTable::from_token(token);
+            let Some(pa) = page_table.translate_va(VirtAddr::from(uaddr as usize)) else {
+                return EFAULT.as_isize();
+            };
+
+            let queue = {
+                let queues = FUTEX_WAIT_QUEUES.lock();
+                queues.get(&pa.0).cloned()
+            };
+
+            let Some(queue) = queue else {
+                return 0;
+            };
+
+            let mut woken = 0;
+            while woken < val {
+                let guard = queue.lock();
+                let has_waiter = !guard.is_empty();
+                if !has_waiter {
+                    break;
+                }
+                crate::process::wake_up_one(guard);
+                woken += 1;
+            }
+
+            woken as isize
+        }
+        _ => ENOSYS.as_isize(),
     }
 }
