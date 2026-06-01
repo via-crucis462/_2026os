@@ -23,6 +23,7 @@ const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP2: usize = 24;
 const SYSCALL_FCNTL: usize = 25;    
 const SYSCALL_IOCTL: usize = 29;
+const SYSCALL_MKNOD: usize = 33;
 /// unlinkat syscall
 const SYSCALL_UNLINKAT: usize = 35;
 /// linkat syscall
@@ -260,11 +261,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         let inner = process.inner_exclusive_access();
         inner.info_map_areas();
     }*/
-    // println!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
+    //println!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
     trace!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
+        SYSCALL_MKNOD => sys_mknod(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u64),
         SYSCALL_OPENAT => sys_openat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_CLOSE => sys_close(args[0]),
         SYSCALL_ACCESSAT => sys_accessat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),

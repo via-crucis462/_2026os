@@ -39,7 +39,12 @@ pub struct TmpfsFileInode {
 
 impl TmpfsFileInode {
     pub fn new(mode: u32) -> Self {
-        let full_mode = 0o100000 | (mode & 0o7777);
+        let file_type = mode & 0o170000;
+        let full_mode = if file_type == 0 {
+            0o100000 | (mode & 0o7777)
+        } else {
+            file_type | (mode & 0o7777)
+        };
         Self {
             ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
             pages: Mutex::new(BTreeMap::new()),
