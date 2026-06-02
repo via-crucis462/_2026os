@@ -39,6 +39,7 @@ const SYSCALL_FCHOWNAT: usize = 54;
 const SYSCALL_OPENAT: usize = 56;
 /// close syscall
 const SYSCALL_CLOSE: usize = 57;
+const SYSCALL_VHANGUP: usize = 58;
 /// pipe syscall
 const SYSCALL_PIPE: usize = 59;
 /// read syscall
@@ -90,6 +91,7 @@ const SYSCALL_SIGRETURN: usize = 139;
 /// setpriority syscall
 const SYSCALL_SET_PRIORITY: usize = 140;
 const SYSCALL_SETGID: usize = 144;
+const SYSCALL_SETREUID: usize = 145;
 const SYSCALL_SETUID: usize = 146;
 const SYSCALL_SETEUID: usize=147;
 const SYSCALL_GETRESUID: usize = 148;
@@ -401,6 +403,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_FUTEX => sys_futex(args[0] as *mut i32, args[1] as i32, args[2] as i32),
         SYSCALL_GETRESGID => sys_getresgid(args[0] as *mut u32, args[1] as *mut u32, args[2] as *mut u32),
         SYSCALL_RT_SIGPENDING => sys_rt_sigpending(args[0] as *mut SigSet, args[1] as usize),
+        SYSCALL_SETREUID => sys_setreuid(args[0] as u32, args[1] as u32),
+        SYSCALL_VHANGUP => sys_vhangup(),
         _ => {
             println!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 

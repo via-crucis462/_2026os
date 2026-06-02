@@ -1307,7 +1307,7 @@ pub fn sys_fchmodat(dirfd: isize, path_ptr: *const u8, mode: u32) -> isize {
     let process = task.process(); 
     let mut inner = process.inner_exclusive_access();
     let token = inner.get_user_token();
-    let euid = inner.uid;
+    let euid = inner.ruid;
     drop(inner);
     
     let path = {
@@ -1348,7 +1348,7 @@ pub fn sys_fchmod(fd: usize, mode: u32) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
-    let euid = inner.uid;
+    let euid = inner.ruid;
 
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return EBADF.as_isize();
@@ -1385,7 +1385,7 @@ pub fn sys_fchownat(dirfd: isize, path_ptr: *const u8, owner: u32, group: u32) -
     let process = task.process(); 
     let mut inner = process.inner_exclusive_access();
     let token = inner.get_user_token();
-    let euid = inner.uid;
+    let euid = inner.ruid;
     drop(inner);
     info!("pid[{}] sys_fchownat: dirfd={}, owner={}, group={}", task.process().pid.0, dirfd, owner, group);
     let path = {
