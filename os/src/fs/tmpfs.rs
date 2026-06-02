@@ -371,7 +371,9 @@ pub fn setup_oscomp_env() {
             let bb_inode = busybox_node.inode.clone();
             let applets = [
                 "basename", "dirname", "sh", "grep", "sed", "awk", "cat", 
-                "ls", "rm", "echo", "true", "false", "wc", "mkdir", "rmdir", "touch", "env"
+                "ls", "rm", "echo", "true", "false", "wc", "mkdir", "rmdir", "touch", "env","cut","locale",
+                "tr", "head", "tail", "sort", "uniq", "tee", "sleep", "id", "uname", "rsh",
+                "which", "find", "xargs", "chmod", "chown", "date", "printf", "clear"
             ];
             
             for app in applets {
