@@ -3245,6 +3245,7 @@ pub fn sys_prlimit64(
     new_limit: *const Rlimit64, 
     old_limit: *mut Rlimit64
 ) -> isize {
+    const UL_SETFSIZE: i32 = 1;
     const RLIMIT_NPROC: i32 = 3;
     const RLIMIT_NOFILE: i32 = 7;
     const RLIMIT_MEMLOCK: i32 = 8;
@@ -3291,6 +3292,25 @@ pub fn sys_prlimit64(
             // core dump 文件大小限制，伪实现
             if !old_limit.is_null() {
                 translated_write(token, old_limit, Rlimit64 { cur_lmt: 0, max_lmt: 0 });
+            }
+            0
+        }
+        UL_SETFSIZE => {
+            //若old有值则是将当前限制写入用户提供的缓冲区，若new有值则是设置新的限制，即读用户传进来的值。
+            let task = current_task().unwrap();
+            let process = task.process();
+            let mut proc_inner = process.inner_exclusive_access();
+            if !old_limit.is_null() {
+                if !try_translated_write(token, old_limit, Rlimit64 { cur_lmt: proc_inner.max_file_size, max_lmt: proc_inner.max_file_size }) {
+                    return EFAULT.as_isize();
+                }
+            }
+            if !new_limit.is_null() {
+                if let Some(new) = try_translated_read(token, new_limit) {
+                    proc_inner.max_file_size = new.cur_lmt;
+                } else {
+                    return EFAULT.as_isize();
+                }
             }
             0
         }

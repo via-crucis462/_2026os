@@ -30,7 +30,7 @@ const AT_PHNUM: usize = 5;
 const AT_PAGESZ: usize = 6;
 const AT_ENTRY: usize = 9;
 const AT_RANDOM: usize = 25;
-
+const RLIM_INFINITY: usize = usize::MAX;//进程最大可操作的文件大小
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct  Rlimit64 {
@@ -191,6 +191,7 @@ impl ProcessControlBlock {
                 euid: 0,
                 egid: 0,
                 sgid: 0,
+                max_file_size: RLIM_INFINITY, // 默认文件大小限制为无限制
                 umask: 0o022,
                 pgid: pid_handle.0,
                 alive_task_count: 0,
@@ -527,6 +528,7 @@ impl ProcessControlBlock {
                 sgid: parent_inner.sgid,
                 pgid: parent_inner.pgid,
                 fd_rlmt: parent_inner.fd_rlmt.clone(),
+                max_file_size: parent_inner.max_file_size,
                 tasks: Vec::new(),
                 alive_task_count: 1, // 初始有一个线程
             })
@@ -799,6 +801,7 @@ pub struct ProcessControlBlockInner {
     pub sid: usize,
     pub pgid: usize, // 进程组 ID
     
+    pub max_file_size: usize, // 进程可创建的最大文件大小，单位为字节，默认为 usize::MAX
     // 进程下的线程数
     pub tasks: Vec<Arc<TaskControlBlock>>, 
     // 存活进程数，等于0相当于僵尸进程
