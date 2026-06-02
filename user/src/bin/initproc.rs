@@ -327,7 +327,7 @@ fn main() -> i32 {
         "uname04",
         "unlinkat01",
         "utsname01",
-        "utsname04",*/
+        "utsname04",
         "wait01",
         "wait02",
         "wait401",
@@ -381,7 +381,7 @@ fn main() -> i32 {
         "writev03",
         "writev05",
         "writev06",
-        "writev07",
+        "writev07",*/
     ];
 
     let mut run_cases: Vec<&str> = Vec::from(BASE_CASES);

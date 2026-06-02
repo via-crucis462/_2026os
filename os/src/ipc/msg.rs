@@ -26,7 +26,18 @@ bitflags! {
         /// 拷贝消息而不消费（仅 msgrcv，Linux 专用）
         const MSG_COPY    = 0o40000;
     }
+
+    /// msgget 标志
+    pub struct MsgGetFlags: usize {
+        const IPC_CREAT = 0o1000;
+        const IPC_EXCL  = 0o2000;
+    }
+
 }
+
+pub const IPC_RMID: usize = 0;
+pub const IPC_SET: usize = 1;
+pub const IPC_STAT: usize = 2;
 
 lazy_static! {
     /// 全局消息队列管理器
@@ -35,25 +46,67 @@ lazy_static! {
 
 pub struct MsgManager {
     id_allocator: RecycleAllocator,
-    // id->MsgQueue
+    // id->队列
     queues: BTreeMap<u32, Arc<Mutex<MsgQueue>>>,
+    // key->id
+    key_to_id: BTreeMap<u32, u32>,
 }
 
 impl MsgManager {
     pub fn new() -> Self {
         Self {
-            id_allocator: RecycleAllocator::new(),
+            id_allocator: RecycleAllocator::new_with_start(1),
             queues: BTreeMap::new(),
+            key_to_id: BTreeMap::new(),
         }
     }
-    pub fn create_queue(&mut self) -> isize {
+
+    /// 根据 key 和 flags 获取或创建队列
+    pub fn msgget(&mut self, key: u32, flags: MsgGetFlags, mode: u16, uid: u32, gid: u32) -> isize {
+        // key = 0 直接创建
+        if key == 0 {
+            return self.create_queue(key, mode, uid, gid);
+        }
+
+        // 尝试查找
+        if let Some(&id) = self.key_to_id.get(&key) {
+            if flags.contains(MsgGetFlags::IPC_CREAT) && flags.contains(MsgGetFlags::IPC_EXCL) {
+                return EEXIST.as_isize();
+            }
+            // TODO: 权限检查
+            return id as isize;
+        }
+
+        // 不存在且指定 IPC_CREAT，创建
+        if flags.contains(MsgGetFlags::IPC_CREAT) {
+            return self.create_queue(key, mode, uid, gid);
+        }
+
+        ENOENT.as_isize()
+    }
+
+    fn create_queue(&mut self, key: u32, mode: u16, uid: u32, gid: u32) -> isize {
         let id = self.id_allocator.alloc();
         // 溢出检查
         if id > MSG_Q_MAX {
             return ENOMEM.as_isize();
         }
-        let queue = Arc::new(Mutex::new(MsgQueue::new()));
-        self.queues.insert(id as u32, queue.clone());
+        let mut queue = MsgQueue::new();
+        // 设置权限信息
+        queue.msqds.msg_perm = IpcPerm {
+            key: key as i32,
+            uid,
+            gid,
+            cuid: uid,
+            cgid: gid,
+            mode,
+            seq: 0,
+        };
+        // 初始化基本信息
+        queue.msqds.msg_ctime = crate::get_real_time_ns() as usize;
+        let qid = id as u32;
+        self.key_to_id.insert(key, qid);
+        self.queues.insert(qid, Arc::new(Mutex::new(queue)));
         id as isize
     }
     /// 根据id查询队列，获得其arc克隆
@@ -62,8 +115,14 @@ impl MsgManager {
     }
     /// 按id移除队列
     pub fn remove_queue(&mut self, id: u32) {
-        self.queues.remove(&id);
-        self.id_allocator.dealloc(id as usize);
+        let queues = &mut self.queues;
+        if let Some(queue) = queues.get(&id) {
+            let q = queue.lock();
+            let key = q.msqds.msg_perm.key as u32;
+            self.key_to_id.remove(&key);
+            self.id_allocator.dealloc(id as usize);
+        }
+        queues.remove(&id);
     }
 }
 
@@ -135,6 +194,7 @@ impl MsgQueue {
         Ok(())
     }
 
+    // 从队列头部取出消息
     pub fn pop(&mut self, pid: usize) -> Option<Msg> {
         let msg = self.msgs.pop_front();
         if msg.is_some() {
@@ -145,6 +205,20 @@ impl MsgQueue {
 
     pub fn len(&self) -> usize {
         self.msgs.len()
+    }
+
+    /// 获取 msqid_ds 快照
+    pub fn get_msqid_ds(&self) -> MsqidDs {
+        self.msqds.clone()
+    }
+
+    /// IPC_SET: 应用用户设置的 uid, gid, mode, msg_qbytes
+    pub fn apply_ipc_set(&mut self, new_ds: &MsqidDs) {
+        self.msqds.msg_perm.uid = new_ds.msg_perm.uid;
+        self.msqds.msg_perm.gid = new_ds.msg_perm.gid;
+        self.msqds.msg_perm.mode = new_ds.msg_perm.mode;
+        self.msqds.msg_qbytes = new_ds.msg_qbytes;
+        self.msqds.msg_ctime = crate::get_real_time_ns() as usize;
     }
 
     /// 从队列中取出一个类型匹配的消息，若消息过长且未设置 MSG_NOERROR 则返回 E2BIG

@@ -12,9 +12,27 @@ use Errno::*;
 use bitflags::bitflags;
 use alloc::vec;
 
-/// msgflg 转 MsgFlags
-fn msg_flags_from(msgflg: usize) -> MsgFlags {
-    MsgFlags::from_bits_truncate(msgflg)
+
+//
+// msg相关
+//
+
+/// msgget 标志解析
+fn msgget_flags_from(msgflg: usize) -> (MsgGetFlags, u16) {
+    let mode = (msgflg & 0o777) as u16;
+    let flags = MsgGetFlags::from_bits_truncate(msgflg & !0o777);
+    (flags, mode)
+}
+
+/// 查询消息队列id，根据flg决定是否新建
+pub fn sys_msgget(key: u32, msgflg: usize) -> isize {
+    let (flags, mode) = msgget_flags_from(msgflg);
+    let (uid, gid) = {
+        let proc = current_task().unwrap().process.upgrade().unwrap();
+        let inner = proc.inner_exclusive_access();
+        (inner.uid, inner.gid)
+    };
+    MSG_MANAGER.lock().msgget(key, flags, mode, uid, gid)
 }
 
 /// 向指定id的消息队列发送消息
@@ -22,7 +40,7 @@ fn msg_flags_from(msgflg: usize) -> MsgFlags {
 pub fn sys_msgsnd(msqid: usize, msgp: usize, msgsz: usize, msgflg: usize) -> isize {
     let pid = current_task().unwrap().process().pid.0;
     let token = current_user_token();
-    let flags = msg_flags_from(msgflg);
+    let flags = MsgFlags::from_bits_truncate(msgflg);
     
     // 读取消息类型
     let mut mtype = if let Some(m) = try_translated_read(token, msgp as *const usize) {
@@ -68,7 +86,7 @@ pub fn sys_msgsnd(msqid: usize, msgp: usize, msgsz: usize, msgflg: usize) -> isi
 pub fn sys_msgrcv(msqid: usize, msgp: usize, msgsz: usize, msgtyp: isize, msgflg: usize) -> isize {
     let pid = current_task().unwrap().process().pid.0;
     let token = current_user_token();
-    let flags = msg_flags_from(msgflg);
+    let flags = MsgFlags::from_bits_truncate(msgflg);
     let manager = MSG_MANAGER.lock();
     if let Some(queue) = manager.get_queue(msqid as u32) {
         let mut q = queue.lock();
@@ -105,6 +123,56 @@ pub fn sys_msgrcv(msqid: usize, msgp: usize, msgsz: usize, msgtyp: isize, msgflg
         EINVAL.as_isize()
     }
 }
+
+/// 对消息队列执行控制操作
+/// cmd: IPC_STAT / IPC_SET / IPC_RMID
+pub fn sys_msgctl(msqid: u32, cmd: usize, buf: usize) -> isize {
+    let token = current_user_token();
+
+    match cmd {
+        // 获取状态信息
+        IPC_STAT => {
+            let manager = MSG_MANAGER.lock();
+            if let Some(queue) = manager.get_queue(msqid) {
+                let q = queue.lock();
+                let ds = q.get_msqid_ds();
+                if !try_translated_write(token, buf as *mut MsqidDs, ds) {
+                    return EFAULT.as_isize();
+                }
+                0
+            } else {
+                EINVAL.as_isize()
+            }
+        }
+        // 设置状态信息
+        IPC_SET => {
+            let ds = if let Some(d) = try_translated_read(token, buf as *const MsqidDs) {
+                d
+            } else {
+                return EFAULT.as_isize();
+            };
+            let manager = MSG_MANAGER.lock();
+            if let Some(queue) = manager.get_queue(msqid) {
+                let mut q = queue.lock();
+                q.apply_ipc_set(&ds);
+                0
+            } else {
+                EINVAL.as_isize()
+            }
+        }
+        // 删除消息队列
+        IPC_RMID => {
+            MSG_MANAGER.lock().remove_queue(msqid);
+            0
+        }
+        _ => EINVAL.as_isize(),
+    }
+}
+
+
+//
+// shm相关
+//
 
 bitflags! {
     struct ShmFlags: i32 {
