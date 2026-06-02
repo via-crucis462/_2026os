@@ -502,7 +502,7 @@ impl VfsInode for ProcStatusInode {
         let (uid, euid, gid, egid) = {
  
             let inner = process.inner.exclusive_access(); 
-            (inner.uid, inner.euid, inner.gid, inner.egid)
+            (inner.ruid, inner.euid, inner.gid, inner.egid)
         };
 
 

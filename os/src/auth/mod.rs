@@ -31,7 +31,7 @@ impl PermStat {
     pub fn current_perm_set(&self) -> PermSet {
         let proc = current_task().unwrap().process.upgrade().unwrap();
         let inner = proc.inner_exclusive_access();
-        let uid = inner.uid;
+        let uid = inner.ruid;
         let gid = inner.gid;
         drop(inner);
         drop(proc);

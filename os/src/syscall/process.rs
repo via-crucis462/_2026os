@@ -362,7 +362,7 @@ pub fn sys_getuid() -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
     let inner = proc.inner_exclusive_access();
-    inner.uid as isize
+    inner.ruid as isize
 }
 // 假装获取成功，返回 PGID 为 0
 pub fn sys_getpgid(pid: usize) -> isize {
@@ -427,7 +427,7 @@ pub fn sys_setuid(uid: u32) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
     let mut proc_inner = proc.inner_exclusive_access();
-    proc_inner.uid = uid;
+    proc_inner.ruid = uid;
     proc_inner.euid = uid;
     0 
 }
@@ -1067,7 +1067,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     let task = current_task().unwrap();
     let cwd = task.process().inner_exclusive_access().cwd.clone();
     let gid = task.process().inner_exclusive_access().gid;
-    let uid = task.process().inner_exclusive_access().uid;
+    let uid = task.process().inner_exclusive_access().ruid;
     drop(task);
     let path_str = {
         if let Some(path) = try_translated_str(token, path){
@@ -3372,4 +3372,68 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32) -> isize {
         }
         _ => ENOSYS.as_isize(),
     }
+}
+
+pub fn sys_getresgid(gid_ptr: *mut u32, egid_ptr: *mut u32, sgid_ptr: *mut u32) -> isize {
+    let task = current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+
+    if !gid_ptr.is_null() {
+        if !try_translated_write(token, gid_ptr, inner.gid) {
+            return EFAULT.as_isize();
+        }
+    }
+    if !egid_ptr.is_null() {
+        if !try_translated_write(token, egid_ptr, inner.egid) {
+            return EFAULT.as_isize();
+        }
+    }
+    if !sgid_ptr.is_null() {
+        if !try_translated_write(token, sgid_ptr, inner.sgid) {
+            return EFAULT.as_isize();
+        }
+    }
+    0
+}
+pub fn sys_rt_sigpending(sigset_ptr: *mut SigSet, sigsetsize: usize) -> isize {
+    if sigsetsize != 8 {
+        return EINVAL.as_isize();
+    }
+    let task = current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+
+    let pending = inner.signals.bits() as usize;
+    if !try_translated_write(token, sigset_ptr, pending) {
+        return EFAULT.as_isize();
+    }
+    0
+}
+pub fn sys_setreuid(ruid: u32, euid: u32) -> isize {
+    let task = current_task().unwrap();
+    let process = task.process();
+    let mut inner = process.inner_exclusive_access();
+
+    if ruid != u32::MAX {
+        inner.ruid = ruid;
+    }
+    if euid != u32::MAX {
+        inner.euid = euid;
+    }
+    0
+}
+
+pub fn sys_vhangup() -> isize {
+    let task = current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+
+    if inner.euid != 0 {
+        return EPERM.as_isize();
+    }
+
+    0
 }

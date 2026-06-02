@@ -36,7 +36,7 @@ pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
     let (uid, gid) = {
         let proc = current_task().unwrap().process.upgrade().unwrap();
         let inner = proc.inner_exclusive_access();
-        (inner.uid, inner.gid)
+        (inner.ruid, inner.gid)
     };
 
     // IPC_PRIVATE 始终创建新段

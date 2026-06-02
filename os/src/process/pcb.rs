@@ -185,11 +185,12 @@ impl ProcessControlBlock {
                 signals: SignalFlags::empty(),
                 signal_actions: SignalActions::default(),
                 exit_code: 0,
-                uid: 0,
+                ruid: 0,
                 gid: 0,
                 sid:0,
                 euid: 0,
                 egid: 0,
+                sgid: 0,
                 umask: 0o022,
                 pgid: pid_handle.0,
                 alive_task_count: 0,
@@ -517,12 +518,13 @@ impl ProcessControlBlock {
                 signals: SignalFlags::empty(),
                 signal_actions: parent_inner.signal_actions.clone(),
                 exit_code: 0,
-                uid: parent_inner.uid,
+                ruid: parent_inner.ruid,
                 gid: parent_inner.gid,
                 euid: parent_inner.euid,
                 umask: parent_inner.umask, 
                 sid:parent_inner.sid,
                 egid: parent_inner.egid,
+                sgid: parent_inner.sgid,
                 pgid: parent_inner.pgid,
                 fd_rlmt: parent_inner.fd_rlmt.clone(),
                 tasks: Vec::new(),
@@ -787,10 +789,11 @@ pub struct ProcessControlBlockInner {
 
     pub exit_code: i32, // 进程退出码，默认为0，只有当进程状态为Zombie时才有意义
 
-    pub uid: u32,  // 用户 ID
+    pub ruid: u32,  // 用户 ID
     pub gid: u32,  // 用户组 ID
     pub euid: u32, // 有效用户 ID
     pub egid: u32, // 有效用户组 ID
+    pub sgid: u32, // 辅助用户组 ID
     pub umask: u32, // 文件模式创建掩码
 
     pub sid: usize,
