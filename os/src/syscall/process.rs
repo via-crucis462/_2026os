@@ -3400,3 +3400,18 @@ pub fn sys_getresgid(gid_ptr: *mut u32, egid_ptr: *mut u32, sgid_ptr: *mut u32) 
     }
     0
 }
+pub fn sys_rt_sigpending(sigset_ptr: *mut SigSet, sigsetsize: usize) -> isize {
+    if sigsetsize != 8 {
+        return EINVAL.as_isize();
+    }
+    let task = current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+
+    let pending = inner.signals.bits() as usize;
+    if !try_translated_write(token, sigset_ptr, pending) {
+        return EFAULT.as_isize();
+    }
+    0
+}
