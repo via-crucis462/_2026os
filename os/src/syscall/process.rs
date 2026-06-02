@@ -1148,6 +1148,13 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         envs_vec.push("PATH=/bin:/sbin:/usr/bin:/usr/sbin:/musl:/musl/ltp/testcases/bin".to_string());
         envs_vec.push("HOME=/".to_string());
         envs_vec.push("TERM=linux".to_string());
+        #[cfg(target_arch = "riscv64")]
+        let mac = crate::drivers::block::NET_DEVICE.0.exclusive_access().mac();
+        let real_mac_str = alloc::format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
+        envs_vec.push(alloc::format!("LHOST_HWADDRS={}", real_mac_str));
     }
     trace!("[kernel] sys_exec: before open_file");
     

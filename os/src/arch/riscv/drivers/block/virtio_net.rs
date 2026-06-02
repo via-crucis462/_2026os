@@ -29,12 +29,17 @@ impl VirtIONetWrapper {
             panic!("[kernel] virtio-net device not found!");
         }
 
-        // 使用你写好的 VirtioHal 进行初始化
+        // 使用写好的 VirtioHal 进行初始化
         let net = unsafe {
             VirtIONet::<VirtioHal>::new(&mut *(net_addr as *mut VirtIOHeader))
                 .expect("Failed to initialize virtio-net")
         };
         
         Self(MPSafeCell::new(net))
+    }
+    //获得mac地址
+    pub fn get_mac_address(&self) -> [u8; 6] {
+        let net_guard = self.0.exclusive_access(); 
+        net_guard.mac() 
     }
 }

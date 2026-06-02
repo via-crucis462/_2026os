@@ -371,7 +371,7 @@ pub fn setup_oscomp_env() {
             let bb_inode = busybox_node.inode.clone();
             let applets = [
                 "basename", "dirname", "sh", "grep", "sed", "awk", "cat", 
-                "ls", "rm", "echo", "true", "false", "wc", "mkdir", "rmdir", "touch", "env","cut","locale",
+                "ls", "rm", "echo", "true", "false", "wc", "mkdir", "rmdir", "touch", "env","cut",
                 "tr", "head", "tail", "sort", "uniq", "tee", "sleep", "id", "uname", "rsh",
                 "which", "find", "xargs", "chmod", "chown", "date", "printf", "clear"
             ];
@@ -468,6 +468,11 @@ pub fn setup_oscomp_env() {
         error!("DEBUG: /dev/shm path is BROKEN!");
     }
     mount_hugepages();
+    //返回简单的“语言、国家、字符编码”的一套环境变量并挂载
+    let locale_content = "#!/bin/sh\necho \"LANG=C\"\necho \"LC_ALL=C\"\n";
+    bin_dentry.insert( "locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
+    sbin_dentry.insert("locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
+    usr_bin_dentry.insert("locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
     info!("[VFS] setup_oscomp_env done.");
 }
 
