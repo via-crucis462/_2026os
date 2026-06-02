@@ -3376,3 +3376,27 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32) -> isize {
         _ => ENOSYS.as_isize(),
     }
 }
+
+pub fn sys_getresgid(gid_ptr: *mut u32, egid_ptr: *mut u32, sgid_ptr: *mut u32) -> isize {
+    let task = current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+
+    if !gid_ptr.is_null() {
+        if !try_translated_write(token, gid_ptr, inner.gid) {
+            return EFAULT.as_isize();
+        }
+    }
+    if !egid_ptr.is_null() {
+        if !try_translated_write(token, egid_ptr, inner.egid) {
+            return EFAULT.as_isize();
+        }
+    }
+    if !sgid_ptr.is_null() {
+        if !try_translated_write(token, sgid_ptr, inner.sgid) {
+            return EFAULT.as_isize();
+        }
+    }
+    0
+}

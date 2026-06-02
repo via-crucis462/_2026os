@@ -126,7 +126,7 @@ impl Dentry {
                 }
                 continue;
             }
-            // 查找子节点（利用你写好的带缓存的 find_child）
+
             let next = current.find_child(&comp)?;
             // 检查是不是软链接
             let stat = next.inode.get_stat();
