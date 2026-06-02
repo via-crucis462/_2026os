@@ -1143,19 +1143,18 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
 
     // 2. 继续执行逻辑
     if let Some(mut app_inode) = app_inode_opt {
-        let stat = app_inode.inode.get_stat();
-        let is_dir = (stat.mode & 0o170000) == 0o040000; 
-        let can_exec = (stat.mode & 0o111) != 0;        
-        if is_dir || !can_exec {
-            return EACCES.as_isize();
+        {
+            let stat = app_inode.inode.get_stat();
+            let is_dir = (stat.mode & 0o170000) == 0o040000;
+            let perm = app_inode.get_perm();
+            let can_exec = perm.can_execute(uid, gid);
+            if is_dir || !can_exec {
+                warn!("[kernel] sys_exec: target '{}' is not executable (is_dir={}, mode={:#o})", path_str, is_dir, stat.mode);
+                return EACCES.as_isize();
+            }
         }
-        debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         
-        // 鉴权逻辑，但当前实现用户几乎一定是root，所以似乎没用
-        let perm = app_inode.get_perm();
-        if !perm.can_execute(uid, gid) {
-            return EACCES.as_isize();
-        }
+        debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
 
         let app_name = app_inode.get_dentry().name.clone();
 
