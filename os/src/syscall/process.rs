@@ -1136,7 +1136,19 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             unsafe { envs = envs.add(1); }
         }
     }
-
+    let mut path_exists = false;
+    for env in envs_vec.iter() {
+        if env.starts_with("PATH=") {
+            path_exists = true;
+            break;
+        }
+    }
+    // 初始化的时候增加基本的系统环境变量
+    if !path_exists {
+        envs_vec.push("PATH=/bin:/sbin:/usr/bin:/usr/sbin:/musl:/musl/ltp/testcases/bin".to_string());
+        envs_vec.push("HOME=/".to_string());
+        envs_vec.push("TERM=linux".to_string());
+    }
     trace!("[kernel] sys_exec: before open_file");
     
     // 1. 尝试正常打开主程序
