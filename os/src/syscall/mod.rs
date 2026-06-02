@@ -175,12 +175,15 @@ const SYSCALL_RESQ: usize = 293;
 const SYSCALL_ACCESSAT: usize = 48;
 pub mod bpf;
 pub mod fs;
-use bpf::*;
+pub mod errno;
 mod process;
 mod prctl;
-pub mod errno;
 mod mm;
 mod net;
+mod ipc;
+
+use ipc::*;
+use bpf::*;
 use fs::*;
 use process::*;
 use prctl::*;

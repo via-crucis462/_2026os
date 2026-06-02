@@ -46,10 +46,9 @@ pub mod syscall;
 pub mod process;
 pub mod auth;
 pub mod timer;
+pub mod ipc;
 
 pub use arch::config::*;
-use crate::drivers::block::NET_DEVICE;
-
 pub use process::task;
 
 #[allow(unused)]
@@ -58,6 +57,10 @@ use core::arch::global_asm;
 #[cfg(target_arch = "loongarch64")]
 #[allow(unused)]
 use crate::arch::la;
+
+pub use arch::timer::*;
+
+use crate::drivers::block::NET_DEVICE;
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::*;

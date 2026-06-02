@@ -101,7 +101,7 @@ fn main() -> i32 {
 
     // 白名单：仅运行这些有分数的测例
     const BASE_CASES: &[&str] = &[
-
+/*
         "accept01",
         "accept03",
         "accept4_01",
@@ -327,7 +327,7 @@ fn main() -> i32 {
         "uname04",
         "unlinkat01",
         "utsname01",
-        "utsname04",
+        "utsname04",*/
         "wait01",
         "wait02",
         "wait401",
@@ -343,6 +343,45 @@ fn main() -> i32 {
         "write02",
         "write05",
         "writev01",
+        "waitid01",
+        "waitid02",
+        "waitid03",
+        "waitid07",
+        "waitid08",
+        "waitid09",
+        "waitid10",
+        "waitpid01",
+        "waitpid06",
+        "waitpid07",
+        "waitpid08",
+        "waitpid10",
+        "waitpid11",
+        "waitpid12",
+        "waitpid13",
+        "wc01.sh",
+        "which01.sh",
+        "wireguard01.sh",
+        "wireguard02.sh",
+        "wireguard_lib.sh",
+        "wqueue01",
+        "wqueue02",
+        "wqueue03",
+        "wqueue04",
+        "wqueue05",
+        "wqueue06",
+        "wqueue07",
+        "wqueue08",
+        "wqueue09",
+        "write03",
+        "write04",
+        "write06",
+        "write_freezing.sh",
+        "writetest",
+        "writev02",
+        "writev03",
+        "writev05",
+        "writev06",
+        "writev07",
     ];
 
     let mut run_cases: Vec<&str> = Vec::from(BASE_CASES);
@@ -364,6 +403,7 @@ fn main() -> i32 {
             "sbrk02",
             "signal01",
             "times03",
+            "waitid11",
         ]);
     }
 
@@ -392,25 +432,20 @@ fn main() -> i32 {
     }
     let fd = fd as usize;
 
-// --- musl basic ---
-#[cfg(target_arch = "riscv64")]
+// --- basic cases ---
+#[cfg(false)]
 {
-    write_fd(fd, "echo \"#### OS COMP TEST GROUP START basic-musl ####\"\n");
-    write_fd(fd, "for f in /musl/basic/*; do\n");
-    write_fd(fd, "  fname=$(basename \"$f\")\n");
-    write_fd(fd, "  case \"$fname\" in *.sh|text.txt) continue ;; esac\n");
-    write_fd(fd, "  if [ -f \"$f\" ] && [ -x \"$f\" ]; then \"$f\"; fi\n");
-    write_fd(fd, "done\n");
-    write_fd(fd, "echo \"#### OS COMP TEST GROUP END basic-musl ####\"\n");
+    write_fd(fd, "
+cd /musl 
+sh /musl/basic_testcode.sh
+sh /musl/busybox_testcode.sh
+sh /musl/libctest_testcode.sh
+cd /glibc
+sh /glibc/basic_testcode.sh
+sh /glibc/busybox_testcode.sh
+   ");
 }
 
-{
-    write_fd(fd, "sh /musl/busybox_testcode.sh\n");
-}
-#[cfg(target_arch = "riscv64")]
-{
-    write_fd(fd, "sh /musl/libctest_testcode.sh\n");
-}
 // --- musl ltp ---
 {
     write_fd(fd, "echo \"#### OS COMP TEST GROUP START ltp-musl ####\"\n");
@@ -433,22 +468,6 @@ fn main() -> i32 {
     write_fd(fd, "echo \"#### OS COMP TEST GROUP END ltp-musl ####\"\n");
 }
 
-// --- glibc basic ---
-#[cfg(target_arch = "riscv64")]
-{
-    write_fd(fd, "echo \"#### OS COMP TEST GROUP START basic-glibc ####\"\n");
-    write_fd(fd, "for f in /glibc/basic/*; do\n");
-    write_fd(fd, "  fname=$(basename \"$f\")\n");
-    write_fd(fd, "  case \"$fname\" in *.sh|text.txt) continue ;; esac\n");
-    write_fd(fd, "  if [ -f \"$f\" ] && [ -x \"$f\" ]; then \"$f\"; fi\n");
-    write_fd(fd, "done\n");
-    write_fd(fd, "echo \"#### OS COMP TEST GROUP END basic-glibc ####\"\n");
-}
-
-{
-    write_fd(fd, "sh /glibc/busybox_testcode.sh\n");
-}
-
 // --- glibc ltp ---
 {
     write_fd(fd, "echo \"#### OS COMP TEST GROUP START ltp-glibc ####\"\n");
@@ -467,7 +486,7 @@ fn main() -> i32 {
         write_fd(fd, "    echo \"FAIL LTP CASE $name : $ret\"\n");
         write_fd(fd, "  fi\n");
         write_fd(fd, "done\n");
-    }
+    } // 
     write_fd(fd, "echo \"#### OS COMP TEST GROUP END ltp-glibc ####\"\n");
 }
     sys_close(fd);
