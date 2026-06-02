@@ -1137,10 +1137,14 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         }
     }
     let mut path_exists = false;
+    let mut hwaddr_exists = false;
     for env in envs_vec.iter() {
         if env.starts_with("PATH=") {
             path_exists = true;
             break;
+        }
+        if env.starts_with("LHOST_HWADDRS=") {
+            hwaddr_exists = true;
         }
     }
     // 初始化的时候增加基本的系统环境变量
@@ -1148,13 +1152,18 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         envs_vec.push("PATH=/bin:/sbin:/usr/bin:/usr/sbin:/musl:/musl/ltp/testcases/bin".to_string());
         envs_vec.push("HOME=/".to_string());
         envs_vec.push("TERM=linux".to_string());
+    }
+    if !hwaddr_exists {
+        // 没有 MAC 地址后增加
         #[cfg(target_arch = "riscv64")]
         let mac = crate::drivers::block::NET_DEVICE.0.exclusive_access().mac();
         let real_mac_str = alloc::format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
         );
-        envs_vec.push(alloc::format!("LHOST_HWADDRS={}", real_mac_str));
+        
+        envs_vec.push(alloc::format!("LHOST_HWADDRS={}", real_mac_str)); //本地真实 MAC
+        envs_vec.push("RHOST_HWADDRS=00:11:22:33:44:66".to_string());//远端假 MAC
     }
     trace!("[kernel] sys_exec: before open_file");
     
