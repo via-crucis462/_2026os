@@ -675,7 +675,7 @@ impl VfsInode for MemInfoInode {
    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let free_frames = get_free_frames(); 
         let free_kb = free_frames * 4;
-        let total_kb = 128 * 1024; 
+        let total_kb = crate::arch::config::MEMORY_SIZE / 1024;
         let mut local_buf = [0u8; 128];
         let mut writer = StackBuffer { buf: &mut local_buf, len: 0 };
         let _ = write!(
@@ -683,7 +683,7 @@ impl VfsInode for MemInfoInode {
             "MemTotal:        {} kB\nMemFree:         {} kB\nMemAvailable:    {} kB\n",
             total_kb, free_kb, free_kb
         );
-
+        info!("MemInfo: {}", String::from_utf8_lossy(&writer.buf[..writer.len]));
         let output_bytes = &writer.buf[..writer.len];
 
         if offset >= output_bytes.len() {

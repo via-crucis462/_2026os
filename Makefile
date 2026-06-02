@@ -7,7 +7,7 @@ LA_SMP ?= 4
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
 # default, sh, ltp
-INIT ?= 	sh
+INIT ?= default
 RV_ELF ?= os/target/riscv64gc-unknown-none-elf/$(MODE)/os
 LA_ELF ?= os/target/loongarch64-unknown-none/$(MODE)/os
 
@@ -46,8 +46,7 @@ copy-user: copy-user-rv copy-user-la
 
 copy: copy-rv  copy-user-rv copy-la  copy-user-la
 
-build: build-rv 
-# build-la
+build: build-rv build-la
 
 test-rv: MODE = release
 test-rv: build-user-rv copy-user-rv build-rv copy-rv

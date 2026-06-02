@@ -95,8 +95,8 @@ env-la:
 ifeq ($(OFFLINE),)
 	export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static; \
 	export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup; \
-	(rustup target list | grep "loongarch64-unknown-none (installed)") || rustup target add loongarch64-unknown-none
-	rustup component add rust-src
+	((rustup target list | grep "loongarch64-unknown-none (installed)") || rustup target add loongarch64-unknown-none) && \
+	rustup component add rust-src && \
 	rustup component add llvm-tools-preview
 endif
 

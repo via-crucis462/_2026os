@@ -495,6 +495,8 @@ pub fn setup_oscomp_env() {
     {
         lib64_dentry.mount_child("ld-musl-riscv64.so.1".to_string(), ld.inode.clone());
         lib_dentry.mount_child("ld-musl-riscv64.so.1".to_string(), ld.inode.clone());
+        lib64_dentry.mount_child("ld-musl-riscv64-sf.so.1".to_string(), ld.inode.clone());
+        lib_dentry.mount_child("ld-musl-riscv64-sf.so.1".to_string(), ld.inode.clone());
     }
     info!("[VFS] Populated musl lib symlinks");
 

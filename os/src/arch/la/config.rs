@@ -27,9 +27,14 @@ pub const KERNEL_HEAP_SIZE: usize = 0x800_0000; // 128MB
 pub const CLOCK_FREQ: usize = 12500000;
 /// 为pci设备预留的内存空间大小
 pub const DMA_SIZE: usize = 0x100_0000; // 16MB
+
+/// qemu主要内存起始地址, 注意linker.ld需要与此同步
+pub const MEMORY_BASE: usize = 0x8000_0000;
+/// qemu memory size
+pub const MEMORY_SIZE: usize = 1<<30; // 1GB,0x4000_0000
 /// the physical memory end
-/// 只留这么多物理内存，更高的地址空间可能会被设备占用，可能出现冲突
-pub const MEMORY_END: usize = 0x9000_004_0000_0000;
+pub const MEMORY_END: usize = MEMORY_BASE + MEMORY_SIZE; // 0xc000_0000
+
 /// 查看qemu的源代码可以知道配置空间的基地址为0x2000_0000，不写成虚拟地址
 pub const PCI_CONFIG_SPACE_BASE: usize = 0x2000_0000;
 /// MMIO基址设置为0x4000_0000起，改成更低的地址会有问题，ai解释是qemu规定这里开始才是合法的MMIO地址
