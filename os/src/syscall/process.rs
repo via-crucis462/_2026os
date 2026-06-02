@@ -1159,9 +1159,10 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         }
 
         let app_name = app_inode.get_dentry().name.clone();
-
+        let mut all_data = app_inode.read_all();
+        let is_script = app_name.ends_with(".sh") || (all_data.len() >= 2 && &all_data[0..2] == b"#!");
         // 脚本处理逻辑 (.sh)
-        if app_name.ends_with(".sh") {
+        if is_script     {
             info!("[kernel] sys_exec: detected script '{}', trying to execute with busybox", app_name);
             let busybox = "/musl/busybox";
             if let Some(inode) = open_file(cwd.clone(), busybox, OpenFlags::RDONLY,0) {
@@ -1171,14 +1172,16 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
                 //new_args.extend(args_vec);
                 args_vec = new_args;
                 app_inode = inode;
+                all_data = app_inode.read_all();
             } else {
                 println!("[kernel] sys_exec: failed to open busybox for script execution");
                 return ENOENT.as_isize();
             }
         }
 
-        let all_data = app_inode.read_all();
+       
         // 验证 ELF 签名
+        
         if all_data.len() < 4 || &all_data[0..4] != &[0x7f, 0x45, 0x4c, 0x46] {
             return ENOEXEC.as_isize();
         }
