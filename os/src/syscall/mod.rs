@@ -23,6 +23,7 @@ const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP2: usize = 24;
 const SYSCALL_FCNTL: usize = 25;    
 const SYSCALL_IOCTL: usize = 29;
+const SYSCALL_MKNOD: usize = 33;
 /// unlinkat syscall
 const SYSCALL_UNLINKAT: usize = 35;
 /// linkat syscall
@@ -59,10 +60,13 @@ const SYSCALL_UTIMENSAT: usize = 88;
 /// exit syscall
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
+const SYSCALL_WAITID: usize = 95;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
-
+const SYSCALL_FUTEX: usize = 98;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;
 const SYSCALL_GET_ROBUST_LIST: usize = 100;
+const SYSCALL_TKILL: usize = 130;
+const SYSCALL_TGKILL: usize = 131;
 
 const SYSCALL_SLEEP:usize =101;
 const SYSCALL_SETITIMER: usize = 103;
@@ -257,11 +261,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         let inner = process.inner_exclusive_access();
         inner.info_map_areas();
     }*/
-    // println!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
+    //println!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
     trace!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
+        SYSCALL_MKNOD => sys_mknod(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u64),
         SYSCALL_OPENAT => sys_openat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_CLOSE => sys_close(args[0]),
         SYSCALL_ACCESSAT => sys_accessat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
@@ -303,6 +308,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SETUID => sys_setuid(args[0] as u32),
         SYSCALL_SETEUID => sys_seteuid(args[0] as u32),
         SYSCALL_SETGID => sys_setgid(args[0] as u32),
+        SYSCALL_TKILL => sys_tkill(args[0], args[1] as i32),
+        SYSCALL_TGKILL => sys_tgkill(args[0], args[1], args[2] as i32),
         SYSCALL_GETRESUID => sys_getresuid(args[0] as *mut u32, args[1] as *mut u32, args[2] as *mut u32),
         SYSCALL_UMASK => sys_umask(args[0] as u32),
         SYSCALL_GETPID => sys_getpid(),
@@ -339,6 +346,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2]),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize, args[2] as *const usize),
+        SYSCALL_WAITID => sys_waitid(args[0] as i32, args[1] as i32, args[2] as *mut SigInfo, args[3] as i32),
         SYSCALL_WAIT4  => sys_wait4(args[0] as i32, args[1] as *mut i32, args[2]),//注意：为了跑通脚本，暂时将waitpid和wait4合并了
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_MMAP => sys_mmap(
@@ -387,6 +395,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SHMGET => sys_shmget(args[0] as i32, args[1], args[2] as i32),
         SYSCALL_CLOCK_ADJTIME => sys_clock_adjtime(args[0] as i32, args[1] as *mut Timex),
         SYSCALL_CLOCK_SETTIME => sys_clock_settime(args[0] as i32, args[1] as *const TimeSpec),
+        SYSCALL_WAITID => sys_waitid(args[0] as i32, args[1] as i32, args[2] as *mut SigInfo, args[3] as i32),
+        SYSCALL_FUTEX => sys_futex(args[0] as *mut i32, args[1] as i32, args[2] as i32),
         _ => {
             warn!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 

@@ -5,6 +5,8 @@ use alloc::sync::{Arc, Weak};
 use crate::mm::{frame_alloc, FrameTracker}; 
 use crate::arch::config::PAGE_SIZE;
 use crate::auth::{PermStat, FileMode};
+use crate::process::{SignalFlags, wake_up_task};
+use crate::syscall::errno::Errno;
 use core::any::Any;
 
 use crate::task::suspend_current_and_run_next;
@@ -32,6 +34,34 @@ impl Pipe {
             writable: true,
             buffer,
         }
+    }
+
+    fn broken_pipe_error(&self) -> Option<Errno> {
+        if !self.writable {
+            return None;
+        }
+        let read_ends_closed = self.buffer.exclusive_access().all_read_ends_closed();
+        if !read_ends_closed {
+            return None;
+        }
+
+        let task = crate::task::current_task().unwrap();
+        {
+            let process = task.process();
+            let mut proc_inner = process.inner_exclusive_access();
+            proc_inner.signals.insert(SignalFlags::SIGPIPE);
+        }
+
+        let mut task_inner = task.inner_exclusive_access();
+        task_inner.signals.insert(SignalFlags::SIGPIPE);
+        let is_unblocked = !task_inner.signal_mask.contains(SignalFlags::SIGPIPE);
+        drop(task_inner);
+
+        if is_unblocked {
+            wake_up_task(task.clone());
+        }
+
+        Some(Errno::EPIPE)
     }
 }
 
@@ -169,6 +199,9 @@ impl File for Pipe {
         ring_buffer.available_write() > 0 || ring_buffer.all_read_ends_closed()
         
     }
+    fn check_write_error(&self) -> Option<Errno> {
+        self.broken_pipe_error()
+    }
     fn read(&self, buf: UserBuffer) -> usize {
         assert!(self.readable());
         let want_to_read = buf.len();
@@ -227,6 +260,8 @@ impl File for Pipe {
             let loop_write = ring_buffer.available_write();
             if loop_write == 0 {
                 if ring_buffer.all_read_ends_closed() {
+                    drop(ring_buffer);
+                    let _ = self.broken_pipe_error();
                     return already_write;
                 }
               //  println!("[kernel] Pipe Write Full: already_write={}, waiting for consumer...", already_write);
@@ -238,6 +273,8 @@ impl File for Pipe {
             for _ in 0..loop_write {
                 if let Some(byte_ref) = buf_iter.next() {
                     if ring_buffer.all_read_ends_closed() {
+                        drop(ring_buffer);
+                        let _ = self.broken_pipe_error();
                         return already_write;
                     }
                     ring_buffer.write_byte(unsafe { *byte_ref });
@@ -252,6 +289,54 @@ impl File for Pipe {
                     return already_write;
                 }
             }
+        }
+    }
+
+    fn write_nonblock(&self, buf: UserBuffer) -> Result<usize, crate::syscall::errno::Errno> {
+        if !self.writable() {
+            return Err(Errno::EBADF);
+        }
+        let want_to_write = buf.len();
+        let mut buf_iter = buf.into_iter();
+        let mut already_write = 0usize;
+        loop {
+            let mut ring_buffer = self.buffer.exclusive_access();
+            let loop_write = ring_buffer.available_write();
+            if loop_write == 0 {
+                if ring_buffer.all_read_ends_closed() {
+                    drop(ring_buffer);
+                    return if already_write == 0 {
+                        Err(self.broken_pipe_error().unwrap_or(Errno::EPIPE))
+                    } else {
+                        Ok(already_write)
+                    };
+                }
+                return if already_write == 0 {
+                    Err(Errno::EAGAIN)
+                } else {
+                    Ok(already_write)
+                };
+            }
+            for _ in 0..loop_write {
+                if let Some(byte_ref) = buf_iter.next() {
+                    if ring_buffer.all_read_ends_closed() {
+                        drop(ring_buffer);
+                        return if already_write == 0 {
+                            Err(self.broken_pipe_error().unwrap_or(Errno::EPIPE))
+                        } else {
+                            Ok(already_write)
+                        };
+                    }
+                    ring_buffer.write_byte(unsafe { *byte_ref });
+                    already_write += 1;
+                    if already_write == want_to_write {
+                        return Ok(want_to_write);
+                    }
+                } else {
+                    return Ok(already_write);
+                }
+            }
+            return Ok(already_write);
         }
     }
 

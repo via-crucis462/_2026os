@@ -60,8 +60,8 @@ test-rv: build-user-rv copy-user-rv build-rv copy-rv
 	-no-reboot \
 	-device virtio-net-device,netdev=net0 \
 	-netdev user,id=net0,hostfwd=udp::6200-:2000,hostfwd=tcp::6200-:2000 \
-	-rtc base=utc 
-#	| tee kernel_output.log
+	-rtc base=utc \
+	| tee kernel_output.log
 
 test-la: MODE = release
 test-la: build-user-la copy-user-la build-la copy-la

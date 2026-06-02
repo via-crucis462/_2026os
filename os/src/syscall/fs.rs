@@ -1,7 +1,7 @@
 //! File and filesystem-related syscalls
 use crate::PAGE_SIZE;
-use crate::fs::{OpenFlags, ROOT_DENTRY, Stat, Statx, file_name, make_dir, make_pipe, open_file, parent_path};
-use crate::mm::{PageSize, UserBuffer, translated_byte_buffer, try_translated_read, try_translated_str, try_translated_write};
+use crate::fs::{create_fifo_in_dentry, create_file_in_dentry, is_fifo_mode, make_pipe, open_fifo_file, Dentry, File, OpenFlags, ROOT_DENTRY, Stat, Statx, file_name, make_dir, open_file, parent_path, S_IFMT};
+use crate::mm::{PageSize, UserBuffer, prepare_user_write, translated_byte_buffer, try_translated_read, try_translated_str, try_translated_write};
 use crate::task::{current_task, current_user_token};
 use alloc::vec;
 use alloc::sync::Arc;
@@ -10,7 +10,6 @@ use crate::syscall::TIME_CACHE;
 use super::{errno::Errno::*, normalize_leading_dot_path, translate_path};
 use crate::syscall::TmpfsFileInode;
 use crate::syscall::OSInode;
-use crate::syscall::Dentry;
 
 use alloc::string::String;
 const F_DUPFD: usize = 0;
@@ -97,6 +96,9 @@ fn ensure_fd_slots(inner: &mut crate::process::ProcessControlBlockInner, target_
 }
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
+    if !prepare_user_write(token, buf as usize, len) {
+        return EFAULT.as_isize();
+    }
     let task = current_task().unwrap();
     let proc = task.process();
     let inner = proc.inner_exclusive_access();
@@ -107,16 +109,32 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     }
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     let status = inner.fd_table[fd].status;
+        drop(inner);
     if !file.writable() {
         return EACCES.as_isize(); 
+    }
+    if let Some(err) = file.check_write_error() {
+        return err.as_isize();
     }
     if (status & (O_NONBLOCK | O_NDELAY)) != 0 && !file.ready_to_write() {
         return EAGAIN.as_isize();
     }
-    drop(inner); 
+    let nonblock = (status & (O_NONBLOCK | O_NDELAY)) != 0;
     let user_buffer = UserBuffer::new(crate::mm::translated_byte_buffer(token, buf, len));
-  
-    let ax = file.write(user_buffer) as isize;
+
+    let ax = if nonblock {
+        match file.write_nonblock(user_buffer) {
+            Ok(written) => written as isize,
+            Err(err) => return err.as_isize(),
+        }
+    } else {
+        file.write(user_buffer) as isize
+    };
+    if ax == 0 && len > 0 {
+        if let Some(err) = file.check_write_error() {
+            return err.as_isize();
+        }
+    }
     if ax == 0 && len > 0 {
         warn!("pid[{}] [sys_write] FATAL: Underlying file returned 0 on write! fd={}", proc.pid.0, fd);
     } else {
@@ -281,17 +299,84 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
             trace!("kernel:pid[{}] VFS: sys_openat failed - '{}' is not a directory", task.process().pid.0, path_str);
             return ENOTDIR.as_isize(); // 目标文件不是目录
         }
+        let file: Arc<dyn File> = if is_fifo_mode(inode.inode.get_stat().mode) {
+            open_fifo_file(&inode, readable, writable)
+        } else {
+            inode
+        };
         let mut inner = proc.inner_exclusive_access();
         let fd = match inner.alloc_fd() {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
-        inner.set_fd(fd, inode, (flags & O_CLOEXEC) != 0, flags as usize);
+        inner.set_fd(fd, file, (flags & O_CLOEXEC) != 0, flags as usize);
         fd as isize
     } else {
         trace!("kernel:pid[{}] VFS: File '{}' not found", task.process().pid.0, path_str);
         debug!("kernel:pid[{}] sys_openat: failed path={}", task.process().pid.0, path_str);
             ENOENT.as_isize()
+    }
+}
+
+pub fn sys_mknod(dirfd: isize, path: *const u8, mode: u32, _dev: u64) -> isize {
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let token = current_user_token();
+    let path_str = normalize_leading_dot_path(
+        if let Some(s) = try_translated_str(token, path) { s } else { return EFAULT.as_isize(); }
+    );
+
+    if path_str.is_empty() {
+        return EINVAL.as_isize();
+    }
+
+    let start_dentry = if path_str.starts_with('/') {
+        ROOT_DENTRY.clone()
+    } else if dirfd == AT_FDCWD {
+        proc.inner_exclusive_access().cwd.clone()
+    } else {
+        let inner = proc.inner_exclusive_access();
+        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
+            return EBADF.as_isize();
+        }
+        if let Some(file) = &inner.fd_table[dirfd as usize].file {
+            if let Some(dentry) = file.get_dentry() {
+                if (dentry.inode.get_stat().mode & S_IFMT) != 0o040000 {
+                    return ENOTDIR.as_isize();
+                }
+                dentry
+            } else {
+                return ENOTDIR.as_isize();
+            }
+        } else {
+            return EBADF.as_isize();
+        }
+    };
+
+    if start_dentry.find_tree(&path_str, true).is_some() {
+        return EEXIST.as_isize();
+    }
+
+    let parent = parent_path(&path_str);
+    let Some(parent_dentry) = start_dentry.find_tree(&parent, true) else {
+        return ENOENT.as_isize();
+    };
+    if (parent_dentry.inode.get_stat().mode & S_IFMT) != 0o040000 {
+        return ENOTDIR.as_isize();
+    }
+
+    match mode & S_IFMT {
+        crate::fs::S_IFIFO => {
+            let name = file_name(&path_str);
+            create_fifo_in_dentry(&parent_dentry, name, mode);
+            0
+        }
+        0o100000 => {
+            let name = file_name(&path_str);
+            create_file_in_dentry(&parent_dentry, name, mode);
+            0
+        }
+        _ => ENOSYS.as_isize(),
     }
 }
 
@@ -514,8 +599,16 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
         return EBADF.as_isize();
     }
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let status = inner.fd_table[fd].status;
     let token = inner.memory_set.token();
     drop(inner);
+    if !file.writable() {
+        return EACCES.as_isize();
+    }
+    if let Some(err) = file.check_write_error() {
+        return err.as_isize();
+    }
+    let nonblock = (status & (O_NONBLOCK | O_NDELAY)) != 0;
     let mut total_written = 0;
     for i in 0..iovcnt {
         let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
@@ -531,17 +624,50 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
         }
         const IOV_BUF_MAX: usize = 1024;
         if iovec.len > IOV_BUF_MAX {
+            return EINVAL.as_isize();
+        }
+        if !prepare_user_write(token, iovec.base, iovec.len) {
             return EFAULT.as_isize();
+        }
+        if nonblock && !file.ready_to_write() {
+            return if total_written == 0 {
+                EAGAIN.as_isize()
+            } else {
+                total_written as isize
+            };
         }
         let iovec_len = iovec.len.min(IOV_BUF_MAX);
         let user_buffer = UserBuffer {
             buffers: translated_byte_buffer(token, iovec.base as *const u8, iovec_len),
         };
-        let written = file.write(user_buffer);
+        let written = if nonblock {
+            match file.write_nonblock(user_buffer) {
+                Ok(written) => written,
+                Err(err) => {
+                    return if total_written == 0 {
+                        err.as_isize()
+                    } else {
+                        total_written as isize
+                    };
+                }
+            }
+        } else {
+            file.write(user_buffer)
+        };
         if written == 0 && iovec_len > 0 {
+            if let Some(err) = file.check_write_error() {
+                return if total_written == 0 {
+                    err.as_isize()
+                } else {
+                    total_written as isize
+                };
+            }
             warn!("pid[{}] [sys_writev] FATAL: Underlying file returned 0 on write! fd={}", proc.pid.0, fd);
         }
         total_written += written;
+        if written < iovec_len {
+            break;
+        }
     }
     info!("pid[{}] [sys_writev] LEAVE total_written={}", proc.pid.0, total_written);
     total_written as isize

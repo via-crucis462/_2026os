@@ -1,6 +1,7 @@
 //! File trait & inode(dir, file, pipe, stdin, stdout)
 
 mod inode;
+mod fifo;
 mod pipe;
 mod stdio;
 mod dir_entry;
@@ -16,6 +17,7 @@ pub use procfs::mount_procfs;
 pub use dir_entry::DirEntry;
 pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
 pub use file_tree::{Dentry};
+pub use fifo::{create_fifo_in_dentry, is_fifo_mode, open_fifo_file, S_IFIFO, S_IFMT};
 pub use crate::arch::timer::TimeSpec;
 use crate::mm::UserBuffer;
 use crate::syscall::errno::Errno;
@@ -40,6 +42,9 @@ pub trait File: Send + Sync {
     /// write to the file from buf, return the number of bytes written
     fn pread(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
     fn write(&self, _buf: UserBuffer) -> usize { 0 }
+    fn write_nonblock(&self, buf: UserBuffer) -> Result<usize, Errno> {
+        Ok(self.write(buf))
+    }
     /// read from the file to buf at a given offset, return the number of bytes read
     fn read_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
     /// write to the file from buf at a given offset, return the number of bytes written
@@ -66,6 +71,9 @@ pub trait File: Send + Sync {
     /// Is there space available to write right now?
     fn ready_to_write(&self) -> bool {
         self.writable()
+    }
+    fn check_write_error(&self) -> Option<Errno> {
+        None
     }
     fn as_any(&self) -> &dyn Any {
         unimplemented!("as_any not implemented for this file type")
