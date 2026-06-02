@@ -1,9 +1,9 @@
 //! File and filesystem-related syscalls
 use crate::PAGE_SIZE;
 use crate::fs::{create_fifo_in_dentry, create_file_in_dentry, is_fifo_mode, make_pipe, open_fifo_file, Dentry, File, OpenFlags, ROOT_DENTRY, Stat, Statx, file_name, make_dir, open_file, parent_path, S_IFMT};
-use crate::mm::{PageSize, UserBuffer, prepare_user_write, translated_byte_buffer, try_translated_read, try_translated_str, try_translated_write};
+use crate::mm::{PageSize, UserBuffer, prepare_user_write, translated_byte_buffer, translated_read, try_translated_read, try_translated_str, try_translated_write};
 use crate::task::{current_task, current_user_token};
-use alloc::vec;
+use alloc::{task, vec};
 use alloc::sync::Arc;
 use alloc::string::ToString;
 use crate::syscall::TIME_CACHE;
@@ -18,7 +18,7 @@ const F_SETFD: usize = 2;
 const F_GETFL: usize = 3;
 const F_SETFL: usize = 4;
 const F_DUPFD_CLOEXEC: usize = 1030;
-
+const F_GETPIPE_SIZE: usize = 1032;
 const FD_CLOEXEC: usize = 1;
 const O_ACCMODE: usize = 0o3;
 const O_NONBLOCK: usize = 0o4000;
@@ -869,6 +869,7 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
 }
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
+    println!("sys_fcntl fd={}, cmd={}, arg={:#x}", fd, cmd, arg);
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
 
@@ -924,6 +925,12 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             let old = inner.fd_table[fd].status;
             inner.fd_table[fd].status = (old & O_ACCMODE) | (arg & !O_ACCMODE);
             0
+        }
+        F_GETPIPE_SIZE => {
+            if inner.fd_table[fd].file.as_ref().unwrap().get_stat().mode & S_IFMT != crate::fs::S_IFIFO {
+                return EBADF.as_isize();
+            }
+            16*4096 as isize
         }
         _ => EINVAL.as_isize(),
     }
@@ -1553,3 +1560,331 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
     fd as isize
 }
 
+pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> isize {
+    //println!("fd={}, iov={:?}, iovcnt={}, flags={:#x}", fd, iov, iovcnt, flags);
+    const IOV_MAX: usize = 1024;
+    const IOV_BUF_MAX: usize = 1024 * 1024; // 1 MiB per iovec element
+    const SPLICE_F_MOVE: u32 = 0x01;
+    const SPLICE_F_NONBLOCK: u32 = 0x02;
+    const SPLICE_F_MORE: u32 = 0x04;
+    const SPLICE_F_GIFT: u32 = 0x08;
+    const SPLICE_FLAGS_MASK: u32 = SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
+
+    if (flags & !SPLICE_FLAGS_MASK) != 0 {
+        return EINVAL.as_isize();
+    }
+    if iovcnt > IOV_MAX {
+        return EINVAL.as_isize();
+    }
+    if iovcnt > 0 && iov.is_null() {
+        return EFAULT.as_isize();
+    }
+
+    let Some(task) = current_task() else {
+        return ENOSYS.as_isize();
+    };
+    let process = task.process();
+    let token = current_user_token();
+
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        println!("vmsplice target fd {} out of range", fd);
+        return EBADF.as_isize();
+    }
+
+    let fd_entry = &inner.fd_table[fd];
+    let file = match fd_entry.file.as_ref() {
+        Some(f) => f.clone(),
+        None => {
+            println!("vmsplice target fd {} has no associated file", fd);
+            return EBADF.as_isize();
+        }
+    };
+    let fd_status = fd_entry.status;
+    drop(inner);
+
+    // vmsplice(..., fd, ...) writes user iov into a pipe.
+    if !file.writable() && !file.readable() {
+        println!("vmsplice target fd {} is not writable", fd);
+        return EBADF.as_isize();
+    }
+    if (file.get_stat().mode & S_IFMT) != crate::fs::S_IFIFO {
+        println!("vmsplice target fd {} is not a pipe", fd);
+        return EBADF.as_isize();
+    }
+    if file.writable(){
+        let nonblock = (flags & SPLICE_F_NONBLOCK) != 0 || (fd_status & (O_NONBLOCK | O_NDELAY)) != 0;
+        let mut total_written = 0usize;
+
+        for i in 0..iovcnt {
+            let iov_addr = iov as usize + i * core::mem::size_of::<IoVec>();
+            let iovec: IoVec = match try_translated_read(token, iov_addr as *const IoVec) {
+                Some(io) => io,
+                None => {
+                    return if total_written == 0 {
+                        EFAULT.as_isize()
+                    } else {
+                        total_written as isize
+                    };
+                }
+            };
+            if iovec.len == 0 {
+                continue;
+            }
+            if iovec.len > IOV_BUF_MAX {
+                return if total_written == 0 {
+                    EINVAL.as_isize()
+                } else {
+                    total_written as isize
+                };
+            }
+
+            if !prepare_user_write(token, iovec.base, iovec.len) {
+                return if total_written == 0 {
+                    EFAULT.as_isize()
+                } else {
+                    total_written as isize
+                };
+            }
+
+            if nonblock && !file.ready_to_write() {
+                return if total_written == 0 {
+                    EAGAIN.as_isize()
+                } else {
+                    total_written as isize
+                };
+            }
+            let user_buffer = UserBuffer::new(translated_byte_buffer(token, iovec.base as *const u8, iovec.len));
+            if user_buffer.len() == 0 {
+                return if total_written == 0 {
+                    EFAULT.as_isize()
+                } else {
+                    total_written as isize
+                };
+            }
+
+            // Always perform a one-shot nonblocking write to avoid self-deadlock
+            // when producer and consumer progress happen in the same userspace loop.
+            let written = match file.write_nonblock(user_buffer) {
+                Ok(n) => n,
+                Err(err) => {
+                    if !nonblock && err.as_isize() == EAGAIN.as_isize() {
+                        break;
+                    }
+                    return if total_written == 0 {
+                        err.as_isize()
+                    } else {
+                        total_written as isize
+                    };
+                }
+            };
+
+            if written == 0 {
+                if let Some(err) = file.check_write_error() {
+                    return if total_written == 0 {
+                        err.as_isize()
+                    } else {
+                        total_written as isize
+                    };
+                }
+                break;
+            }
+
+            total_written += written;
+            if written < iovec.len {
+                break;
+            }
+        }
+        total_written as isize
+    }
+    else{
+        if let Some(iov) = try_translated_read(token, iov as *const IoVec) {
+            let len = iov.len;
+            file.read(UserBuffer::new(translated_byte_buffer(token, iov.base as *const u8, len))) as isize
+        } else {
+            EFAULT.as_isize()
+        }
+    }
+}
+
+pub fn sys_splice(fd_in: usize, off_in: *mut i64, fd_out: usize, off_out: *mut i64, len: usize, flags: u32) -> isize {
+    println!("fd_in , off_in , fd_out , off_out , len , flags : {} {} {} {} {} {}", fd_in, off_in as usize, fd_out, off_out as usize, len, flags);
+    const SPLICE_F_MOVE: u32 = 0x01;
+    const SPLICE_F_NONBLOCK: u32 = 0x02;
+    const SPLICE_F_MORE: u32 = 0x04;
+    const SPLICE_F_GIFT: u32 = 0x08;
+    const SPLICE_FLAGS_MASK: u32 = SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
+    const SPLICE_CHUNK: usize = 64 * 1024;
+    //无效的flag
+    if (flags & !SPLICE_FLAGS_MASK) != 0 {
+        return EINVAL.as_isize();
+    }
+    if len == 0 {
+        return 0;
+    }
+
+    let task = match current_task() {
+        Some(t) => t,
+        None => return ENOSYS.as_isize(),
+    };
+    let process = task.process();
+    let token = current_user_token();
+    drop(task);
+
+    let inner = process.inner_exclusive_access();
+    if fd_in >= inner.fd_table.len() || fd_out >= inner.fd_table.len() {
+        return EBADF.as_isize();
+    }
+    //获取输入输出文件和状态
+    let fd_in_entry = &inner.fd_table[fd_in];
+    let file_in = match fd_in_entry.file.as_ref() {
+        Some(f) => f.clone(),
+        None => return EBADF.as_isize(),
+    };
+    let fd_in_status = fd_in_entry.status;
+
+    let fd_out_entry = &inner.fd_table[fd_out];
+    let file_out = match fd_out_entry.file.as_ref() {
+        Some(f) => f.clone(),
+        None => return EBADF.as_isize(),
+    };
+    let fd_out_status = fd_out_entry.status;
+    drop(inner);
+
+    if !file_in.readable() || !file_out.writable() {
+        return EBADF.as_isize();
+    }
+    //判断是否有一方为管道
+    let in_is_pipe = (file_in.get_stat().mode & S_IFMT) == crate::fs::S_IFIFO;
+    let out_is_pipe = (file_out.get_stat().mode & S_IFMT) == crate::fs::S_IFIFO;
+
+    // Linux splice requires at least one endpoint to be a pipe.
+    if !in_is_pipe && !out_is_pipe {
+        return EINVAL.as_isize();
+    }
+    // Pipe endpoints cannot use explicit offsets.
+    if in_is_pipe && !off_in.is_null() {
+        return EINVAL.as_isize();
+    }
+    if out_is_pipe && !off_out.is_null() {
+        return EINVAL.as_isize();
+    }
+    //判断是否要非阻塞
+    let nonblock = (flags & SPLICE_F_NONBLOCK) != 0
+        || (fd_in_status & (O_NONBLOCK | O_NDELAY)) != 0
+        || (fd_out_status & (O_NONBLOCK | O_NDELAY)) != 0;
+    //提取偏移量
+    let mut in_off = if off_in.is_null() {
+        None
+    } else {
+        match try_translated_read(token, off_in as *const i64) {
+            Some(v) if v >= 0 => Some(v as usize),
+            Some(_) => return EINVAL.as_isize(),
+            None => return EFAULT.as_isize(),
+        }
+    };
+    let mut out_off = if off_out.is_null() {
+        None
+    } else {
+        match try_translated_read(token, off_out as *const i64) {
+            Some(v) if v >= 0 => Some(v as usize),
+            Some(_) => return EINVAL.as_isize(),
+            None => return EFAULT.as_isize(),
+        }
+    };
+    //开始写入
+    let mut total = 0usize;
+    while total < len {
+        //剩余未读入的长度，创造缓冲区
+        let chunk = (len - total).min(SPLICE_CHUNK);
+        let mut kbuf = vec![0u8; chunk];
+        let read_slice = unsafe { core::slice::from_raw_parts_mut(kbuf.as_mut_ptr(), chunk) };
+        let read_buf = UserBuffer { buffers: vec![read_slice] };
+        //如果输入是非阻塞的且当前没有数据可读，立即返回
+        if nonblock && !file_in.ready_to_read() {
+            return if total == 0 {
+                EAGAIN.as_isize()
+            } else {
+                total as isize
+            };
+        }
+
+        let read_bytes = match in_off {
+            Some(off) => {
+                let n = file_in.read_at(off, read_buf);
+                in_off = in_off.map(|v| v + n);
+                n
+            }
+            None => file_in.read(read_buf),
+        };
+
+        if read_bytes == 0 {
+            break;
+        }
+
+        let mut wrote = 0usize;
+        while wrote < read_bytes {
+            if nonblock && !file_out.ready_to_write() {
+                return if total == 0 {
+                    EAGAIN.as_isize()
+                } else {
+                    total as isize
+                };
+            }
+
+            let write_slice = unsafe {
+                core::slice::from_raw_parts_mut(kbuf.as_mut_ptr().add(wrote), read_bytes - wrote)
+            };
+            let write_buf = UserBuffer { buffers: vec![write_slice] };
+
+            let n = match out_off {
+                Some(off) => {
+                    let n = file_out.write_at(off, write_buf);
+                    out_off = out_off.map(|v| v + n);
+                    n
+                }
+                None => file_out.write(write_buf),
+            };
+
+            if n == 0 {
+                if let Some(err) = file_out.check_write_error() {
+                    return if total == 0 {
+                        err.as_isize()
+                    } else {
+                        total as isize
+                    };
+                }
+                break;
+            }
+
+            wrote += n;
+        }
+
+        total += wrote;
+        if wrote < read_bytes {
+            break;
+        }
+    }
+
+    if let Some(v) = in_off {
+        if !try_translated_write(token, off_in, v as i64) {
+            return if total == 0 {
+                EFAULT.as_isize()
+            } else {
+                total as isize
+            };
+        }
+    }
+    if let Some(v) = out_off {
+        if !try_translated_write(token, off_out, v as i64) {
+            return if total == 0 {
+                EFAULT.as_isize()
+            } else {
+                total as isize
+            };
+        }
+    }
+
+    //返回总共写入的字节数
+    total as isize
+}

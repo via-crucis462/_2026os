@@ -3,7 +3,6 @@ use crate::mm::{PageSize, UserBuffer};
 use crate::sync::MPSafeCell;
 use alloc::sync::{Arc, Weak};
 use crate::mm::{frame_alloc, FrameTracker}; 
-use crate::arch::config::PAGE_SIZE;
 use crate::auth::{PermStat, FileMode};
 use crate::process::{SignalFlags, wake_up_task};
 use crate::syscall::errno::Errno;
@@ -65,7 +64,10 @@ impl Pipe {
     }
 }
 
-const RING_BUFFER_SIZE: usize = PAGE_SIZE * 16;
+// Linux default pipe capacity is typically 16 pages (64KiB on 4KiB pages).
+const PIPE_BUF_PAGE_SIZE: usize = 4096;
+const PIPE_BUF_PAGES: usize = 16;
+const RING_BUFFER_SIZE: usize = PIPE_BUF_PAGE_SIZE * PIPE_BUF_PAGES;
 
 #[derive(Copy, Clone, PartialEq)]
 enum RingBufferStatus {
@@ -117,8 +119,8 @@ impl PipeRingBuffer {
     }
     // 内部辅助方法：根据当前的 head 或 tail 索引，拿到物理页中对应字节的可变引用
     fn get_byte_mut(&mut self, index: usize) -> &mut u8 {
-        let frame_idx = index / PAGE_SIZE; // 在第几个物理页（0 或 1）
-        let offset = index % PAGE_SIZE;    // 页内偏移
+        let frame_idx = index / PIPE_BUF_PAGE_SIZE;
+        let offset = index % PIPE_BUF_PAGE_SIZE;
         let ppn = self.frames[frame_idx].ppn;
         
         // 获取该物理页的全体字节数组，然后取对应偏移的字节
@@ -179,7 +181,7 @@ impl File for Pipe {
     fn writable(&self) -> bool {
         self.writable
     }
-    // 👇 加上重写的 ready_to_read
+    // 加上重写的 ready_to_read
     fn ready_to_read(&self) -> bool {
         if !self.readable { return false; }
         let ring_buffer = self.buffer.exclusive_access();
@@ -187,7 +189,7 @@ impl File for Pipe {
         ring_buffer.available_read() > 0 || ring_buffer.all_write_ends_closed()
     }
 
-    // 👇 加上重写的 ready_to_write
+    // 加上重写的 ready_to_write
     fn ready_to_write(&self) -> bool {
         if !self.writable { return false; }
         let ring_buffer = self.buffer.exclusive_access();

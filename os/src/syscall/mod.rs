@@ -53,6 +53,8 @@ const SYSCALL_PREAD64: usize = 67;
 const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_PPOLL: usize = 73;
+const SYSCALL_VMSPLICE: usize = 75;
+const SYSCALL_SPLICE: usize = 76;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
 /// fstat syscall
@@ -405,6 +407,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RT_SIGPENDING => sys_rt_sigpending(args[0] as *mut SigSet, args[1] as usize),
         SYSCALL_SETREUID => sys_setreuid(args[0] as u32, args[1] as u32),
         SYSCALL_VHANGUP => sys_vhangup(),
+        SYSCALL_VMSPLICE => sys_vmsplice(args[0] as usize, args[1] as *const IoVec, args[2] as usize, args[3] as u32),
+        SYSCALL_SPLICE => sys_splice(args[0] as usize, args[1] as *mut i64, args[2] as usize, args[3] as *mut i64, args[4] as usize, args[5] as u32),
         _ => {
             println!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
