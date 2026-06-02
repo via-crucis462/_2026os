@@ -294,7 +294,8 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
     };
 
     let open_flags = OpenFlags::from_bits_truncate(flags);
-    if let Some(inode) = open_file(start_dentry, path_str.as_str(), open_flags, mode) {
+    let mask = mode & !proc.inner_exclusive_access().umask;
+    if let Some(inode) = open_file(start_dentry, path_str.as_str(), open_flags, mask) {
         if open_flags.should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
             trace!("kernel:pid[{}] VFS: sys_openat failed - '{}' is not a directory", task.process().pid.0, path_str);
             return ENOTDIR.as_isize(); // 目标文件不是目录

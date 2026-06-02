@@ -98,7 +98,7 @@ const SYSCALL_SETUID: usize = 146;
 const SYSCALL_SETEUID: usize=147;
 const SYSCALL_GETRESUID: usize = 148;
 const SYSCALL_GETRESGID: usize = 150;
-const SYSCALL_UMASK: usize = 166;
+
 const SYSCALL_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_GETPGID: usize = 155;
@@ -106,6 +106,7 @@ const SYSCALL_GETSID:  usize = 156;
 const SYSCALL_SETSID:  usize = 157;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GETRUSAGE: usize = 165;
+const SYSCALL_UMASK: usize = 166;
 const SYSCALL_PRCTL: usize = 167;
 const SYSCALL_GET_TIME: usize = 169;
 /// getpid syscall
