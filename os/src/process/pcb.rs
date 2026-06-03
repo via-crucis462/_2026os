@@ -196,6 +196,7 @@ impl ProcessControlBlock {
                 pgid: pid_handle.0,
                 alive_task_count: 0,
                 tasks: Vec::new(),
+                personality: 0, // 默认 personality 为 0 (通常表示标准 Linux 兼容模式)
             })
         });
         // 为pcb创建主线程
@@ -531,6 +532,7 @@ impl ProcessControlBlock {
                 max_file_size: parent_inner.max_file_size,
                 tasks: Vec::new(),
                 alive_task_count: 1, // 初始有一个线程
+                personality: parent_inner.personality,
             })
         });
         let new_task = Arc::new(TaskControlBlock {
@@ -806,6 +808,8 @@ pub struct ProcessControlBlockInner {
     pub tasks: Vec<Arc<TaskControlBlock>>, 
     // 存活进程数，等于0相当于僵尸进程
     pub alive_task_count: isize,
+    // 专用于syscall92的personality
+    pub personality: usize,
 }
 
 impl ProcessControlBlockInner {

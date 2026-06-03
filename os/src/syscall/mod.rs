@@ -60,6 +60,7 @@ const SYSCALL_FSTATAT: usize = 79;
 /// fstat syscall
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_UTIMENSAT: usize = 88;
+const SYSCALL_PERSONALITY: usize = 92;
 /// exit syscall
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
@@ -410,6 +411,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_VHANGUP => sys_vhangup(),
         SYSCALL_VMSPLICE => sys_vmsplice(args[0] as usize, args[1] as *const IoVec, args[2] as usize, args[3] as u32),
         SYSCALL_SPLICE => sys_splice(args[0] as usize, args[1] as *mut i64, args[2] as usize, args[3] as *mut i64, args[4] as usize, args[5] as u32),
+        SYSCALL_PERSONALITY => sys_personality(args[0] as usize),
         _ => {
             println!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 

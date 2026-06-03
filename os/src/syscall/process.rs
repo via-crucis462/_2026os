@@ -992,15 +992,43 @@ pub fn sys_uname(uts: *mut UtsName) -> isize {
         }
     };
     
+    // 读取当前进程的 personality，检查 UNAME26 标志
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let persona = proc.inner_exclusive_access().personality;
+    drop(task);
+    const UNAME26: usize = 0x0020000;
+    let uname26 = persona & UNAME26 != 0;
+
     // 填充系统信息
-    let sysname = b"rCore";
+    let sysname = b"Linux";
     let nodename = b"rCore-Nodename";
-    let release = b"5.10.0-rcore";
     let version = b"v0.1.0";
     let machine = b"riscv64";
     let domainname = b"rcore.os";
 
-    // 辅助函数，安全复制并补 0
+    // UNAME26: release 字段只保留前 3 个 '.' 分隔的版本段
+    let full_release = b"5.10.0-rcore";
+    let release: &[u8] = if uname26 {
+        // 找第 3 个 '.' 出现的位置，或直接到字符串末尾
+        let mut dot_count = 0;
+        let mut cut_pos = full_release.len();
+        for (i, &ch) in full_release.iter().enumerate() {
+            if ch == b'.' {
+                dot_count += 1;
+                if dot_count == 3 {
+                    cut_pos = i;
+                    break;
+                }
+            }
+        }
+        // 如果不足 3 个 '.'，保留全部
+        &full_release[..cut_pos]
+    } else {
+        full_release
+    };
+
+    // 辅助函数，安全复制并补 0（防御 CVE-2012-0957 内核内存泄露）
     fn fill_str(dest: &mut [u8; 65], src: &[u8]) {
         let len = src.len().min(64);
         dest[..len].copy_from_slice(&src[..len]);
@@ -3456,4 +3484,21 @@ pub fn sys_vhangup() -> isize {
     }
 
     0
+}
+
+/// personality 系统调用 (#92)
+/// 设置/查询当前进程的执行域标志。
+/// - persona == 0xffffffff: 只查询不修改，返回当前值
+/// - 其他值: 设置新 persona 并返回旧值
+/// 目前支持的标志: UNAME26 (0x0020000) 影响 uname() 的 release 字段输出
+pub fn sys_personality(persona: usize) -> isize {
+    let task = current_task().unwrap();
+    let process = task.process();
+    let mut inner = process.inner_exclusive_access();
+    let old = inner.personality;
+    // persona == 0xffffffff 表示仅查询，不修改
+    if persona != 0xffffffff {
+        inner.personality = persona;
+    }
+    old as isize
 }
