@@ -1,3 +1,5 @@
+//! System V IPC 消息队列 
+
 use super::IpcPerm;
 use crate::{
     process::RecycleAllocator,
@@ -39,10 +41,6 @@ pub const IPC_RMID: usize = 0;
 pub const IPC_SET: usize = 1;
 pub const IPC_STAT: usize = 2;
 
-lazy_static! {
-    /// 全局消息队列管理器
-    pub static ref MSG_MANAGER: Mutex<MsgManager> = Mutex::new(MsgManager::new());
-}
 
 pub struct MsgManager {
     id_allocator: RecycleAllocator,
@@ -101,9 +99,10 @@ impl MsgManager {
             cgid: gid,
             mode,
             seq: 0,
+            ..Default::default()
         };
         // 初始化基本信息
-        queue.msqds.msg_ctime = crate::get_real_time_ns() as usize;
+        queue.msqds.msg_ctime = (crate::get_real_time_ns() / 1_000_000_000) as usize;
         let qid = id as u32;
         self.key_to_id.insert(key, qid);
         self.queues.insert(qid, Arc::new(Mutex::new(queue)));
@@ -137,8 +136,10 @@ pub struct MsqidDs {
     pub msg_cbytes: usize,     // 当前队列中所有消息的字节数总和
     pub msg_qnum: usize,       // 当前队列中的消息总数
     pub msg_qbytes: usize,     // 队列允许的最大字节数
-    pub msg_lspid: usize,      // 最后一个调用 msgsnd() 的进程 PID
-    pub msg_lrpid: usize,      // 最后一个调用 msgrcv() 的进程 PID
+    pub msg_lspid: i32,        // 最后一个调用 msgsnd() 的进程 PID
+    pub msg_lrpid: i32,        // 最后一个调用 msgrcv() 的进程 PID
+    pub __unused4: usize,
+    pub __unused5: usize,
 }
 
 impl Default for MsqidDs {
@@ -153,6 +154,8 @@ impl Default for MsqidDs {
             msg_qbytes: 16384, // 默认最大 16KB，Linux 常见默认值 MSGMNB
             msg_lspid: 0,
             msg_lrpid: 0,
+            __unused4: 0,
+            __unused5: 0,
         }
     }
 }
@@ -170,27 +173,30 @@ impl MsgQueue {
         }
     }
 
-    /// 更新信息
-    fn update_msqds(&mut self, is_send: bool, pid: usize, size: usize) {
-        let time_now = crate::get_real_time_ns();
+    /// 更新信息（调用前 msg 必须已完成入队或出队操作）
+    fn update_msqds(&mut self, is_send: bool, pid: usize) {
+        let time_now = crate::get_real_time_ns() / 1_000_000_000;
+        // msg_qnum 和 msg_cbytes 直接由队列内容计算
         self.msqds.msg_qnum = self.msgs.len();
         self.msqds.msg_cbytes = self.msgs.iter().map(|msg| msg.mtext.len()).sum();
         if is_send {
             self.msqds.msg_stime = time_now as usize;
-            self.msqds.msg_lspid = pid;
-            self.msqds.msg_cbytes += size as usize;
-         } else {
+            self.msqds.msg_lspid = pid as i32;
+        } else {
             self.msqds.msg_rtime = time_now as usize;
-            self.msqds.msg_lrpid = pid;
-            self.msqds.msg_cbytes -= size as usize;
+            self.msqds.msg_lrpid = pid as i32;
         }
     }
 
-    /// 将消息追加到队列
+    /// 将消息追加到队列，超出 msg_qbytes 限制时返回 EAGAIN
     pub fn add(&mut self, msg: Msg, pid: usize) -> Result<(), isize> {
         let size = msg.get_size();
+        // 检查队列字节数上限
+        if self.msqds.msg_cbytes + size > self.msqds.msg_qbytes {
+            return Err(EAGAIN.as_isize());
+        }
         self.msgs.push_back(msg);
-        self.update_msqds(true, pid, size);
+        self.update_msqds(true, pid);
         Ok(())
     }
 
@@ -198,7 +204,7 @@ impl MsgQueue {
     pub fn pop(&mut self, pid: usize) -> Option<Msg> {
         let msg = self.msgs.pop_front();
         if msg.is_some() {
-            self.update_msqds(false, pid, 0);
+            self.update_msqds(false, pid);
         }
         msg
     }
@@ -218,7 +224,7 @@ impl MsgQueue {
         self.msqds.msg_perm.gid = new_ds.msg_perm.gid;
         self.msqds.msg_perm.mode = new_ds.msg_perm.mode;
         self.msqds.msg_qbytes = new_ds.msg_qbytes;
-        self.msqds.msg_ctime = crate::get_real_time_ns() as usize;
+        self.msqds.msg_ctime = (crate::get_real_time_ns() / 1_000_000_000) as usize;
     }
 
     /// 从队列中取出一个类型匹配的消息，若消息过长且未设置 MSG_NOERROR 则返回 E2BIG
@@ -233,7 +239,7 @@ impl MsgQueue {
                 return Err(E2BIG.as_isize());
             }
             let msg = self.msgs.remove(idx).unwrap();
-            self.update_msqds(false, pid, msg.mtext.len());
+            self.update_msqds(false, pid);
             Ok(msg)
         } else {
             Err(ENOMSG.as_isize())

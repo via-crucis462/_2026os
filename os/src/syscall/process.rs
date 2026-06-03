@@ -655,7 +655,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             }
         }
         TIOCGWINSZ => {
-            if fd > 2 {
+            if fd > 3 {
                 warn!("[kernel] sys_ioctl: TIOCGWINSZ request on non-tty fd {}", fd);
                 return ENOTTY.as_isize();
             }
@@ -2116,7 +2116,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
 
     // 
     // 只有在非匿名且非共享（即传统的 MAP_PRIVATE 读文件到内存）时，执行你原有的手动读取
-    if !is_anonymous && !is_shared {
+    if !is_anonymous && true { // !is_shared { shared还不支持
         if let Some(file) = file_inner {
             if file.readable() {
                 let token = current_user_token();
@@ -3229,8 +3229,11 @@ pub fn sys_rt_sigtimedwait(
             suspend_current_and_run_next();
             
         } else {
+            suspend_current_and_run_next();
+            /*
             let sig_queue_guard = SIGNAL_WAIT_QUEUE.lock();
             current_task_to_sleep(sig_queue_guard);
+             */
         }
     }
 }

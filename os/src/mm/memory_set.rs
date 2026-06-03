@@ -971,7 +971,7 @@ impl MemorySet {
         let is_shared = mmap_flags.contains(mmap::MMapFlags::MAP_SHARED);
 
 
-        if is_shared && file_inner.is_some() {
+        if false {//is_shared && file_inner.is_some() { // 伪实现？？先屏蔽掉这部分
             //共享文件映射 
             let file = file_inner.as_ref().unwrap();
 
@@ -1016,7 +1016,7 @@ impl MemorySet {
                 PageSize::Page4K // mmap目前直接用标准页
         );
             
-            if is_shared {
+            if false {//is_shared {
                 if let Some(last_area) = self.areas.last_mut() {
                     last_area.is_shared = true;
                 }

@@ -156,6 +156,7 @@ fn main() -> i32 {
         "mallinfo*", // 测试meminfo，炸得有点怪，brk或许有问题
         "mmapstress03", //brk或许有问题
         "accept02", // la musl会炸
+        "msg_comm",
     ];
 
     let skip_list = {

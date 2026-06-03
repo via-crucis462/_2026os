@@ -28,6 +28,14 @@ impl ShmManager {
             shms: BTreeMap::new(),
         }
     }
+    pub fn get_shm(&self, id: u32) -> Option<Arc<Shm>> {
+        self.shms.get(&id).cloned()
+    }
+
+    pub fn get_shm_by_key(&self, key: i32) -> Option<Arc<Shm>> {
+        self.shms.values().find(|s| s.get_key() == key).cloned()
+    }
+
     pub fn remove_shm(&mut self, id: u32) {
         self.shms.remove(&id);
         self.id_allocator.dealloc(id as usize);

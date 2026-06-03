@@ -13,6 +13,8 @@ use crate::{
         translated_write, MapArea, MapPermission, MapType, PageSize},
     sync::{MPSafeCell, WaitQueue},
     syscall::errno::Errno::*,
+    ipc::namespace::*,
+    ipc::*,
 };
 use alloc::{
     string::String,
@@ -81,6 +83,7 @@ impl FileDescriptor {
 pub struct ProcessControlBlock {
     pub pid: Arc<PidHandle>,
     pub oom_score_adj: AtomicI32,
+    pub ns_proxy: NsProxy,
     pub inner: MPSafeCell<ProcessControlBlockInner>,
 }
 
@@ -165,6 +168,7 @@ impl ProcessControlBlock {
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),// 注意：实际上只克隆了指针
             oom_score_adj: AtomicI32::new(0),
+            ns_proxy: NsProxy::new(IPCNamespace::new()),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: true, // initproc和shell默认在主核运行
                 pname: String::from("initproc"),
@@ -503,6 +507,7 @@ impl ProcessControlBlock {
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
             oom_score_adj: AtomicI32::new(self.oom_score_adj.load(Ordering::SeqCst)),
+            ns_proxy: self.ns_proxy.clone(),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: false, 
                 pname: parent_inner.pname.clone(),

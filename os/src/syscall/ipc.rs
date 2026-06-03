@@ -3,14 +3,32 @@
 //! 
 use crate::{
     auth::{FileMode, PermSet, PermStat},
-    ipc::{msg::*, shm::*},
+    ipc::{msg::*, shm::*, namespace::*, IpcPerm},
     mm::{UserBuffer, try_translated_byte_buffer, try_translated_byte_buffer_mut, try_translated_read, try_translated_write},
-    process::current_user_token
+    process::current_user_token,
 };
 use super::*;
 use Errno::*;
 use bitflags::bitflags;
 use alloc::vec;
+
+
+/// 调用者是否为队列所有者或root
+fn ipc_owner_check(perm: &IpcPerm, uid: u32) -> bool {
+    uid == 0 || uid == perm.uid || uid == perm.cuid
+}
+
+/// 写入权检查
+fn ipc_write_check(perm: &IpcPerm, uid: u32, gid: u32) -> bool {
+    PermStat::new(FileMode::from_bits_truncate(perm.mode), perm.uid, perm.gid)
+        .can_write(uid, gid)
+}
+
+/// 读取权检查
+fn ipc_read_check(perm: &IpcPerm, uid: u32, gid: u32) -> bool {
+    PermStat::new(FileMode::from_bits_truncate(perm.mode), perm.uid, perm.gid)
+        .can_read(uid, gid)
+}
 
 
 //
@@ -32,7 +50,10 @@ pub fn sys_msgget(key: u32, msgflg: usize) -> isize {
         let inner = proc.inner_exclusive_access();
         (inner.uid, inner.gid)
     };
-    MSG_MANAGER.lock().msgget(key, flags, mode, uid, gid)
+    let ns = current_ipc_namespace();
+    let mut ns_lckd = ns.lock();
+    let msg_man = ns_lckd.msg_manager();
+    msg_man.msgget(key, flags, mode, uid, gid)
 }
 
 /// 向指定id的消息队列发送消息
@@ -40,15 +61,26 @@ pub fn sys_msgget(key: u32, msgflg: usize) -> isize {
 pub fn sys_msgsnd(msqid: usize, msgp: usize, msgsz: usize, msgflg: usize) -> isize {
     let pid = current_task().unwrap().process().pid.0;
     let token = current_user_token();
-    let flags = MsgFlags::from_bits_truncate(msgflg);
-    
+    let (uid, gid) = {
+        let proc = current_task().unwrap().process.upgrade().unwrap();
+        let inner = proc.inner_exclusive_access();
+        (inner.uid, inner.gid)
+    };
+    let _flags = MsgFlags::from_bits_truncate(msgflg);
+
+    // 参数合法性检查
+    if msgsz as isize > 0x7FFFFFFF || (msgsz as isize) < 0 {
+        return EINVAL.as_isize();
+    }
+
     // 读取消息类型
-    let mut mtype = if let Some(m) = try_translated_read(token, msgp as *const usize) {
+    let mtype = if let Some(m) = try_translated_read(token, msgp as *const isize) {
         m
     } else {
         return EFAULT.as_isize();
     };
-    if mtype == 0 {
+    // mtype 必须 > 0
+    if mtype <= 0 {
         return EINVAL.as_isize();
     }
 
@@ -67,15 +99,19 @@ pub fn sys_msgsnd(msqid: usize, msgp: usize, msgsz: usize, msgflg: usize) -> isi
     msg_buf.read(&mut text);
 
     // 构造消息结构体
-    let msg = Msg::new(mtype, text);
+    let msg = Msg::new(mtype as usize, text);
 
     // 存入队列
-    let manager = MSG_MANAGER.lock();
-    if let Some(queue) = manager.get_queue(msqid as u32) {
+    let ns = current_ipc_namespace();
+    let mut ns_lckd = ns.lock();
+    let msg_man = ns_lckd.msg_manager();
+    if let Some(queue) = msg_man.get_queue(msqid as u32) {
         let mut q = queue.lock();
-        // 此处暂时省略 msg_qbytes 上限检查及 IPC_NOWAIT 阻塞逻辑
-        q.add(msg, pid);
-        0
+        // 权限检查
+        if !ipc_write_check(&q.get_msqid_ds().msg_perm, uid, gid) {
+            return EACCES.as_isize();
+        }
+        q.add(msg, pid).map(|_| 0).unwrap_or_else(|e| e)
     } else {
         EINVAL.as_isize()
     }
@@ -86,10 +122,21 @@ pub fn sys_msgsnd(msqid: usize, msgp: usize, msgsz: usize, msgflg: usize) -> isi
 pub fn sys_msgrcv(msqid: usize, msgp: usize, msgsz: usize, msgtyp: isize, msgflg: usize) -> isize {
     let pid = current_task().unwrap().process().pid.0;
     let token = current_user_token();
+    let (uid, gid) = {
+        let proc = current_task().unwrap().process.upgrade().unwrap();
+        let inner = proc.inner_exclusive_access();
+        (inner.uid, inner.gid)
+    };
     let flags = MsgFlags::from_bits_truncate(msgflg);
-    let manager = MSG_MANAGER.lock();
-    if let Some(queue) = manager.get_queue(msqid as u32) {
+    let ns = current_ipc_namespace();
+    let mut ns_lckd = ns.lock();
+    let msg_man = ns_lckd.msg_manager();
+    if let Some(queue) = msg_man.get_queue(msqid as u32) {
         let mut q = queue.lock();
+        // 权限检查：需要读权限
+        if !ipc_read_check(&q.get_msqid_ds().msg_perm, uid, gid) {
+            return EACCES.as_isize();
+        }
         match q.get(msgtyp, msgsz, flags, pid) {
             Ok(msg) => {
                 let actual_len = msg.mtext.len();
@@ -128,13 +175,24 @@ pub fn sys_msgrcv(msqid: usize, msgp: usize, msgsz: usize, msgtyp: isize, msgflg
 /// cmd: IPC_STAT / IPC_SET / IPC_RMID
 pub fn sys_msgctl(msqid: u32, cmd: usize, buf: usize) -> isize {
     let token = current_user_token();
+    let (uid, gid) = {
+        let proc = current_task().unwrap().process.upgrade().unwrap();
+        let inner = proc.inner_exclusive_access();
+        (inner.uid, inner.gid)
+    };
 
     match cmd {
         // 获取状态信息
         IPC_STAT => {
-            let manager = MSG_MANAGER.lock();
-            if let Some(queue) = manager.get_queue(msqid) {
+            let ns = current_ipc_namespace();
+            let mut ns_lckd = ns.lock();
+            let msg_man = ns_lckd.msg_manager();
+            if let Some(queue) = msg_man.get_queue(msqid) {
                 let q = queue.lock();
+                // 权限检查
+                if !ipc_read_check(&q.get_msqid_ds().msg_perm, uid, gid) {
+                    return EACCES.as_isize();
+                }
                 let ds = q.get_msqid_ds();
                 if !try_translated_write(token, buf as *mut MsqidDs, ds) {
                     return EFAULT.as_isize();
@@ -151,9 +209,18 @@ pub fn sys_msgctl(msqid: u32, cmd: usize, buf: usize) -> isize {
             } else {
                 return EFAULT.as_isize();
             };
-            let manager = MSG_MANAGER.lock();
-            if let Some(queue) = manager.get_queue(msqid) {
+            let ns = current_ipc_namespace();
+            let mut ns_lckd = ns.lock();
+            let msg_man = ns_lckd.msg_manager();
+            if let Some(queue) = msg_man.get_queue(msqid) {
                 let mut q = queue.lock();
+                // 权限检查
+                // 写或所有者
+                if !(ipc_write_check(&q.get_msqid_ds().msg_perm, uid, gid)
+                    || ipc_owner_check(&q.get_msqid_ds().msg_perm, uid))
+                {
+                    return EACCES.as_isize();
+                }
                 q.apply_ipc_set(&ds);
                 0
             } else {
@@ -162,13 +229,25 @@ pub fn sys_msgctl(msqid: u32, cmd: usize, buf: usize) -> isize {
         }
         // 删除消息队列
         IPC_RMID => {
-            MSG_MANAGER.lock().remove_queue(msqid);
-            0
+            let ns = current_ipc_namespace();
+            let mut ns_lckd = ns.lock();
+            let msg_man = ns_lckd.msg_manager();
+            if let Some(queue) = msg_man.get_queue(msqid) {
+                let q = queue.lock();
+                let has_perm = ipc_owner_check(&q.get_msqid_ds().msg_perm, uid);
+                drop(q);
+                if !has_perm {
+                    return EPERM.as_isize();
+                }
+                msg_man.remove_queue(msqid);
+                0
+            } else {
+                EINVAL.as_isize()
+            }
         }
         _ => EINVAL.as_isize(),
     }
 }
-
 
 //
 // shm相关
@@ -214,12 +293,16 @@ pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
             return EINVAL.as_isize();
         }
         let cpid = current_task().unwrap().process().pid.0;
-        let shm = get_new_shm(size, key, mode, cpid);
+        let ns = current_ipc_namespace();
+        let mut ns_lckd = ns.lock();
+        let shm = ns_lckd.shm_manager().create_shm(size, key, mode, cpid);
         return shm.get_id() as isize
     }
 
     // 尝试找到段
-    if let Some(shm) = get_shm_by_key(key) {
+    let ns = current_ipc_namespace();
+    let mut ns_lckd = ns.lock();
+    if let Some(shm) = ns_lckd.shm_manager().get_shm_by_key(key) {
         if ipc_flags.contains(ShmFlags::IPC_EXCL) && ipc_flags.contains(ShmFlags::IPC_CREAT) {
             return EEXIST.as_isize();
         }
@@ -249,7 +332,7 @@ pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
         return EINVAL.as_isize();
     }
     let cpid = current_task().unwrap().process().pid.0;
-    let shm = get_new_shm(size, key, mode, cpid);
+    let shm = ns_lckd.shm_manager().create_shm(size, key, mode, cpid);
     shm.get_id() as isize
 }
 
