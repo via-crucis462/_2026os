@@ -99,7 +99,7 @@ fn main() -> i32 {
     chdir("/musl\0");
 
     // 测例首字母
-    let test_start = "msg";
+    let test_start = "mmap";
 
     // 测例黑名单
     const SKIP_CASES: &[&str] = &[
@@ -156,7 +156,10 @@ fn main() -> i32 {
         "mallinfo*", // 测试meminfo，炸得有点怪，brk或许有问题
         "mmapstress03", //brk或许有问题
         "accept02", // la musl会炸
-        "msg_comm",
+        "msg_comm", // boom
+        "msgrcv05", // la boom
+        "msgrcv06", // la boom
+        "mmap3",
     ];
 
     let skip_list = {

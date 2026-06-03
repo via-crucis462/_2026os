@@ -2,9 +2,17 @@
 #![allow(missing_docs)]
 
 use bitflags::*;
-use crate::task::processor::*;
-use alloc::sync::Arc;
+use crate::{mm::{FrameTracker, MapArea, PhysPageNum, frame_alloc}, task::processor::*};
+use alloc::{
+    sync::Arc,
+    collections::BTreeMap,
+    vec::Vec,
+};
+
 use crate::fs::File;
+
+use spin::Mutex;
+
 
 // mmap 权限标志
 bitflags! {
@@ -54,6 +62,41 @@ pub fn do_munmap(addr: usize, length: usize) -> Result<(), isize> {
     let proc = task.process();
     proc.munmap(addr, length)
 }
-// 尽管文件映射在syscall中实现，但此处设置一个shared区域
-// （未实现）
-// 早期想法，似乎没必要
+
+// shared映射需要page cache
+
+use lazy_static::lazy_static;
+
+lazy_static! {
+    /// 共享映射页缓存管理器
+    pub static ref SHARED_PAGE_CACHE_MANAGER: SharedPageCacheManager = SharedPageCacheManager {
+        page_cache_map: Mutex::new(BTreeMap::new()),
+    };
+}
+
+/// 共享映射页缓存管理器
+pub struct SharedPageCacheManager {
+    // (ino, page_offset) -> SharedPageCache
+    page_cache_map: Mutex<BTreeMap<(u64, usize), FrameTracker>>,
+}
+
+impl SharedPageCacheManager {
+    /// 获取共享页缓存，返回页框和是否新分配的标志
+    pub fn get_shared_page_cache(&self, ino: u64, page_offset: usize) -> (FrameTracker, bool) {
+        let mut map = self.page_cache_map.lock();
+        let key = (ino, page_offset);
+        if let Some(cache) = map.get(&key) {
+            (cache.clone(), false)
+        } else {
+            // 如果没有，分配一个新的页框插入缓存
+            let frame = frame_alloc(super::PageSize::Page4K).unwrap();
+            map.insert(key, frame.clone());
+            (frame, true)
+        }
+    }
+}
+
+/// 用于sync系统调用，将缓存内容写回文件
+pub fn sync_shared_page_cache() {
+    // TODO
+}

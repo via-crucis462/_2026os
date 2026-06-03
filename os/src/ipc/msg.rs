@@ -33,6 +33,8 @@ bitflags! {
     pub struct MsgGetFlags: usize {
         const IPC_CREAT = 0o1000;
         const IPC_EXCL  = 0o2000;
+        const MSG_RD    = 0o0400;
+        const MSG_WR    = 0o0200;
     }
 
 }
@@ -71,7 +73,7 @@ impl MsgManager {
             if flags.contains(MsgGetFlags::IPC_CREAT) && flags.contains(MsgGetFlags::IPC_EXCL) {
                 return EEXIST.as_isize();
             }
-            // TODO: 权限检查
+            // 权限检查在上层 syscall 中处理
             return id as isize;
         }
 
@@ -227,22 +229,70 @@ impl MsgQueue {
         self.msqds.msg_ctime = (crate::get_real_time_ns() / 1_000_000_000) as usize;
     }
 
-    /// 从队列中取出一个类型匹配的消息，若消息过长且未设置 MSG_NOERROR 则返回 E2BIG
+    /// 从队列中取出一个类型匹配的消息
+    ///
+    /// msgtyp 符号含义与 wait4 的 pid 类似:
+    /// 0   表示不限制(取队头);
+    /// >0  表示取第一条类型等于 msgtyp 的消息;
+    /// <0  表示取类型值最小，且类型值小于等于 |msgtyp| 的消息.
+    ///
+    /// 若消息过长且未设置 MSG_NOERROR 则返回 E2BIG。
     pub fn get(&mut self, msgtyp: isize, msgsz: usize, msgflg: MsgFlags, pid: usize) -> Result<Msg, isize> {
-        let pos = self.msgs.iter().position(|msg| {
-            msg.mtype == msgtyp as usize
-        });
-        if let Some(idx) = pos {
-            let msg = &self.msgs[idx];
-            // 消息过长且未设置 MSG_NOERROR，保留消息并返回 E2BIG
-            if msg.mtext.len() > msgsz && !msgflg.contains(MsgFlags::MSG_NOERROR) {
-                return Err(E2BIG.as_isize());
-            }
-            let msg = self.msgs.remove(idx).unwrap();
-            self.update_msqds(false, pid);
-            Ok(msg)
+        // MSG_COPY 暂不支持
+        if msgflg.contains(MsgFlags::MSG_COPY) {
+            return Err(EINVAL.as_isize());
+        }
+
+        // 查询
+        let idx = self.find_msg(msgtyp, msgflg).ok_or(ENOMSG.as_isize())?;
+
+        // 消息过长且未设置 MSG_NOERROR
+        if self.msgs[idx].mtext.len() > msgsz && !msgflg.contains(MsgFlags::MSG_NOERROR) {
+            return Err(E2BIG.as_isize());
+        }
+
+        // 取出消息
+        let msg = if idx == 0 {
+            self.msgs.pop_front().unwrap()
         } else {
-            Err(ENOMSG.as_isize())
+            self.msgs.remove(idx).unwrap()
+        };
+
+        self.update_msqds(false, pid);
+        Ok(msg)
+    }
+
+    // 查找符合条件的消息的下标
+    fn find_msg(&self, msgtyp: isize, msgflg: MsgFlags) -> Option<usize> {
+        if self.msgs.is_empty() {
+            return None;
+        }
+        if msgtyp == 0 {
+            // 取第一条消息
+            Some(0)
+        } else if msgtyp > 0 {
+            let target = msgtyp as usize;
+            if msgflg.contains(MsgFlags::MSG_EXCEPT) {
+                // 第一条类型 != target 的消息
+                self.msgs.iter().position(|m| m.mtype != target)
+            } else {
+                // 第一条类型 == target 的消息
+                self.msgs.iter().position(|m| m.mtype == target)
+            }
+        } else {
+            // msgtyp < 0
+            let limit = (-msgtyp) as usize;
+            let mut best: Option<(usize, usize)> = None;
+            for (i, msg) in self.msgs.iter().enumerate() {
+                if msg.mtype <= limit {
+                    match best {
+                        None => best = Some((i, msg.mtype)),
+                        Some((_, best_type)) if msg.mtype < best_type => best = Some((i, msg.mtype)),
+                        _ => {}
+                    }
+                }
+            }
+            best.map(|(i, _)| i)
         }
     }
 }

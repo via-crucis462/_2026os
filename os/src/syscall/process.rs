@@ -38,7 +38,7 @@ fn get_futex_wait_queue(uaddr: usize) -> Arc<Mutex<WaitQueue>> {
         .clone()
 }
 pub use crate::{
-    arch::timer::{ADJ_ESTERROR, ADJ_FREQUENCY, ADJ_MAXERROR, ADJ_MICRO, ADJ_NANO, ADJ_OFFSET, ADJ_OFFSET_SINGLESHOT, ADJ_OFFSET_SS_READ, ADJ_SETOFFSET, ADJ_STATUS, ADJ_TAI, ADJ_TICK, ADJ_TIMECONST, CLOCK_ADJ_ALLOWED_MODES, CLOCK_ADJ_RW_STATUS, CLOCK_ADJ_STATE, CLOCK_ADJ_VALID_STATUS, CLOCK_REALTIME_OFFSET_NS, ITimerVal, RtcTime, STA_CLOCKERR, STA_CLK, STA_DEL, STA_FLL, STA_FREQHOLD, STA_INS, STA_MODE, STA_NANO, STA_PLL, STA_PPSERROR, STA_PPSFREQ, STA_PPSJITTER, STA_PPSSIGNAL, STA_PPSTIME, STA_PPSWANDER, STA_UNSYNC, TIME_ERROR, TIME_OK, TimeSpec, TimeVal, Timex, get_real_time_ns, get_time_ms, get_time_us, get_timer_ticks}, 
+    timer::*,
     fs::*, 
     mm::{PageTable, UserBuffer, VirtAddr, mmap, translated_byte_buffer, translated_str, translated_byte_buffer_mut, translated_write}, 
     process::{
@@ -2115,8 +2115,8 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: 
     };
 
     // 
-    // 只有在非匿名且非共享（即传统的 MAP_PRIVATE 读文件到内存）时，执行你原有的手动读取
-    if !is_anonymous && true { // !is_shared { shared还不支持
+    // 只有在非匿名且非共享才读取
+    if !is_anonymous && !is_shared {
         if let Some(file) = file_inner {
             if file.readable() {
                 let token = current_user_token();

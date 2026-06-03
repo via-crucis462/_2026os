@@ -6,23 +6,28 @@ use crate::mm::UserBuffer;
 use crate::fs::File;
 use crate::arch::sbi::console_getchar;
 use crate::task::suspend_current_and_run_next;
+use crate::fs::ino::get_next_ino;
 use spin::Mutex;
 
 /// /dev/tty 字符设备
-pub struct TtyInode;
+pub struct TtyInode {
+    ino: u64,
+}
 
 impl TtyInode {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self { Self { ino: get_next_ino() } }
 }
 
 /// /dev/urandom 随机数设备
 pub struct UrandomInode {
+    ino: u64,
     seed: Mutex<u32>,
 }
 
 impl UrandomInode {
     pub fn new() -> Self {
         Self {
+            ino: get_next_ino(),
             seed: Mutex::new(0x12345678),
         }
     }
@@ -47,11 +52,12 @@ impl VfsInode for UrandomInode {
         buf.len()
     }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
 
     fn get_stat(&self) -> Stat {
         Stat {
             dev: 0,
-            ino: 1005,      // 随便给一个不冲突的 inode 号
+            ino: self.ino,
             mode: 0o020666, // S_IFCHR (字符设备 0o020000) | rw-rw-rw- (0666)
             nlink: 1,
             uid: 0,
@@ -127,8 +133,10 @@ impl super::VfsInode for TtyInode {
         buf.len()
     }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> super::Stat {
         super::Stat {
+            ino: self.ino,
             mode: 0o020000, // 字符设备标志位 (S_IFCHR)
             blksize: 4096,
             ..Default::default()
@@ -143,7 +151,9 @@ impl super::VfsInode for TtyInode {
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
 
-pub struct NullInode;
+pub struct NullInode {
+    ino: u64,
+}
 
 impl VfsInode for NullInode {
     fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize {
@@ -154,9 +164,10 @@ impl VfsInode for NullInode {
         buf.len()
     }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {
         Stat {
-            dev: 0, ino: 901,
+            dev: 0, ino: self.ino,
             mode: 0o020666, // 0o020000 表示字符设备 (S_IFCHR)，0o666 表示 rw-rw-rw-
             nlink: 1,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
@@ -174,7 +185,17 @@ impl VfsInode for NullInode {
 
 
 // /dev/zero
-pub struct ZeroInode;
+pub struct ZeroInode {
+    ino: u64,
+}
+
+impl ZeroInode {
+    pub fn new() -> Self {
+         Self {
+            ino: get_next_ino()
+        }
+    }
+}
 
 impl VfsInode for ZeroInode {
     fn read_at(&self, _offset: usize, buf: &mut [u8]) -> usize {
@@ -187,9 +208,10 @@ impl VfsInode for ZeroInode {
     }
     
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {
         Stat {
-            dev: 0, ino: 902,
+            dev: 0, ino: self.ino,
             mode: 0o020666, // 同样是字符设备 rw-rw-rw-
             nlink: 1,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
@@ -204,15 +226,26 @@ impl VfsInode for ZeroInode {
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
-pub struct RtcInode;
+pub struct RtcInode {
+    ino: u64,
+}
+
+impl RtcInode {
+    pub fn new() -> Self {
+        Self {
+            ino: get_next_ino()
+        }
+    }
+}
 
 impl VfsInode for RtcInode {
     fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
     fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {
         Stat {
-            dev: 0, ino: 903,
+            dev: 0, ino: self.ino,
             mode: 0o020666, // 字符设备
             nlink: 1,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
@@ -244,7 +277,7 @@ pub fn mount_devfs() {
 
 impl NullInode {
     pub fn new() -> Self {
-        Self
+        Self { ino: get_next_ino() }
     }
 }
 
@@ -272,18 +305,5 @@ fn stat_to_statx(stat: &Stat) -> Statx {
         stx_dev_major: (stat.dev >> 32) as u32,
         stx_dev_minor: stat.dev as u32,
         __spare2: [0u64; 14],
-    }
-}
-
-impl ZeroInode {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-// 如果你有 RtcInode，也顺手补一个
-impl RtcInode {
-    pub fn new() -> Self {
-        Self
     }
 }

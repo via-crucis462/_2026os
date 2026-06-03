@@ -38,7 +38,7 @@ fn ipc_read_check(perm: &IpcPerm, uid: u32, gid: u32) -> bool {
 /// msgget 标志解析
 fn msgget_flags_from(msgflg: usize) -> (MsgGetFlags, u16) {
     let mode = (msgflg & 0o777) as u16;
-    let flags = MsgGetFlags::from_bits_truncate(msgflg & !0o777);
+    let flags = MsgGetFlags::from_bits_truncate(msgflg);
     (flags, mode)
 }
 
@@ -53,7 +53,25 @@ pub fn sys_msgget(key: u32, msgflg: usize) -> isize {
     let ns = current_ipc_namespace();
     let mut ns_lckd = ns.lock();
     let msg_man = ns_lckd.msg_manager();
-    msg_man.msgget(key, flags, mode, uid, gid)
+    let result = msg_man.msgget(key, flags, mode, uid, gid);
+    // 找到队列，权限检查
+    if result > 0 {
+        let need_rd = flags.contains(MsgGetFlags::MSG_RD);
+        let need_wr = flags.contains(MsgGetFlags::MSG_WR);
+        if need_rd || need_wr {
+            if let Some(queue) = msg_man.get_queue(result as u32) {
+                let q = queue.lock();
+                let perm = &q.get_msqid_ds().msg_perm;
+                if need_rd && !ipc_read_check(perm, uid, gid) {
+                    return EACCES.as_isize();
+                }
+                if need_wr && !ipc_write_check(perm, uid, gid) {
+                    return EACCES.as_isize();
+                }
+            }
+        }
+    }
+    result
 }
 
 /// 向指定id的消息队列发送消息

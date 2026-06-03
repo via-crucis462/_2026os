@@ -1,7 +1,6 @@
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, lazy};
 use crate::fs::ROOT_DENTRY;
 use crate::fs::Dentry;
@@ -18,10 +17,9 @@ use crate::drivers::loopdev::*;
 use crate::mm::{FrameTracker, PhysPageNum };
 use crate::mm::frame_alloc;
 use crate::mm::PageSize::Page4K;
+use crate::fs::ino::get_next_ino;
 
 use crate::PAGE_SIZE;
-// 全局唯一的 Inode 分配器
-pub static TMPFS_INO_COUNTER: AtomicUsize = AtomicUsize::new(10000);
 
 use lazy_static::lazy_static;
 /// 大页目录
@@ -31,7 +29,7 @@ lazy_static! {
 
 /// 临时文件inode
 pub struct TmpfsFileInode {
-    ino: usize,
+    ino: u64,
     pages: Mutex<BTreeMap<usize, FrameTracker>>,
     size: Mutex<usize>,
     perms: Mutex<PermStat>, // 权限信息
@@ -46,7 +44,7 @@ impl TmpfsFileInode {
             file_type | (mode & 0o7777)
         };
         Self {
-            ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
+            ino: get_next_ino(),
             pages: Mutex::new(BTreeMap::new()),
             size: Mutex::new(0),
             perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(full_mode as _), 0, 0)),
@@ -137,6 +135,9 @@ impl super::VfsInode for TmpfsFileInode {
         });
         Some(frame.ppn)
     }
+    fn ino(&self) -> u64 {
+        self.ino
+    }
     fn get_stat(&self) -> super::Stat {
        
         let perms = self.perms.lock();
@@ -144,7 +145,7 @@ impl super::VfsInode for TmpfsFileInode {
         let (mode, uid, gid) = (perms.mode.bits(), perms.uid, perms.gid);
         super::Stat {
             dev: 0, 
-            ino: self.ino as u64,
+            ino: self.ino,
             mode: mode as u32, nlink: 1, 
             uid: uid, gid: gid, rdev: 0, __pad: 0, 
 
@@ -212,7 +213,7 @@ impl super::VfsInode for TmpfsFileInode {
 
 /// 临时目录inode
 pub struct TmpfsDirInode {
-    ino: usize,
+    ino: u64,
     entries: Mutex<BTreeMap<String, Arc<dyn super::VfsInode>>>,
     perms: Mutex<PermStat>, // 权限信息
 }
@@ -221,7 +222,7 @@ impl TmpfsDirInode {
     pub fn new(mode: u32) -> Self {
         let full_mode = 0o040000 | (mode & 0o7777); // S_IFDIR
         Self {
-            ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
+            ino: get_next_ino(),
             entries: Mutex::new(BTreeMap::new()),
             perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(full_mode as _), 0, 0)),
         }
@@ -245,13 +246,14 @@ impl super::VfsInode for TmpfsDirInode {
     fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
     fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     
     fn get_stat(&self) -> super::Stat {
         let perms = self.perms.lock();
         let (mode, uid, gid) = (perms.mode.bits(), perms.uid, perms.gid);
         super::Stat {
             dev: 0, 
-            ino: self.ino as u64, 
+            ino: self.ino,
             mode: mode as u32, nlink: 2,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
             blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],

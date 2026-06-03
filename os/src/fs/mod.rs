@@ -8,9 +8,13 @@ mod dir_entry;
 mod file_tree;
 mod procfs;
 mod devfs;
+mod ino;
+
 pub mod memfd;
+use alloc::vec::{self, Vec};
 pub use memfd::*;
 pub mod tmpfs;
+use riscv::addr::page;
 pub use tmpfs::setup_oscomp_env;
 pub use tmpfs::{TmpfsFileInode, TmpfsDirInode};
 pub use procfs::mount_procfs;
@@ -18,7 +22,9 @@ pub use dir_entry::DirEntry;
 pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
 pub use file_tree::{Dentry};
 pub use fifo::{create_fifo_in_dentry, is_fifo_mode, open_fifo_file, S_IFIFO, S_IFMT};
-pub use crate::arch::timer::TimeSpec;
+use crate::PAGE_SIZE_BITS;
+pub use crate::timer::TimeSpec;
+pub use ino::get_next_ino;
 use crate::mm::UserBuffer;
 use crate::syscall::errno::Errno;
 use alloc::sync::Arc;
@@ -81,10 +87,27 @@ pub trait File: Send + Sync {
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
         0
     }
-    // 获取该文件指定页偏移的物理页号。
-    // 如果没有，文件内部负责分配一个并存起来。
+    // 获取该文件指定偏移页缓存（对于虚拟文件则就是文件自身）的物理页号。
+    // 如果没有，分配一个，读取数据并存起来。
+    // 这里是默认实现
     fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
-        None // 默认不支持
+        let man = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
+        let (frame, newly_allowcated) = man.get_shared_page_cache(self.get_stat().ino, page_offset);
+        if newly_allowcated {
+            // 读入文件数据到分配的页
+            trace!("VFS: Allocated new shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
+            let (ppn, page_size) = (frame.ppn, frame.page_size);
+            let page_addr = ppn.0 << PAGE_SIZE_BITS;
+            assert!(page_addr % page_size.size() == 0, "Shared page address not aligned to its size");
+            let buf = unsafe { core::slice::from_raw_parts_mut(page_addr as *mut u8, page_size.size()) };
+            let vec_buf = alloc::vec![buf];
+            // 这里实际上是内核态的物理页
+            let buffer = UserBuffer::new(vec_buf);
+            self.read_at(page_offset * page_size.size(), buffer);
+        } else {
+            trace!("VFS: Reusing existing shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
+        }
+        Some(frame.ppn)
     }
 }
 
@@ -245,7 +268,9 @@ pub trait VfsInode: Send + Sync {
     fn get_shared_page(&self, _page_offset: usize) -> Option<PhysPageNum> {
         None
     }
-
+    /// 返回该 inode 的唯一标识号（跨所有文件系统唯一）
+    /// 默认从 get_stat().ino 读取，可能 override 为直接字段读取
+    fn ino(&self) -> u64 ;
 }
 
 bitflags! {

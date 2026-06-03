@@ -477,6 +477,17 @@ fn set_sig_ret(trap_ctx: &mut TrapContext) {
     trap_ctx.set_ra(*SIG_RT_ADDR);
 }
 
+/// 检查当前任务是否有未屏蔽的挂起信号
+pub fn check_pending_signal() -> bool {
+    let task = current_task().unwrap();
+    let task_inner = task.inner_exclusive_access();
+    let pending = task_inner.signals.bits() & !(
+        task_inner.signal_mask.bits() & 
+        !(SignalFlags::SIGKILL | SignalFlags::SIGSTOP).bits()
+    );
+    pending!= 0
+}
+
 /* rcore的实现修改而来，目前不被调用了，留作参考
 /// Check if the current task has any signal to handle
 /// 仅部分修改

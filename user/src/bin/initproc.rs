@@ -382,6 +382,7 @@ fn main() -> i32 {
         "writev05",
         "writev06",
         "writev07",*/
+        "mmap01",
     ];
 
     let mut run_cases: Vec<&str> = Vec::from(BASE_CASES);
