@@ -950,6 +950,10 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
 
 /// YOUR JOB: Implement unlinkat.
 pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
+    // 校验 flags：只允许 0 或 AT_REMOVEDIR
+    if flags != 0 && flags != AT_REMOVEDIR {
+        return EINVAL.as_isize();
+    }
     let token = current_user_token();
     let path_str = {
         if let Some(s) = try_translated_str(token, path) {
@@ -980,8 +984,16 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
         if dirfd < 0 || (dirfd as usize) >= fd_table_len || inner.fd_table[dirfd as usize].file.is_none() {
             return EBADF.as_isize();
         }
-        trace!("kernel:pid[{}] sys_unlinkat: resolve relative to dirfd {} is WIP", task.process().pid.0, dirfd);
-        cwd.clone() 
+        // 确保 dirfd 指向的是一个目录，否则返回 ENOTDIR
+        let file = inner.fd_table[dirfd as usize].file.as_ref().unwrap().clone();
+        if let Some(dentry) = file.get_dentry() {
+            if (dentry.inode.get_stat().mode & 0o170000) != 0o040000 {
+                return ENOTDIR.as_isize();
+            }
+            dentry
+        } else {
+            return ENOTDIR.as_isize();
+        }
     };
 
     drop(inner);
