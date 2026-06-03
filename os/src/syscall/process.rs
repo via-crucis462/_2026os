@@ -878,7 +878,7 @@ pub fn sys_renameat2(
     let cwd = proc.inner_exclusive_access().cwd.clone();
 
     // 找到新老父目录的内存 Dentry
-    if let (Some(old_parent), Some(new_parent)) = (
+    if let (Ok(old_parent), Ok(new_parent)) = (
         cwd.find_tree(&old_parent_path, true),
         cwd.find_tree(&new_parent_path, true)
     ) {
@@ -1239,7 +1239,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             // 如果当前不是最后一段路径，或者原路径明确以 '/' 结尾（如 testfile/），这一段必须是目录
             let require_dir = i < comps.len() - 1 || path_str.ends_with('/');
             if require_dir {
-                if let Some(node) = cwd.find_tree(&check_path, true) {
+                if let Ok(node) = cwd.find_tree(&check_path, true) {
                     let stat = node.inode.get_stat();
                     let is_dir = (stat.mode & 0o170000) == 0o040000;
                     if !is_dir {
@@ -1958,7 +1958,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
             };
             if path_str == "/dev/null/invalid" { return ENOTDIR.as_isize(); } // ENOTDIR 特判
 
-            if let Some(dentry) = cwd.find_tree(&path_str, true) {
+            if let Ok(dentry) = cwd.find_tree(&path_str, true) {
                 let stat = dentry.inode.get_stat();
                 let ino = stat.ino;
                 let old_atime = TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ };

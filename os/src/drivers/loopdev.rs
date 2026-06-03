@@ -225,7 +225,7 @@ pub fn mount_loop_device(loop_device: Arc<LoopDevice>, mount_point: &str) -> Res
     let parent_dir = parent_path(mount_point);
     let name = file_name(mount_point);
     
-    if let Some(parent_dentry) = ROOT_DENTRY.find_tree(&parent_dir, true) {
+    if let Ok(parent_dentry) = ROOT_DENTRY.find_tree(&parent_dir, true) {
         parent_dentry.insert(name, root_inode);
         Ok(id)
     } else {

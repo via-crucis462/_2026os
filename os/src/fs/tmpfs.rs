@@ -376,7 +376,7 @@ fn populate_lib_from_dentries(
                 if let Ok(name) = core::str::from_utf8(&data[name_start..name_start + name_len]) {
                     if name != "." && name != ".." {
                         // 用 find_tree 跟随符号链接，拿到真实文件 inode
-                        if let Some(child) = src.find_tree(name, true) {
+                        if let Ok(child) = src.find_tree(name, true) {
                             println!("[VFS] Mounted lib entry: {}", name);
                             lib.mount_child(name.to_string(), child.inode.clone());
                             lib64.mount_child(name.to_string(), child.inode.clone());
@@ -429,7 +429,7 @@ pub fn setup_oscomp_env() {
     sys_module_dentry.insert("loop".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
 
     // 3. 将 Busybox 和 libc 的真实 Inode 映射进虚拟目录
-    if let Some(musl_dir) = root.find_tree("/musl", true) {
+    if let Ok(musl_dir) = root.find_tree("/musl", true) {
         if let Some(busybox_node) = musl_dir.find_child("busybox") {
             let bb_inode = busybox_node.inode.clone();
             let applets = [
@@ -445,7 +445,7 @@ pub fn setup_oscomp_env() {
             }
             info!("[VFS] Populated busybox applets");
         }
-        let dev_dentry = if let Some(dev) = root.find_tree("/dev", true) {
+        let dev_dentry = if let Ok(dev) = root.find_tree("/dev", true) {
             dev
         } else {
             // 理论上不会走到这
@@ -472,7 +472,7 @@ pub fn setup_oscomp_env() {
         }
 
         info!("[VFS] Mounted /dev/shm safely");
-        if root.find_tree("/dev/shm", true).is_some() {
+        if let Ok(_) = root.find_tree("/dev/shm", true) {
             info!("DEBUG: /dev/shm path is VALID");
         } else {
             error!("DEBUG: /dev/shm path is BROKEN!");
@@ -510,7 +510,7 @@ pub fn setup_oscomp_env() {
     info!("[VFS] Populated glibc lib symlinks");
 
 
-    if root.find_tree("/dev/shm", true).is_some() {
+    if let Ok(_) = root.find_tree("/dev/shm", true) {
         info!("DEBUG: /dev/shm path is VALID");
     } else {
         error!("DEBUG: /dev/shm path is BROKEN!");
@@ -522,22 +522,22 @@ pub fn setup_oscomp_env() {
 // 挂载 /sys/kernel/mm/hugepages
 fn mount_hugepages() -> Arc<super::Dentry> {
     let root = ROOT_DENTRY.clone();
-    let sys_dentry = if let Some(sys) = root.find_tree("/sys", true) {
+    let sys_dentry = if let Ok(sys) = root.find_tree("/sys", true) {
         sys
     } else {
         root.mount_child("sys".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
-    let kernel_dentry = if let Some(kernel) = sys_dentry.find_tree("/sys/kernel", true) {
+    let kernel_dentry = if let Ok(kernel) = sys_dentry.find_tree("/sys/kernel", true) {
         kernel
     } else {
         sys_dentry.insert("kernel".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
-    let mm_dentry = if let Some(mm) = kernel_dentry.find_tree("/sys/kernel/mm", true) {
+    let mm_dentry = if let Ok(mm) = kernel_dentry.find_tree("/sys/kernel/mm", true) {
         mm
     } else {
         kernel_dentry.insert("mm".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
-    let hugepages_dentry = if let Some(hugepages) = mm_dentry.find_tree("/sys/kernel/mm/hugepages", true) {
+    let hugepages_dentry = if let Ok(hugepages) = mm_dentry.find_tree("/sys/kernel/mm/hugepages", true) {
         hugepages
     } else {
         mm_dentry.insert("hugepages".to_string(), Arc::new(TmpfsDirInode::new(0o777)))

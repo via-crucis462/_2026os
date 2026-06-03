@@ -301,7 +301,11 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> O
     
     // 使用全局 Dentry 树递归查找路径，并自动填充缓存
     // 1. 查找文件是否已存在
-    let target_dentry = start_node.find_tree(path, !flags.is_nofollow());
+    let target_dentry = if let Ok(dentry) = start_node.find_tree(path, !flags.is_nofollow()) {
+        Some(dentry)
+    } else {
+        None
+    };
     // 2.1 若不存在
     // 2.1.1 若文件不需要创建，返回 None
     if target_dentry.is_none() {
@@ -312,7 +316,9 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> O
         // 创建新文件的逻辑（简化处理，只创建空文件）
     // 2.1.2 创建新文件
         let parent_path = parent_path(path);
-        let parent_dentry = start_node.find_tree(&parent_path, true)?;
+        let Ok(parent_dentry) = start_node.find_tree(&parent_path, true) else {
+            return None;
+        };
         let file_name = file_name(path);
         let new_dentry = create_file_in_dentry(&parent_dentry, file_name, mode);
         let (readable, writable) = flags.read_write();
@@ -342,12 +348,15 @@ pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
         current_task().unwrap().process().inner_exclusive_access().cwd.clone()
     };
     // 从起点开始检查目标路径是否已存在
-    if start.find_tree(path, true).is_some() {
+    if let Ok(_) = start.find_tree(path, true) {
         info!("VFS: make_dir - target '{}' already exists", path);
         return None; 
     }
     let parent_path = parent_path(path);
-    let parent_dentry = start.find_tree(&parent_path, true)?;
+    let Ok(parent_dentry) = start.find_tree(&parent_path, true) else {
+        info!("VFS: make_dir - parent path '{}' does not exist", parent_path);
+        return None;
+    };
     let dir_name = file_name(path);
     info!("VFS: make_dir - creating directory '{}' in parent '{}'", dir_name, parent_path);
     let new_dentry = create_dir_in_dentry(&parent_dentry, dir_name , _mode);
