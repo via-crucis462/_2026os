@@ -1911,7 +1911,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 pub const UTIME_NOW: usize = 0x3fffffff;
 pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usize) -> isize {
-    println!("sys_utimensat called with dirfd={}, path_ptr={:#x}, times_ptr={:#x}, flags={:#x}", dirfd, path_ptr, times_ptr, _flags);
+    //println!("sys_utimensat called with dirfd={}, path_ptr={:#x}, times_ptr={:#x}, flags={:#x}", dirfd, path_ptr, times_ptr, _flags);
     let task = current_task().unwrap();
     let proc = task.process();
 
@@ -1957,7 +1957,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
 
             let path_str = {
                 if let Some(s) = try_translated_str(token, path_ptr as *const u8) {
-                    println!("sys_utimensat: translated path string: {}", s);
+                    //println!("sys_utimensat: translated path string: {}", s);
                     s
                 } else {
                     return EFAULT.as_isize();
@@ -1965,10 +1965,12 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
             };
             if path_str == "/dev/null/invalid" { return ENOTDIR.as_isize(); } // ENOTDIR 特判
 
-            if let Ok(dentry) = cwd.find_tree(&path_str, true) {
+            let find_result = cwd.find_tree(&path_str, true);
+            match find_result {
+                Ok(dentry) => {
                 let stat = dentry.inode.get_stat();
                 let ino = stat.ino;
-                println!("sys_utimensat: found target inode with ino={}, atime=({}, {}), mtime=({}, {})", ino, stat.atime_sec, stat.atime_nsec, stat.mtime_sec, stat.mtime_nsec);
+                //println!("sys_utimensat: found target inode with ino={}, atime=({}, {}), mtime=({}, {})", ino, stat.atime_sec, stat.atime_nsec, stat.mtime_sec, stat.mtime_nsec);
                 let old_atime = TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ };
                 let old_mtime = TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ };
                 let (old_atime, old_mtime) = if ino != 0 {
@@ -1978,8 +1980,9 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
                     } else { (old_atime, old_mtime) }
                 } else { (old_atime, old_mtime) };
                 (None, Some(dentry.inode.clone()), old_atime, old_mtime, ino, token)
-            } else {
-                return ENOENT.as_isize();
+                }
+                Err(0) => return ELOOP.as_isize(),
+                Err(_) => return ENOENT.as_isize(),
             }
         }
     };
@@ -2015,8 +2018,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
     if let Some(file) = target_file.as_ref() {
         file.set_time(&new_atime, &new_mtime);
     } else if let Some(inode) = target_inode.as_ref() {
-        //println!("sys_utimensat: target_inode type={}, ino={}, new_atime=({}, {}), new_mtime=({}, {})", 
-        //    inode.type_name(), ino, new_atime.tv_sec, new_atime.tv_nsec, new_mtime.tv_sec, new_mtime.tv_nsec);
+        //println!("sys_utimensat: target_inode type={}, ino={}, new_atime=({}, {}), new_mtime=({}, {})",    inode.type_name(), ino, new_atime.tv_sec, new_atime.tv_nsec, new_mtime.tv_sec, new_mtime.tv_nsec);
         inode.set_time(&new_atime, &new_mtime);
     }
 

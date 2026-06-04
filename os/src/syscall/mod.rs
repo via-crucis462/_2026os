@@ -26,6 +26,7 @@ const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_MKNOD: usize = 33;
 /// unlinkat syscall
 const SYSCALL_UNLINKAT: usize = 35;
+const SYSCALL_SYMLINK: usize = 36;
 /// linkat syscall
 const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_STATFS: usize = 43;
@@ -399,7 +400,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SET_ROBUST_LIST => sys_robust_list(),
         SYSCALL_GET_ROBUST_LIST => sys_get_robust_list(),
         SYSCALL_RESQ => sys_resq(),
-        SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat),
+        SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat, args[3] as usize),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
         SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
         SYSCALL_COPY_FILE_RANGE => sys_copy_file_range(args[0], args[1] as *mut i64, args[2], args[3] as *mut i64, args[4], args[5] as u32),
@@ -418,6 +419,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_UNSHARE => sys_unshare(args[0] as i32),
         SYSCALL_USERFAULTFD => sys_userfaultfd(args[0] as i32),
         SYSCALL_MEMBARRIER => sys_membarrier(args[0] as i32, args[1] as u32, args[2] as i32),
+        SYSCALL_SYMLINK => sys_symlinkat(args[0] as *const u8, args[1] as isize, args[2] as *const u8),
         _ => {
             println!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 

@@ -1274,7 +1274,7 @@ pub fn sys_fremovexattr(_fd: isize, _name: *const u8) -> isize {
     return 0; // 目前不支持扩展属性，直接返回成功
 }
 
-pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
+pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usize) -> isize {
     let token = current_user_token();
     let path_str = {
         if let Some(s) = crate::mm::try_translated_str(token, path_ptr) {
@@ -1283,7 +1283,9 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
             return EFAULT.as_isize();
         }
     };
-    trace!("kernel:pid[{}] sys_fstatat dirfd={} path={}", current_task().unwrap().process().pid.0, dirfd, path_str);
+    const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+    let follow_links = (flags & AT_SYMLINK_NOFOLLOW) == 0;
+    trace!("kernel:pid[{}] sys_fstatat dirfd={} path={} follow={}", current_task().unwrap().process().pid.0, dirfd, path_str, follow_links);
 
     let task = current_task().unwrap();
     let proc = task.process();
@@ -1312,23 +1314,28 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
     };
 
     drop(inner); 
-    // 查找文件
-    let target_dentry = base_dir.find_tree(&path_str, false);
+    // 查找文件（follow_links: stat 跟随符号链接，lstat 不跟随）
+    let target_dentry = base_dir.find_tree(&path_str, follow_links);
 
     match target_dentry {
         Ok(dentry) => {
             let stat = dentry.inode.get_stat();
+            //println!("mtime = {}.{} , atime = {}.{}, inode={}", stat.mtime_sec, stat.mtime_nsec, stat.atime_sec, stat.atime_nsec, dentry.name);
             if !try_translated_write(token, st, stat) {
                 return EFAULT.as_isize();
             }
             0
         }
+        Err(0) => {
+            // 符号链接循环
+            ELOOP.as_isize()
+        }
         Err(1) => {
-            // 不存在
+            // 中间路径不是目录
             ENOTDIR.as_isize()
         }
         Err(_) => {
-            // 其他错误
+            // 路径不存在
             ENOENT.as_isize()
         }
     }
@@ -1991,4 +1998,73 @@ pub fn sys_userfaultfd(_flags: i32) -> isize {
     };
         inner.set_fd(fd, Arc::new(UserPageFaultInfo::new((_flags as usize & O_NONBLOCK) != 0)), FdFlags::from_bits_truncate(_flags as usize), 0);
         fd as isize
+}
+pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) -> isize {
+    let token = current_user_token();
+    let task = current_task().unwrap();
+    let proc = task.process();
+
+    let target_str = {
+        if let Some(s) = try_translated_str(token, target) {
+            s
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
+    let linkpath_str = normalize_leading_dot_path(
+        if let Some(s) = try_translated_str(token, linkpath) {
+            s
+        } else {
+            return EFAULT.as_isize();
+        }
+    );
+    if linkpath_str.is_empty() || target_str.is_empty() {
+        return ENOENT.as_isize();
+    }
+    debug!("kernel:pid[{}] sys_symlinkat: target={}, linkpath={}", proc.pid.0, target_str, linkpath_str);
+
+    // 解析起始目录
+    let start_dentry = if linkpath_str.starts_with('/') {
+        ROOT_DENTRY.clone()
+    } else if newdirfd == AT_FDCWD {
+        proc.inner_exclusive_access().cwd.clone()
+    } else {
+        let inner = proc.inner_exclusive_access();
+        if newdirfd < 0 || newdirfd as usize >= inner.fd_table.len() {
+            return EBADF.as_isize();
+        }
+        if let Some(file) = &inner.fd_table[newdirfd as usize].file {
+            if let Some(dentry) = file.get_dentry() {
+                dentry
+            } else {
+                return EBADF.as_isize();
+            }
+        } else {
+            return EBADF.as_isize();
+        }
+    };
+
+    // 检查目标是否已存在
+    if start_dentry.find_tree(&linkpath_str, false).is_ok() {
+        return EEXIST.as_isize();
+    }
+
+    // 解析父目录和文件名
+    let parent_path_str = parent_path(&linkpath_str);
+    let name = file_name(&linkpath_str);
+
+    let parent_dentry = match start_dentry.find_tree(&parent_path_str, true) {
+        Ok(d) => d,
+        Err(_) => return ENOENT.as_isize(),
+    };
+
+    // 通过父目录的 inode 创建符号链接
+    //println!("parent_path_str={}, name={}, target_str={}", parent_dentry.inode.type_name(), name, target_str);
+    if let Some(symlink_inode) = parent_dentry.inode.create_symlink(&name, &target_str) {
+        // 将新创建的 Inode 挂到 VFS 树
+        parent_dentry.insert(name, symlink_inode);
+        0
+    } else {
+        EACCES.as_isize()
+    }
 }

@@ -170,8 +170,8 @@ impl super::VfsInode for TmpfsFileInode {
         true
     }
     fn set_time(&self, atime: &super::TimeSpec, mtime: &super::TimeSpec) -> isize {
-        println!("VFS: set_time called on TmpfsFileInode, atime=({}, {}), mtime=({}, {})", 
-            atime.tv_sec, atime.tv_nsec, mtime.tv_sec, mtime.tv_nsec);
+        //println!("VFS: set_time called on TmpfsFileInode, atime=({}, {}), mtime=({}, {})", 
+        //    atime.tv_sec, atime.tv_nsec, mtime.tv_sec, mtime.tv_nsec);
         let mut stat = self.stat.lock();
         stat.atime_sec = atime.tv_sec as i64;
         stat.atime_nsec = atime.tv_nsec as i64;
@@ -257,6 +257,21 @@ impl super::VfsInode for TmpfsDirInode {
     }
 
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn super::VfsInode>> {
+        if mode == 0o120777 {
+            let symlink_inode = Arc::new(TmpfsFsSymbolicLinkInode {
+                ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
+                target: String::new(),
+                stat: Mutex::new({
+                    let mut s = Stat::default();
+                    s.mode = 0o120777; // 符号链接
+                    s.nlink = 1;
+                    s.blksize = 4096;
+                    s
+                }),
+            });
+            self.entries.lock().insert(name.to_string(), symlink_inode.clone());
+            return Some(symlink_inode);
+        }
        let new_file: Arc<dyn super::VfsInode> = Arc::new(TmpfsFileInode::new(mode));
         self.entries.lock().insert(name.to_string(), new_file.clone());
         Some(new_file)
@@ -288,9 +303,26 @@ impl super::VfsInode for TmpfsDirInode {
             f_flags: 0, f_spare: [0; 4],
         }
     }
+    fn create_symlink(&self, name: &str, target: &str) -> Option<Arc<dyn VfsInode>> {
+        let inodeid = TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst);
+        //println!("Creating symlink: name={}, target={}, assigned ino={}", name, target, inodeid);
+        let symlink_inode = Arc::new(TmpfsFsSymbolicLinkInode {
+            ino: inodeid,
+            target: target.to_string(),
+            stat: Mutex::new({
+                let mut s = Stat::default();
+                s.mode = 0o120777; // 符号链接
+                s.nlink = 1;
+                s.blksize = 4096;
+                s
+            }),
+        });
+        self.entries.lock().insert(name.to_string(), symlink_inode.clone());
+        Some(symlink_inode)
+    }
     fn set_time(&self, _atime: &super::TimeSpec, _mtime: &super::TimeSpec) -> isize {
-        println!("VFS: set_time called on TmpfsDirInode, atime=({}, {}), mtime=({}, {})", 
-            _atime.tv_sec, _atime.tv_nsec, _mtime.tv_sec, _mtime.tv_nsec);
+       // println!("VFS: set_time called on TmpfsDirInode, atime=({}, {}), mtime=({}, {})", 
+       //     _atime.tv_sec, _atime.tv_nsec, _mtime.tv_sec, _mtime.tv_nsec);
         let mut stat = self.stat.lock();
         stat.atime_sec = _atime.tv_sec as i64;
         stat.atime_nsec = _atime.tv_nsec as i64;
@@ -504,4 +536,73 @@ fn mount_hugepages() -> Arc<super::Dentry> {
     };
     info!("[VFS] Mounted /sys/kernel/mm/hugepages");
     hugepages_dentry
+}
+pub struct TmpfsFsSymbolicLinkInode {
+    ino: usize,
+    target: String,
+    stat: Mutex<Stat>,
+}
+impl VfsInode for TmpfsFsSymbolicLinkInode {
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize { 
+        let target_bytes = self.target.as_bytes();
+        if offset >= target_bytes.len() {
+            return 0;
+        }
+        let copy_len = core::cmp::min(buf.len(), target_bytes.len() - offset);
+        buf[..copy_len].copy_from_slice(&target_bytes[offset..offset + copy_len]);
+        copy_len
+    }
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn get_size(&self) -> usize { self.target.len() }
+    fn get_stat(&self) -> super::Stat {
+        let mut stat = *self.stat.lock();
+        stat.ino = self.ino as u64;
+        stat.size = self.target.len() as i64;
+        stat
+    }
+    fn get_statx(&self) -> super::Statx { super::stat_to_statx(self.get_stat()) }
+    fn get_perm(&self) -> PermStat {
+        let stat = self.stat.lock();
+        PermStat {
+            mode: FileMode::from_bits_truncate(stat.mode as u16),
+            uid: stat.uid,
+            gid: stat.gid,
+        }
+    }
+    fn set_perm(&self, perm: PermStat) -> bool {
+        let mut stat = self.stat.lock();
+        stat.mode = perm.mode.bits() as u32;
+        stat.uid = perm.uid;
+        stat.gid = perm.gid;
+        true
+    }
+    fn set_time(&self, atime: &super::TimeSpec, mtime: &super::TimeSpec) -> isize {
+        println!("VFS: set_time called on TmpfsFsSymbolicLinkInode, atime=({}, {}), mtime=({}, {})", atime.tv_sec, atime.tv_nsec, mtime.tv_sec, mtime.tv_nsec);
+        let mut stat = self.stat.lock();
+        stat.atime_sec = atime.tv_sec as i64;
+        stat.atime_nsec = atime.tv_nsec as i64;
+        stat.mtime_sec = mtime.tv_sec as i64;
+        stat.mtime_nsec = mtime.tv_nsec as i64;
+        0
+    }
+    fn type_name(&self) -> &'static str { "TmpfsFsSymbolicLinkInode" }
+    fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
+    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
+    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
+    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
+    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
+}
+impl TmpfsFsSymbolicLinkInode{
+    fn new(target: String) -> Self {
+        let mut stat = Stat::default();
+        stat.mode = 0o120777; // S_IFLNK
+        stat.nlink = 1;
+        stat.blksize = 4096;
+        stat.ino = TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst) as u64;
+        Self {
+            ino: stat.ino as usize,
+            target,
+            stat: Mutex::new(stat),
+        }
+    }
 }

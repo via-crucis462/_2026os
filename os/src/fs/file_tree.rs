@@ -98,7 +98,7 @@ impl Dentry {
     }
     /// 递归查找完整路径，例如 "bin/sh" 或 "/bin/sh"
     /// 将self作为起点，不考虑路径是否以'/'开头
-    /// find_tree中，err返回0时是文件不存在，返回1时是路径中间有个组件是文件不是目录，返回2时是符号链接循环
+    /// find_tree中，err返回0时是符号链接循环(ELOOP)，返回1时是路径中间有文件(ENOTDIR)，返回2时是路径不存在(ENOENT)
     pub fn find_tree(self: &Arc<Self>, path: &str, follow_links: bool) -> Result<Arc<Dentry>, usize> {
         if path.is_empty() {
             return Ok(self.clone());
