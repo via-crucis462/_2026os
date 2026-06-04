@@ -1052,12 +1052,12 @@ pub fn sys_uname(uts: *mut UtsName) -> isize {
     0
 }
 
-pub fn _sys_fork(stack: Option<usize>) -> isize {
+pub fn sys_fork(stack: Option<usize> , _flags: usize) -> isize {
 	let current_task = current_task().unwrap();
     let current_process = current_task.process();
 	trace!("kernel:pid[{}] old_sys_fork", current_process.pid.0);
     let proc = current_task.process();
-    let (new_proc, new_task) = proc.fork(stack, current_task);//此处添加了一个 None 参数
+    let (new_proc, new_task) = proc.fork(stack, current_task, _flags);//此处添加了一个 None 参数
     let new_pid = new_proc.pid.0;
     //println!("sys_fork: created new process with PID {}", new_pid);
     // modify trap context of new_task, because it returns immediately after switching
@@ -1084,7 +1084,7 @@ pub fn sys_clone(flags: usize, stack: usize, _ptid: usize) -> isize {
         return EINVAL.as_isize()
     } else {
         //println!("sys_clone: CLONE_THREAD flag is not set, cloning a process with stack={:#x} and ptid={:#x}", stack, _ptid);
-        _sys_fork((stack != 0).then_some(stack))
+        sys_fork((stack != 0).then_some(stack), flags)
     }
 }
 // path elf路径
@@ -3532,4 +3532,31 @@ pub fn sys_unshare(flags: i32) -> isize {
         return EPERM.as_isize();
     }
     0
+}
+
+//内存一致性
+pub fn sys_membarrier(cmd: i32, _flags: u32, _cpu_id: i32) -> isize {
+    const MEMBARRIER_CMD_QUERY: i32 = 0;
+    const MEMBARRIER_CMD_PRIVATE_EXPEDITED: i32 = 1 << 3;        // 8
+    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: i32 = 1 << 4; // 16
+
+    match cmd {
+        MEMBARRIER_CMD_QUERY => {
+            // Report that we support PRIVATE_EXPEDITED and REGISTER_PRIVATE_EXPEDITED
+            ((1 << 3) | (1 << 4)) as isize
+        }
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED => {
+            // Full memory barrier: all previous loads/stores complete before subsequent ones
+            #[cfg(target_arch = "riscv64")]
+            unsafe { core::arch::asm!("fence rw, rw") };
+            #[cfg(target_arch = "loongarch64")]
+            unsafe { core::arch::asm!("dbar 0") };
+            0
+        }
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => {
+            // Registration is implicit in our kernel: always succeed
+            0
+        }
+        _ => Errno::EINVAL.as_isize(),
+    }
 }

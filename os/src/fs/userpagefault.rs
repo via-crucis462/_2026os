@@ -14,6 +14,38 @@ const UFFDIO_API: u32      = 0xC018AA3F;
 const UFFDIO_REGISTER: u32 = 0xC020AA00;
 const UFFDIO_COPY: u32     = 0xC028AA03;
 
+/// struct uffd_msg (packed, 24 bytes for pagefault event)
+///   u8  event     = 0x12 (UFFD_EVENT_PAGEFAULT)
+///   u8  reserved1 = 0
+///   u16 reserved2 = 0
+///   u32 reserved3 = 0
+///   u64 flags     = 0  (arg.pagefault.flags)
+///   u64 address   = faulting_address  (arg.pagefault.address)
+const UFFD_MSG_SIZE: usize = 24;
+const UFFD_EVENT_PAGEFAULT: u64 = 0x12;
+
+/// Write a uffd_msg for a pagefault event into the user buffer.
+/// Returns the number of bytes written.
+fn fill_uffd_msg_pagefault(buf: UserBuffer, fault_addr: usize) -> usize {
+    let len = buf.len().min(UFFD_MSG_SIZE);
+    let mut i = 0;
+    for byte_ref in buf.into_iter() {
+        if i >= len { break; }
+        unsafe {
+            *byte_ref = match i {
+                0 => UFFD_EVENT_PAGEFAULT as u8,  // event
+                1..=7 => 0,                         // reserved1, reserved2, reserved3
+                8..=15 => 0,                        // flags (low bytes first)
+                16..=23 => ((fault_addr as u64) >> ((i - 16) * 8)) as u8, // address (LE)
+                _ => 0,
+            };
+        }
+        i += 1;
+    }
+    println!("fill uffd_msg: event=0x{:x}, address=0x{:x}, len={}", UFFD_EVENT_PAGEFAULT, fault_addr, len);
+    len
+}
+
 pub struct UserPageFaultInfo {
     //发生缺页的线程
     pub faulting_task: MPSafeCell<Option<Arc<TaskControlBlock>>>,
@@ -36,13 +68,14 @@ impl File for UserPageFaultInfo {
         false
     }
     /// read from the file to buf, return the number of bytes read
-    fn read(&self, _buf: UserBuffer) -> usize {
+    fn read(&self, buf: UserBuffer) -> usize {
+        // 阻塞直到有缺页事件
         if !self.faulting_task.exclusive_access().is_some() {
-            // 没有待处理缺页 + 阻塞模式：等待缺页发生
             block_current_and_run_next(&self.read_waiters);
-            // 被唤醒后，faulting_task 已被缺页处理函数设置
         }
-        return 0;
+        // 缺页已发生：读取 faulting_address，构造 uffd_msg 写入用户缓冲区
+        let fault_addr = *self.faulting_address.exclusive_access();
+        fill_uffd_msg_pagefault(buf, fault_addr)
     }
     /// write to the file from buf, return the number of bytes written
     fn pread(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }

@@ -56,7 +56,15 @@ impl PageTable {
             frames: vec![frame],
         }
     }
-    /// Temporarily used to get arguments from user space.
+    /// Create a page table that shares the same root as another.
+    /// The new table does NOT own the intermediate page table frames;
+    /// the original owner is responsible for freeing them.
+    pub fn alias_of(other: &PageTable) -> Self {
+        Self {
+            root_ppn: other.root_ppn,
+            frames: Vec::new(),
+        }
+    }
     /// LA64根页表地址存储在CSR.PGDL或H，
     /// 这里存储的是2级页表的物理地址，因为弃用了3，4级页表
     /// 参考rv64的rcore理解即可

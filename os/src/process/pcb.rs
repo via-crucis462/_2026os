@@ -3,6 +3,7 @@
 use super::*;
 use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
 use schedule::*;
+use core::mem;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::mm::get_free_frames;
@@ -461,13 +462,23 @@ impl ProcessControlBlock {
     /// Fork from parent to child
     /// 已编辑，添加了stack参数 
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
-    pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>, caller_task: Arc<TaskControlBlock>)-> (Arc<Self>, Arc<TaskControlBlock>) {
+    pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>, caller_task: Arc<TaskControlBlock>, _flags: usize)-> (Arc<Self>, Arc<TaskControlBlock>) {
+        const CLONE_VM: usize = 0x00000100; // 共享内存空间
+        const CLONE_THREAD: usize = 0x00010000; // 共享线程组（即父子线程共享 PCB）
+        const CLONE_CHILD_CLEARTID: usize = 0x00200000; // 子线程退出时清除父线程中的子线程 ID（即 clear_child_tid）
         // fix:锁序调整，先拿tcb锁再拿pcb锁
         let caller_inner = caller_task.inner_exclusive_access();
         // ---- hold parent PCB lock
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
-        let mut memory_set = MemorySet::from_existed_user(&mut parent_inner.memory_set);
+        //println!("[kernel] ProcessControlBlock::fork: copying user space for new process, flags={:#x}", _flags);
+        let mut memory_set = if _flags & CLONE_VM != 0 {
+            // CLONE_VM: 真正共享地址空间——共享同一个页表，不做COW拷贝
+            //parent_inner.info_map_areas();
+            MemorySet::share_from_parent(&parent_inner.memory_set)
+        } else {
+            MemorySet::from_existed_user(&mut parent_inner.memory_set)
+        };
         flush_tlb_for_asid(parent_inner.memory_set.asid());
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = Arc::new(pid_alloc());
@@ -879,9 +890,9 @@ impl ProcessControlBlockInner {
         self.alive_task_count == 0
     }
     pub fn info_map_areas(&self) {
-            warn!("mapping asid {}:", self.get_asid());
+            println!("mapping asid {}:", self.get_asid());
         for i in self.memory_set.areas().iter() {
-            warn!("mapping: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
+            println!("mapping: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
         }
     }
 }

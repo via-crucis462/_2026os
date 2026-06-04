@@ -155,6 +155,7 @@ const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_CLOCK_ADJTIME: usize = 266;
 const SYSCALL_USERFAULTFD: usize = 282;
+const SYSCALL_MEMBARRIER: usize = 283;
 /// statx syscall
 const SYSCALL_STATX: usize = 291;
 /// spawn syscall
@@ -416,6 +417,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_PERSONALITY => sys_personality(args[0] as usize),
         SYSCALL_UNSHARE => sys_unshare(args[0] as i32),
         SYSCALL_USERFAULTFD => sys_userfaultfd(args[0] as i32),
+        SYSCALL_MEMBARRIER => sys_membarrier(args[0] as i32, args[1] as u32, args[2] as i32),
         _ => {
             println!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
