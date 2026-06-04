@@ -14,7 +14,6 @@ pub mod memfd;
 use alloc::vec::{self, Vec};
 pub use memfd::*;
 pub mod tmpfs;
-use riscv::addr::page;
 pub use tmpfs::setup_oscomp_env;
 pub use tmpfs::{TmpfsFileInode, TmpfsDirInode};
 pub use procfs::mount_procfs;
@@ -87,35 +86,10 @@ pub trait File: Send + Sync {
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
         0
     }
-    // 获取该文件指定偏移页缓存（对于虚拟文件则就是文件自身）的物理页号。
-    // 如果没有，分配一个，读取数据并存起来。
-    // 这里是默认实现
+    // 这里是默认实现，需要为不同文件重写
     fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
-        let man = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
-        let (frame, newly_allowcated) = 
-            man.get_shared_page_cache(self.get_stat().ino, page_offset);
-        if newly_allowcated {
-            // 读入文件数据到分配的页
-            trace!("VFS: Allocated new shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
-            let (ppn, page_size) = (frame.ppn, frame.page_size);
-            let page_addr = ppn.0 << PAGE_SIZE_BITS;
-            // 检查是否对齐，防止传入的 frame 是大页
-            assert!(page_addr % page_size.size() == 0, "Shared page address not aligned to its size");
-            // 将物理页转换为缓冲区
-            let buffer = UserBuffer::new({
-                let buf = unsafe { 
-                    core::slice::from_raw_parts_mut(page_addr as *mut u8, page_size.size())
-                };
-                let vec_buf = alloc::vec![buf];
-                vec_buf
-            });
-            // 读取内容
-            self.read_at(page_offset * page_size.size(), buffer);
-        } else {
-            // 已经存在共享页，直接复用，返回物理页号
-            trace!("VFS: Reusing existing shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
-        }
-        Some(frame.ppn)
+        error!("File type does not support shared pages: page_offset={}", page_offset);
+        None
     }
 }
 
@@ -273,8 +247,31 @@ pub trait VfsInode: Send + Sync {
             f_namelen: 255, f_frsize: 0, f_flags: 0, f_spare: [0; 4],
         }
     }
-    fn get_shared_page(&self, _page_offset: usize) -> Option<PhysPageNum> {
-        None
+    fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
+        let man = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
+        let (frame, newly_allowcated) = 
+            man.get_shared_page_cache(self.get_stat().ino, page_offset);
+        if newly_allowcated {
+            // 读入文件数据到分配的页
+            info!("VFS: Allocated new shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
+            let (ppn, page_size) = (frame.ppn, frame.page_size);
+            let page_addr = ppn.0 << PAGE_SIZE_BITS;
+            // 检查是否对齐，防止传入的 frame 是大页
+            assert!(page_addr % page_size.size() == 0, "Shared page address not aligned to its size");
+            // 将物理页转换为缓冲区
+            let mut buffer = {
+                let buf = unsafe { 
+                    core::slice::from_raw_parts_mut(page_addr as *mut u8, page_size.size())
+                };
+                buf
+            };
+            // 读取内容
+            self.read_at(page_offset * page_size.size(), buffer);
+        } else {
+            // 已经存在共享页，直接复用，返回物理页号
+            info!("VFS: Reusing existing shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
+        }
+        Some(frame.ppn)
     }
     /// 返回该 inode 的唯一标识号（跨所有文件系统唯一）
     /// 默认从 get_stat().ino 读取，可能 override 为直接字段读取

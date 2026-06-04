@@ -179,15 +179,12 @@ impl File for Pipe {
     fn writable(&self) -> bool {
         self.writable
     }
-    // 👇 加上重写的 ready_to_read
     fn ready_to_read(&self) -> bool {
         if !self.readable { return false; }
         let ring_buffer = self.buffer.exclusive_access();
         // 有数据可读，或者写端全关了（EOF），都算可读就绪
         ring_buffer.available_read() > 0 || ring_buffer.all_write_ends_closed()
     }
-
-    // 👇 加上重写的 ready_to_write
     fn ready_to_write(&self) -> bool {
         if !self.writable { return false; }
         let ring_buffer = self.buffer.exclusive_access();

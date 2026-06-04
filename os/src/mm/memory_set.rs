@@ -920,6 +920,8 @@ impl MemorySet {
         let needing_std_pages = 
             VirtAddr(addr+length).std_ceil().0 -
             VirtAddr(addr).std_floor().0;
+        info!("mapping memory: addr={:#x}, length={:#x}, prot={:?}, flags={:?}, free_std_pages={}, needing_std_pages={}", 
+            addr, length, prot, mmap_flags, free_std_pages, needing_std_pages);
         // 检查内存是否充足
         if free_std_pages < needing_std_pages {
             warn!(
@@ -936,7 +938,7 @@ impl MemorySet {
             if let Some(new_addr) = self.find_free_area(length) {
                 start_va = new_addr;
             } else {
-                //println!("[kernel] mmap failed: no suitable free area found for length {:#x}", length);
+                error!("mmap failed: no suitable free area found for length {:#x}", length);
                 return Err(Errno::EEXIST.as_isize());
             }
         } else {
@@ -1017,7 +1019,7 @@ impl MemorySet {
                 PageSize::Page4K // mmap目前直接用标准页
             );
             
-            if false {//is_shared {
+            if is_shared {
                 if let Some(last_area) = self.areas.last_mut() {
                     last_area.is_shared = true;
                 }
