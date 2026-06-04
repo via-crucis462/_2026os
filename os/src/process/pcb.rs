@@ -39,10 +39,18 @@ pub struct  Rlimit64 {
 }
 
 
+bitflags::bitflags! {
+    /// 文件描述符标志位
+    pub struct FdFlags: usize {
+        const CLOEXEC  = 0o2000000; // O_CLOEXEC: exec 时自动关闭
+        const NONBLOCK = 0o4000;    // O_NONBLOCK: 非阻塞 I/O
+    }
+}
+
 #[derive(Clone)]
 pub struct FileDescriptor {
     pub file: Option<Arc<dyn File + Send + Sync>>,
-    pub cloexec: bool,
+    pub flags: FdFlags,
     pub status: usize,
 }
 
@@ -52,15 +60,15 @@ impl FileDescriptor {
     pub fn empty() -> Self {
         Self {
             file: None,
-            cloexec: false,
+            flags: FdFlags::empty(),
             status: 0,
         }
     }
 
-    pub fn new(file: Arc<dyn File + Send + Sync>, cloexec: bool, status: usize) -> Self {
+    pub fn new(file: Arc<dyn File + Send + Sync>, flags: FdFlags, status: usize) -> Self {
         Self {
             file: Some(file),
-            cloexec,
+            flags,
             status: status & !FD_STATUS_RESERVED,
         }
     }
@@ -68,7 +76,7 @@ impl FileDescriptor {
     pub fn reserved() -> Self {
         Self {
             file: None,
-            cloexec: false,
+            flags: FdFlags::empty(),
             status: FD_STATUS_RESERVED,
         }
     }
@@ -177,9 +185,9 @@ impl ProcessControlBlock {
                 fd_rlmt: Rlimit64 { cur_lmt: 1024, max_lmt: 1024 }, // 默认允许打开的最大文件描述符数量
                 // 初始化 fd_table，预先放入 stdin 和 stdout
                 fd_table: vec![
-                    FileDescriptor::new(Arc::new(Stdin), false, 0),
-                    FileDescriptor::new(Arc::new(Stdout), false, 0),
-                    FileDescriptor::new(Arc::new(Stderr), false, 0),
+                    FileDescriptor::new(Arc::new(Stdin), FdFlags::empty(), 0),
+                    FileDescriptor::new(Arc::new(Stdout), FdFlags::empty(), 0),
+                    FileDescriptor::new(Arc::new(Stderr), FdFlags::empty(), 0),
                 ],
                 cwd: ROOT_DENTRY.clone(),
                 signals: SignalFlags::empty(),
@@ -391,7 +399,7 @@ impl ProcessControlBlock {
         // 更新 PCB 内部信息
         let mut proc_inner = self.inner_exclusive_access();
         for fd in 0..proc_inner.fd_table.len() {
-            if proc_inner.fd_table[fd].cloexec {
+            if proc_inner.fd_table[fd].flags.contains(FdFlags::CLOEXEC) {
                 proc_inner.clear_fd(fd);
             }
         }
@@ -822,7 +830,7 @@ impl ProcessControlBlockInner {
     pub fn alloc_fd(&mut self) -> Option<usize> {
         // 1. 先尝试在现有的表中寻找被 close 空出来的坑位
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_available()) {
-            self.fd_table[fd].cloexec = false;
+            self.fd_table[fd].flags = FdFlags::empty();
             self.fd_table[fd].status = FD_STATUS_RESERVED;
             return Some(fd);
         } 
@@ -843,10 +851,10 @@ impl ProcessControlBlockInner {
         &mut self,
         fd: usize,
         file: Arc<dyn File + Send + Sync>,
-        cloexec: bool,
+        flags: FdFlags,
         status: usize,
     ) {
-        self.fd_table[fd] = FileDescriptor::new(file, cloexec, status);
+        self.fd_table[fd] = FileDescriptor::new(file, flags, status);
     }
     /// 回收被close的fd，压缩fd_table
     pub fn recycle_fd(&mut self) {

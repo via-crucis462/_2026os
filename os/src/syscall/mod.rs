@@ -154,6 +154,7 @@ const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_CLOCK_ADJTIME: usize = 266;
+const SYSCALL_USERFAULTFD: usize = 282;
 /// statx syscall
 const SYSCALL_STATX: usize = 291;
 /// spawn syscall
@@ -414,6 +415,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SPLICE => sys_splice(args[0] as usize, args[1] as *mut i64, args[2] as usize, args[3] as *mut i64, args[4] as usize, args[5] as u32),
         SYSCALL_PERSONALITY => sys_personality(args[0] as usize),
         SYSCALL_UNSHARE => sys_unshare(args[0] as i32),
+        SYSCALL_USERFAULTFD => sys_userfaultfd(args[0] as i32),
         _ => {
             println!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 

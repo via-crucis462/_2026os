@@ -624,6 +624,7 @@ struct LoopInfo64 {
 /// io设备控制系统调用
 /// 虽然loop设备驱动实现好了，但这里部分loop设备操作是伪实现的
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
+    //println!("kernel: sys_ioctl: fd={}, request={:#x}, argp={:#x}", fd, request, argp);
     let task = current_task().unwrap();
     let proc = task.process();
     let fd_table = proc.inner_exclusive_access().fd_table.clone();
@@ -848,8 +849,9 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             0
         }
         _ => {
-            warn!("[kernel] sys_ioctl: unsupported request: {}", request);
-            ENOTTY.as_isize()
+            // 委托给文件自己的 ioctl（如 userfaultfd）
+            let file = fd_table[fd].file.as_ref().unwrap();
+            file.ioctl(request as u32, argp, token)
         }
     }
 }

@@ -1,7 +1,8 @@
 //! File and filesystem-related syscalls
 use crate::PAGE_SIZE;
 use crate::auth::FileMode;
-use crate::fs::{create_fifo_in_dentry, create_file_in_dentry, is_fifo_mode, make_pipe, open_fifo_file, Dentry, File, OpenFlags, ROOT_DENTRY, Stat, Statx, file_name, make_dir, open_file, parent_path, S_IFMT};
+use crate::process::FdFlags;
+use crate::fs::{create_fifo_in_dentry, create_file_in_dentry, is_fifo_mode, make_pipe, open_fifo_file, Dentry, File, OpenFlags, ROOT_DENTRY, Stat, Statx, file_name, make_dir, open_file, parent_path, S_IFMT, UserPageFaultInfo};
 use crate::mm::{PageSize, UserBuffer, prepare_user_write, translated_byte_buffer, translated_read, try_translated_read, try_translated_str, try_translated_write};
 use crate::task::{current_task, current_user_token};
 use alloc::{task, vec};
@@ -295,7 +296,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
         };
 
         // 4. 塞入进程的文件描述符表
-        inner.set_fd(fd, anon_file, (flags & O_CLOEXEC) != 0, flags as usize);
+        inner.set_fd(fd, anon_file, FdFlags::from_bits_truncate(flags as usize), flags as usize);
         debug!("kernel:pid[{}] sys_openat: O_TMPFILE success fd={}", task.process().pid.0, fd);
         
         return fd as isize;
@@ -318,7 +319,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
-        inner.set_fd(fd, file, (flags & O_CLOEXEC) != 0, flags as usize);
+        inner.set_fd(fd, file, FdFlags::from_bits_truncate(flags as usize), flags as usize);
         fd as isize
     } else {
         trace!("kernel:pid[{}] VFS: File '{}' not found", task.process().pid.0, path_str);
@@ -477,12 +478,12 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
-    inner.set_fd(read_fd, pipe_read, false, 0);
+    inner.set_fd(read_fd, pipe_read, FdFlags::empty(), 0);
     let write_fd = match inner.alloc_fd() {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
-    inner.set_fd(write_fd, pipe_write, false, O_WRONLY as usize);
+    inner.set_fd(write_fd, pipe_write, FdFlags::empty(), O_WRONLY as usize);
     // 释放锁，因为下面的write会访问用户锁
     drop(inner);
     // User ABI for pipe is int pipefd[2], i.e. two 32-bit entries.
@@ -517,7 +518,7 @@ pub fn sys_dup(fd: usize) -> isize {
     // println!("[kernel] sys_dup: new fd allocated: {}", new_fd);
     let file = Arc::clone(inner.fd_table[fd].file.as_ref().unwrap());
     let old_status = inner.fd_table[fd].status;
-    inner.set_fd(new_fd, file, false, old_status);
+    inner.set_fd(new_fd, file, FdFlags::empty(), old_status);
     new_fd as isize
 }
 
@@ -555,7 +556,7 @@ pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
     ensure_fd_slots(&mut inner, new_fd + 1);
     let file = Arc::clone(inner.fd_table[fd].file.as_ref().unwrap());
     let old_status = inner.fd_table[fd].status;
-    inner.set_fd(new_fd, file, false, old_status);
+    inner.set_fd(new_fd, file, FdFlags::empty(), old_status);
     new_fd as isize
 }
 
@@ -918,16 +919,20 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             inner.set_fd(
                 new_fd,
                 file,
-                cmd == F_DUPFD_CLOEXEC,
+                if cmd == F_DUPFD_CLOEXEC { FdFlags::CLOEXEC } else { FdFlags::empty() },
                 old_status,
             );
             new_fd as isize
         }
         F_GETFD => {
-            if inner.fd_table[fd].cloexec { FD_CLOEXEC as isize } else { 0 }
+            if inner.fd_table[fd].flags.contains(FdFlags::CLOEXEC) { FD_CLOEXEC as isize } else { 0 }
         }
         F_SETFD => {
-            inner.fd_table[fd].cloexec = (arg & FD_CLOEXEC) != 0;
+            if (arg & FD_CLOEXEC) != 0 {
+                inner.fd_table[fd].flags.insert(FdFlags::CLOEXEC);
+            } else {
+                inner.fd_table[fd].flags.remove(FdFlags::CLOEXEC);
+            }
             0
         }
         F_GETFL => inner.fd_table[fd].status as isize,
@@ -1630,7 +1635,7 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(),
     };
-    inner.set_fd(fd, file, flags.contains(MemfdFlags::MFD_CLOEXEC), 0);
+    inner.set_fd(fd, file, if flags.contains(MemfdFlags::MFD_CLOEXEC) { FdFlags::CLOEXEC } else { FdFlags::empty() }, 0);
 
     trace!("kernel:pid[{}] sys_memfd_create: name='{}', page_size={:?}, fd={}",
         task.process().pid.0, name_str, page_size, fd);
@@ -1964,4 +1969,24 @@ pub fn sys_splice(fd_in: usize, off_in: *mut i64, fd_out: usize, off_out: *mut i
 
     //返回总共写入的字节数
     total as isize
+}
+pub fn sys_userfaultfd(_flags: i32) -> isize {
+    let task = match current_task() {
+        Some(t) => t,
+        None => return ENOSYS.as_isize(),
+    };
+    let proc = task.process();
+    let mut inner = proc.inner_exclusive_access();
+
+    // 需要 root 权限 (CAP_SYS_PTRACE)
+    if inner.euid != 0 {
+        return EPERM.as_isize();
+    }
+
+    let fd = match inner.alloc_fd() {
+        Some(fd) => fd,
+        None => return EMFILE.as_isize(),
+    };
+        inner.set_fd(fd, Arc::new(UserPageFaultInfo::new((_flags as usize & O_NONBLOCK) != 0)), FdFlags::from_bits_truncate(_flags as usize), 0);
+        fd as isize
 }

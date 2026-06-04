@@ -18,7 +18,7 @@ use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 use crate::mm::VirtAddr;
 use crate::syscall::syscall;
 use crate::task::{
-    KernelStack, SignalFlags,current_task, current_tid, 
+    KernelStack, SignalFlags, TaskStatus, add_task, current_task, current_tid,
     current_trap_cx, current_user_token, exit_current_and_run_next,
     suspend_current_and_run_next, handle_signals, current_add_signal
 };
@@ -131,7 +131,7 @@ pub fn trap_handler() -> ! {
             
             // 【修改 1】：获取当前的栈指针 SP
             let sp = current_trap_cx().x[2];
-            
+            //
             if process_inner.memory_set.handle_cow_fault(stval) {
                 info!("[WATCHDOG][COW] : {:#x}, PC: {:#x}", stval, sepc);
                 drop(process_inner);
@@ -144,19 +144,57 @@ pub fn trap_handler() -> ! {
                 drop(process);
                 drop(task);
             } else {
-                error!(
-                    "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}, sp={:#x}",
-                    crate::task::current_task().unwrap().process().pid.0,
-                    scause.cause(),
-                    current_trap_cx().get_rt(),
-                    stval,
-                    sp
-                );
-                process_inner.info_map_areas();
-                drop(process_inner);
-                drop(process);
-                drop(task);
-                current_add_signal(SignalFlags::SIGSEGV);
+                // 【新增】检查 userfaultfd 注册范围
+                let fd_table = &process_inner.fd_table;
+                let mut uffd_handled = false;
+                for fd_entry in fd_table.iter() {
+                    if let Some(file) = &fd_entry.file {
+                        if let Some(uffd) = file.as_any()
+                            .downcast_ref::<crate::fs::UserPageFaultInfo>()
+                        {
+                            let in_range = uffd.registered_ranges.exclusive_access()
+                                .iter().any(|&(start, len)| stval >= start && stval < start + len);
+                            if in_range {
+                                *uffd.faulting_address.exclusive_access() = stval;
+                                *uffd.faulting_task.exclusive_access() = Some(task.clone());
+                                // 唤醒一个阻塞在 read(uffd) 上的 handler 线程
+                                let mut guard = uffd.read_waiters.exclusive_access();
+                                if let Some(handler) = guard.pop_front() {
+                                    drop(guard);
+                                    let mut h_inner = handler.inner_exclusive_access();
+                                    h_inner.task_status = TaskStatus::Ready;
+                                    h_inner.owner_hart = None;
+                                    drop(h_inner);
+                                    add_task(handler);
+                                }
+                                uffd_handled = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if uffd_handled {
+                    // 释放所有锁，挂起当前缺页线程，等待 UFFDIO_COPY 唤醒
+                    drop(process_inner);
+                    drop(process);
+                    drop(task);
+                    suspend_current_and_run_next();
+                } else {
+                    error!(
+                        "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}, sp={:#x}",
+                        crate::task::current_task().unwrap().process().pid.0,
+                        scause.cause(),
+                        current_trap_cx().get_rt(),
+                        stval,
+                        sp
+                    );
+                    process_inner.info_map_areas();
+                    drop(process_inner);
+                    drop(process);
+                    drop(task);
+                    current_add_signal(SignalFlags::SIGSEGV);
+                }
             }
         }
         _ => {

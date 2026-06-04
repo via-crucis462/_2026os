@@ -114,6 +114,22 @@ pub fn current_task_to_sleep(mut wait_queue: MutexGuard<WaitQueue>) {
     schedule(task_cx_ptr);
 }
 
+/// 将当前线程入队并调度，自动管理锁避免死锁。
+/// 先加锁→入队→放锁，再 schedule，确保 schedule 时无锁持有。
+pub fn block_current_and_run_next(cell: &MPSafeCell<WaitQueue>) {
+    let task = take_current_task().unwrap();
+    let task_cx_ptr = {
+        let mut task_inner = task.inner_exclusive_access();
+        let ptr = &mut task_inner.task_cx as *mut TaskContext;
+        task_inner.task_status = TaskStatus::Blocked;
+        drop(task_inner);
+        let mut guard = cell.exclusive_access();
+        guard.push_back(task);
+        ptr
+    };
+    schedule(task_cx_ptr);
+}
+
 // 从等待队列中唤醒一个线程到全局池
 pub fn wake_up_one(mut wait_queue: MutexGuard<WaitQueue>) {
     if let Some(task) = wait_queue.pop_front() {

@@ -14,6 +14,7 @@ use crate::{
     auth::{FileMode, PermStat},
     fs::{File, Stat},
     mm::{translated_read, translated_write},
+    process::FdFlags,
     task::current_task,
 };
 
@@ -445,7 +446,7 @@ fn install_bpf_fd(file: Arc<dyn File + Send + Sync>) -> Result<isize, Errno> {
     let process = task.process();
     let mut inner = process.inner_exclusive_access();
     let fd = inner.alloc_fd().ok_or(Errno::EMFILE)?;
-    inner.set_fd(fd, file, false, 0);
+    inner.set_fd(fd, file, FdFlags::empty(), 0);
     Ok(fd as isize)
 }
 
