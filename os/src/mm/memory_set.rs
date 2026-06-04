@@ -74,6 +74,26 @@ impl MemorySet {
             brk_index: 0,// 注意维护！！
         }
     }
+
+    /// Create a MemorySet that shares the same page table with the parent.
+    /// Used by fork() with CLONE_VM flag for true address space sharing.
+    ///
+    /// - Shares the parent's page_table (same root_ppn → same satp token)
+    /// - Allocates a new ASID (different TLB tag, but same page table content)
+    /// - Copies area metadata but with empty data_frames (child doesn't own parent's frames)
+    /// - Child's own trap_cx page (pushed later) gets its own FrameTracker
+    pub fn share_from_parent(parent: &Self) -> Self {
+        let areas: Vec<MapArea> = parent.areas.iter().map(|a| MapArea::from_another(a)).collect();
+        /*for area in &areas {
+            println!("shared area: [{:#x}, {:#x}), {:?}", area.vpn_range.get_start().0 * PAGE_SIZE, area.vpn_range.get_end().0 * PAGE_SIZE, area.map_perm);
+        }*/
+        Self {
+            page_table: PageTable::alias_of(&parent.page_table), // 共享根页表，但不拥有中间页帧
+            asid: asid_alloc(),            // New ASID for child
+            areas,
+            brk_index: parent.brk_index,
+        }
+    }
     /// Get the page table token
     pub fn token(&self) -> usize {
         #[cfg(target_arch = "riscv64")]

@@ -3,6 +3,7 @@
 use super::*;
 use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
 use schedule::*;
+use core::mem;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::mm::get_free_frames;
@@ -30,7 +31,7 @@ const AT_PHNUM: usize = 5;
 const AT_PAGESZ: usize = 6;
 const AT_ENTRY: usize = 9;
 const AT_RANDOM: usize = 25;
-
+const RLIM_INFINITY: usize = usize::MAX;//进程最大可操作的文件大小
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct  Rlimit64 {
@@ -39,10 +40,18 @@ pub struct  Rlimit64 {
 }
 
 
+bitflags::bitflags! {
+    /// 文件描述符标志位
+    pub struct FdFlags: usize {
+        const CLOEXEC  = 0o2000000; // O_CLOEXEC: exec 时自动关闭
+        const NONBLOCK = 0o4000;    // O_NONBLOCK: 非阻塞 I/O
+    }
+}
+
 #[derive(Clone)]
 pub struct FileDescriptor {
     pub file: Option<Arc<dyn File + Send + Sync>>,
-    pub cloexec: bool,
+    pub flags: FdFlags,
     pub status: usize,
 }
 
@@ -52,15 +61,15 @@ impl FileDescriptor {
     pub fn empty() -> Self {
         Self {
             file: None,
-            cloexec: false,
+            flags: FdFlags::empty(),
             status: 0,
         }
     }
 
-    pub fn new(file: Arc<dyn File + Send + Sync>, cloexec: bool, status: usize) -> Self {
+    pub fn new(file: Arc<dyn File + Send + Sync>, flags: FdFlags, status: usize) -> Self {
         Self {
             file: Some(file),
-            cloexec,
+            flags,
             status: status & !FD_STATUS_RESERVED,
         }
     }
@@ -68,7 +77,7 @@ impl FileDescriptor {
     pub fn reserved() -> Self {
         Self {
             file: None,
-            cloexec: false,
+            flags: FdFlags::empty(),
             status: FD_STATUS_RESERVED,
         }
     }
@@ -177,9 +186,9 @@ impl ProcessControlBlock {
                 fd_rlmt: Rlimit64 { cur_lmt: 1024, max_lmt: 1024 }, // 默认允许打开的最大文件描述符数量
                 // 初始化 fd_table，预先放入 stdin 和 stdout
                 fd_table: vec![
-                    FileDescriptor::new(Arc::new(Stdin), false, 0),
-                    FileDescriptor::new(Arc::new(Stdout), false, 0),
-                    FileDescriptor::new(Arc::new(Stderr), false, 0),
+                    FileDescriptor::new(Arc::new(Stdin), FdFlags::empty(), 0),
+                    FileDescriptor::new(Arc::new(Stdout), FdFlags::empty(), 0),
+                    FileDescriptor::new(Arc::new(Stderr), FdFlags::empty(), 0),
                 ],
                 cwd: ROOT_DENTRY.clone(),
                 signals: SignalFlags::empty(),
@@ -191,10 +200,12 @@ impl ProcessControlBlock {
                 euid: 0,
                 egid: 0,
                 sgid: 0,
+                max_file_size: RLIM_INFINITY, // 默认文件大小限制为无限制
                 umask: 0o022,
                 pgid: pid_handle.0,
                 alive_task_count: 0,
                 tasks: Vec::new(),
+                personality: 0, // 默认 personality 为 0 (通常表示标准 Linux 兼容模式)
             })
         });
         // 为pcb创建主线程
@@ -389,7 +400,7 @@ impl ProcessControlBlock {
         // 更新 PCB 内部信息
         let mut proc_inner = self.inner_exclusive_access();
         for fd in 0..proc_inner.fd_table.len() {
-            if proc_inner.fd_table[fd].cloexec {
+            if proc_inner.fd_table[fd].flags.contains(FdFlags::CLOEXEC) {
                 proc_inner.clear_fd(fd);
             }
         }
@@ -451,13 +462,23 @@ impl ProcessControlBlock {
     /// Fork from parent to child
     /// 已编辑，添加了stack参数 
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
-    pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>, caller_task: Arc<TaskControlBlock>)-> (Arc<Self>, Arc<TaskControlBlock>) {
+    pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>, caller_task: Arc<TaskControlBlock>, _flags: usize)-> (Arc<Self>, Arc<TaskControlBlock>) {
+        const CLONE_VM: usize = 0x00000100; // 共享内存空间
+        const CLONE_THREAD: usize = 0x00010000; // 共享线程组（即父子线程共享 PCB）
+        const CLONE_CHILD_CLEARTID: usize = 0x00200000; // 子线程退出时清除父线程中的子线程 ID（即 clear_child_tid）
         // fix:锁序调整，先拿tcb锁再拿pcb锁
         let caller_inner = caller_task.inner_exclusive_access();
         // ---- hold parent PCB lock
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
-        let mut memory_set = MemorySet::from_existed_user(&mut parent_inner.memory_set);
+        //println!("[kernel] ProcessControlBlock::fork: copying user space for new process, flags={:#x}", _flags);
+        let mut memory_set = if _flags & CLONE_VM != 0 {
+            // CLONE_VM: 真正共享地址空间——共享同一个页表，不做COW拷贝
+            //parent_inner.info_map_areas();
+            MemorySet::share_from_parent(&parent_inner.memory_set)
+        } else {
+            MemorySet::from_existed_user(&mut parent_inner.memory_set)
+        };
         flush_tlb_for_asid(parent_inner.memory_set.asid());
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = Arc::new(pid_alloc());
@@ -527,8 +548,10 @@ impl ProcessControlBlock {
                 sgid: parent_inner.sgid,
                 pgid: parent_inner.pgid,
                 fd_rlmt: parent_inner.fd_rlmt.clone(),
+                max_file_size: parent_inner.max_file_size,
                 tasks: Vec::new(),
                 alive_task_count: 1, // 初始有一个线程
+                personality: parent_inner.personality,
             })
         });
         let new_task = Arc::new(TaskControlBlock {
@@ -799,10 +822,13 @@ pub struct ProcessControlBlockInner {
     pub sid: usize,
     pub pgid: usize, // 进程组 ID
     
+    pub max_file_size: usize, // 进程可创建的最大文件大小，单位为字节，默认为 usize::MAX
     // 进程下的线程数
     pub tasks: Vec<Arc<TaskControlBlock>>, 
     // 存活进程数，等于0相当于僵尸进程
     pub alive_task_count: isize,
+    // 专用于syscall92的personality
+    pub personality: usize,
 }
 
 impl ProcessControlBlockInner {
@@ -815,7 +841,7 @@ impl ProcessControlBlockInner {
     pub fn alloc_fd(&mut self) -> Option<usize> {
         // 1. 先尝试在现有的表中寻找被 close 空出来的坑位
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_available()) {
-            self.fd_table[fd].cloexec = false;
+            self.fd_table[fd].flags = FdFlags::empty();
             self.fd_table[fd].status = FD_STATUS_RESERVED;
             return Some(fd);
         } 
@@ -836,10 +862,10 @@ impl ProcessControlBlockInner {
         &mut self,
         fd: usize,
         file: Arc<dyn File + Send + Sync>,
-        cloexec: bool,
+        flags: FdFlags,
         status: usize,
     ) {
-        self.fd_table[fd] = FileDescriptor::new(file, cloexec, status);
+        self.fd_table[fd] = FileDescriptor::new(file, flags, status);
     }
     /// 回收被close的fd，压缩fd_table
     pub fn recycle_fd(&mut self) {
@@ -864,9 +890,9 @@ impl ProcessControlBlockInner {
         self.alive_task_count == 0
     }
     pub fn info_map_areas(&self) {
-            warn!("mapping asid {}:", self.get_asid());
+            println!("mapping asid {}:", self.get_asid());
         for i in self.memory_set.areas().iter() {
-            warn!("mapping: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
+            println!("mapping: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
         }
     }
 }

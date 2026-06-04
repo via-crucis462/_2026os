@@ -8,6 +8,7 @@ mod dir_entry;
 mod file_tree;
 mod procfs;
 mod devfs;
+mod userpagefault;
 pub mod memfd;
 pub use memfd::*;
 pub mod tmpfs;
@@ -19,6 +20,7 @@ pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
 pub use file_tree::{Dentry};
 pub use fifo::{create_fifo_in_dentry, is_fifo_mode, open_fifo_file, S_IFIFO, S_IFMT};
 pub use crate::arch::timer::TimeSpec;
+pub use userpagefault::UserPageFaultInfo;
 use crate::mm::UserBuffer;
 use crate::syscall::errno::Errno;
 use alloc::sync::Arc;
@@ -85,6 +87,10 @@ pub trait File: Send + Sync {
     // 如果没有，文件内部负责分配一个并存起来。
     fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
         None // 默认不支持
+    }
+    /// ioctl 设备控制，默认返回 ENOTTY（不支持的 ioctl 请求）
+    fn ioctl(&self, _request: u32, _argp: usize, _token: usize) -> isize {
+        Errno::ENOTTY.as_isize()
     }
 }
 
@@ -232,6 +238,10 @@ pub trait VfsInode: Send + Sync {
     }
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
         0 // 默认返回成功，至少让测试能跑通
+    }
+    /// 调试用：返回具体实现类型的名字
+    fn type_name(&self) -> &'static str {
+        core::any::type_name::<Self>()
     }
     fn statfs(&self) -> Statfs {
         // 默认实现：返回全 0 或者一个安全的默认值

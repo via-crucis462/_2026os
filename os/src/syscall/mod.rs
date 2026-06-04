@@ -26,6 +26,7 @@ const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_MKNOD: usize = 33;
 /// unlinkat syscall
 const SYSCALL_UNLINKAT: usize = 35;
+const SYSCALL_SYMLINK: usize = 36;
 /// linkat syscall
 const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_STATFS: usize = 43;
@@ -60,11 +61,13 @@ const SYSCALL_FSTATAT: usize = 79;
 /// fstat syscall
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_UTIMENSAT: usize = 88;
+const SYSCALL_PERSONALITY: usize = 92;
 /// exit syscall
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_WAITID: usize = 95;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
+const SYSCALL_UNSHARE: usize = 97;
 const SYSCALL_FUTEX: usize = 98;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;
 const SYSCALL_GET_ROBUST_LIST: usize = 100;
@@ -98,7 +101,7 @@ const SYSCALL_SETUID: usize = 146;
 const SYSCALL_SETEUID: usize=147;
 const SYSCALL_GETRESUID: usize = 148;
 const SYSCALL_GETRESGID: usize = 150;
-const SYSCALL_UMASK: usize = 166;
+
 const SYSCALL_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_GETPGID: usize = 155;
@@ -106,6 +109,7 @@ const SYSCALL_GETSID:  usize = 156;
 const SYSCALL_SETSID:  usize = 157;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GETRUSAGE: usize = 165;
+const SYSCALL_UMASK: usize = 166;
 const SYSCALL_PRCTL: usize = 167;
 const SYSCALL_GET_TIME: usize = 169;
 /// getpid syscall
@@ -151,6 +155,8 @@ const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_CLOCK_ADJTIME: usize = 266;
+const SYSCALL_USERFAULTFD: usize = 282;
+const SYSCALL_MEMBARRIER: usize = 283;
 /// statx syscall
 const SYSCALL_STATX: usize = 291;
 /// spawn syscall
@@ -267,7 +273,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         let inner = process.inner_exclusive_access();
         inner.info_map_areas();
     }*/
-    // println!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
+    //println!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
     info!("[K] hart[{}] PID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id);
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
@@ -394,7 +400,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SET_ROBUST_LIST => sys_robust_list(),
         SYSCALL_GET_ROBUST_LIST => sys_get_robust_list(),
         SYSCALL_RESQ => sys_resq(),
-        SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat),
+        SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat, args[3] as usize),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
         SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
         SYSCALL_COPY_FILE_RANGE => sys_copy_file_range(args[0], args[1] as *mut i64, args[2], args[3] as *mut i64, args[4], args[5] as u32),
@@ -409,6 +415,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_VHANGUP => sys_vhangup(),
         SYSCALL_VMSPLICE => sys_vmsplice(args[0] as usize, args[1] as *const IoVec, args[2] as usize, args[3] as u32),
         SYSCALL_SPLICE => sys_splice(args[0] as usize, args[1] as *mut i64, args[2] as usize, args[3] as *mut i64, args[4] as usize, args[5] as u32),
+        SYSCALL_PERSONALITY => sys_personality(args[0] as usize),
+        SYSCALL_UNSHARE => sys_unshare(args[0] as i32),
+        SYSCALL_USERFAULTFD => sys_userfaultfd(args[0] as i32),
+        SYSCALL_MEMBARRIER => sys_membarrier(args[0] as i32, args[1] as u32, args[2] as i32),
+        SYSCALL_SYMLINK => sys_symlinkat(args[0] as *const u8, args[1] as isize, args[2] as *const u8),
         _ => {
             println!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 

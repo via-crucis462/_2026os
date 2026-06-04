@@ -523,6 +523,8 @@ pub fn sys_getresuid(ruid_ptr: *mut u32, euid_ptr: *mut u32, suid_ptr: *mut u32)
 }
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
+const CLOCK_REALTIME_COARSE: usize = 5;
+const CLOCK_MONOTONIC_COARSE: usize = 6;
 fn clock_adj_has_invalid_mode_bits(modes: u32) -> bool {
     let allowed = CLOCK_ADJ_ALLOWED_MODES | ADJ_OFFSET_SINGLESHOT | ADJ_OFFSET_SS_READ;
     modes & !allowed != 0
@@ -556,16 +558,17 @@ fn current_wallclock_ns() -> i64 {
 }
 
 pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
+    //println!("kernel: sys_clock_gettime: clock_id={}, tp={:#x}", clock_id, tp as usize);
     if tp as usize == 0 {
         return EFAULT.as_isize();
     }
     let (sec, nsec) = match clock_id {
-        CLOCK_REALTIME => {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
             let total_ns = current_wallclock_ns() as usize;
             (total_ns / 1_000_000_000, total_ns % 1_000_000_000)
             
         }
-        CLOCK_MONOTONIC | _ => {
+        CLOCK_MONOTONIC | CLOCK_MONOTONIC_COARSE | _ => {
             // 默认：返回系统运行时间 (Uptime)
             let total_us = get_time_us();
             (total_us / 1_000_000, (total_us % 1_000_000) * 1_000)
@@ -624,6 +627,7 @@ struct LoopInfo64 {
 /// io设备控制系统调用
 /// 虽然loop设备驱动实现好了，但这里部分loop设备操作是伪实现的
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
+    //println!("kernel: sys_ioctl: fd={}, request={:#x}, argp={:#x}", fd, request, argp);
     let task = current_task().unwrap();
     let proc = task.process();
     let fd_table = proc.inner_exclusive_access().fd_table.clone();
@@ -848,8 +852,9 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             0
         }
         _ => {
-            warn!("[kernel] sys_ioctl: unsupported request: {}", request);
-            ENOTTY.as_isize()
+            // 委托给文件自己的 ioctl（如 userfaultfd）
+            let file = fd_table[fd].file.as_ref().unwrap();
+            file.ioctl(request as u32, argp, token)
         }
     }
 }
@@ -878,7 +883,7 @@ pub fn sys_renameat2(
     let cwd = proc.inner_exclusive_access().cwd.clone();
 
     // 找到新老父目录的内存 Dentry
-    if let (Some(old_parent), Some(new_parent)) = (
+    if let (Ok(old_parent), Ok(new_parent)) = (
         cwd.find_tree(&old_parent_path, true),
         cwd.find_tree(&new_parent_path, true)
     ) {
@@ -992,15 +997,43 @@ pub fn sys_uname(uts: *mut UtsName) -> isize {
         }
     };
     
+    // 读取当前进程的 personality，检查 UNAME26 标志
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let persona = proc.inner_exclusive_access().personality;
+    drop(task);
+    const UNAME26: usize = 0x0020000;
+    let uname26 = persona & UNAME26 != 0;
+
     // 填充系统信息
-    let sysname = b"rCore";
+    let sysname = b"Linux";
     let nodename = b"rCore-Nodename";
-    let release = b"5.10.0-rcore";
     let version = b"v0.1.0";
     let machine = b"riscv64";
     let domainname = b"rcore.os";
 
-    // 辅助函数，安全复制并补 0
+    // UNAME26: release 字段只保留前 3 个 '.' 分隔的版本段
+    let full_release = b"5.10.0-rcore";
+    let release: &[u8] = if uname26 {
+        // 找第 3 个 '.' 出现的位置，或直接到字符串末尾
+        let mut dot_count = 0;
+        let mut cut_pos = full_release.len();
+        for (i, &ch) in full_release.iter().enumerate() {
+            if ch == b'.' {
+                dot_count += 1;
+                if dot_count == 3 {
+                    cut_pos = i;
+                    break;
+                }
+            }
+        }
+        // 如果不足 3 个 '.'，保留全部
+        &full_release[..cut_pos]
+    } else {
+        full_release
+    };
+
+    // 辅助函数，安全复制并补 0（防御 CVE-2012-0957 内核内存泄露）
     fn fill_str(dest: &mut [u8; 65], src: &[u8]) {
         let len = src.len().min(64);
         dest[..len].copy_from_slice(&src[..len]);
@@ -1022,12 +1055,12 @@ pub fn sys_uname(uts: *mut UtsName) -> isize {
     0
 }
 
-pub fn _sys_fork(stack: Option<usize>) -> isize {
+pub fn sys_fork(stack: Option<usize> , _flags: usize) -> isize {
 	let current_task = current_task().unwrap();
     let current_process = current_task.process();
 	trace!("kernel:pid[{}] old_sys_fork", current_process.pid.0);
     let proc = current_task.process();
-    let (new_proc, new_task) = proc.fork(stack, current_task);//此处添加了一个 None 参数
+    let (new_proc, new_task) = proc.fork(stack, current_task, _flags);//此处添加了一个 None 参数
     let new_pid = new_proc.pid.0;
     //println!("sys_fork: created new process with PID {}", new_pid);
     // modify trap context of new_task, because it returns immediately after switching
@@ -1054,7 +1087,7 @@ pub fn sys_clone(flags: usize, stack: usize, _ptid: usize) -> isize {
         return EINVAL.as_isize()
     } else {
         //println!("sys_clone: CLONE_THREAD flag is not set, cloning a process with stack={:#x} and ptid={:#x}", stack, _ptid);
-        _sys_fork((stack != 0).then_some(stack))
+        sys_fork((stack != 0).then_some(stack), flags)
     }
 }
 // path elf路径
@@ -1211,7 +1244,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             // 如果当前不是最后一段路径，或者原路径明确以 '/' 结尾（如 testfile/），这一段必须是目录
             let require_dir = i < comps.len() - 1 || path_str.ends_with('/');
             if require_dir {
-                if let Some(node) = cwd.find_tree(&check_path, true) {
+                if let Ok(node) = cwd.find_tree(&check_path, true) {
                     let stat = node.inode.get_stat();
                     let is_dir = (stat.mode & 0o170000) == 0o040000;
                     if !is_dir {
@@ -1878,6 +1911,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 pub const UTIME_NOW: usize = 0x3fffffff;
 pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usize) -> isize {
+    //println!("sys_utimensat called with dirfd={}, path_ptr={:#x}, times_ptr={:#x}, flags={:#x}", dirfd, path_ptr, times_ptr, _flags);
     let task = current_task().unwrap();
     let proc = task.process();
 
@@ -1923,6 +1957,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
 
             let path_str = {
                 if let Some(s) = try_translated_str(token, path_ptr as *const u8) {
+                    //println!("sys_utimensat: translated path string: {}", s);
                     s
                 } else {
                     return EFAULT.as_isize();
@@ -1930,9 +1965,12 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
             };
             if path_str == "/dev/null/invalid" { return ENOTDIR.as_isize(); } // ENOTDIR 特判
 
-            if let Some(dentry) = cwd.find_tree(&path_str, true) {
+            let find_result = cwd.find_tree(&path_str, true);
+            match find_result {
+                Ok(dentry) => {
                 let stat = dentry.inode.get_stat();
                 let ino = stat.ino;
+                //println!("sys_utimensat: found target inode with ino={}, atime=({}, {}), mtime=({}, {})", ino, stat.atime_sec, stat.atime_nsec, stat.mtime_sec, stat.mtime_nsec);
                 let old_atime = TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ };
                 let old_mtime = TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ };
                 let (old_atime, old_mtime) = if ino != 0 {
@@ -1942,8 +1980,9 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
                     } else { (old_atime, old_mtime) }
                 } else { (old_atime, old_mtime) };
                 (None, Some(dentry.inode.clone()), old_atime, old_mtime, ino, token)
-            } else {
-                return ENOENT.as_isize();
+                }
+                Err(0) => return ELOOP.as_isize(),
+                Err(_) => return ENOENT.as_isize(),
             }
         }
     };
@@ -1975,24 +2014,18 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
         } // 否则保持 current_sec (UTIME_NOW)
     }
 
-    // 提取 Inode 号，用于后续的 TIME_CACHE 更新
-    let ino = if let Some(file) = &target_file {
-        file.get_stat().ino
-    } else if let Some(inode) = &target_inode {
-        inode.get_stat().ino
-    } else {
-        0
-    };
-
     // 4. 执行底层写入操作（无锁）
     if let Some(file) = target_file.as_ref() {
         file.set_time(&new_atime, &new_mtime);
     } else if let Some(inode) = target_inode.as_ref() {
+        //println!("sys_utimensat: target_inode type={}, ino={}, new_atime=({}, {}), new_mtime=({}, {})",    inode.type_name(), ino, new_atime.tv_sec, new_atime.tv_nsec, new_mtime.tv_sec, new_mtime.tv_nsec);
         inode.set_time(&new_atime, &new_mtime);
     }
 
     // 5. 存入 TIME_CACHE 解决底层 Ext4 32位时间戳截断问题
     if ino != 0 {
+        //println!("sys_utimensat: updating TIME_CACHE for ino={}, atime=({}, {}), mtime=({}, {})", 
+            //ino, new_atime.tv_sec, new_atime.tv_nsec, new_mtime.tv_sec, new_mtime.tv_nsec);
         TIME_CACHE.lock().insert(
             ino, 
             (new_atime.tv_sec as i64, new_atime.tv_nsec as i64, new_mtime.tv_sec as i64, new_mtime.tv_nsec as i64)
@@ -2000,6 +2033,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
     } else {
         println!("[utime_debug] sys_utimensat: WARNING! ino is 0, cache skipped!");
     }
+    //println!("sys_utimensat: finished, returning 0");
     0
 }
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
@@ -3245,6 +3279,7 @@ pub fn sys_prlimit64(
     new_limit: *const Rlimit64, 
     old_limit: *mut Rlimit64
 ) -> isize {
+    const UL_SETFSIZE: i32 = 1;
     const RLIMIT_NPROC: i32 = 3;
     const RLIMIT_NOFILE: i32 = 7;
     const RLIMIT_MEMLOCK: i32 = 8;
@@ -3291,6 +3326,25 @@ pub fn sys_prlimit64(
             // core dump 文件大小限制，伪实现
             if !old_limit.is_null() {
                 translated_write(token, old_limit, Rlimit64 { cur_lmt: 0, max_lmt: 0 });
+            }
+            0
+        }
+        UL_SETFSIZE => {
+            //若old有值则是将当前限制写入用户提供的缓冲区，若new有值则是设置新的限制，即读用户传进来的值。
+            let task = current_task().unwrap();
+            let process = task.process();
+            let mut proc_inner = process.inner_exclusive_access();
+            if !old_limit.is_null() {
+                if !try_translated_write(token, old_limit, Rlimit64 { cur_lmt: proc_inner.max_file_size, max_lmt: proc_inner.max_file_size }) {
+                    return EFAULT.as_isize();
+                }
+            }
+            if !new_limit.is_null() {
+                if let Some(new) = try_translated_read(token, new_limit) {
+                    proc_inner.max_file_size = new.cur_lmt;
+                } else {
+                    return EFAULT.as_isize();
+                }
             }
             0
         }
@@ -3436,4 +3490,77 @@ pub fn sys_vhangup() -> isize {
     }
 
     0
+}
+
+/// personality 系统调用 (#92)
+/// 设置/查询当前进程的执行域标志。
+/// - persona == 0xffffffff: 只查询不修改，返回当前值
+/// - 其他值: 设置新 persona 并返回旧值
+/// 目前支持的标志: UNAME26 (0x0020000) 影响 uname() 的 release 字段输出
+pub fn sys_personality(persona: usize) -> isize {
+    let task = current_task().unwrap();
+    let process = task.process();
+    let mut inner = process.inner_exclusive_access();
+    let old = inner.personality;
+    // persona == 0xffffffff 表示仅查询，不修改
+    if persona != 0xffffffff {
+        inner.personality = persona;
+    }
+    old as isize
+}
+//linux中，父子进程的fd_table这些本身是指向同一个实例的，但我们的pcb都是直接独立的fd_table
+//故unshare系统调用在我们的实现中没有实际效果，直接检查权限后放行即可
+pub fn sys_unshare(flags: i32) -> isize {
+    // 所有当前支持的 unshare 标志位
+    const CLONE_VM: i32      = 0x00000100;
+    const CLONE_FS: i32      = 0x00000200;
+    const CLONE_FILES: i32   = 0x00000400;
+    const CLONE_NEWNS: i32   = 0x00020000;
+    const CLONE_NEWCGROUP: i32 = 0x02000000;
+    const CLONE_NEWUTS: i32  = 0x04000000;
+    const CLONE_NEWIPC: i32  = 0x08000000;
+
+    // 掩码
+    const KNOWN_FLAGS: i32 = CLONE_VM | CLONE_FS | CLONE_FILES
+        | CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS | CLONE_NEWIPC;
+
+    // 检查是否有未定义的标志位
+    if flags & !KNOWN_FLAGS != 0 {
+        return EINVAL.as_isize();
+    }
+
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
+    if inner.euid != 0 {
+        return EPERM.as_isize();
+    }
+    0
+}
+
+//内存一致性
+pub fn sys_membarrier(cmd: i32, _flags: u32, _cpu_id: i32) -> isize {
+    const MEMBARRIER_CMD_QUERY: i32 = 0;
+    const MEMBARRIER_CMD_PRIVATE_EXPEDITED: i32 = 1 << 3;        // 8
+    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: i32 = 1 << 4; // 16
+
+    match cmd {
+        MEMBARRIER_CMD_QUERY => {
+            // Report that we support PRIVATE_EXPEDITED and REGISTER_PRIVATE_EXPEDITED
+            ((1 << 3) | (1 << 4)) as isize
+        }
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED => {
+            // Full memory barrier: all previous loads/stores complete before subsequent ones
+            #[cfg(target_arch = "riscv64")]
+            unsafe { core::arch::asm!("fence rw, rw") };
+            #[cfg(target_arch = "loongarch64")]
+            unsafe { core::arch::asm!("dbar 0") };
+            0
+        }
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => {
+            // Registration is implicit in our kernel: always succeed
+            0
+        }
+        _ => Errno::EINVAL.as_isize(),
+    }
 }

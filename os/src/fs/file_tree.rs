@@ -98,9 +98,10 @@ impl Dentry {
     }
     /// 递归查找完整路径，例如 "bin/sh" 或 "/bin/sh"
     /// 将self作为起点，不考虑路径是否以'/'开头
-    pub fn find_tree(self: &Arc<Self>, path: &str, follow_links: bool) -> Option<Arc<Dentry>> {
+    /// find_tree中，err返回0时是符号链接循环(ELOOP)，返回1时是路径中间有文件(ENOTDIR)，返回2时是路径不存在(ENOENT)
+    pub fn find_tree(self: &Arc<Self>, path: &str, follow_links: bool) -> Result<Arc<Dentry>, usize> {
         if path.is_empty() {
-            return Some(self.clone());
+            return Ok(self.clone());
         }
         // 1. 确定搜索起点
         let mut current = if path.starts_with('/') {
@@ -127,7 +128,11 @@ impl Dentry {
                 continue;
             }
 
-            let next = current.find_child(&comp)?;
+            let next = match current.find_child(&comp) {
+                Some(child) => child,
+                None => return Err(2), // 返回错误码表示路径组件不存在
+            };
+
             // 检查是不是软链接
             let stat = next.inode.get_stat();
             let is_symlink = (stat.mode & 0o170000) == 0o120000; // S_IFLNK
@@ -142,7 +147,7 @@ impl Dentry {
                 symlink_depth += 1;
                 if symlink_depth > MAX_SYMLINK_DEPTH {
                     warn!("[VFS] find_tree: ELOOP (Too many levels of symbolic links) path='{}'", path);
-                    return None;
+                    return Err(0); // 返回错误码表示符号链接循环
                 }
                 // 读取软链接指向的目标路径
                 let size = stat.size as usize;
@@ -162,14 +167,19 @@ impl Dentry {
                 // 原有剩下的路径接在展开的软链接后面
                 new_comps.extend(components);
                 components = new_comps;
-
             } else {
                 // 普通文件或目录，正常步进
+                let stat = next.inode.get_stat();
+                let is_dir = (stat.mode & 0o170000) == 0o040000; // S_IFDIR
+                // 如果不是目录但后面还有路径组件，说明中间有个路径是文件，在unlink中要做出区分
+                if !is_dir && !components.is_empty() {
+                    return Err(1); // 返回错误码表示路径中间有文件
+                }
                 current = next;
             }
         }
 
-        Some(current)
+        Ok(current)
     }
 
     /// 查找子节点（单级）：返回的是 Dentry 包装，以便继续向下查找
