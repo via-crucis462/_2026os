@@ -1096,7 +1096,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
             return EFAULT.as_isize();
         }
     };
-    trace!("kernel:pid[{}] sys_fstatat dirfd={} path={}", current_task().unwrap().process().pid.0, dirfd, path_str);
+    warn!("kernel:pid[{}] sys_fstatat dirfd={} path={}", current_task().unwrap().process().pid.0, dirfd, path_str);
 
     let task = current_task().unwrap();
     let proc = task.process();

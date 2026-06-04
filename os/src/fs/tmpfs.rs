@@ -333,7 +333,7 @@ pub fn setup_oscomp_env() {
     // 1. 挂载 /tmp 
     root.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     info!("[VFS] Mounted /tmp");
-
+    
     // 2. 挂载 bin, sbin, usr 等虚拟目录
     let etc_dentry = root.insert("etc".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let passwd_content = "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
@@ -372,8 +372,8 @@ pub fn setup_oscomp_env() {
             let applets = [
                 "basename", "dirname", "sh", "grep", "sed", "awk", "cat", 
                 "ls", "rm", "echo", "true", "false", "wc", "mkdir", "rmdir", "touch", "env","cut",
-                "tr", "head", "tail", "sort", "uniq", "tee", "sleep", "id", "uname", "rsh",
-                "which", "find", "xargs", "chmod", "chown", "date", "printf", "clear"
+                "tr", "head", "tail", "sort", "uniq", "tee", "sleep", "id", "uname", 
+                "which", "find", "xargs", "chmod", "chown", "date", "printf", "clear","ps", "fgrep"
             ];
             
             for app in applets {
@@ -473,6 +473,17 @@ pub fn setup_oscomp_env() {
     bin_dentry.insert( "locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
     sbin_dentry.insert("locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
     usr_bin_dentry.insert("locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
+    // get_ifname：LTP 获取网卡名，打印 eth0 
+    let fake_get_ifname = "#!/bin/sh\necho eth0\n";
+    bin_dentry.insert("get_ifname".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_get_ifname.as_bytes())));
+    sbin_dentry.insert("get_ifname".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_get_ifname.as_bytes())));
+    usr_bin_dentry.insert("get_ifname".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_get_ifname.as_bytes())));
+    // rsh尝试去远端杀掉僵尸进程。
+    // 直接返回成功 (exit 0)
+    let fake_rsh = "#!/bin/sh\nfor arg in \"$@\"; do CORE_CMD=\"$arg\"; done\nexec /musl/busybox sh -c \"$CORE_CMD\"\n";
+    bin_dentry.insert("rsh".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())));
+    sbin_dentry.insert("rsh".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())));
+    usr_bin_dentry.insert("rsh".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())));
     info!("[VFS] setup_oscomp_env done.");
 }
 

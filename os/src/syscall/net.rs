@@ -450,7 +450,7 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     
     // 4. 根据类型分配不同的 Socket
     let socket_file: Arc<dyn crate::fs::File> = if real_socket_type == 2 {
-        // 如果是 UDP，分配 UdpSocket (我们等会儿去建这个结构体)
+        // 如果是 UDP，分配 UdpSocket
         Arc::new(crate::net::socket::UdpSocket::new()) 
     } else {
         // 否则默认按 TCP 处理
@@ -471,7 +471,15 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
         inner.fd_table.push(fd_desc);
         idx
     };
-    
+    info!(
+        "[kernel] sys_socket: pid={} created {} {} socket, protocol={}, nonblock={}, allocated fd={}",
+        process.getpid(),                             // 当前进程 PID
+        if domain == 2 { "AF_INET" } else { "AF_UNIX" }, // 协议族字符串化
+        if real_socket_type == 2 { "UDP" } else { "TCP" }, // 核心类型字符串化
+        protocol,                                 // 协议号
+        nonblock,                                 // 是否是非阻塞
+        fd                                        // 分配到的文件描述符
+    );
     fd as isize
 }
 

@@ -592,7 +592,9 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
 const TCGETS: u32 = 0x5401;
 const TIOCGWINSZ: u32 = 0x5413;
 const RTC_RD_TIME: u32 = 0x80247009; // 真实的 RTC 读取指令号
-
+const TIOCGPGRP: u32 = 0x540F; // 获取终端的前台进程组
+const TIOCSPGRP: u32 = 0x5410; // 设置终端的前台进程组
+const TIOCSCTTY: u32 = 0x540E; // 设置控制终端
 // Loop 设备相关的 ioctl 命令
 const LOOP_SET_FD: u32 = 0x4C00; //设置 Loop 设备的后端文件描述符
 const LOOP_CLR_FD: u32 = 0x4C01; //清除 Loop 设备的后端文件描述符
@@ -633,10 +635,21 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     if fd >= fd_table.len() || fd_table[fd].file.is_none() {
         return EBADF.as_isize();
     }
+    let file = fd_table[fd].file.as_ref().unwrap();
+    let mut is_tty = false;
+    if fd <= 2 {
+        is_tty = true; 
+    } else if let Some(dentry) = file.get_dentry() {
+        // 如果 fd > 2，检查它的文件名，只要包含 tty 或 console，是合法的终端 fd
+        let name = dentry.name.as_str();
+        if name.contains("tty") || name.contains("console") {
+            is_tty = true;
+        }
+    }
     let token = proc.inner_exclusive_access().get_user_token();
     match request as u32 {
         TCGETS => {
-            if fd > 2 {
+            if !is_tty {
                 warn!("[kernel] sys_ioctl: TCGETS request on non-tty fd {}", fd);
                 return ENOTTY.as_isize();
             }
@@ -656,8 +669,46 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 EFAULT.as_isize()
             }
         }
+        TIOCGPGRP => { 
+            if !is_tty {
+                warn!("[kernel] sys_ioctl: TIOCGPGRP on non-tty fd {}", fd);
+                return ENOTTY.as_isize();
+            }
+            if argp != 0 {
+                // 获取真实的进程组 ID 
+                let pgid = proc.inner_exclusive_access().pgid as i32;
+                if !try_translated_write(token, argp as *mut i32, pgid) {
+                    return EFAULT.as_isize();
+                }
+                0 
+            } else {
+                EFAULT.as_isize()
+            }
+        }
+        TIOCSPGRP => { 
+            if !is_tty {
+                warn!("[kernel] sys_ioctl: TIOCSPGRP on non-tty fd {}", fd);
+                return ENOTTY.as_isize();
+            }
+            if argp != 0 {
+                if let Some(new_pgid) = try_translated_read(token, argp as *const i32) {
+                    proc.inner_exclusive_access().pgid = new_pgid as usize;
+                    0 
+                } else {
+                    EFAULT.as_isize()
+                }
+            } else {
+                EFAULT.as_isize()
+            }
+        }
+        
+        TIOCSCTTY => { 
+            if !is_tty { return ENOTTY.as_isize(); }
+            // 申请将当前终端设为控制终端返回成功
+            0
+        }
         TIOCGWINSZ => {
-            if fd > 2 {
+            if !is_tty {
                 warn!("[kernel] sys_ioctl: TIOCGWINSZ request on non-tty fd {}", fd);
                 return ENOTTY.as_isize();
             }
@@ -1164,6 +1215,8 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         
         envs_vec.push(alloc::format!("LHOST_HWADDRS={}", real_mac_str)); //本地真实 MAC
         envs_vec.push("RHOST_HWADDRS=00:11:22:33:44:66".to_string());//远端假 MAC
+        envs_vec.push("LHOST_IFACES=eth0".to_string());               // 本地网卡名
+        envs_vec.push("RHOST_IFACES=eth0".to_string());               // 远端网卡名
     }
     trace!("[kernel] sys_exec: before open_file");
     
@@ -1195,9 +1248,13 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             let busybox = "/musl/busybox";
             if let Some(inode) = open_file(cwd.clone(), busybox, OpenFlags::RDONLY,0) {
                 let mut new_args = vec!["musl/busybox".to_string(), "sh".to_string()];
-                // 如果脚本没带参数，把脚本路径加进去
-                if args_vec.len() <= 1 { new_args.push(path_str.clone()); }
-                //new_args.extend(args_vec);
+                // 把脚本自己的路径作为第三个参数加进去
+                new_args.push(path_str.clone()); 
+                if args_vec.len() > 1 {
+                    for arg in args_vec.iter().skip(1) {
+                        new_args.push(arg.clone());
+                    }
+                }
                 args_vec = new_args;
                 app_inode = inode;
                 all_data = app_inode.read_all();
