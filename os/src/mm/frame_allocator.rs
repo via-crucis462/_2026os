@@ -32,6 +32,9 @@ impl FrameTracker {
         frame_add_ref(ppn);
         Self { ppn, page_size: page_size }
     }
+    pub fn get_bytes_array(&self) -> &'static mut [u8] {
+        self.ppn.get_bytes_array_with_size(self.page_size)
+    }
 }
 
 impl Clone for FrameTracker {

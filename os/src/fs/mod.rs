@@ -86,6 +86,9 @@ pub trait File: Send + Sync {
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
         0
     }
+    fn ino(&self) -> u64 {
+        self.get_stat().ino
+    }
     // 这里是默认实现，需要为不同文件重写
     fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
         error!("File type does not support shared pages: page_offset={}", page_offset);

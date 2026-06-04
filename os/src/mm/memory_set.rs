@@ -844,6 +844,12 @@ impl MemorySet {
             false
         }
     }
+    /// 写回共享映射页面内容
+    pub fn sync_shared_pages(&mut self) {
+        for area in self.areas.iter_mut() {
+            area.sync_back_to_file();
+        }
+    }
     /// Remove all `MapArea`
     pub fn recycle_data_pages(&mut self) {
         for area in self.areas.iter_mut() {
@@ -851,7 +857,6 @@ impl MemorySet {
         }
         self.areas.clear();
     }
-
     /// shrink the area to new_end
     #[allow(unused)]
     pub fn shrink_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
@@ -913,6 +918,8 @@ impl MemorySet {
     ) -> Result<usize, isize> {
         // 最少分配一页，似乎没必要，暂时注释
         // let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        // 字节偏移转页偏移
+        let page_offset = offset / PAGE_SIZE;
 
         // 剩余物理页数
         let free_std_pages = get_free_frames();
@@ -974,6 +981,7 @@ impl MemorySet {
             permission |= MapPermission::U;
         }
 
+
         let is_shared = mmap_flags.contains(mmap::MMapFlags::MAP_SHARED);
         let is_anonymous = mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS);
         if is_shared && !is_anonymous {
@@ -988,14 +996,15 @@ impl MemorySet {
                 map_type: MapType::File, 
                 map_perm: permission,
                 is_shared: true,
-                backing_file: file_inner.clone(), 
+                backing_file: file_inner.clone()
+                    .map(|f| (f.clone(), page_offset)),
                 page_size:Page4K // 默认用标准页
             };
 
             let start_vpn = VirtAddr::from(start_va).std_floor().0;
             for i in 0..needing_std_pages{
                 let vpn = start_vpn + i;
-                let file_page_offset = (offset / PAGE_SIZE) + i; 
+                let file_page_offset = page_offset + i; 
                 if let Some(shared_ppn) = file.get_shared_page(file_page_offset) {
                     /* 前面检查过了
                     if self.page_table.translate(VirtPageNum::from(vpn)).is_some() {
@@ -1008,6 +1017,9 @@ impl MemorySet {
                     return Err(Errno::EIO.as_isize());
                 }
             }
+            // 注册到全局共享页面管理器
+            let man = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
+            man.register_file(file.ino(), file);
             // 这里是简单插入，映射在前面已经完成了
             self.areas.push(area);
         } else {
@@ -1116,7 +1128,7 @@ impl MemorySet {
                     // 情况2：Split（目标区域在当前块中间，一分为二）
                     // 2.1 清理中间被 unmap 的页表和物理页
                     for vpn in VPNRange::new(start_vpn, end_vpn) {
-                        area.unmap_one(&mut self.page_table, vpn);
+                        area.unmap_one_safe(&mut self.page_table, vpn);
                     }
                     // 2.2 切出右半部分保留的物理帧
                     let right_frames = area.data_frames.split_off(&end_vpn);
@@ -1279,7 +1291,8 @@ pub struct MapArea {
     map_type: MapType,
     map_perm: MapPermission,
     pub is_shared: bool,
-    pub backing_file: Option<Arc<dyn File + Send + Sync>>,
+    // 记录文件信息和页偏移，其中页偏移的语义为映射起始页在文件中的页偏移量
+    pub backing_file: Option<(Arc<dyn File + Send + Sync>, usize)>,
     pub page_size: PageSize,
 }
 
@@ -1317,7 +1330,7 @@ impl MapArea {
             page_size: another.page_size,
         }
     }
-    /// 仅解除页表映射
+    /// 如果是共享映射写回内容，如果是私有匿名映射则释放物理页
     pub fn unmap_one_safe(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         if page_table.translate(vpn).is_some() {
             page_table.unmap(vpn);
@@ -1325,6 +1338,14 @@ impl MapArea {
         // 如果是私有匿名映射，需要将私有物理帧从 data_frames 里移除释放
         if !self.is_shared {
             self.data_frames.remove(&vpn);
+        } else if self.backing_file.is_some() {
+            // 共享文件映射：写回内容，根据相对虚拟页号偏移计算文件页偏移
+            if let Some((file, base_offset)) = &self.backing_file {
+                let file_page_offset = *base_offset + (vpn.0 - self.vpn_range.get_start().0);
+                let ino = file.ino();
+                let man = &super::mmap::SHARED_PAGE_CACHE_MANAGER;
+                man.write_back_shared_page_cache(ino, file_page_offset, file);
+            }
         }
     }
 
@@ -1376,8 +1397,8 @@ impl MapArea {
                 if self.data_frames.remove(&vpn).is_some() {
                     page_table.unmap(vpn);
                 } else if self.is_shared {
-                    // 核心：子进程的共享页没有 FrameTracker（因为物理页在父进程手里），
-                    // 但子进程退出时依然需要解除自己页表里的映射，防止死锁或崩溃。
+                    // 共享页在全局管理器中，这里只解除页表的映射即可。
+                    // 至于文件内容，在解除映射前其实已经写回了。
                     if page_table.translate(vpn).is_some() && page_table.translate(vpn).unwrap().is_valid() {
                         page_table.unmap(vpn);
                     }
@@ -1478,6 +1499,19 @@ impl MapArea {
     }
     pub fn contains(&self, vpn: VirtPageNum) -> bool {
         vpn >= self.vpn_range.get_start() && vpn < self.vpn_range.get_end()
+    }
+    /// 将段内数据全部写回文件（如果是共享文件映射）
+    pub fn sync_back_to_file(&mut self) {
+        let man = &super::mmap::SHARED_PAGE_CACHE_MANAGER;
+        if self.is_shared {
+            if let Some((file, offset)) = &self.backing_file {
+                let ino = file.ino();
+                for vpn in self.vpn_range.clone() {
+                    let file_page_offset = *offset + (vpn.0 - self.vpn_range.get_start().0);
+                    man.write_back_shared_page_cache(ino, file_page_offset, file);
+                }
+            }
+        }
     }
 }
 

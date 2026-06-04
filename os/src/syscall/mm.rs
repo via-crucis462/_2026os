@@ -60,6 +60,11 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: u
         return Errno::EINVAL.as_isize();
     }
 
+    // 文件偏移需要页对齐的
+    if off % PAGE_SIZE != 0 {
+        return Errno::EINVAL.as_isize();
+    }
+
     // 长度不能为0
     if len == 0 {
         return Errno::EINVAL.as_isize();
@@ -113,4 +118,10 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
     } else {
         EINVAL.as_isize() // 目标地址不合法
     }
+}
+
+// 回写内存映射区域到文件
+pub fn sys_msync(_addr: usize, _len: usize, _flags: u32) -> isize {
+    crate::mm::mmap::sync_shared_page_cache();
+    0
 }

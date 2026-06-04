@@ -2807,10 +2807,7 @@ pub fn sys_request_key(_type: *const u8, _desc: *const u8, _callout_info: *const
 pub fn sys_keyctl(_operation: i32, _arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
     ENOSYS.as_isize()
 }
-pub fn sys_msync(_addr: usize, _len: usize, _flags: u32) -> isize {
-    // 我们的 shm 是纯内存文件系统，数据实时可见，不需要刷盘，直接伪装成功！
-    0
-}
+
 pub fn sys_times(tms_ptr: *mut usize) -> isize {
     //println!("[kernel] sys_times called with tms_ptr={:#x}", tms_ptr as usize);
     let token = current_user_token();
