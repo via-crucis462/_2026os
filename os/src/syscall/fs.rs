@@ -1318,7 +1318,9 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat) -> isize {
     match target_dentry {
         Ok(dentry) => {
             let stat = dentry.inode.get_stat();
-            crate::mm::translated_write(token, st, stat);
+            if !try_translated_write(token, st, stat) {
+                return EFAULT.as_isize();
+            }
             0
         }
         Err(1) => {

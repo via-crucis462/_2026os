@@ -239,6 +239,10 @@ pub trait VfsInode: Send + Sync {
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
         0 // 默认返回成功，至少让测试能跑通
     }
+    /// 调试用：返回具体实现类型的名字
+    fn type_name(&self) -> &'static str {
+        core::any::type_name::<Self>()
+    }
     fn statfs(&self) -> Statfs {
         // 默认实现：返回全 0 或者一个安全的默认值
         // 

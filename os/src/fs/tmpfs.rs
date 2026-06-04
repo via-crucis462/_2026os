@@ -34,7 +34,7 @@ pub struct TmpfsFileInode {
     ino: usize,
     pages: Mutex<BTreeMap<usize, FrameTracker>>,
     size: Mutex<usize>,
-    perms: Mutex<PermStat>, // 权限信息
+    stat: Mutex<Stat>,
 }
 
 impl TmpfsFileInode {
@@ -45,11 +45,16 @@ impl TmpfsFileInode {
         } else {
             file_type | (mode & 0o7777)
         };
+        let mut stat = Stat::default();
+        stat.mode = full_mode;
+        stat.nlink = 1;
+        stat.blksize = 4096;
+        stat.ino = TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst) as u64;
         Self {
-            ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
+            ino: stat.ino as usize,
             pages: Mutex::new(BTreeMap::new()),
             size: Mutex::new(0),
-            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(full_mode as _), 0, 0)),
+            stat: Mutex::new(stat),
         }
     }
 
@@ -138,71 +143,43 @@ impl super::VfsInode for TmpfsFileInode {
         Some(frame.ppn)
     }
     fn get_stat(&self) -> super::Stat {
-       
-        let perms = self.perms.lock();
-        let file_size = self.get_size() as i64; // 提前获取大小
-        let (mode, uid, gid) = (perms.mode.bits(), perms.uid, perms.gid);
-        super::Stat {
-            dev: 0, 
-            ino: self.ino as u64,
-            mode: mode as u32, nlink: 1, 
-            uid: uid, gid: gid, rdev: 0, __pad: 0, 
-
-            size: self.get_size() as i64, 
-            blksize: 4096, __pad2: 0,
-            blocks: ((self.get_size() as i64) + 511) / 512, 
-            atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
-        }
+        let file_size = self.get_size() as i64;
+        let mut stat = *self.stat.lock();
+        stat.size = file_size;
+        stat.blocks = (file_size + 511) / 512;
+        stat.ino = self.ino as u64;
+        stat
     }
     
     fn get_statx(&self) -> super::Statx {
-        let stat = self.get_stat();
-        Statx{
-            stx_mask: 0,
-            stx_blksize: stat.blksize as u32,
-            stx_attributes: 0,
-            stx_nlink: stat.nlink,
-            stx_uid: stat.uid,
-            stx_gid: stat.gid,
-            stx_mode: stat.mode as u16,
-            __spare0: [0; 1],
-            stx_ino: stat.ino,
-            stx_size: stat.size as u64,
-            stx_blocks: stat.blocks as u64,
-            stx_attributes_mask: 0,
-            stx_atime: super::StatxTimestamp {
-                tv_sec: stat.atime_sec,
-                tv_nsec: stat.atime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_btime: super::StatxTimestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 },
-            stx_ctime: super::StatxTimestamp {
-                tv_sec: stat.ctime_sec,
-                tv_nsec: stat.ctime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_mtime: super::StatxTimestamp {
-                tv_sec: stat.mtime_sec,
-                tv_nsec: stat.mtime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_rdev_major: 0, 
-            stx_rdev_minor: 0, 
-            stx_dev_major: 0, 
-            stx_dev_minor: 0, 
-            __spare2: [0; 14],
-        }
+        super::stat_to_statx(self.get_stat())
     }
     fn get_perm(&self) -> PermStat {
-        // 此处的实现与其他常规文件不同。
-        // 其他文件是从 stat 的 mode 字段解析权限，
-        // 而这里直接存储了 PermStat 结构体，所以直接返回
-        self.perms.lock().clone()
+        let stat = self.stat.lock();
+        PermStat {
+            mode: FileMode::from_bits_truncate(stat.mode as u16),
+            uid: stat.uid,
+            gid: stat.gid,
+        }
     }
     fn set_perm(&self, perm: PermStat) -> bool {
-        *self.perms.lock() = perm;
+        let mut stat = self.stat.lock();
+        stat.mode = perm.mode.bits() as u32;
+        stat.uid = perm.uid;
+        stat.gid = perm.gid;
         true
     }
+    fn set_time(&self, atime: &super::TimeSpec, mtime: &super::TimeSpec) -> isize {
+        println!("VFS: set_time called on TmpfsFileInode, atime=({}, {}), mtime=({}, {})", 
+            atime.tv_sec, atime.tv_nsec, mtime.tv_sec, mtime.tv_nsec);
+        let mut stat = self.stat.lock();
+        stat.atime_sec = atime.tv_sec as i64;
+        stat.atime_nsec = atime.tv_nsec as i64;
+        stat.mtime_sec = mtime.tv_sec as i64;
+        stat.mtime_nsec = mtime.tv_nsec as i64;
+        0
+    }
+    fn type_name(&self) -> &'static str { "TmpfsFileInode" }
     fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
@@ -214,16 +191,21 @@ impl super::VfsInode for TmpfsFileInode {
 pub struct TmpfsDirInode {
     ino: usize,
     entries: Mutex<BTreeMap<String, Arc<dyn super::VfsInode>>>,
-    perms: Mutex<PermStat>, // 权限信息
+    stat: Mutex<Stat>,
 }
 
 impl TmpfsDirInode {
     pub fn new(mode: u32) -> Self {
         let full_mode = 0o040000 | (mode & 0o7777); // S_IFDIR
+        let mut stat = Stat::default();
+        stat.mode = full_mode;
+        stat.nlink = 2;
+        stat.blksize = 512;
+        stat.ino = TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst) as u64;
         Self {
-            ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
+            ino: stat.ino as usize,
             entries: Mutex::new(BTreeMap::new()),
-            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(full_mode as _), 0, 0)),
+            stat: Mutex::new(stat),
         }
     }
     pub fn insert(&self, name: String, inode: Arc<dyn VfsInode>) -> Arc<dyn VfsInode> {
@@ -247,60 +229,27 @@ impl super::VfsInode for TmpfsDirInode {
     fn get_size(&self) -> usize { 0 }
     
     fn get_stat(&self) -> super::Stat {
-        let perms = self.perms.lock();
-        let (mode, uid, gid) = (perms.mode.bits(), perms.uid, perms.gid);
-        super::Stat {
-            dev: 0, 
-            ino: self.ino as u64, 
-            mode: mode as u32, nlink: 2,
-            uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
-            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
-        }
+        let mut stat = *self.stat.lock();
+        stat.ino = self.ino as u64;
+        stat
     }
     
     fn get_statx(&self) -> super::Statx { 
-        let stat = self.get_stat();
-        Statx{
-            stx_mask: 0,
-            stx_blksize: stat.blksize as u32,
-            stx_attributes: 0,
-            stx_nlink: stat.nlink,
-            stx_uid: stat.uid,
-            stx_gid: stat.gid,
-            stx_mode: stat.mode as u16,
-            __spare0: [0; 1],
-            stx_ino: stat.ino,
-            stx_size: stat.size as u64,
-            stx_blocks: stat.blocks as u64,
-            stx_attributes_mask: 0,
-            stx_atime: super::StatxTimestamp {
-                tv_sec: stat.atime_sec,
-                tv_nsec: stat.atime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_btime: super::StatxTimestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 },
-            stx_ctime: super::StatxTimestamp {
-                tv_sec: stat.ctime_sec,
-                tv_nsec: stat.ctime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_mtime: super::StatxTimestamp {
-                tv_sec: stat.mtime_sec,
-                tv_nsec: stat.mtime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_rdev_major: 0, 
-            stx_rdev_minor: 0, 
-            stx_dev_major: 0, 
-            stx_dev_minor: 0, 
-            __spare2: [0; 14],
-        }
+        super::stat_to_statx(self.get_stat())
     }
     fn get_perm(&self) -> PermStat {
-        self.perms.lock().clone()
+        let stat = self.stat.lock();
+        PermStat {
+            mode: FileMode::from_bits_truncate(stat.mode as u16),
+            uid: stat.uid,
+            gid: stat.gid,
+        }
     }
     fn set_perm(&self, perm: PermStat) -> bool {
-        *self.perms.lock() = perm;
+        let mut stat = self.stat.lock();
+        stat.mode = perm.mode.bits() as u32;
+        stat.uid = perm.uid;
+        stat.gid = perm.gid;
         true
     }
     fn find(&self, name: &str) -> Option<Arc<dyn super::VfsInode>> {
@@ -339,6 +288,17 @@ impl super::VfsInode for TmpfsDirInode {
             f_flags: 0, f_spare: [0; 4],
         }
     }
+    fn set_time(&self, _atime: &super::TimeSpec, _mtime: &super::TimeSpec) -> isize {
+        println!("VFS: set_time called on TmpfsDirInode, atime=({}, {}), mtime=({}, {})", 
+            _atime.tv_sec, _atime.tv_nsec, _mtime.tv_sec, _mtime.tv_nsec);
+        let mut stat = self.stat.lock();
+        stat.atime_sec = _atime.tv_sec as i64;
+        stat.atime_nsec = _atime.tv_nsec as i64;
+        stat.mtime_sec = _mtime.tv_sec as i64;
+        stat.mtime_nsec = _mtime.tv_nsec as i64;
+        0
+    }
+    fn type_name(&self) -> &'static str { "TmpfsDirInode" }
 }
 
 /// 通过 getdents 枚举目录项，将源目录下所有条目的 inode 映射到目标 lib/lib64

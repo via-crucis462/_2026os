@@ -523,6 +523,8 @@ pub fn sys_getresuid(ruid_ptr: *mut u32, euid_ptr: *mut u32, suid_ptr: *mut u32)
 }
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
+const CLOCK_REALTIME_COARSE: usize = 5;
+const CLOCK_MONOTONIC_COARSE: usize = 6;
 fn clock_adj_has_invalid_mode_bits(modes: u32) -> bool {
     let allowed = CLOCK_ADJ_ALLOWED_MODES | ADJ_OFFSET_SINGLESHOT | ADJ_OFFSET_SS_READ;
     modes & !allowed != 0
@@ -556,16 +558,17 @@ fn current_wallclock_ns() -> i64 {
 }
 
 pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
+    //println!("kernel: sys_clock_gettime: clock_id={}, tp={:#x}", clock_id, tp as usize);
     if tp as usize == 0 {
         return EFAULT.as_isize();
     }
     let (sec, nsec) = match clock_id {
-        CLOCK_REALTIME => {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
             let total_ns = current_wallclock_ns() as usize;
             (total_ns / 1_000_000_000, total_ns % 1_000_000_000)
             
         }
-        CLOCK_MONOTONIC | _ => {
+        CLOCK_MONOTONIC | CLOCK_MONOTONIC_COARSE | _ => {
             // 默认：返回系统运行时间 (Uptime)
             let total_us = get_time_us();
             (total_us / 1_000_000, (total_us % 1_000_000) * 1_000)
@@ -1908,6 +1911,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 pub const UTIME_NOW: usize = 0x3fffffff;
 pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usize) -> isize {
+    println!("sys_utimensat called with dirfd={}, path_ptr={:#x}, times_ptr={:#x}, flags={:#x}", dirfd, path_ptr, times_ptr, _flags);
     let task = current_task().unwrap();
     let proc = task.process();
 
@@ -1953,6 +1957,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
 
             let path_str = {
                 if let Some(s) = try_translated_str(token, path_ptr as *const u8) {
+                    println!("sys_utimensat: translated path string: {}", s);
                     s
                 } else {
                     return EFAULT.as_isize();
@@ -1963,6 +1968,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
             if let Ok(dentry) = cwd.find_tree(&path_str, true) {
                 let stat = dentry.inode.get_stat();
                 let ino = stat.ino;
+                println!("sys_utimensat: found target inode with ino={}, atime=({}, {}), mtime=({}, {})", ino, stat.atime_sec, stat.atime_nsec, stat.mtime_sec, stat.mtime_nsec);
                 let old_atime = TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ };
                 let old_mtime = TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ };
                 let (old_atime, old_mtime) = if ino != 0 {
@@ -2005,24 +2011,19 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
         } // 否则保持 current_sec (UTIME_NOW)
     }
 
-    // 提取 Inode 号，用于后续的 TIME_CACHE 更新
-    let ino = if let Some(file) = &target_file {
-        file.get_stat().ino
-    } else if let Some(inode) = &target_inode {
-        inode.get_stat().ino
-    } else {
-        0
-    };
-
     // 4. 执行底层写入操作（无锁）
     if let Some(file) = target_file.as_ref() {
         file.set_time(&new_atime, &new_mtime);
     } else if let Some(inode) = target_inode.as_ref() {
+        //println!("sys_utimensat: target_inode type={}, ino={}, new_atime=({}, {}), new_mtime=({}, {})", 
+        //    inode.type_name(), ino, new_atime.tv_sec, new_atime.tv_nsec, new_mtime.tv_sec, new_mtime.tv_nsec);
         inode.set_time(&new_atime, &new_mtime);
     }
 
     // 5. 存入 TIME_CACHE 解决底层 Ext4 32位时间戳截断问题
     if ino != 0 {
+        //println!("sys_utimensat: updating TIME_CACHE for ino={}, atime=({}, {}), mtime=({}, {})", 
+            //ino, new_atime.tv_sec, new_atime.tv_nsec, new_mtime.tv_sec, new_mtime.tv_nsec);
         TIME_CACHE.lock().insert(
             ino, 
             (new_atime.tv_sec as i64, new_atime.tv_nsec as i64, new_mtime.tv_sec as i64, new_mtime.tv_nsec as i64)
@@ -2030,6 +2031,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
     } else {
         println!("[utime_debug] sys_utimensat: WARNING! ino is 0, cache skipped!");
     }
+    //println!("sys_utimensat: finished, returning 0");
     0
 }
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
