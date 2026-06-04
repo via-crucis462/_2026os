@@ -42,7 +42,8 @@ pub fn do_brk(addr: usize) -> Result<usize, i32> {
     proc.change_program_brk(addr)
 }
 
-/// 处理mmap系统调用的分配部分
+/// 内存映射逻辑
+/// 要求调用者已经完成了参数检查
 pub fn do_mmap(
     addr: usize, 
     length: usize, 

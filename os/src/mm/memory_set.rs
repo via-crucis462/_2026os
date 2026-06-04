@@ -900,7 +900,8 @@ impl MemorySet {
         }
         false
     }
-    /// mmap的实现（只分配内存，不加载文件）
+    /// mmap的实现（只分配内存，不加载文件，并且不检查参数合法性）
+    /// 目前的实现全用4k页
     pub fn mmap(
         &mut self,
         addr: usize,
@@ -910,18 +911,21 @@ impl MemorySet {
         file_inner: Option<Arc<dyn File + Send + Sync>>,
         offset: usize,
     ) -> Result<usize, isize> {
-        if (addr as isize) < 0 {
-            return Err(Errno::EINVAL.as_isize());
-        }
-        // 最少分配一页
-        let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        // 检查剩余内存是否足够
-        let free = get_free_frames();
-        if free < length / PAGE_SIZE {
+        // 最少分配一页，似乎没必要，暂时注释
+        // let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+        // 剩余物理页数
+        let free_std_pages = get_free_frames();
+        // 计算需要的物理页数
+        let needing_std_pages = 
+            VirtAddr(addr+length).std_ceil().0 -
+            VirtAddr(addr).std_floor().0;
+        // 检查内存是否充足
+        if free_std_pages < needing_std_pages {
             warn!(
                 "mmap failed: not enough free frames (need {}, have {})",
-                length / PAGE_SIZE,
-                free
+                needing_std_pages,
+                free_std_pages
             );
             return Err(Errno::ENOMEM.as_isize());
         }
@@ -933,10 +937,9 @@ impl MemorySet {
                 start_va = new_addr;
             } else {
                 //println!("[kernel] mmap failed: no suitable free area found for length {:#x}", length);
-                return Err(Errno::ENOMEM.as_isize());
+                return Err(Errno::EEXIST.as_isize());
             }
-        }
-        else {
+        } else {
             // 检查冲突
             if self.has_conflict(start_va, length) {
                 if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED) {
@@ -945,11 +948,11 @@ impl MemorySet {
                         //println!("[kernel] mmap: MAP_FIXED flag set, unmapped conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
                     }else {
                         //println!("[kernel] mmap: MAP_FIXED flag set, but failed to unmap conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
-                        return Err(Errno::ENOMEM.as_isize());
+                        return Err(Errno::EEXIST.as_isize());
                     }
                 } else {
                     //println!("[kernel] mmap failed: address range [{:#x}, {:#x}) conflicts with existing mapping", start_va, start_va + length);
-                    return Err(Errno::ENOMEM.as_isize());
+                    return Err(Errno::EEXIST.as_isize());
                 }
             }
         }
@@ -968,45 +971,43 @@ impl MemorySet {
         if prot != mmap::MMapProt::PROT_NONE {
             permission |= MapPermission::U;
         }
+
         let is_shared = mmap_flags.contains(mmap::MMapFlags::MAP_SHARED);
-
-
-        if is_shared && file_inner.is_some() {
-            //共享文件映射 
+        let is_anonymous = mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS);
+        if is_shared && !is_anonymous {
+            // 共享文件映射 
             let file = file_inner.as_ref().unwrap();
-
             let area = MapArea {
-                vpn_range: VPNRange::new(VirtAddr::from(start_va).std_floor(), VirtAddr::from(start_va + length).std_ceil()),
+                vpn_range: VPNRange::new(
+                    VirtAddr::from(start_va).std_floor(), 
+                    VirtAddr::from(start_va + length).std_ceil()
+                ),
                 data_frames: BTreeMap::new(), 
-                map_type: MapType::Framed, 
+                map_type: MapType::File, 
                 map_perm: permission,
                 is_shared: true,
                 backing_file: file_inner.clone(), 
-                page_size:Page4K
+                page_size:Page4K // 默认用标准页
             };
 
-            let start_vpn = start_va / PAGE_SIZE;
-            let page_count = length / PAGE_SIZE;
-            for i in 0..page_count {
+            let start_vpn = VirtAddr::from(start_va).std_floor().0;
+            for i in 0..needing_std_pages{
                 let vpn = start_vpn + i;
                 let file_page_offset = (offset / PAGE_SIZE) + i; 
-                
                 if let Some(shared_ppn) = file.get_shared_page(file_page_offset) {
-                 
+                    /* 前面检查过了
                     if self.page_table.translate(VirtPageNum::from(vpn)).is_some() {
                         self.page_table.unmap(VirtPageNum::from(vpn)); 
                     }
-
+                    */
                     let pte_flags = PTEFlags::from_bits(permission.bits).unwrap();
                     self.page_table.map(VirtPageNum::from(vpn), shared_ppn, pte_flags,Page4K);
                 } else {
-                    return Err(-1);
+                    return Err(Errno::EIO.as_isize());
                 }
             }
-
-            // 塞入虚存区域管理器中
+            // 这里是简单插入，映射在前面已经完成了
             self.areas.push(area);
-
         } else {
             // 普通映射
             self.insert_file_area(
@@ -1014,7 +1015,7 @@ impl MemorySet {
                 VirtAddr::from(start_va + length),
                 permission,
                 PageSize::Page4K // mmap目前直接用标准页
-        );
+            );
             
             if false {//is_shared {
                 if let Some(last_area) = self.areas.last_mut() {
@@ -1031,10 +1032,11 @@ impl MemorySet {
     }
 
     /// 在当前地址空间中寻找一个长度为 length 的空闲连续区域
+    /// 找的是逻辑区域，与实际物理页无关
     pub fn find_free_area(&self, length: usize) -> Option<usize> {
         //println!("[kernel] find_free_area: finding free area for length {:#x}", length);
-        // 将长度向上对齐到页
-        let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        // 将长度向上对齐到页，似乎没必要
+        // let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
         let mut current_addr: usize = USER_APP_BASE + (USER_APP_MAX_SIZE - USER_APP_BASE) / 2;
         // 为高地址用户栈预留顶部空间，避免 mmap 和初始栈冲突。

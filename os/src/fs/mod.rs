@@ -92,19 +92,27 @@ pub trait File: Send + Sync {
     // 这里是默认实现
     fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
         let man = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
-        let (frame, newly_allowcated) = man.get_shared_page_cache(self.get_stat().ino, page_offset);
+        let (frame, newly_allowcated) = 
+            man.get_shared_page_cache(self.get_stat().ino, page_offset);
         if newly_allowcated {
             // 读入文件数据到分配的页
             trace!("VFS: Allocated new shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
             let (ppn, page_size) = (frame.ppn, frame.page_size);
             let page_addr = ppn.0 << PAGE_SIZE_BITS;
+            // 检查是否对齐，防止传入的 frame 是大页
             assert!(page_addr % page_size.size() == 0, "Shared page address not aligned to its size");
-            let buf = unsafe { core::slice::from_raw_parts_mut(page_addr as *mut u8, page_size.size()) };
-            let vec_buf = alloc::vec![buf];
-            // 这里实际上是内核态的物理页
-            let buffer = UserBuffer::new(vec_buf);
+            // 将物理页转换为缓冲区
+            let buffer = UserBuffer::new({
+                let buf = unsafe { 
+                    core::slice::from_raw_parts_mut(page_addr as *mut u8, page_size.size())
+                };
+                let vec_buf = alloc::vec![buf];
+                vec_buf
+            });
+            // 读取内容
             self.read_at(page_offset * page_size.size(), buffer);
         } else {
+            // 已经存在共享页，直接复用，返回物理页号
             trace!("VFS: Reusing existing shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
         }
         Some(frame.ppn)
