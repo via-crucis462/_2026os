@@ -3502,3 +3502,32 @@ pub fn sys_personality(persona: usize) -> isize {
     }
     old as isize
 }
+//linux中，父子进程的fd_table这些本身是指向同一个实例的，但我们的pcb都是直接独立的fd_table
+//故unshare系统调用在我们的实现中没有实际效果，直接检查权限后放行即可
+pub fn sys_unshare(flags: i32) -> isize {
+    // 所有当前支持的 unshare 标志位
+    const CLONE_VM: i32      = 0x00000100;
+    const CLONE_FS: i32      = 0x00000200;
+    const CLONE_FILES: i32   = 0x00000400;
+    const CLONE_NEWNS: i32   = 0x00020000;
+    const CLONE_NEWCGROUP: i32 = 0x02000000;
+    const CLONE_NEWUTS: i32  = 0x04000000;
+    const CLONE_NEWIPC: i32  = 0x08000000;
+
+    // 掩码
+    const KNOWN_FLAGS: i32 = CLONE_VM | CLONE_FS | CLONE_FILES
+        | CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS | CLONE_NEWIPC;
+
+    // 检查是否有未定义的标志位
+    if flags & !KNOWN_FLAGS != 0 {
+        return EINVAL.as_isize();
+    }
+
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
+    if inner.euid != 0 {
+        return EPERM.as_isize();
+    }
+    0
+}
