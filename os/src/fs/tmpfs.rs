@@ -269,13 +269,13 @@ impl super::VfsInode for TmpfsDirInode {
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn super::VfsInode>> {
         if mode == 0o120777 {
             let symlink_inode = Arc::new(TmpfsFsSymbolicLinkInode {
-                ino: get_next_ino() as usize,
                 target: String::new(),
                 stat: Mutex::new({
                     let mut s = Stat::default();
                     s.mode = 0o120777; // 符号链接
                     s.nlink = 1;
                     s.blksize = 4096;
+                    s.ino = get_next_ino();
                     s
                 }),
             });
@@ -314,16 +314,14 @@ impl super::VfsInode for TmpfsDirInode {
         }
     }
     fn create_symlink(&self, name: &str, target: &str) -> Option<Arc<dyn VfsInode>> {
-        let inodeid = get_next_ino() as usize;
-        //println!("Creating symlink: name={}, target={}, assigned ino={}", name, target, inodeid);
         let symlink_inode = Arc::new(TmpfsFsSymbolicLinkInode {
-            ino: inodeid,
             target: target.to_string(),
             stat: Mutex::new({
                 let mut s = Stat::default();
                 s.mode = 0o120777; // 符号链接
                 s.nlink = 1;
                 s.blksize = 4096;
+                s.ino = get_next_ino();
                 s
             }),
         });
@@ -548,7 +546,6 @@ fn mount_hugepages() -> Arc<super::Dentry> {
     hugepages_dentry
 }
 pub struct TmpfsFsSymbolicLinkInode {
-    ino: usize,
     target: String,
     stat: Mutex<Stat>,
 }
@@ -566,7 +563,6 @@ impl VfsInode for TmpfsFsSymbolicLinkInode {
     fn get_size(&self) -> usize { self.target.len() }
     fn get_stat(&self) -> super::Stat {
         let mut stat = *self.stat.lock();
-        stat.ino = self.ino as u64;
         stat.size = self.target.len() as i64;
         stat
     }
@@ -601,7 +597,7 @@ impl VfsInode for TmpfsFsSymbolicLinkInode {
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
-    fn ino(&self) -> u64 { self.ino as u64 }
+    fn ino(&self) -> u64 { self.stat.lock().ino }
 }
 impl TmpfsFsSymbolicLinkInode{
     fn new(target: String) -> Self {
@@ -611,7 +607,6 @@ impl TmpfsFsSymbolicLinkInode{
         stat.blksize = 4096;
         stat.ino = get_next_ino();
         Self {
-            ino: stat.ino as usize,
             target,
             stat: Mutex::new(stat),
         }
