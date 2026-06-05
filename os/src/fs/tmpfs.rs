@@ -478,13 +478,40 @@ pub fn setup_oscomp_env() {
     bin_dentry.insert("get_ifname".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_get_ifname.as_bytes())));
     sbin_dentry.insert("get_ifname".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_get_ifname.as_bytes())));
     usr_bin_dentry.insert("get_ifname".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_get_ifname.as_bytes())));
-    // rsh尝试去远端杀掉僵尸进程。
-    // 直接返回成功 (exit 0)
-    let fake_rsh = "#!/bin/sh\nfor arg in \"$@\"; do CORE_CMD=\"$arg\"; done\nexec /musl/busybox sh -c \"$CORE_CMD\"\n";
+    // rsh远程连接sh
+    let fake_rsh = r#"#!/bin/sh
+    if [ "$1" = "-n" ]; then
+        shift 2
+    elif echo "$1" | grep -E -q '^[0-9\.]+ \d*$'; then
+        shift 1
+    fi
+    exec /musl/busybox sh -c "$*"
+    "#;
     bin_dentry.insert("rsh".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())));
     sbin_dentry.insert("rsh".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())));
     usr_bin_dentry.insert("rsh".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())));
+    //setkey命令
+    let fake_setkey = "#!/bin/sh\nexit 0\n";
+    bin_dentry.insert("setkey".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_setkey.as_bytes())));
+    sbin_dentry.insert("setkey".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_setkey.as_bytes())));
     info!("[VFS] setup_oscomp_env done.");
+    // 伪造并转发 expr 命令给 busybox
+    let fake_expr = "#!/bin/sh\nexec /musl/busybox expr \"$@\"\n";
+    bin_dentry.insert("expr".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())));
+    usr_bin_dentry.insert("expr".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())));
+
+    // 伪造并转发 ip 命令，现在还没配置Netlink 协议簇，没法用ip配置网卡
+    let fake_ip = r#"#!/bin/sh
+    case "$*" in
+        *link*|*addr*) 
+
+            echo "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP"
+            ;;
+    esac
+    exit 0
+    "#;
+    sbin_dentry.insert("ip".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())));
+    bin_dentry.insert("ip".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())));
 }
 
 fn mount_hugepages() -> Arc<super::Dentry> {
