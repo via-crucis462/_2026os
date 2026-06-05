@@ -2534,32 +2534,34 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
     0 
 }
 
-
-pub fn sys_ftruncate(fd: usize, _len: usize) -> isize {
+/// 调整文件大小
+pub fn sys_ftruncate(fd: usize, len: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
     
-    // 1. 严谨校验 FD 合法性 (不能越界)
+    // 校验
     if fd >= inner.fd_table.len() {
         return EBADF.as_isize(); // -EBADF (Bad file descriptor)
     }
     
-    // 2. 获取文件对象
+    // 获取文件
     if let Some(file) = &inner.fd_table[fd].file {
-        // 3. 严谨校验：ftruncate 要求文件必须是以可写模式打开的
+        // 鉴权
         if !file.writable() {
-            return EINVAL.as_isize(); // -EINVAL (Invalid argument) 或者 EBADF
+            return EACCES.as_isize();
         }
-        
-        // 文件有效且可写！
-        // 由于你的 File trait 目前没有定义 truncate 方法，
-        // 且 LTP 这里只是初始化临时测试文件，我们在内存鉴权通过后直接放行。
-        return 0;
+        // 调用文件系统的 truncate 方法
+        if file.truncate(len) {
+            return 0;
+        } else {
+            // 文件系统不支持 truncate（如 pipe、socket 等）
+            return EINVAL.as_isize();
+        }
     }
     
-    // FD 为空（被 close 了或者没分配）
-    EBADF.as_isize() // -EBADF
+    // fd 指定文件不存在
+    EBADF.as_isize()
 }
 
 /// 信号处理完成后的恢复

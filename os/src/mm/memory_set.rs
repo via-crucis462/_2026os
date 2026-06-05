@@ -1001,10 +1001,16 @@ impl MemorySet {
                 page_size:Page4K // 默认用标准页
             };
 
+            // 文件页偏移末，开边界，也就是文件最后一页的下一个页的偏移，超过的部分不映射
+            let file_end_page_offset = PhysAddr(file.get_stat().size as usize).std_ceil().0;
+
             let start_vpn = VirtAddr::from(start_va).std_floor().0;
-            for i in 0..needing_std_pages{
+            for i in 0..needing_std_pages {
                 let vpn = start_vpn + i;
                 let file_page_offset = page_offset + i; 
+                if file_page_offset >= file_end_page_offset {
+                    break;
+                }
                 if let Some(shared_ppn) = file.get_shared_page(file_page_offset) {
                     /* 前面检查过了
                     if self.page_table.translate(VirtPageNum::from(vpn)).is_some() {
@@ -1014,7 +1020,7 @@ impl MemorySet {
                     let pte_flags = PTEFlags::from_bits(permission.bits).unwrap();
                     self.page_table.map(VirtPageNum::from(vpn), shared_ppn, pte_flags,Page4K);
                 } else {
-                    return Err(Errno::EIO.as_isize());
+                    return Err(Errno::ENOMEM.as_isize());
                 }
             }
             // 注册到全局共享页面管理器
@@ -1176,7 +1182,7 @@ impl MemorySet {
         Ok(())
     }
     /// 处理缺页异常。如果触发异常的地址在合法区域内，则为其分配物理页；否则返回 false。
-    /// 这部分逻辑目前暂时是ai写的，没怎么用到，待后续完善&测试
+    /// 待进一步完善&测试
     #[no_mangle]
     #[inline(never)]
     pub fn handle_page_fault(&mut self, bad_addr: usize, sp: usize) -> bool {
@@ -1185,9 +1191,9 @@ impl MemorySet {
         
         let mut page_size_opt = None;
 
-        // 1. 遍历寻找包含该虚拟页号的合法内存段 (MapArea)
+        // 遍历寻找包含该虚拟页号的段
         if let Some(area) = self.areas.iter_mut().find(|a| {
-            vpn >= a.vpn_range.get_start() && vpn < a.vpn_range.get_end()
+            a.contains(vpn)
         }) {
             if area.map_type == MapType::Guard {
                 return false;
@@ -1195,7 +1201,7 @@ impl MemorySet {
 
             page_size_opt = Some(area.page_size);
 
-            // 2. 检查该页是否已经在页表中映射
+            // 检查该页是否已经在页表中映射
             if let Some(pte) = page_table.translate(vpn) {
                 if pte.is_valid() {
                     // 已经映射却还报 Fault，通常是非法写只读段
@@ -1203,19 +1209,24 @@ impl MemorySet {
                 }
             }
             
-            // 3. 确认为合法的未映射页（惰性分配触发），执行分配和映射
+            // 共享文件映射直接返回false，交给后续处理
+            if area.is_shared && area.backing_file.is_some() {
+                return false;
+            }
+
+            // 非共享映射：惰性分配新物理帧
             area.map_one(page_table, vpn, page_size_opt.unwrap());
             
             #[cfg(target_arch = "loongarch64")]
             Self::flush_tlb_after_mapping_change();
             
-            return true; // 惰性分配修复成功！
+            return true; // 惰性分配修复成功
         }
         
-        // 4. 【新增】：动态扩张用户栈 (Dynamic Stack Growth)
+        // 动态扩张用户栈
         let sp_vpn = VirtAddr::from(sp).std_floor();
         
-        // 设定一个栈最大允许单次/总共扩张的大小，比如 32 页 (128KB)，防止恶意程序耗尽内存
+        // 设定一个栈最大允许单次/总共扩张的大小，防止恶意程序耗尽内存
         const MAX_EXPAND_PAGES: usize = 32;
 
         let mut expand_idx = None;
@@ -1255,7 +1266,7 @@ impl MemorySet {
             return true; // 栈扩张修复成功！
         }
 
-        // 5. 如果既不在合法区域，也不符合栈扩张规则，则是真正的野指针/无可救药的溢出
+        // 既不在合法区域，也不符合栈扩张规则，野指针/溢出
         false
     }
 
@@ -1282,6 +1293,27 @@ impl MemorySet {
                 if era_hit { " [ERA]" } else { "" },
             );
         }
+    }
+    /// 检查是否是超出文件大小导致的pagefault，如果是，返回后触发SIGBUS信号
+    pub fn check_mmap_page_fault(&self, bad_addr: usize) -> bool {
+        let vpn = VirtAddr::from(bad_addr).std_floor();
+        // 如果 PTE 已存在且有效，说明页已建立映射，缺页是权限冲突（如写只读页）
+        if let Some(pte) = self.page_table.translate(vpn) {
+            if pte.is_valid() {
+                return false;
+            }
+        }
+        for area in self.areas.iter() {
+            // 访问超出文件大小
+            if area.map_type == MapType::File
+                && area.is_shared
+                && area.backing_file.is_some()
+                && area.contains(vpn)
+            {
+                return true;
+            }
+        }
+        false
     }
 }
 /// map area structure, controls a contiguous piece of virtual memory
@@ -1498,7 +1530,7 @@ impl MapArea {
         self.map_perm
     }
     pub fn contains(&self, vpn: VirtPageNum) -> bool {
-        vpn >= self.vpn_range.get_start() && vpn < self.vpn_range.get_end()
+        self.vpn_range.contains(vpn)
     }
     /// 将段内数据全部写回文件（如果是共享文件映射）
     pub fn sync_back_to_file(&mut self) {

@@ -146,6 +146,7 @@ const SYSCALL_EXEC: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MSYNC: usize = 227;
+const SYSCALL_FSYNC: usize = 82;
 /// waitpid syscall
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
@@ -374,6 +375,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         args[3]
         ),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2] as u32),
+        SYSCALL_FSYNC => sys_fsync(args[0]),
         SYSCALL_ADD_KEY => sys_add_key(args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3], args[4] as i32),
         SYSCALL_REQUEST_KEY => sys_request_key(args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3] as i32),
         SYSCALL_KEYCTL => sys_keyctl(args[0] as i32, args[1], args[2], args[3], args[4]),
@@ -429,6 +431,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             syscall_id, args[0], args[1], args[2], args[3], args[4], ret
         );*/
     //println!("[K] hart[{}] PID{} finished syscall {} with return value {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
-    info!("[K] hart[{}] PID{} finished syscall {} with return value {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
+    info!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
     ret
 }

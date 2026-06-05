@@ -89,6 +89,10 @@ pub trait File: Send + Sync {
     fn ino(&self) -> u64 {
         self.get_stat().ino
     }
+    /// 截断/扩展文件到指定大小
+    fn truncate(&self, _len: usize) -> bool {
+        false // 默认不支持
+    }
     // 这里是默认实现，需要为不同文件重写
     fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
         error!("File type does not support shared pages: page_offset={}", page_offset);
@@ -178,6 +182,12 @@ pub trait VfsInode: Send + Sync {
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize;
     fn write_at(&self, offset: usize, buf: &[u8]) -> usize;
     fn get_size(&self) -> usize;
+    /// 截断/扩展文件到指定大小
+    /// len < 当前大小：丢弃超出部分
+    /// len > 当前大小：扩展并用零填充（对 tmpfs 等可以只更新 size）
+    fn truncate(&self, _len: usize) -> bool {
+        false // 默认不支持
+    }
     fn get_stat(&self) -> Stat;
     fn get_statx(&self) -> Statx;
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>>;

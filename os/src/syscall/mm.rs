@@ -11,12 +11,21 @@ use super::*;
 /// 2. 非匿名映射必须提供合法文件，且检查优先级高于长度
 /// 3. 匿名映射不保证地址，且不允许提供文件
 /// 4. 如果是非匿名，要求prot必须至少有PROT_READ
-///
+/// 5
 /// 
 /// 参数检查由sys_mmap完成
 pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: usize) -> isize {
-    trace!("kernel:pid[{}] sys_mmap called with start={:#x}, len={:#x}, prot={:#x}, flags={:#x}, fd={}, off={:#x}", 
+    info!("kernel:pid[{}] sys_mmap called with start={:#x}, len={:#x}, prot={:#x}, flags={:#x}, fd={}, off={:#x}", 
         current_task().unwrap().process().pid.0, start, len, port, flags, fd, off);
+
+    // MAP_SHARED_VALIDATE (0x03): 等同于 MAP_SHARED 但需要校验所有 flag 位已知
+    // 必须在 from_bits_truncate 之前检查，因为 truncate 会丢弃未知位
+    if (flags & mmap::MAP_SHARED_VALIDATE) == mmap::MAP_SHARED_VALIDATE {
+        let all_known = mmap::MMapFlags::all().bits();
+        if (flags & !all_known) != 0 {
+            return Errno::EOPNOTSUPP.as_isize();
+        }
+    }
 
     let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
     let is_anonymous = mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS);
@@ -60,7 +69,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: u
         return Errno::EINVAL.as_isize();
     }
 
-    // 文件偏移需要页对齐的
+    // 文件偏移需要页对齐
     if off % PAGE_SIZE != 0 {
         return Errno::EINVAL.as_isize();
     }

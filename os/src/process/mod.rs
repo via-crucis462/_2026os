@@ -451,9 +451,11 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
     } else { 
         // 由内核处理
         match signal {
-            SignalFlags::SIGCHLD | SignalFlags::SIGURG | SignalFlags::SIGWINCH => {
+            SignalFlags::SIGCHLD 
+            | SignalFlags::SIGURG 
+            | SignalFlags::SIGWINCH => {
                 // 目前的实现这些默认忽略
-                // trace!("[K] ignore default signal {:?}", signal);
+                info!("[K] ignore default signal {:?}", signal);
             }
              SignalFlags::SIGSTOP => {
                 task_inner.frozen = true;
@@ -466,7 +468,7 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
                 // 此处标注为kill后稍后会调用exit_current_and_run_next，这里不直接调用
                 task_inner.killed = true;
                 task_inner.term_signal = Some(sig as i32 + 1);
-                // println!("[K] default terminate for signal {:?}", signal);
+                warn!("[K] default terminate for signal {:?}", signal);
             }
         }
     }

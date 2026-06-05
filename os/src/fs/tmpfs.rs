@@ -124,6 +124,21 @@ impl super::VfsInode for TmpfsFileInode {
     fn get_size(&self) -> usize {
         *self.size.lock()
     }
+    fn truncate(&self, len: usize) -> bool {
+        let mut size = self.size.lock();
+        let mut pages = self.pages.lock();
+        let old_size = *size;
+        // 更新大小信息
+        *size = len;
+
+        if len < old_size {
+            // 收缩：释放超出部分的物理页
+            let new_end_page = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+            pages.retain(|&page_idx, _| page_idx < new_end_page);
+        }
+        // 扩张：tmpfs 用惰性分配策略，跳过
+        true
+    }
     fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
         let mut frames = self.pages.lock();
         // 如果 mmap 映射的页超出了当前文件大小，Linux 允许直接分配空白页给它

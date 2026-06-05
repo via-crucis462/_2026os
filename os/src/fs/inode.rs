@@ -249,6 +249,10 @@ impl File for OSInode {
         self.inode.get_shared_page(page_offset)
     }
 
+    fn truncate(&self, len: usize) -> bool {
+        self.inode.truncate(len)
+    }
+
     fn as_any(&self) -> &dyn Any { self }
 }
 
