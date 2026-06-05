@@ -1,6 +1,7 @@
 .*/*
 !.github/*
 !.vscode/settings.json
+!.cargo/config.toml
 .idea
 #Cargo.lock
 target
@@ -19,7 +20,6 @@ tools/
 pushall.sh
 *.bak
 ci-user/
-user/
 # os/vendor/
 fs_img/la*
 fs_img/riscv*

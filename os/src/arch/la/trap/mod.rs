@@ -8,7 +8,10 @@ use crate::mm::{PageTable, VirtAddr};
 use crate::syscall::syscall;
 use crate::arch::mm::flush_tlb_for_asid;
 use crate::task::{
-    KernelStack, SignalFlags, check_signals_error_of_current, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token, exit_current_and_run_next, handle_signals, suspend_current_and_run_next
+    KernelStack, SignalFlags,
+    current_add_signal, current_task, current_tid, current_trap_cx,
+    current_user_token, exit_current_and_run_next,
+    suspend_current_and_run_next, handle_signals
 };
 use crate::arch::timer::set_next_trigger;
 use crate::net::net_poll;
@@ -310,6 +313,11 @@ pub fn trap_handler() -> ! {
                 syscall_id,
                 [cx.r[4], cx.r[5], cx.r[6], cx.r[7], cx.r[8], cx.r[9]]
             );
+            current_task().unwrap().inner_exclusive_access().errno = if result < 0 {
+                (-result) as i32
+            } else {
+                0
+            };
             // cx is changed during sys_exec, so we have to call it again
             cx = current_trap_cx();
             cx.r[4] = result as usize;
@@ -329,7 +337,7 @@ pub fn trap_handler() -> ! {
                 let proc = task.process();
                 let mut inner = proc.inner_exclusive_access();
                 let sp = current_trap_cx().r[3];
-                let vpn = VirtAddr::from(badv).floor();
+                let vpn = VirtAddr::from(badv).std_floor();
                 if ecode == 4 {
                     if let Some(pte) = inner.memory_set.translate(vpn) {
                         if pte.is_valid() && pte.writable() && inner.memory_set.set_pte_dirty(vpn) {
@@ -354,7 +362,7 @@ pub fn trap_handler() -> ! {
                 }
                 match inner.memory_set.translate(vpn) {
                     Some(pte) => {
-                        println!(
+                        trace!(
                             "[kernel] user_fault_pte: current hart id={}, estat={:#x}, ecode={}({:#x}), esubcode={:#x}, era={:#x}, badv={:#x}, badi={:#x}, ra={:#x}, sp={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
                             get_hart_id(),
                             estat,
@@ -375,7 +383,7 @@ pub fn trap_handler() -> ! {
                         );
                     }
                     None => {
-                        println!(
+                        trace!(
                             "[kernel] user_fault_pte: current hart id={}, estat={:#x}, ecode={}({:#x}), esubcode={:#x}, era={:#x}, badv={:#x}, badi={:#x}, ra={:#x}, sp={:#x}, vpn={:#x}, pte=<none>",
                             get_hart_id(),
                             estat,
@@ -452,16 +460,16 @@ pub fn trap_handler() -> ! {
             if let Some(task) = current_task() {
                 let proc = task.process();
                 let inner = proc.inner_exclusive_access();
-                println!(
+                trace!(
                     "[kernel] trap_handler: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
                     task.getpid(),
                     task.gettid(),
                     inner.heap_bottom,
                     inner.program_brk,
                 );
-                inner.memory_set.debug_dump_areas(Some(badv), Some(era));
+                // inner.memory_set.debug_dump_areas(Some(badv), Some(era));
             } else {
-                println!("[kernel] trap_handler: no current task");
+                trace!("[kernel] trap_handler: no current task");
             }
             current_add_signal(SignalFlags::SIGSEGV);
         }
@@ -475,11 +483,13 @@ pub fn trap_handler() -> ! {
         "[trap_handler] after handle_signals: cause={:?}, estat={:#x}, era={:#x}, badv={:#x}, badi={:#x}",
         cause, estat, era, badv, badi
     );*/
+    /* 
     // check error signals (if error then exit)
     if let Some((errno, msg)) = check_signals_error_of_current() {
         trace!("[kernel] trap_handler: .. check signals {}", msg);
         exit_current_and_run_next(errno);
     }
+    */
     /*println!(
         "[trap_return] estat={:#x}, era_csr={:#x}, badv={:#x}, badi={:#x}, next_era={:#x}, ra={:#x}, sp={:#x}",
         estat,
@@ -500,6 +510,7 @@ pub fn trap_handler() -> ! {
 pub fn trap_return() -> ! {
     //set_user_trap_entry();
     // 直接用物理地址
+    handle_signals();
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
     let id = current_user_asid();

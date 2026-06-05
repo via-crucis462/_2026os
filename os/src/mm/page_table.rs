@@ -2,7 +2,6 @@ use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAdd
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use riscv::addr::page;
 use crate::arch::config::PAGE_SIZE;
 use crate::arch::trap::{current_trap_cx_user_va, TrapContext};
 use crate::mm::MapArea;
@@ -57,7 +56,15 @@ impl PageTable {
             frames: vec![frame],
         }
     }
-    /// Temporarily used to get arguments from user space.
+    /// Create a page table that shares the same root as another.
+    /// The new table does NOT own the intermediate page table frames;
+    /// the original owner is responsible for freeing them.
+    pub fn alias_of(other: &PageTable) -> Self {
+        Self {
+            root_ppn: other.root_ppn,
+            frames: Vec::new(),
+        }
+    }
     /// LA64根页表地址存储在CSR.PGDL或H，
     /// 这里存储的是2级页表的物理地址，因为弃用了3，4级页表
     /// 参考rv64的rcore理解即可
@@ -66,7 +73,7 @@ impl PageTable {
             #[cfg(target_arch = "riscv64")]
             root_ppn: PhysPageNum::from(token & ((1usize << 44) - 1)),
             #[cfg(target_arch = "loongarch64")]
-            root_ppn: PhysAddr(token).floor(),
+            root_ppn: PhysAddr(token).std_floor(),
             frames: Vec::new(),
         }
     }
@@ -100,6 +107,10 @@ impl PageTable {
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
             if i == page_size.walk_level() {
+                if i != 2 {
+                    // 页表提前结束，设置大页
+                    pte.set_huge_page();
+                }
                 result = Some(pte);
                 break;
             }
@@ -112,7 +123,7 @@ impl PageTable {
         }
         result
     }
-
+ 
     /// Find PageTableEntry by VirtPageNum
     #[cfg(target_arch = "riscv64")]
     pub fn find_pte(&self, vpn: VirtPageNum) -> Option<(&mut PageTableEntry, PageSize)> {
@@ -141,10 +152,9 @@ impl PageTable {
             ppn = pte.ppn();
         }
         None
-        
     }
     #[cfg(target_arch = "loongarch64")]
-    pub fn find_pte(&self, vpn: VirtPageNum, page_size: PageSize) -> Option<&mut PageTableEntry> {
+    pub fn find_pte(&self, vpn: VirtPageNum,) -> Option<(&mut PageTableEntry, PageSize)> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;
@@ -155,13 +165,20 @@ impl PageTable {
                 //println!("find_pte: vpn = {:?}, i = {}, pte is empty", vpn, i);
                 return None;
             }
-            if i == 2 {
-                result = Some(pte);
-                break;
+            if i == 2 || (pte.is_huge_page()){
+                return Some((
+                    pte, 
+                    match i {
+                        0 => PageSize::Page1G,
+                        1 => PageSize::Page2M,
+                        2 => PageSize::Page4K,
+                        _ => unreachable!(),
+                    }
+                ));
             }
             ppn = pte.ppn();
         }
-        result
+        None
     }
     /// set the map between virtual page number and physical page number
     #[allow(unused)]
@@ -210,7 +227,7 @@ impl PageTable {
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
     }
     #[cfg(target_arch = "loongarch64")]
-    pub fn set_entry(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags, page_size: PageSize) {
+    pub fn set_entry(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let (pte, size) = self.find_pte(vpn).unwrap();
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
         if (flags & PTEFlags::W) != PTEFlags::empty() {
@@ -281,6 +298,34 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         start = end_va.into();
     }
     v
+}
+
+pub fn try_translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Option<Vec<&'static mut [u8]>> {
+    if !prepare_user_read(token, ptr as usize, len) {
+        return None;
+    }
+    let page_table = PageTable::from_token(token);
+    let mut start = ptr as usize;
+    let end = start + len;
+    let mut v = Vec::new();
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let mut vpn = start_va.std_floor();
+        let (ppn, size) = match page_table.translate_and_get_size(vpn) {
+            Some((pte, size)) if pte.is_valid() => (pte.ppn(), size),
+            _ => return None,
+        };
+        vpn.step_by(size.num_pages());
+        let mut end_va: VirtAddr = vpn.into();
+        end_va = end_va.min(VirtAddr::from(end));
+        if end_va.actual_page_offset(size) == 0 {
+            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..]);
+        } else {
+            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..end_va.actual_page_offset(size)]);
+        }
+        start = end_va.into();
+    }
+    Some(v)
 }
 
 pub fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
@@ -389,6 +434,34 @@ pub fn translated_byte_buffer_mut(token: usize, ptr: *const u8, len: usize) -> V
         return Vec::new();
     }
     translated_byte_buffer(token, ptr, len)
+}
+
+pub fn try_translated_byte_buffer_mut(token: usize, ptr: *mut u8, len: usize) -> Option<Vec<&'static mut [u8]>> {
+    if !prepare_user_write(token, ptr as usize, len) {
+        return None;
+    }
+    let page_table = PageTable::from_token(token);
+    let mut start = ptr as usize;
+    let end = start + len;
+    let mut v = Vec::new();
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let mut vpn = start_va.std_floor();
+        let (ppn, size) = match page_table.translate_and_get_size(vpn) {
+            Some((pte, size)) if pte.is_valid() => (pte.ppn(), size),
+            _ => return None,
+        };
+        vpn.step_by(size.num_pages());
+        let mut end_va: VirtAddr = vpn.into();
+        end_va = end_va.min(VirtAddr::from(end));
+        if end_va.actual_page_offset(size) == 0 {
+            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..]);
+        } else {
+            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..end_va.actual_page_offset(size)]);
+        }
+        start = end_va.into();
+    }
+    Some(v)
 }
 
 /// Translate&Copy a ptr[u8] array end with `\0` to a `String` Vec through page table

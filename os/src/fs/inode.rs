@@ -27,6 +27,47 @@ pub struct OSInode {
 
 pub struct OSInodeInner {
     offset: usize,  //记录当前文件的读写偏移量，read/write系统调用会更新这个偏移量
+    mounted_offset: usize,
+}
+// 判断文件类型的函数，返回值对应 Linux dirent 结构体中的 d_type 字段
+fn dirent_type_from_mode(mode: u32) -> u8 {
+    match mode & 0o170000 {
+        0o010000 => 1,  // FIFO / named pipe -> DT_FIFO
+        0o020000 => 2,  // character device -> DT_CHR
+        0o040000 => 4,  // directory -> DT_DIR
+        0o060000 => 6,  // block device -> DT_BLK
+        0o100000 => 8,  // regular file -> DT_REG
+        0o120000 => 10, // symbolic link -> DT_LNK
+        0o140000 => 12, // Unix domain socket -> DT_SOCK
+        _ => 0,
+    }
+}
+// 把目录项写到用户缓冲区的函数，返回写了多少字节
+fn append_dirent_record(
+    buf: &mut [u8],
+    buf_offset: usize,
+    inode_id: u64,
+    next_offset: i64,
+    d_type: u8,
+    name: &str,
+) -> Option<usize> {
+    let name_bytes = name.as_bytes();
+    let name_len = name_bytes.len();
+    let total_len = 19 + name_len + 1;
+    let d_reclen = (total_len + 7) & !7;
+    if buf_offset + d_reclen > buf.len() {
+        return None;
+    }
+
+    buf[buf_offset..buf_offset + 8].copy_from_slice(&inode_id.to_ne_bytes());
+    buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&next_offset.to_ne_bytes());
+    buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(d_reclen as u16).to_ne_bytes());
+    buf[buf_offset + 18] = d_type;
+    buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(name_bytes);
+    for byte in &mut buf[buf_offset + 19 + name_len..buf_offset + d_reclen] {
+        *byte = 0;
+    }
+    Some(d_reclen)
 }
 
 impl OSInode {
@@ -34,7 +75,7 @@ impl OSInode {
         Self {
             readable,
             writable,
-            inner: Mutex::new(OSInodeInner { offset: 0 }),
+            inner: Mutex::new(OSInodeInner { offset: 0, mounted_offset: 0 }),
             inode,
             dentry,
         }
@@ -114,7 +155,41 @@ impl File for OSInode {
     fn getdents(&self, buf: &mut [u8]) -> isize{
         let mut inner = self.inner.lock();
         let read_bytes = self.inode.getdents(&mut inner.offset, buf);
-        read_bytes
+        if read_bytes < 0 {
+            return read_bytes;
+        }
+
+        let lower_size = self.inode.get_size();
+        if inner.offset < lower_size {
+            return read_bytes;
+        }
+
+        let mounted_children = self.dentry.mounted_children_snapshot();
+        if mounted_children.is_empty() {
+            return read_bytes;
+        }
+
+        let mut buf_offset = read_bytes as usize;
+        let mut mount_index = inner.mounted_offset;
+        while mount_index < mounted_children.len() {
+            let child = &mounted_children[mount_index];
+            let stat = child.inode.get_stat();
+            let next_offset = (lower_size + mount_index + 1) as i64;
+            let Some(written) = append_dirent_record(
+                buf,
+                buf_offset,
+                stat.ino,
+                next_offset,
+                dirent_type_from_mode(stat.mode),
+                child.name.as_str(),
+            ) else {
+                break;
+            };
+            buf_offset += written;
+            mount_index += 1;
+        }
+        inner.mounted_offset = mount_index;
+        buf_offset as isize
     }
 
     fn get_dentry(&self) -> Option<Arc<super::Dentry>> {
@@ -161,17 +236,26 @@ impl File for OSInode {
 
         // 4. 更新 inode 内部的偏移量
         inner.offset = new_offset as usize;
+        if new_offset == 0 {
+            inner.mounted_offset = 0;
+        }
         
         // 5. 成功返回新的偏移量
         new_offset as isize
     }
-
-    fn as_any(&self) -> &dyn Any { self }
+    
     fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
         // 转发给底层的具体文件系统 Inode
         self.inode.get_shared_page(page_offset)
     }
+
+    fn truncate(&self, len: usize) -> bool {
+        self.inode.truncate(len)
+    }
+
+    fn as_any(&self) -> &dyn Any { self }
 }
+
 bitflags! {
     ///  The flags argument to the open() system call is constructed by ORing together zero or more of the following values:
     pub struct OpenFlags: u32 {
@@ -223,7 +307,11 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> O
     
     // 使用全局 Dentry 树递归查找路径，并自动填充缓存
     // 1. 查找文件是否已存在
-    let target_dentry = start_node.find_tree(path, !flags.is_nofollow());
+    let target_dentry = if let Ok(dentry) = start_node.find_tree(path, !flags.is_nofollow()) {
+        Some(dentry)
+    } else {
+        None
+    };
     // 2.1 若不存在
     // 2.1.1 若文件不需要创建，返回 None
     if target_dentry.is_none() {
@@ -234,7 +322,9 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> O
         // 创建新文件的逻辑（简化处理，只创建空文件）
     // 2.1.2 创建新文件
         let parent_path = parent_path(path);
-        let parent_dentry = start_node.find_tree(&parent_path, true)?;
+        let Ok(parent_dentry) = start_node.find_tree(&parent_path, true) else {
+            return None;
+        };
         let file_name = file_name(path);
         let new_dentry = create_file_in_dentry(&parent_dentry, file_name, mode);
         let (readable, writable) = flags.read_write();
@@ -264,12 +354,15 @@ pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
         current_task().unwrap().process().inner_exclusive_access().cwd.clone()
     };
     // 从起点开始检查目标路径是否已存在
-    if start.find_tree(path, true).is_some() {
+    if let Ok(_) = start.find_tree(path, true) {
         info!("VFS: make_dir - target '{}' already exists", path);
         return None; 
     }
     let parent_path = parent_path(path);
-    let parent_dentry = start.find_tree(&parent_path, true)?;
+    let Ok(parent_dentry) = start.find_tree(&parent_path, true) else {
+        info!("VFS: make_dir - parent path '{}' does not exist", parent_path);
+        return None;
+    };
     let dir_name = file_name(path);
     info!("VFS: make_dir - creating directory '{}' in parent '{}'", dir_name, parent_path);
     let new_dentry = create_dir_in_dentry(&parent_dentry, dir_name , _mode);

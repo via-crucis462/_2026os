@@ -10,6 +10,7 @@ pub struct Dentry {
     pub inode: Arc<dyn VfsInode>,
     pub parent: Weak<Dentry>,
     pub children: Mutex<BTreeMap<String, Arc<Dentry>>>,
+    pub mounted_children: Mutex<BTreeMap<String, Arc<Dentry>>>,
 }
 
 impl Dentry {
@@ -23,16 +24,24 @@ impl Dentry {
             inode,
             parent,
             children: Mutex::new(BTreeMap::new()),
+            mounted_children: Mutex::new(BTreeMap::new()),
         })
     }
     pub fn find(self: &Arc<Self>, name: &str) -> Arc<dyn VfsInode> {
-        // 1. 尝试从当前节点的缓存中获取
+        // 1. 挂载点优先
+        let mounted_children = self.mounted_children.lock();
+        if let Some(child) = mounted_children.get(name) {
+            return child.inode.clone();
+        }
+        drop(mounted_children);
+
+        // 2. 尝试从当前节点的缓存中获取
         let mut children = self.children.lock();
         if let Some(child) = children.get(name) {
             return child.inode.clone();
         }
 
-        // 2. 缓存未击中，调用底层磁盘接口查找
+        // 3. 缓存未击中，调用底层磁盘接口查找
         // 注意：这里调用 self.inode.find 是 VfsInode 特征定义的磁盘查找接口
         if let Some(vfs_inode) = self.inode.find(name) {
             // 找到了，将其包装成 Dentry 并插入缓存树
@@ -45,16 +54,18 @@ impl Dentry {
             return vfs_inode;
         }
 
-        // 3. 磁盘也没找到，按照要求 panic
+        // 4. 磁盘也没找到，按照要求 panic
         panic!("VFS: File '{}' not found in directory '{}'", name, self.name);
     }
+
+    /// 创建新节点，将其作为self的子节点插入树
+    /// bug/特性：getdents不遍历children，只遍历mounted_children
     pub fn insert(self: &Arc<Self>, name: String, inode: Arc<dyn VfsInode>) -> Arc<Self> {
         let mut children = self.children.lock();
         if let Some(child) = children.get(&name) {
             return child.clone();
         }
         
-        // 创建新节点，并将 parent 指向当前节点（self）
         let new_child = Self::new(
             name.clone(),
             inode,
@@ -64,11 +75,33 @@ impl Dentry {
         children.insert(name, new_child.clone());
         new_child
     }
+
+    /// 在目前的实现中，专用于虚拟文件夹挂载
+    /// bug/特性：getdents不遍历children，只遍历mounted_children
+    pub fn mount_child(self: &Arc<Self>, name: String, inode: Arc<dyn VfsInode>) -> Arc<Self> {
+        let mut mounted_children = self.mounted_children.lock();
+        if let Some(child) = mounted_children.get(&name) {
+            return child.clone();
+        }
+
+        let new_child = Self::new(
+            name.clone(),
+            inode,
+            Arc::downgrade(self),
+        );
+
+        mounted_children.insert(name, new_child.clone());
+        new_child
+    }
+    pub fn mounted_children_snapshot(self: &Arc<Self>) -> alloc::vec::Vec<Arc<Dentry>> {
+        self.mounted_children.lock().values().cloned().collect()
+    }
     /// 递归查找完整路径，例如 "bin/sh" 或 "/bin/sh"
     /// 将self作为起点，不考虑路径是否以'/'开头
-    pub fn find_tree(self: &Arc<Self>, path: &str, follow_links: bool) -> Option<Arc<Dentry>> {
+    /// find_tree中，err返回0时是符号链接循环(ELOOP)，返回1时是路径中间有文件(ENOTDIR)，返回2时是路径不存在(ENOENT)
+    pub fn find_tree(self: &Arc<Self>, path: &str, follow_links: bool) -> Result<Arc<Dentry>, usize> {
         if path.is_empty() {
-            return Some(self.clone());
+            return Ok(self.clone());
         }
         // 1. 确定搜索起点
         let mut current = if path.starts_with('/') {
@@ -94,8 +127,12 @@ impl Dentry {
                 }
                 continue;
             }
-            // 查找子节点（利用你写好的带缓存的 find_child）
-            let next = current.find_child(&comp)?;
+
+            let next = match current.find_child(&comp) {
+                Some(child) => child,
+                None => return Err(2), // 返回错误码表示路径组件不存在
+            };
+
             // 检查是不是软链接
             let stat = next.inode.get_stat();
             let is_symlink = (stat.mode & 0o170000) == 0o120000; // S_IFLNK
@@ -110,7 +147,7 @@ impl Dentry {
                 symlink_depth += 1;
                 if symlink_depth > MAX_SYMLINK_DEPTH {
                     warn!("[VFS] find_tree: ELOOP (Too many levels of symbolic links) path='{}'", path);
-                    return None;
+                    return Err(0); // 返回错误码表示符号链接循环
                 }
                 // 读取软链接指向的目标路径
                 let size = stat.size as usize;
@@ -130,19 +167,31 @@ impl Dentry {
                 // 原有剩下的路径接在展开的软链接后面
                 new_comps.extend(components);
                 components = new_comps;
-
             } else {
                 // 普通文件或目录，正常步进
+                let stat = next.inode.get_stat();
+                let is_dir = (stat.mode & 0o170000) == 0o040000; // S_IFDIR
+                // 如果不是目录但后面还有路径组件，说明中间有个路径是文件，在unlink中要做出区分
+                if !is_dir && !components.is_empty() {
+                    return Err(1); // 返回错误码表示路径中间有文件
+                }
                 current = next;
             }
         }
 
-        Some(current)
+        Ok(current)
     }
 
     /// 查找子节点（单级）：返回的是 Dentry 包装，以便继续向下查找
     pub fn find_child(self: &Arc<Self>, name: &str) -> Option<Arc<Dentry>> {
         trace!("[kernel] Dentry::find_child: parent={}, name={}", self.name, name);
+        //先看虚拟挂载点
+        let mounted_children = self.mounted_children.lock();
+        if let Some(child) = mounted_children.get(name) {
+            return Some(child.clone());
+        }
+        drop(mounted_children);
+
         let mut children = self.children.lock();
         // 1. 尝试从当前节点的缓存中获取
         if let Some(child) = children.get(name) {

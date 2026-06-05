@@ -459,7 +459,7 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     
     let fd_desc = FileDescriptor {
         file: Some(socket_file),
-        cloexec, 
+        flags: FdFlags::from_bits_truncate(if nonblock { 0o4000 } else { 0 } | if cloexec { 0o2000000 } else { 0 }),
         status: if nonblock { 0o4000 } else { 0 },
     };
     
@@ -521,9 +521,9 @@ pub fn sys_socketpair(domain: usize, socket_type: usize, protocol: usize, sv: *m
     };
     let (left, right) = UnixSocket::pair(socket_kind);
     let status = if (socket_type & SOCK_NONBLOCK) != 0 { SOCK_NONBLOCK } else { 0 };
-    let cloexec = (socket_type & SOCK_CLOEXEC) != 0;
-    inner.set_fd(left_fd, Arc::new(left), cloexec, status);
-    inner.set_fd(right_fd, Arc::new(right), cloexec, status);
+    let fd_flags = FdFlags::from_bits_truncate(socket_type);
+    inner.set_fd(left_fd, Arc::new(left), fd_flags, status);
+    inner.set_fd(right_fd, Arc::new(right), fd_flags, status);
     drop(inner);
 
     let mut data = [0u8; 8];
@@ -633,7 +633,7 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
 
         inner.fd_table[new_fd] = FileDescriptor {
             file: Some(new_socket),
-            cloexec: false,
+            flags: FdFlags::empty(),
             status: 0,
         };
 

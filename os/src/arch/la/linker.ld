@@ -14,14 +14,14 @@ SECTIONS
     stext = .;
     .text : {
         *(.text.entry)
-        . = ALIGN(16K);
+        . = ALIGN(4K);
         strampoline = .;
         *(.text.trampoline);
-        . = ALIGN(16K);
+        . = ALIGN(4K);
         *(.text .text.*)
     }
 
-    . = ALIGN(16K);
+    . = ALIGN(4K);
     etext = .;
     srodata = .;
     .rodata : {
@@ -29,7 +29,7 @@ SECTIONS
         *(.srodata .srodata.*)
     }
 
-    . = ALIGN(16K);
+    . = ALIGN(4K);
     erodata = .;
     sdata = .;
     .data : {
@@ -37,7 +37,7 @@ SECTIONS
         *(.sdata .sdata.*)
     }
 
-    . = ALIGN(16K);
+    . = ALIGN(4K);
     edata = .;
     sbss_with_stack = .;
     .bss : {
@@ -47,7 +47,7 @@ SECTIONS
         *(.sbss .sbss.*)
     }
 
-    . = ALIGN(16K);
+    . = ALIGN(4K);
     ebss = .;
     ekernel = .;
 

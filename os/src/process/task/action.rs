@@ -4,22 +4,24 @@ use crate::task::{SignalFlags, MAX_SIG};
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
 pub struct SignalAction {
-    /// 信号处理函数地址 (8 bytes)
+    /// 信号处理函数地址
     pub handler: usize,
-    /// 信号标志位 (8 bytes)
+    /// 信号标志位
     pub flags: usize,
-    /// 蹦床函数地址 (8 bytes)
-    pub restorer: usize,
-    /// 信号掩码 (8 bytes)
+    // riscv/loongarch 无此字段，火箭队直接注释废物了
+    // 会导致glibc ltp跑完，收尾阶段炸掉
+    // 原因是restorer原本的位置是mask应该的位置，ra被写了个mask进去
+    // pub restorer: usize,
+    /// 信号掩码
     pub mask: SignalFlags, 
 }
+
 impl Default for SignalAction {
     fn default() -> Self {
         Self {
             handler: 0,
             flags: 0,
-            mask: SignalFlags::from_bits(40).unwrap(),
-            restorer: 0,
+            mask: SignalFlags::from_bits(0).unwrap(),
         }
     }
 }
@@ -28,13 +30,13 @@ impl Default for SignalAction {
 #[derive(Clone)]
 pub struct SignalActions {
     /// Signal actions table
-    pub table: [SignalAction; MAX_SIG + 1],
+    pub table: [SignalAction; MAX_SIG],
 }
 
 impl Default for SignalActions {
     fn default() -> Self {
         Self {
-            table: [SignalAction::default(); MAX_SIG + 1],
+            table: [SignalAction::default(); MAX_SIG],
         }
     }
 }

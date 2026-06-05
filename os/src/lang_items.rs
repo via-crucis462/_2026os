@@ -27,6 +27,6 @@ fn panic(info: &PanicInfo) -> ! {
         println!("[kernel] Panicked: {}", info.message());
     }
 
-    // shutdown(); // 调试时注释掉这行方便回溯调用栈
+    shutdown(); // 调试时注释掉这行方便回溯调用栈
     loop{}
 }

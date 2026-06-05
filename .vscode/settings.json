@@ -21,6 +21,7 @@
     // ],
     
     "rust-analyzer.linkedProjects": [
-        "os/Cargo.toml"
+        "os/Cargo.toml",
+        "user/Cargo.toml"
     ]
 }

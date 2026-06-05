@@ -18,7 +18,9 @@ use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 use crate::mm::VirtAddr;
 use crate::syscall::syscall;
 use crate::task::{
-    KernelStack, SignalFlags, check_signals_error_of_current, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token, exit_current_and_run_next, handle_signals, suspend_current_and_run_next
+    KernelStack, SignalFlags, TaskStatus, add_task, current_task, current_tid,
+    current_trap_cx, current_user_token, exit_current_and_run_next,
+    suspend_current_and_run_next, handle_signals, current_add_signal
 };
 use crate::arch::timer::get_time_ms;
 use alloc::sync::Arc;
@@ -82,6 +84,11 @@ pub fn trap_handler() -> ! {
                 cx.x[17], 
                 [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]]
             );
+            current_task().unwrap().inner_exclusive_access().errno = if result < 0 {
+                (-result) as i32
+            } else {
+                0
+            };
             if result < 0 {
                 warn!("pid[{}] syscall {} returned error code {}", current_task().unwrap().process().pid.0, cx.x[17], result);
             }
@@ -124,7 +131,7 @@ pub fn trap_handler() -> ! {
             
             // 【修改 1】：获取当前的栈指针 SP
             let sp = current_trap_cx().x[2];
-            
+            //
             if process_inner.memory_set.handle_cow_fault(stval) {
                 info!("[WATCHDOG][COW] : {:#x}, PC: {:#x}", stval, sepc);
                 drop(process_inner);
@@ -136,27 +143,122 @@ pub fn trap_handler() -> ! {
                 drop(process_inner);
                 drop(process);
                 drop(task);
-            } else {
-                println!(
-                    "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}, sp={:#x}",
+            } else if process_inner.memory_set.check_mmap_page_fault(stval){
+                error!("[WATCHDOG][BUS] : {:#x}, PC: {:#x}", stval, sepc);
+                error!(
+                    "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
                     crate::task::current_task().unwrap().process().pid.0,
+                    scause.cause(),
+                    current_trap_cx().get_rt(),
+                    stval
+                );
+                error!("[kernel] Trap! Source: User");
+                error!("[kernel] Scause: {:?} (Code: {})", scause.cause(), scause.bits());
+                error!("[kernel] Stval:  {:#x} (Bad Address)", stval);
+                error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, bad instruction = {:#x}",
+                scause.cause(),
+                current_task().unwrap().process().pid.0,
+                stval,
+                current_trap_cx().get_rt(),
+            );
+                // 触发了文件映射区域的page fault，说明是超出文件大小访问了，发送SIGBUS信号
+                drop(process_inner);
+                drop(process);
+                drop(task);
+                current_add_signal(SignalFlags::SIGBUS);
+            } else {
+                // 【新增】检查 userfaultfd 注册范围
+                /*println!(
+                    "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}, sp={:#x}",
+                    process.pid.0,
                     scause.cause(),
                     current_trap_cx().get_rt(),
                     stval,
                     sp
-                );
+                );*/
+                let fd_table = &process_inner.fd_table;
+                let mut uffd_handled = false;
+
+                // 调试：打印 fd_table 中每个条目的文件类型
+                /*info!("=== fd_table dump for PID {} ===", process.pid.0);
+                for (idx, fd_entry) in fd_table.iter().enumerate() {
+                    match &fd_entry.file {
+                        Some(file) => {
+                            let type_name = if file.as_any().downcast_ref::<crate::fs::UserPageFaultInfo>().is_some() {
+                                "UserPageFaultInfo"
+                            } else if file.as_any().downcast_ref::<crate::fs::Stdin>().is_some() {
+                                "Stdin"
+                            } else if file.as_any().downcast_ref::<crate::fs::Stdout>().is_some() {
+                                "Stdout"
+                            } else if file.as_any().downcast_ref::<crate::fs::Stderr>().is_some() {
+                                "Stderr"
+                            } else {
+                                "Other"
+                            };
+                            info!("  fd[{}] = Some({})", idx, type_name);
+                        }
+                        None => info!("  fd[{}] = None", idx),
+                    }
+                }
+                info!("=== end fd_table dump ===");*/
                 process_inner.info_map_areas();
-                drop(process_inner);
-                drop(process);
-                drop(task);
-                // 取消原来的 current_add_signal(SignalFlags::SIGSEGV);
-                // 发信号压栈死循环。
-                // 直接以 11 (SIGSEGV的默认信号值) 退出码击毙当前进程！
-                crate::task::exit_current_and_run_next(11);
+                for fd_entry in fd_table.iter() {
+                    if let Some(file) = &fd_entry.file {
+                        if let Some(uffd) = file.as_any()
+                            .downcast_ref::<crate::fs::UserPageFaultInfo>()
+                        {
+                            println!("Checking UFFD registered ranges for PID {}...", process.pid.0);
+                            let in_range = uffd.registered_ranges.exclusive_access()
+                                .iter().map(|&(start, len)| {
+                                    println!("  Comparing fault address {:#x} with registered range {:#x} - {:#x}", stval, start, start + len);
+                                    stval >= start && stval < start + len
+                                }).any(|x| x);
+                            if in_range {
+                                println!("Page fault address {:#x} is within a registered UFFD range, handling with UFFD", stval);
+                                *uffd.faulting_address.exclusive_access() = stval;
+                                *uffd.faulting_task.exclusive_access() = Some(task.clone());
+                                // 唤醒一个阻塞在 read(uffd) 上的 handler 线程
+                                let mut guard = uffd.read_waiters.exclusive_access();
+                                if let Some(handler) = guard.pop_front() {
+                                    drop(guard);
+                                    let mut h_inner = handler.inner_exclusive_access();
+                                    h_inner.task_status = TaskStatus::Ready;
+                                    h_inner.owner_hart = None;
+                                    drop(h_inner);
+                                    add_task(handler);
+                                }
+                                uffd_handled = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if uffd_handled {
+                    // 释放所有锁，挂起当前缺页线程，等待 UFFDIO_COPY 唤醒
+                    drop(process_inner);
+                    drop(process);
+                    drop(task);
+                    suspend_current_and_run_next();
+                } else {
+                    error!(
+                        "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}, sp={:#x}",
+                        crate::task::current_task().unwrap().process().pid.0,
+                        scause.cause(),
+                        current_trap_cx().get_rt(),
+                        stval,
+                        sp
+                    );
+                    process_inner.info_map_areas();
+                    drop(process_inner);
+                    drop(process);
+                    drop(task);
+                    current_add_signal(SignalFlags::SIGSEGV);
+                }
             }
         }
         _ => {
-            println!(
+            error!(
                 "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
                 crate::task::current_task().unwrap().process().pid.0,
                 scause.cause(),
@@ -200,11 +302,19 @@ pub fn trap_cx_va_by_kernel_stack(kernel_stack: &KernelStack) -> usize {
 #[no_mangle]
 /// return to user space
 pub fn trap_return() -> ! {
-
-    crate::process::handle_signals();
-    if current_task().unwrap().inner_exclusive_access().killed {
+    handle_signals();
+    let term_signal = {
+        let task = current_task().unwrap();
+        let inner = task.inner_exclusive_access();
+        if inner.killed {
+            inner.term_signal.unwrap_or(1)
+        } else {
+            0
+        }
+    };
+    if term_signal != 0 {
         info!("[SIG PROBE] EXECUTING DEATH SENTENCE FOR PID!");
-        exit_current_and_run_next(-1); 
+        exit_current_and_run_next(-term_signal);
     }
     set_user_trap_entry();
     let trap_cx_ptr = current_trap_cx_user_va();

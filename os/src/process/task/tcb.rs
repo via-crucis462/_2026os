@@ -53,6 +53,21 @@ impl TaskControlBlock {
     pub fn gettid(&self) -> usize {
         self.tid.0
     }
+
+    pub fn recycle_on_exit(&self, exit_code: i32) {
+        remove_from_tid2task(self.gettid());
+
+        let mut inner = self.inner_exclusive_access();
+        inner.exit_code = exit_code;
+        inner.errno = 0;
+        inner.task_status = TaskStatus::Zombie;
+        inner.signals = SignalFlags::empty();
+        inner.signal_mask_backup.clear();
+        inner.trap_ctx_backup.clear();
+        inner.killed = false;
+        inner.term_signal = None;
+        inner.frozen = false;
+    }
 }
 
 pub struct TaskControlBlockInner {
@@ -71,16 +86,18 @@ pub struct TaskControlBlockInner {
 
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
+    pub errno: i32,
     pub signals: SignalFlags,
     pub signal_mask: SignalFlags,
-    // the signal which is being handling
-    pub handling_sig: isize,
-    pub signal_mask_backup: Option<SignalFlags>,
+    /// 信号嵌套处理时的掩码栈（当前未完全验证行为是否正确，初步测试没问题）
+    pub signal_mask_backup: Vec<SignalFlags>,
     // if the task is killed
     pub killed: bool,
+    pub term_signal: Option<i32>,
     // if the task is frozen by a signal
     pub frozen: bool,
-    pub trap_ctx_backup: Option<TrapContext>,
+    /// 信号嵌套处理时的上下文栈（当前未完全验证行为是否正确，初步测试没问题）
+    pub trap_ctx_backup: Vec<TrapContext>,
 
     pub clear_child_tid: usize,// 线程清理指针
 }

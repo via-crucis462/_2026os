@@ -7,7 +7,7 @@ use crate::task::*;
 ///__clone(fn, stack, flags, NULL, NULL, NULL);
 ///测例中默认不指定ctid和ptid
 ///flags暂时未使用
-pub fn do_fork(_func: usize, stack: usize, _flags: usize) -> isize {
+/*pub fn do_fork(_func: usize, stack: usize, _flags: usize) -> isize {
     let current_task = current_task().unwrap();
     let current_proc = current_task.process();
     let (new_proc, new_task) = current_proc.fork(
@@ -28,7 +28,7 @@ pub fn do_fork(_func: usize, stack: usize, _flags: usize) -> isize {
     add_task(new_task);
     //println!("forked process: {}", new_pid);
     new_pid as isize
-}
+}*/
 
 pub fn do_clone_thread(_func: usize, stack: usize, _flags: usize, _ptid: usize) -> isize {
     let current_task = current_task().unwrap();

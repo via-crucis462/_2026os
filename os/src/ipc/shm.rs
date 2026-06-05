@@ -5,6 +5,8 @@ use spin::Mutex;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
+use super::IpcPerm;
+
 
 use lazy_static::lazy_static;
 
@@ -26,6 +28,14 @@ impl ShmManager {
             shms: BTreeMap::new(),
         }
     }
+    pub fn get_shm(&self, id: u32) -> Option<Arc<Shm>> {
+        self.shms.get(&id).cloned()
+    }
+
+    pub fn get_shm_by_key(&self, key: i32) -> Option<Arc<Shm>> {
+        self.shms.values().find(|s| s.get_key() == key).cloned()
+    }
+
     pub fn remove_shm(&mut self, id: u32) {
         self.shms.remove(&id);
         self.id_allocator.dealloc(id as usize);
@@ -42,18 +52,6 @@ impl ShmManager {
     }
 }
 
-/// System V IPC 权限信息
-#[derive(Debug, Clone, Copy, Default)]
-#[repr(C)]
-pub struct IpcPerm {
-    pub key: i32,
-    pub uid: u32,
-    pub gid: u32,
-    pub cuid: u32,
-    pub cgid: u32,
-    pub mode: u16,
-    pub seq: u16,
-}
 
 /// 对应 Linux shmid_ds
 #[derive(Debug, Clone, Copy, Default)]

@@ -2,9 +2,17 @@
 #![allow(missing_docs)]
 
 use bitflags::*;
-use crate::task::processor::*;
-use alloc::sync::Arc;
+use riscv::register;
+use crate::{mm::{FrameTracker, MapArea, PhysPageNum, UserBuffer, frame_alloc}, task::processor::*};
+use alloc::{
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+};
+
 use crate::fs::File;
+
+use spin::Mutex;
+
 
 // mmap 权限标志
 bitflags! {
@@ -19,13 +27,30 @@ bitflags! {
 // mmap 映射类型标志
 bitflags! {
     pub struct MMapFlags: i32 {
-        const MAP_FILE      = 0;
-        const MAP_SHARED    = 0x01;
-        const MAP_PRIVATE   = 0x02;
-        const MAP_FIXED     = 0x10;
-        const MAP_ANONYMOUS = 0x20;
+        const MAP_FILE           = 0;
+        const MAP_SHARED         = 0x01;
+        const MAP_PRIVATE        = 0x02;
+        const MAP_FIXED          = 0x10;
+        const MAP_ANONYMOUS      = 0x20;
+        // 下面的标志待完善
+        const MAP_GROWSDOWN      = 0x0100;
+        const MAP_DENYWRITE      = 0x0800;
+        const MAP_EXECUTABLE     = 0x1000;
+        const MAP_LOCKED         = 0x2000;
+        const MAP_NORESERVE      = 0x4000;
+        const MAP_POPULATE       = 0x8000;
+        const MAP_NONBLOCK       = 0x10000;
+        const MAP_STACK          = 0x20000;
+        const MAP_HUGETLB        = 0x40000;
+        const MAP_SYNC           = 0x80000;
+        const MAP_FIXED_NOREPLACE = 0x100000;
     }
 }
+
+/// MAP_SHARED_VALIDATE 标志值。等同于 MAP_SHARED|MAP_PRIVATE，
+/// 语义为带校验的 MAP_SHARED：设置后内核会验证所有 flag 位是否已知，
+/// 存在未知位导致返回 EOPNOTSUPP。
+pub const MAP_SHARED_VALIDATE: i32 = 0x03;
 
 /// 修改断点
 pub fn do_brk(addr: usize) -> Result<usize, i32> {
@@ -34,7 +59,8 @@ pub fn do_brk(addr: usize) -> Result<usize, i32> {
     proc.change_program_brk(addr)
 }
 
-/// 处理mmap系统调用的分配部分
+/// 内存映射逻辑
+/// 要求调用者已经完成了参数检查
 pub fn do_mmap(
     addr: usize, 
     length: usize, 
@@ -49,11 +75,107 @@ pub fn do_mmap(
     proc.mmap(addr, length, prot, flags, file_inner, offset) 
 }
 
+/// 要求调用者已经完成了参数检查
 pub fn do_munmap(addr: usize, length: usize) -> Result<(), isize> {
     let task = current_processor().current().unwrap();
     let proc = task.process();
     proc.munmap(addr, length)
 }
-// 尽管文件映射在syscall中实现，但此处设置一个shared区域
-// （未实现）
-// 早期想法，似乎没必要
+
+// shared映射需要page cache
+
+use lazy_static::lazy_static;
+
+lazy_static! {
+    /// 共享映射页缓存管理器
+    pub static ref SHARED_PAGE_CACHE_MANAGER: SharedPageCacheManager = SharedPageCacheManager {
+        page_cache_map: Mutex::new(BTreeMap::new()),
+        file_register: Mutex::new(BTreeMap::new()),
+    };
+}
+
+/// 共享映射页缓存管理器
+pub struct SharedPageCacheManager {
+    // (ino, page_offset) -> SharedPageCache
+    page_cache_map: Mutex<BTreeMap<(u64, usize), FrameTracker>>,
+    // ino -> Weak<File>，用于回写找到文件
+    file_register: Mutex<BTreeMap<u64, Weak<dyn File + Send + Sync>>>,
+}
+
+impl SharedPageCacheManager {
+    /// 获取共享页缓存，返回页框和是否新分配的标志
+    pub fn get_shared_page_cache(&self, ino: u64, page_offset: usize) -> (FrameTracker, bool) {
+        let mut map = self.page_cache_map.lock();
+        let key = (ino, page_offset);
+        if let Some(cache) = map.get(&key) {
+            (cache.clone(), false)
+        } else {
+            let frame = frame_alloc(super::PageSize::Page4K).unwrap();
+            map.insert(key, frame.clone());
+            (frame, true)
+        }
+    }
+    /// 将共享页缓存内容写回文件
+    pub fn write_back_shared_page_cache(&self, ino: u64, page_offset: usize, file: &Arc<dyn File + Send + Sync>) {
+        let mut map = self.page_cache_map.lock();
+        let key = (ino, page_offset);
+        if let Some(cache) = map.get(&key) {
+            let buf = cache.get_bytes_array();
+            let buffer = UserBuffer::new(alloc::vec![buf]);
+            file.write_at(page_offset * crate::PAGE_SIZE, buffer);
+        } else {
+            // 部分文件系统（如 tmpfs）在自己的内部存储中维护页缓存，走到这里比较正常
+            #[cfg(not(log_level = "OFF"))]
+            {
+                let name = file.get_dentry().unwrap().get_full_path();
+                warn!("Shared page cache not found for file {}: ino {}, page_offset {} (may be managed by FS internally)", name, ino, page_offset);
+            }
+        }
+    }
+    // 注册文件以便回写时找到
+    pub fn register_file(&self, ino: u64, file: &Arc<dyn File + Send + Sync>) {
+        let mut reg = self.file_register.lock();
+        reg.insert(ino, Arc::downgrade(file));
+    }
+    // 注销文件，同时释放该文件对应的所有缓存页
+    pub fn unregister_file(&self, ino: u64) {
+        let mut reg = self.file_register.lock();
+        reg.remove(&ino);
+        // 释放掉该文件对应的所有缓存页
+        let mut map = self.page_cache_map.lock();
+        map.retain(|(_ino, _), _| *_ino != ino);
+    }
+    // 释放共享页缓存
+    pub fn remove_shared_page_cache(&self, ino: u64, page_offset: usize) {
+        let mut map = self.page_cache_map.lock();
+        let key = (ino, page_offset);
+        map.remove(&key);
+    }
+    /// 清理已关闭文件的注册
+    pub fn clear_closed_files(&self) {
+        let mut register = self.file_register.lock();
+        register.retain(|_, weak_file| weak_file.upgrade().is_some());
+    }
+    /// 同步共享页缓存，将所有缓存内容写回对应文件
+    pub fn sync_shared_page_cache(&self) {
+        let map = self.page_cache_map.lock();
+        let reg = self.file_register.lock();
+        for weak_file in reg.values(){
+            if let Some(file) = weak_file.upgrade() {
+                let ino = file.ino();
+                let start = (ino, 0);
+                let end = (ino + 1, 0);
+                for ((_, page_offset), _) in map.range(start..end) {
+                    self.write_back_shared_page_cache(ino, *page_offset, &file);
+                }
+            }
+        }
+    }
+}
+
+/// 用于sync系统调用，将缓存内容写回文件
+pub fn sync_shared_page_cache() {
+    let man = &SHARED_PAGE_CACHE_MANAGER;
+    man.clear_closed_files();
+    man.sync_shared_page_cache();
+}

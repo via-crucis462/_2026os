@@ -1,13 +1,18 @@
 //! File trait & inode(dir, file, pipe, stdin, stdout)
 
 mod inode;
+mod fifo;
 mod pipe;
 mod stdio;
 mod dir_entry;
 mod file_tree;
 mod procfs;
 mod devfs;
+mod userpagefault;
+mod ino;
+
 pub mod memfd;
+use alloc::vec::{self, Vec};
 pub use memfd::*;
 pub mod tmpfs;
 pub use tmpfs::setup_oscomp_env;
@@ -16,7 +21,11 @@ pub use procfs::mount_procfs;
 pub use dir_entry::DirEntry;
 pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
 pub use file_tree::{Dentry};
-pub use crate::arch::timer::TimeSpec;
+pub use fifo::{create_fifo_in_dentry, is_fifo_mode, open_fifo_file, S_IFIFO, S_IFMT};
+pub use userpagefault::UserPageFaultInfo;
+use crate::PAGE_SIZE_BITS;
+pub use crate::timer::TimeSpec;
+pub use ino::get_next_ino;
 use crate::mm::UserBuffer;
 use crate::syscall::errno::Errno;
 use alloc::sync::Arc;
@@ -40,6 +49,9 @@ pub trait File: Send + Sync {
     /// write to the file from buf, return the number of bytes written
     fn pread(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
     fn write(&self, _buf: UserBuffer) -> usize { 0 }
+    fn write_nonblock(&self, buf: UserBuffer) -> Result<usize, Errno> {
+        Ok(self.write(buf))
+    }
     /// read from the file to buf at a given offset, return the number of bytes read
     fn read_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
     /// write to the file from buf at a given offset, return the number of bytes written
@@ -67,16 +79,30 @@ pub trait File: Send + Sync {
     fn ready_to_write(&self) -> bool {
         self.writable()
     }
+    fn check_write_error(&self) -> Option<Errno> {
+        None
+    }
     fn as_any(&self) -> &dyn Any {
         unimplemented!("as_any not implemented for this file type")
     }
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
         0
     }
-    // 获取该文件指定页偏移的物理页号。
-    // 如果没有，文件内部负责分配一个并存起来。
+    fn ino(&self) -> u64 {
+        self.get_stat().ino
+    }
+    /// 截断/扩展文件到指定大小
+    fn truncate(&self, _len: usize) -> bool {
+        false // 默认不支持
+    }
+    // 这里是默认实现，需要为不同文件重写
     fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
-        None // 默认不支持
+        error!("File type does not support shared pages: page_offset={}", page_offset);
+        None
+    }
+    /// ioctl 设备控制，默认返回 ENOTTY（不支持的 ioctl 请求）
+    fn ioctl(&self, _request: u32, _argp: usize, _token: usize) -> isize {
+        Errno::ENOTTY.as_isize()
     }
 }
 
@@ -162,6 +188,12 @@ pub trait VfsInode: Send + Sync {
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize;
     fn write_at(&self, offset: usize, buf: &[u8]) -> usize;
     fn get_size(&self) -> usize;
+    /// 截断/扩展文件到指定大小
+    /// len < 当前大小：丢弃超出部分
+    /// len > 当前大小：扩展并用零填充（对 tmpfs 等可以只更新 size）
+    fn truncate(&self, _len: usize) -> bool {
+        false // 默认不支持
+    }
     fn get_stat(&self) -> Stat;
     fn get_statx(&self) -> Statx;
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>>;
@@ -225,6 +257,10 @@ pub trait VfsInode: Send + Sync {
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
         0 // 默认返回成功，至少让测试能跑通
     }
+    /// 调试用：返回具体实现类型的名字
+    fn type_name(&self) -> &'static str {
+        core::any::type_name::<Self>()
+    }
     fn statfs(&self) -> Statfs {
         // 默认实现：返回全 0 或者一个安全的默认值
         // 
@@ -234,10 +270,35 @@ pub trait VfsInode: Send + Sync {
             f_namelen: 255, f_frsize: 0, f_flags: 0, f_spare: [0; 4],
         }
     }
-    fn get_shared_page(&self, _page_offset: usize) -> Option<PhysPageNum> {
-        None
+    fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
+        let man = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
+        let (frame, newly_allowcated) = 
+            man.get_shared_page_cache(self.get_stat().ino, page_offset);
+        if newly_allowcated {
+            // 读入文件数据到分配的页
+            info!("VFS: Allocated new shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
+            let (ppn, page_size) = (frame.ppn, frame.page_size);
+            let page_addr = ppn.0 << PAGE_SIZE_BITS;
+            // 检查是否对齐，防止传入的 frame 是大页
+            assert!(page_addr % page_size.size() == 0, "Shared page address not aligned to its size");
+            // 将物理页转换为缓冲区
+            let mut buffer = {
+                let buf = unsafe { 
+                    core::slice::from_raw_parts_mut(page_addr as *mut u8, page_size.size())
+                };
+                buf
+            };
+            // 读取内容
+            self.read_at(page_offset * page_size.size(), buffer);
+        } else {
+            // 已经存在共享页，直接复用，返回物理页号
+            info!("VFS: Reusing existing shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
+        }
+        Some(frame.ppn)
     }
-
+    /// 返回该 inode 的唯一标识号（跨所有文件系统唯一）
+    /// 默认从 get_stat().ino 读取，可能 override 为直接字段读取
+    fn ino(&self) -> u64 ;
 }
 
 bitflags! {
@@ -263,8 +324,8 @@ pub use stdio::{Stdin, Stdout, Stderr};
 
 pub fn init_test_env() {
     println!("[VFS] Mounting true Tmpfs directories in memory...");
-    ROOT_DENTRY.insert(String::from("tmp"), Arc::new(TmpfsDirInode::new(0o777)));
-    ROOT_DENTRY.insert(String::from("var"), Arc::new(TmpfsDirInode::new(0o777)));
+    ROOT_DENTRY.mount_child(String::from("tmp"), Arc::new(TmpfsDirInode::new(0o777)));
+    ROOT_DENTRY.mount_child(String::from("var"), Arc::new(TmpfsDirInode::new(0o777)));
 }
 
 const MAX_SYMLINK_DEPTH: usize = 8; // 地雷1：防止无限递归导致内核栈溢出

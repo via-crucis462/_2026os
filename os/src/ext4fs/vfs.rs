@@ -80,6 +80,9 @@ impl VfsInode for Ext4Inode {
             ..Default::default()
         }
     }
+    fn ino(&self) -> u64 {
+        self.inode_id as u64
+    }
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>> {
         if !self.is_dir() {
             return None;
@@ -413,13 +416,23 @@ fn set_time(&self, atime: &TimeSpec, mtime: &TimeSpec) -> isize {
         // 3. 修改磁盘 Inode 的数据。
         // 注意：modify 闭包内部的操作会自动把这个块标记为 dirty，之后会被写回磁盘
         block_cache.lock().modify(offset, |disk_inode: &mut Ext4InodeDisk| {
-            disk_inode.i_atime = atime.tv_sec as u32;
-            disk_inode.i_mtime = mtime.tv_sec as u32;
-            
+            // 先读取到局部变量，避免对 packed 字段取引用
+            let old_atime = disk_inode.i_atime;
+            let old_mtime = disk_inode.i_mtime;
+            println!("Ext4Inode::set_time: ino={}, old_atime={}, old_mtime={}, new_atime={}, new_mtime={}", 
+                self.inode_id, old_atime, old_mtime, atime.tv_sec, mtime.tv_sec);
+            // 通过指针写入，避免对 packed 字段取可变引用
+            unsafe {
+                core::ptr::addr_of_mut!(disk_inode.i_atime).write_unaligned(atime.tv_sec as u32);
+                core::ptr::addr_of_mut!(disk_inode.i_mtime).write_unaligned(mtime.tv_sec as u32);
+            }
 
         });
 
         0
+    }
+    fn type_name(&self) -> &'static str {
+        "Ext4Inode"
     }
     fn statfs(&self) -> Statfs {
         // 拿到你定义的真实的超级块

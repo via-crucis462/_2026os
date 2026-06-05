@@ -38,7 +38,7 @@ pub fn mmio_alloc(size: usize) -> usize {
     let mut next = CURRENT_MMIO_END.exclusive_access();
     let current = next.clone();
     // 对齐
-    let ppn = PhysAddr(current).ceil();
+    let ppn = PhysAddr(current).std_ceil();
     let start = ppn.0 * PAGE_SIZE;
     *next = start + size;
 

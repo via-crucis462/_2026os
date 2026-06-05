@@ -3,14 +3,19 @@
 use super::*;
 use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
 use schedule::*;
+use core::mem;
 use core::sync::atomic::{AtomicI32, Ordering};
 
+use crate::mm::get_free_frames;
 use crate::{
     arch::trap::{TrapContext, trap_handler, trap_cx_va_by_kernel_stack},
     fs::{open_file, Dentry, File, OpenFlags, ROOT_DENTRY,Stdin, Stdout, Stderr},
     mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap, 
         translated_write, MapArea, MapPermission, MapType, PageSize},
     sync::{MPSafeCell, WaitQueue},
+    syscall::errno::Errno::*,
+    ipc::namespace::*,
+    ipc::*,
 };
 use alloc::{
     string::String,
@@ -28,7 +33,7 @@ const AT_PHNUM: usize = 5;
 const AT_PAGESZ: usize = 6;
 const AT_ENTRY: usize = 9;
 const AT_RANDOM: usize = 25;
-
+const RLIM_INFINITY: usize = usize::MAX;//进程最大可操作的文件大小
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct  Rlimit64 {
@@ -37,10 +42,18 @@ pub struct  Rlimit64 {
 }
 
 
+bitflags::bitflags! {
+    /// 文件描述符标志位
+    pub struct FdFlags: usize {
+        const CLOEXEC  = 0o2000000; // O_CLOEXEC: exec 时自动关闭
+        const NONBLOCK = 0o4000;    // O_NONBLOCK: 非阻塞 I/O
+    }
+}
+
 #[derive(Clone)]
 pub struct FileDescriptor {
     pub file: Option<Arc<dyn File + Send + Sync>>,
-    pub cloexec: bool,
+    pub flags: FdFlags,
     pub status: usize,
 }
 
@@ -50,15 +63,15 @@ impl FileDescriptor {
     pub fn empty() -> Self {
         Self {
             file: None,
-            cloexec: false,
+            flags: FdFlags::empty(),
             status: 0,
         }
     }
 
-    pub fn new(file: Arc<dyn File + Send + Sync>, cloexec: bool, status: usize) -> Self {
+    pub fn new(file: Arc<dyn File + Send + Sync>, flags: FdFlags, status: usize) -> Self {
         Self {
             file: Some(file),
-            cloexec,
+            flags,
             status: status & !FD_STATUS_RESERVED,
         }
     }
@@ -66,7 +79,7 @@ impl FileDescriptor {
     pub fn reserved() -> Self {
         Self {
             file: None,
-            cloexec: false,
+            flags: FdFlags::empty(),
             status: FD_STATUS_RESERVED,
         }
     }
@@ -79,6 +92,7 @@ impl FileDescriptor {
 pub struct ProcessControlBlock {
     pub pid: Arc<PidHandle>,
     pub oom_score_adj: AtomicI32,
+    pub ns_proxy: NsProxy,
     pub inner: MPSafeCell<ProcessControlBlockInner>,
 }
 
@@ -163,6 +177,7 @@ impl ProcessControlBlock {
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),// 注意：实际上只克隆了指针
             oom_score_adj: AtomicI32::new(0),
+            ns_proxy: NsProxy::new(IPCNamespace::new()),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: true, // initproc和shell默认在主核运行
                 pname: String::from("initproc"),
@@ -175,23 +190,26 @@ impl ProcessControlBlock {
                 fd_rlmt: Rlimit64 { cur_lmt: 1024, max_lmt: 1024 }, // 默认允许打开的最大文件描述符数量
                 // 初始化 fd_table，预先放入 stdin 和 stdout
                 fd_table: vec![
-                    FileDescriptor::new(Arc::new(Stdin), false, 0),
-                    FileDescriptor::new(Arc::new(Stdout), false, 0),
-                    FileDescriptor::new(Arc::new(Stderr), false, 0),
+                    FileDescriptor::new(Arc::new(Stdin), FdFlags::empty(), 0),
+                    FileDescriptor::new(Arc::new(Stdout), FdFlags::empty(), 0),
+                    FileDescriptor::new(Arc::new(Stderr), FdFlags::empty(), 0),
                 ],
                 cwd: ROOT_DENTRY.clone(),
                 signals: SignalFlags::empty(),
                 signal_actions: SignalActions::default(),
                 exit_code: 0,
-                uid: 0,
+                ruid: 0,
                 gid: 0,
                 sid:0,
                 euid: 0,
                 egid: 0,
+                sgid: 0,
+                max_file_size: RLIM_INFINITY, // 默认文件大小限制为无限制
                 umask: 0o022,
                 pgid: pid_handle.0,
                 alive_task_count: 0,
                 tasks: Vec::new(),
+                personality: 0, // 默认 personality 为 0 (通常表示标准 Linux 兼容模式)
             })
         });
         // 为pcb创建主线程
@@ -205,12 +223,13 @@ impl ProcessControlBlock {
                 task_status: TaskStatus::Ready,
                 owner_hart: None,
                 signal_mask: SignalFlags::empty(),
-                handling_sig: -1,
                 killed: false,
-                signal_mask_backup: None,
+                term_signal: None,
+                signal_mask_backup: Vec::new(),
                 frozen: false,
-                trap_ctx_backup: None,
+                trap_ctx_backup: Vec::new(),
                 exit_code: 0,
+                errno: 0,
                 signals: SignalFlags::empty(),
                 clear_child_tid: 0,
 
@@ -385,7 +404,7 @@ impl ProcessControlBlock {
         // 更新 PCB 内部信息
         let mut proc_inner = self.inner_exclusive_access();
         for fd in 0..proc_inner.fd_table.len() {
-            if proc_inner.fd_table[fd].cloexec {
+            if proc_inner.fd_table[fd].flags.contains(FdFlags::CLOEXEC) {
                 proc_inner.clear_fd(fd);
             }
         }
@@ -398,6 +417,9 @@ impl ProcessControlBlock {
             proc_inner.pname = argv0.clone();
         }
         // 内核栈无须改变（fork时已经分配了新的）但需要重新映射
+        // 先回收旧的 memory_set 资源，避免物理页泄露
+        proc_inner.memory_set.sync_shared_pages();
+        proc_inner.memory_set.recycle_data_pages();
         proc_inner.memory_set = memory_set;
 
         // 修改trap上下文
@@ -418,9 +440,23 @@ impl ProcessControlBlock {
         task_inner.trap_cx_addr = trap_cx_addr;
         *task_inner.get_trap_cx() = trap_cx;
 
-        // 删除其他线程（如果有）
+        // 删除其他线程（如果有），先收集要移除的旧线程
+        let old_tasks: Vec<Arc<TaskControlBlock>> = proc_inner.tasks
+            .iter()
+            .filter(|t| !Arc::ptr_eq(t, &caller_task))
+            .cloned()
+            .collect();
         proc_inner.tasks.retain(|t: &Arc<TaskControlBlock>| Arc::ptr_eq(t, &caller_task));
         proc_inner.alive_task_count = 1;
+
+        // 清理旧线程在全局结构中的引用，防止 Arc 泄露
+        for old_task in &old_tasks {
+            panic!("[exec] cleaning up old thread tid={}", old_task.gettid());
+            let _lock = crate::task::lock_dispatch();
+            remove_from_tid2task(old_task.gettid());
+            remove_task_from_all_local_queues(old_task.gettid());
+            remove_task_from_global_pool(old_task.gettid());
+        }
         /*for i in proc_inner.memory_set.areas().iter() {
             println!("exec: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
         }*/
@@ -431,13 +467,23 @@ impl ProcessControlBlock {
     /// Fork from parent to child
     /// 已编辑，添加了stack参数 
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
-    pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>, caller_task: Arc<TaskControlBlock>)-> (Arc<Self>, Arc<TaskControlBlock>) {
+    pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>, caller_task: Arc<TaskControlBlock>, _flags: usize)-> (Arc<Self>, Arc<TaskControlBlock>) {
+        const CLONE_VM: usize = 0x00000100; // 共享内存空间
+        const CLONE_THREAD: usize = 0x00010000; // 共享线程组（即父子线程共享 PCB）
+        const CLONE_CHILD_CLEARTID: usize = 0x00200000; // 子线程退出时清除父线程中的子线程 ID（即 clear_child_tid）
         // fix:锁序调整，先拿tcb锁再拿pcb锁
         let caller_inner = caller_task.inner_exclusive_access();
         // ---- hold parent PCB lock
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
-        let mut memory_set = MemorySet::from_existed_user(&mut parent_inner.memory_set);
+        //println!("[kernel] ProcessControlBlock::fork: copying user space for new process, flags={:#x}", _flags);
+        let mut memory_set = if _flags & CLONE_VM != 0 {
+            // CLONE_VM: 真正共享地址空间——共享同一个页表，不做COW拷贝
+            //parent_inner.info_map_areas();
+            MemorySet::share_from_parent(&parent_inner.memory_set)
+        } else {
+            MemorySet::from_existed_user(&mut parent_inner.memory_set)
+        };
         flush_tlb_for_asid(parent_inner.memory_set.asid());
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = Arc::new(pid_alloc());
@@ -484,6 +530,7 @@ impl ProcessControlBlock {
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
             oom_score_adj: AtomicI32::new(self.oom_score_adj.load(Ordering::SeqCst)),
+            ns_proxy: self.ns_proxy.clone(),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: false, 
                 pname: parent_inner.pname.clone(),
@@ -498,16 +545,19 @@ impl ProcessControlBlock {
                 signals: SignalFlags::empty(),
                 signal_actions: parent_inner.signal_actions.clone(),
                 exit_code: 0,
-                uid: parent_inner.uid,
+                ruid: parent_inner.ruid,
                 gid: parent_inner.gid,
                 euid: parent_inner.euid,
                 umask: parent_inner.umask, 
                 sid:parent_inner.sid,
                 egid: parent_inner.egid,
+                sgid: parent_inner.sgid,
                 pgid: parent_inner.pgid,
                 fd_rlmt: parent_inner.fd_rlmt.clone(),
+                max_file_size: parent_inner.max_file_size,
                 tasks: Vec::new(),
                 alive_task_count: 1, // 初始有一个线程
+                personality: parent_inner.personality,
             })
         });
         let new_task = Arc::new(TaskControlBlock {
@@ -516,16 +566,17 @@ impl ProcessControlBlock {
             kernel_stack: kernel_stack,
             inner: MPSafeCell::new(TaskControlBlockInner {
                 trap_cx_addr,
-                signal_mask_backup: None,
+                signal_mask_backup: Vec::new(),
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
                 owner_hart: None,
                 signal_mask: caller_inner.signal_mask,
-                handling_sig: caller_inner.handling_sig,
                 killed: false,
+                term_signal: None,
                 frozen: false,
-                trap_ctx_backup: None,
+                trap_ctx_backup: Vec::new(),
                 exit_code: 0,
+                errno: 0,
                 signals: SignalFlags::empty(),
                 clear_child_tid: 0,
             }),
@@ -606,13 +657,14 @@ impl ProcessControlBlock {
                 task_status: TaskStatus::Ready,
                 owner_hart: None,
                 exit_code: 0,
+                errno: 0,
                 signals: SignalFlags::empty(),
                 signal_mask: caller_inner.signal_mask,
-                handling_sig: caller_inner.handling_sig,
-                signal_mask_backup: None,
+                signal_mask_backup: Vec::new(),
                 killed: false,
+                term_signal: None,
                 frozen: false,
-                trap_ctx_backup: None,
+                trap_ctx_backup: Vec::new(),
                 clear_child_tid: 0,
             }),
         });
@@ -664,8 +716,12 @@ impl ProcessControlBlock {
             // 返回当前断点
             return Ok(self.inner_exclusive_access().program_brk);
         }
-        // 超范围panic
         let size: isize = addr as isize - self.inner_exclusive_access().program_brk as isize;
+        let fa = get_free_frames();
+        if size > 0 && fa < ((size as usize + PAGE_SIZE - 1) / PAGE_SIZE) {
+            // 没有足够的物理页了
+            return Err(ENOMEM.as_isize() as i32);
+        }
         let mut inner = self.inner_exclusive_access();
         let heap_bottom = inner.memory_set.areas()[inner.memory_set.brk_index()].get_vpn_range().get_start().0 * PAGE_SIZE;
         //let heap_bottom = inner.heap_bottom;
@@ -673,7 +729,7 @@ impl ProcessControlBlock {
         let _old_break = inner.program_brk;
         let new_brk = addr as isize;
         if new_brk < heap_bottom as isize {
-            return Err(-1);
+            return Err(ENOMEM.as_isize() as i32);
         }
         let result = if size < 0 {
             debug!("change_program_brk: before shrink_to, heap_bottom={:#x}, new_brk={:#x}", heap_bottom, new_brk);
@@ -762,19 +818,23 @@ pub struct ProcessControlBlockInner {
 
     pub exit_code: i32, // 进程退出码，默认为0，只有当进程状态为Zombie时才有意义
 
-    pub uid: u32,  // 用户 ID
+    pub ruid: u32,  // 用户 ID
     pub gid: u32,  // 用户组 ID
     pub euid: u32, // 有效用户 ID
     pub egid: u32, // 有效用户组 ID
+    pub sgid: u32, // 辅助用户组 ID
     pub umask: u32, // 文件模式创建掩码
 
     pub sid: usize,
     pub pgid: usize, // 进程组 ID
     
+    pub max_file_size: usize, // 进程可创建的最大文件大小，单位为字节，默认为 usize::MAX
     // 进程下的线程数
     pub tasks: Vec<Arc<TaskControlBlock>>, 
     // 存活进程数，等于0相当于僵尸进程
     pub alive_task_count: isize,
+    // 专用于syscall92的personality
+    pub personality: usize,
 }
 
 impl ProcessControlBlockInner {
@@ -787,7 +847,7 @@ impl ProcessControlBlockInner {
     pub fn alloc_fd(&mut self) -> Option<usize> {
         // 1. 先尝试在现有的表中寻找被 close 空出来的坑位
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_available()) {
-            self.fd_table[fd].cloexec = false;
+            self.fd_table[fd].flags = FdFlags::empty();
             self.fd_table[fd].status = FD_STATUS_RESERVED;
             return Some(fd);
         } 
@@ -808,10 +868,10 @@ impl ProcessControlBlockInner {
         &mut self,
         fd: usize,
         file: Arc<dyn File + Send + Sync>,
-        cloexec: bool,
+        flags: FdFlags,
         status: usize,
     ) {
-        self.fd_table[fd] = FileDescriptor::new(file, cloexec, status);
+        self.fd_table[fd] = FileDescriptor::new(file, flags, status);
     }
     /// 回收被close的fd，压缩fd_table
     pub fn recycle_fd(&mut self) {
@@ -822,6 +882,15 @@ impl ProcessControlBlockInner {
     }
     pub fn set_rlimit64(&mut self, new_rlmt: Rlimit64) {
         self.fd_rlmt = new_rlmt;
+    }
+    //回收进程资源，返回子进程组，用于给initproc回收
+    pub fn recycle_on_exit(&mut self, exit_code: i32) -> Vec<Arc<ProcessControlBlock>> {
+        self.exit_code = exit_code;
+        self.memory_set.sync_shared_pages();
+        self.memory_set.recycle_data_pages();
+        self.fd_table.clear();
+        self.signals = SignalFlags::empty();
+        core::mem::take(&mut self.children)
     }
     pub fn is_zombie(&self) -> bool {
         self.alive_task_count == 0

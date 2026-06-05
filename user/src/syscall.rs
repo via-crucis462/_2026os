@@ -48,12 +48,21 @@ pub const SYSCALL_CONDVAR_WAIT: usize = 473;
 pub fn syscall(id: usize, args: [usize; 3]) -> isize {
     let mut ret: isize;
     unsafe {
+        #[cfg(target_arch = "riscv64")]
         core::arch::asm!(
             "ecall",
             inlateout("x10") args[0] => ret,
             in("x11") args[1],
             in("x12") args[2],
             in("x17") id
+        );
+        #[cfg(target_arch = "loongarch64")]
+        core::arch::asm!(
+            "syscall 0",
+            inlateout("$a0") args[0] => ret,
+            in("$a1") args[1],
+            in("$a2") args[2],
+            in("$a7") id
         );
     }
     ret
@@ -62,7 +71,9 @@ pub fn syscall(id: usize, args: [usize; 3]) -> isize {
 pub fn syscall6(id: usize, args: [usize; 6]) -> isize {
     let mut ret: isize;
     unsafe {
-        core::arch::asm!("ecall",
+        #[cfg(target_arch = "riscv64")]
+        core::arch::asm!(
+            "ecall",
             inlateout("x10") args[0] => ret,
             in("x11") args[1],
             in("x12") args[2],
@@ -70,6 +81,17 @@ pub fn syscall6(id: usize, args: [usize; 6]) -> isize {
             in("x14") args[4],
             in("x15") args[5],
             in("x17") id
+        );
+        #[cfg(target_arch = "loongarch64")]
+        core::arch::asm!(
+            "syscall 0",
+            inlateout("$a0") args[0] => ret,
+            in("$a1") args[1],
+            in("$a2") args[2],
+            in("$a3") args[3],
+            in("$a4") args[4],
+            in("$a5") args[5],
+            in("$a7") id
         );
     }
     ret

@@ -4,7 +4,6 @@ use crate::arch::config::{DMA_SIZE, MEMORY_END};
 use crate::sync::MPSafeCell;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use riscv::addr::page;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
 
@@ -32,6 +31,9 @@ impl FrameTracker {
     pub fn from_ppn(ppn: PhysPageNum, page_size: PageSize) -> Self {
         frame_add_ref(ppn);
         Self { ppn, page_size: page_size }
+    }
+    pub fn get_bytes_array(&self) -> &'static mut [u8] {
+        self.ppn.get_bytes_array_with_size(self.page_size)
     }
 }
 
@@ -113,7 +115,7 @@ impl StackFrameAllocator {
     /// 注意是标准页
     pub fn free_frames(&self) -> usize {
         // 未曾分配过的页框数 (end - current) + 已经被释放回收的页框数
-        (self.end - self.current)/PageSize::Page4K.size() +
+        (self.end - self.current) +
         self.recycled_std.len()*PageSize::Page4K.num_pages() +
         self.recycled_mega.len()*PageSize::Page2M.num_pages() +
         self.recycled_giga.len()*PageSize::Page1G.num_pages()

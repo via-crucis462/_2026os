@@ -1,9 +1,9 @@
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, lazy};
 use crate::fs::ROOT_DENTRY;
+use crate::fs::Dentry;
 use crate::mm::{PageSize, user_buffer};
 use alloc::vec;
 use crate::fs::devfs::NullInode;
@@ -17,10 +17,9 @@ use crate::drivers::loopdev::*;
 use crate::mm::{FrameTracker, PhysPageNum };
 use crate::mm::frame_alloc;
 use crate::mm::PageSize::Page4K;
+use crate::fs::ino::get_next_ino;
 
 use crate::PAGE_SIZE;
-// 全局唯一的 Inode 分配器
-pub static TMPFS_INO_COUNTER: AtomicUsize = AtomicUsize::new(10000);
 
 use lazy_static::lazy_static;
 /// 大页目录
@@ -30,20 +29,28 @@ lazy_static! {
 
 /// 临时文件inode
 pub struct TmpfsFileInode {
-    ino: usize,
     pages: Mutex<BTreeMap<usize, FrameTracker>>,
     size: Mutex<usize>,
-    perms: Mutex<PermStat>, // 权限信息
+    stat: Mutex<Stat>,
 }
 
 impl TmpfsFileInode {
     pub fn new(mode: u32) -> Self {
-        let full_mode = 0o100000 | (mode & 0o7777);
+        let file_type = mode & 0o170000;
+        let full_mode = if file_type == 0 {
+            0o100000 | (mode & 0o7777)
+        } else {
+            file_type | (mode & 0o7777)
+        };
+        let mut stat = Stat::default();
+        stat.mode = full_mode;
+        stat.nlink = 1;
+        stat.blksize = 4096;
+        stat.ino = get_next_ino();
         Self {
-            ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
             pages: Mutex::new(BTreeMap::new()),
             size: Mutex::new(0),
-            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(full_mode as _), 0, 0)),
+            stat: Mutex::new(stat),
         }
     }
 
@@ -120,6 +127,21 @@ impl super::VfsInode for TmpfsFileInode {
     fn get_size(&self) -> usize {
         *self.size.lock()
     }
+    fn truncate(&self, len: usize) -> bool {
+        let mut size = self.size.lock();
+        let mut pages = self.pages.lock();
+        let old_size = *size;
+        // 更新大小信息
+        *size = len;
+
+        if len < old_size {
+            // 收缩：释放超出部分的物理页
+            let new_end_page = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+            pages.retain(|&page_idx, _| page_idx < new_end_page);
+        }
+        // 扩张：tmpfs 用惰性分配策略，跳过
+        true
+    }
     fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
         let mut frames = self.pages.lock();
         // 如果 mmap 映射的页超出了当前文件大小，Linux 允许直接分配空白页给它
@@ -131,72 +153,46 @@ impl super::VfsInode for TmpfsFileInode {
         });
         Some(frame.ppn)
     }
+    fn ino(&self) -> u64 {
+        self.stat.lock().ino
+    }
     fn get_stat(&self) -> super::Stat {
-       
-        let perms = self.perms.lock();
-        let file_size = self.get_size() as i64; // 提前获取大小
-        let (mode, uid, gid) = (perms.mode.bits(), perms.uid, perms.gid);
-        super::Stat {
-            dev: 0, 
-            ino: self.ino as u64,
-            mode: mode as u32, nlink: 1, 
-            uid: uid, gid: gid, rdev: 0, __pad: 0, 
-
-            size: self.get_size() as i64, 
-            blksize: 4096, __pad2: 0,
-            blocks: ((self.get_size() as i64) + 511) / 512, 
-            atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
-        }
+        let file_size = self.get_size() as i64;
+        let mut stat = *self.stat.lock();
+        stat.size = file_size;
+        stat.blocks = (file_size + 511) / 512;
+        stat
     }
     
     fn get_statx(&self) -> super::Statx {
-        let stat = self.get_stat();
-        Statx{
-            stx_mask: 0,
-            stx_blksize: stat.blksize as u32,
-            stx_attributes: 0,
-            stx_nlink: stat.nlink,
-            stx_uid: stat.uid,
-            stx_gid: stat.gid,
-            stx_mode: stat.mode as u16,
-            __spare0: [0; 1],
-            stx_ino: stat.ino,
-            stx_size: stat.size as u64,
-            stx_blocks: stat.blocks as u64,
-            stx_attributes_mask: 0,
-            stx_atime: super::StatxTimestamp {
-                tv_sec: stat.atime_sec,
-                tv_nsec: stat.atime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_btime: super::StatxTimestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 },
-            stx_ctime: super::StatxTimestamp {
-                tv_sec: stat.ctime_sec,
-                tv_nsec: stat.ctime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_mtime: super::StatxTimestamp {
-                tv_sec: stat.mtime_sec,
-                tv_nsec: stat.mtime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_rdev_major: 0, 
-            stx_rdev_minor: 0, 
-            stx_dev_major: 0, 
-            stx_dev_minor: 0, 
-            __spare2: [0; 14],
-        }
+        super::stat_to_statx(self.get_stat())
     }
     fn get_perm(&self) -> PermStat {
-        // 此处的实现与其他常规文件不同。
-        // 其他文件是从 stat 的 mode 字段解析权限，
-        // 而这里直接存储了 PermStat 结构体，所以直接返回
-        self.perms.lock().clone()
+        let stat = self.stat.lock();
+        PermStat {
+            mode: FileMode::from_bits_truncate(stat.mode as u16),
+            uid: stat.uid,
+            gid: stat.gid,
+        }
     }
     fn set_perm(&self, perm: PermStat) -> bool {
-        *self.perms.lock() = perm;
+        let mut stat = self.stat.lock();
+        stat.mode = perm.mode.bits() as u32;
+        stat.uid = perm.uid;
+        stat.gid = perm.gid;
         true
     }
+    fn set_time(&self, atime: &super::TimeSpec, mtime: &super::TimeSpec) -> isize {
+        //println!("VFS: set_time called on TmpfsFileInode, atime=({}, {}), mtime=({}, {})", 
+        //    atime.tv_sec, atime.tv_nsec, mtime.tv_sec, mtime.tv_nsec);
+        let mut stat = self.stat.lock();
+        stat.atime_sec = atime.tv_sec as i64;
+        stat.atime_nsec = atime.tv_nsec as i64;
+        stat.mtime_sec = mtime.tv_sec as i64;
+        stat.mtime_nsec = mtime.tv_nsec as i64;
+        0
+    }
+    fn type_name(&self) -> &'static str { "TmpfsFileInode" }
     fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
@@ -206,23 +202,35 @@ impl super::VfsInode for TmpfsFileInode {
 
 /// 临时目录inode
 pub struct TmpfsDirInode {
-    ino: usize,
     entries: Mutex<BTreeMap<String, Arc<dyn super::VfsInode>>>,
-    perms: Mutex<PermStat>, // 权限信息
+    stat: Mutex<Stat>,
 }
 
 impl TmpfsDirInode {
     pub fn new(mode: u32) -> Self {
         let full_mode = 0o040000 | (mode & 0o7777); // S_IFDIR
+        let mut stat = Stat::default();
+        stat.mode = full_mode;
+        stat.nlink = 2;
+        stat.blksize = 512;
+        stat.ino = get_next_ino();
         Self {
-            ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
             entries: Mutex::new(BTreeMap::new()),
-            perms: Mutex::new(PermStat::new(FileMode::from_bits_truncate(full_mode as _), 0, 0)),
+            stat: Mutex::new(stat),
         }
     }
     pub fn insert(&self, name: String, inode: Arc<dyn VfsInode>) -> Arc<dyn VfsInode> {
         self.entries.lock().insert(name, inode.clone());
         inode
+    }
+
+    // 返回当前目录项快照，避免调用方在目录枚举期间长期持有 entries 锁。
+    pub fn entries_snapshot(&self) -> alloc::vec::Vec<(String, Arc<dyn VfsInode>)> {
+        self.entries
+            .lock()
+            .iter()
+            .map(|(name, inode)| (name.clone(), inode.clone()))
+            .collect()
     }
 }
 
@@ -230,62 +238,28 @@ impl super::VfsInode for TmpfsDirInode {
     fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
     fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.stat.lock().ino }
     
     fn get_stat(&self) -> super::Stat {
-        let perms = self.perms.lock();
-        let (mode, uid, gid) = (perms.mode.bits(), perms.uid, perms.gid);
-        super::Stat {
-            dev: 0, 
-            ino: self.ino as u64, 
-            mode: mode as u32, nlink: 2,
-            uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
-            blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
-        }
+        *self.stat.lock()
     }
     
     fn get_statx(&self) -> super::Statx { 
-        let stat = self.get_stat();
-        Statx{
-            stx_mask: 0,
-            stx_blksize: stat.blksize as u32,
-            stx_attributes: 0,
-            stx_nlink: stat.nlink,
-            stx_uid: stat.uid,
-            stx_gid: stat.gid,
-            stx_mode: stat.mode as u16,
-            __spare0: [0; 1],
-            stx_ino: stat.ino,
-            stx_size: stat.size as u64,
-            stx_blocks: stat.blocks as u64,
-            stx_attributes_mask: 0,
-            stx_atime: super::StatxTimestamp {
-                tv_sec: stat.atime_sec,
-                tv_nsec: stat.atime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_btime: super::StatxTimestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 },
-            stx_ctime: super::StatxTimestamp {
-                tv_sec: stat.ctime_sec,
-                tv_nsec: stat.ctime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_mtime: super::StatxTimestamp {
-                tv_sec: stat.mtime_sec,
-                tv_nsec: stat.mtime_nsec as u32,
-                __reserved: 0,
-            },
-            stx_rdev_major: 0, 
-            stx_rdev_minor: 0, 
-            stx_dev_major: 0, 
-            stx_dev_minor: 0, 
-            __spare2: [0; 14],
-        }
+        super::stat_to_statx(self.get_stat())
     }
     fn get_perm(&self) -> PermStat {
-        self.perms.lock().clone()
+        let stat = self.stat.lock();
+        PermStat {
+            mode: FileMode::from_bits_truncate(stat.mode as u16),
+            uid: stat.uid,
+            gid: stat.gid,
+        }
     }
     fn set_perm(&self, perm: PermStat) -> bool {
-        *self.perms.lock() = perm;
+        let mut stat = self.stat.lock();
+        stat.mode = perm.mode.bits() as u32;
+        stat.uid = perm.uid;
+        stat.gid = perm.gid;
         true
     }
     fn find(&self, name: &str) -> Option<Arc<dyn super::VfsInode>> {
@@ -293,6 +267,21 @@ impl super::VfsInode for TmpfsDirInode {
     }
 
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn super::VfsInode>> {
+        if mode == 0o120777 {
+            let symlink_inode = Arc::new(TmpfsFsSymbolicLinkInode {
+                target: String::new(),
+                stat: Mutex::new({
+                    let mut s = Stat::default();
+                    s.mode = 0o120777; // 符号链接
+                    s.nlink = 1;
+                    s.blksize = 4096;
+                    s.ino = get_next_ino();
+                    s
+                }),
+            });
+            self.entries.lock().insert(name.to_string(), symlink_inode.clone());
+            return Some(symlink_inode);
+        }
        let new_file: Arc<dyn super::VfsInode> = Arc::new(TmpfsFileInode::new(mode));
         self.entries.lock().insert(name.to_string(), new_file.clone());
         Some(new_file)
@@ -324,6 +313,80 @@ impl super::VfsInode for TmpfsDirInode {
             f_flags: 0, f_spare: [0; 4],
         }
     }
+    fn create_symlink(&self, name: &str, target: &str) -> Option<Arc<dyn VfsInode>> {
+        let symlink_inode = Arc::new(TmpfsFsSymbolicLinkInode {
+            target: target.to_string(),
+            stat: Mutex::new({
+                let mut s = Stat::default();
+                s.mode = 0o120777; // 符号链接
+                s.nlink = 1;
+                s.blksize = 4096;
+                s.ino = get_next_ino();
+                s
+            }),
+        });
+        self.entries.lock().insert(name.to_string(), symlink_inode.clone());
+        Some(symlink_inode)
+    }
+    fn set_time(&self, _atime: &super::TimeSpec, _mtime: &super::TimeSpec) -> isize {
+       // println!("VFS: set_time called on TmpfsDirInode, atime=({}, {}), mtime=({}, {})", 
+       //     _atime.tv_sec, _atime.tv_nsec, _mtime.tv_sec, _mtime.tv_nsec);
+        let mut stat = self.stat.lock();
+        stat.atime_sec = _atime.tv_sec as i64;
+        stat.atime_nsec = _atime.tv_nsec as i64;
+        stat.mtime_sec = _mtime.tv_sec as i64;
+        stat.mtime_nsec = _mtime.tv_nsec as i64;
+        0
+    }
+    fn type_name(&self) -> &'static str { "TmpfsDirInode" }
+}
+
+/// 通过 getdents 枚举目录项，将源目录下所有条目的 inode 映射到目标 lib/lib64
+fn populate_lib_from_dentries(
+    src: &Arc<Dentry>,
+    lib: &Arc<Dentry>,
+    lib64: &Arc<Dentry>,
+) {
+    let mut buf = vec![0u8; 4096];
+    let mut offset: usize = 0;
+    // 循环调用getdents枚举目录项
+    loop {
+        let n = src.inode.getdents(&mut offset, &mut buf);
+        if n <= 0 {
+            break;
+        }
+        let data = &buf[..n as usize];
+        let mut pos = 0;
+        while pos + 19 <= data.len() {
+            // 结构体解析
+            let d_ino = u64::from_ne_bytes(data[pos..pos + 8].try_into().unwrap());
+            let d_reclen =
+                u16::from_ne_bytes(data[pos + 16..pos + 18].try_into().unwrap()) as usize;
+            if d_reclen == 0 || pos + d_reclen > data.len() {
+                break;
+            }
+            // 处理目录项，跳过 "." 和 ".."
+            if d_ino != 0 {
+                let name_start = pos + 19;
+                let name_max = pos + d_reclen;
+                let name_len = data[name_start..name_max]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(name_max - name_start);
+                if let Ok(name) = core::str::from_utf8(&data[name_start..name_start + name_len]) {
+                    if name != "." && name != ".." {
+                        // 用 find_tree 跟随符号链接，拿到真实文件 inode
+                        if let Ok(child) = src.find_tree(name, true) {
+                            println!("[VFS] Mounted lib entry: {}", name);
+                            lib.mount_child(name.to_string(), child.inode.clone());
+                            lib64.mount_child(name.to_string(), child.inode.clone());
+                        }
+                    }
+                }
+            }
+            pos += d_reclen;
+        }
+    }
 }
 
 pub fn setup_oscomp_env() {
@@ -331,28 +394,28 @@ pub fn setup_oscomp_env() {
     let root = ROOT_DENTRY.clone();
 
     // 1. 挂载 /tmp 
-    root.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    root.mount_child("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     info!("[VFS] Mounted /tmp");
     
     // 2. 挂载 bin, sbin, usr 等虚拟目录
-    let etc_dentry = root.insert("etc".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let etc_dentry = root.mount_child("etc".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let passwd_content = "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
     let group_content = "root:x:0:\nnobody:x:65534:\n";
     
     etc_dentry.insert("passwd".to_string(), Arc::new(TmpfsFileInode::new_with_data(passwd_content.as_bytes())));
     etc_dentry.insert("group".to_string(), Arc::new(TmpfsFileInode::new_with_data(group_content.as_bytes())));
 
-    let var_dentry = root.insert("var".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let var_dentry = root.mount_child("var".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     var_dentry.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     var_dentry.insert("run".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let bin_dentry = root.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let sbin_dentry = root.insert("sbin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let usr_dentry = root.insert("usr".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let bin_dentry = root.mount_child("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let sbin_dentry = root.mount_child("sbin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let usr_dentry = root.mount_child("usr".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let usr_local_dentry = usr_dentry.insert("local".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let usr_local_bin_dentry = usr_local_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let usr_bin_dentry = usr_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let lib_dentry = root.insert("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let lib64_dentry = root.insert("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let lib_dentry = root.mount_child("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let lib64_dentry = root.mount_child("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     
     // loop测例检查的文件
     let lib_modules = lib_dentry.insert("modules".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
@@ -361,12 +424,12 @@ pub fn setup_oscomp_env() {
     lib_modules_rcore.insert("modules.dep".to_string(), Arc::new(TmpfsFileInode::new_with_data(b"")));
     
     // loop测例检查的文件
-    let sys_dentry = root.insert("sys".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let sys_dentry = root.mount_child("sys".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let sys_module_dentry = sys_dentry.insert("module".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     sys_module_dentry.insert("loop".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
 
     // 3. 将 Busybox 和 libc 的真实 Inode 映射进虚拟目录
-    if let Some(musl_dir) = root.find_tree("/musl", true) {
+    if let Ok(musl_dir) = root.find_tree("/musl", true) {
         if let Some(busybox_node) = musl_dir.find_child("busybox") {
             let bb_inode = busybox_node.inode.clone();
             let applets = [
@@ -384,11 +447,11 @@ pub fn setup_oscomp_env() {
             }
             info!("[VFS] Populated busybox applets");
         }
-        let dev_dentry = if let Some(dev) = root.find_tree("/dev", true) {
+        let dev_dentry = if let Ok(dev) = root.find_tree("/dev", true) {
             dev
         } else {
             // 理论上不会走到这
-            root.insert("dev".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+            root.mount_child("dev".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
         };
 
         // 挂载shm到/dev/shm
@@ -411,58 +474,45 @@ pub fn setup_oscomp_env() {
         }
 
         info!("[VFS] Mounted /dev/shm safely");
-        if root.find_tree("/dev/shm", true).is_some() {
-        info!("DEBUG: /dev/shm path is VALID");
+        if let Ok(_) = root.find_tree("/dev/shm", true) {
+            info!("DEBUG: /dev/shm path is VALID");
         } else {
             error!("DEBUG: /dev/shm path is BROKEN!");
-        }
-        // --- 挂载动态链接库 ---
-        // musl
-        if let Some(libc_node) = root.find_tree("/musl/libc.so", true).or_else(|| root.find_tree("/musl/lib/libc.so", true)) {
-            #[cfg(target_arch = "riscv64")]
-            lib_dentry.insert("ld-musl-riscv64.so.1".to_string(), libc_node.inode.clone());
-            
-            #[cfg(target_arch = "loongarch64")]
-            lib_dentry.insert("ld-musl-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
-            
-            lib_dentry.insert("libc.so".to_string(), libc_node.inode.clone());
-            info!("[VFS] Populated libc.so symlinks");
-        }
-        
+        }        
     } else {
         warn!("[VFS] WARNING: /musl not found, skipped busybox mapping.");
     }
-    // mount glibc ld
-    if let Some(glibc_dir) = root.find_tree("/glibc", true) {
-        #[cfg(target_arch = "loongarch64")]
-        {
-            if let Some(libc_node) = root.find_tree("/glibc/lib/ld-linux-loongarch-lp64d.so.1", true) {
-                lib_dentry.insert("ld-linux-loongarch-lp64d.so.1".to_string(), libc_node.inode.clone());
-            }
-            if let Some(libc_node) = root.find_tree("/glibc/lib/libc.so.6", true) {
-                lib_dentry.insert("libc.so.6".to_string(), libc_node.inode.clone());
-            }
-            if let Some(libc_node) = root.find_tree("/glibc/lib/libm.so.6", true) {
-                lib_dentry.insert("libm.so.6".to_string(), libc_node.inode.clone());
-            }
-        }
-        #[cfg(target_arch = "riscv64")]
-        {
-            if let Some(libc_node) = root.find_tree("/glibc/lib/ld-linux-riscv64-lp64d.so.1", true) {
-                lib_dentry.insert("ld-linux-riscv64-lp64d.so.1".to_string(), libc_node.inode.clone());
-            }
-            if let Some(libc_node) = root.find_tree("/glibc/lib/libc.so.6", true) {
-                lib_dentry.insert("libc.so.6".to_string(), libc_node.inode.clone());
-            }
-            if let Some(libc_node) = root.find_tree("/glibc/lib/libm.so.6", true) {
-                lib_dentry.insert("libm.so.6".to_string(), libc_node.inode.clone());
-            }
-        }
-    } else {
-        warn!("[VFS] WARNING: /glibc not found, skipped glibc mapping.");
-    }
 
-    if root.find_tree("/dev/shm", true).is_some() {
+    // --- 挂载 动态链接库 & 加载器 ---
+    // musl
+    let libc_node = root.find_tree("/musl/lib", true).unwrap();
+    populate_lib_from_dentries(&libc_node, &lib_dentry, &lib64_dentry);
+    let ld = libc_node.find_child("libc.so").unwrap();
+    #[cfg(target_arch = "loongarch64")]
+    {
+        lib64_dentry.mount_child("ld-musl-loongarch-lp64d.so.1".to_string(), ld.inode.clone());
+        lib_dentry.mount_child("ld-musl-loongarch-lp64d.so.1".to_string(), ld.inode.clone());
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        lib64_dentry.mount_child("ld-musl-riscv64.so.1".to_string(), ld.inode.clone());
+        lib_dentry.mount_child("ld-musl-riscv64.so.1".to_string(), ld.inode.clone());
+        lib64_dentry.mount_child("ld-musl-riscv64-sf.so.1".to_string(), ld.inode.clone());
+        lib_dentry.mount_child("ld-musl-riscv64-sf.so.1".to_string(), ld.inode.clone());
+    }
+    info!("[VFS] Populated musl lib symlinks");
+
+    // glibc
+    let libc_node = root.find_tree("/glibc/lib", true).unwrap();
+    let user_lib64_dentry = usr_dentry.mount_child("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let user_lib_dentry = usr_dentry.mount_child("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    // 同时挂载到 /lib* 和 /usr/lib*
+    populate_lib_from_dentries(&libc_node, &user_lib_dentry, &user_lib64_dentry);
+    populate_lib_from_dentries(&libc_node, &lib_dentry, &lib64_dentry);
+    info!("[VFS] Populated glibc lib symlinks");
+
+
+    if let Ok(_) = root.find_tree("/dev/shm", true) {
         info!("DEBUG: /dev/shm path is VALID");
     } else {
         error!("DEBUG: /dev/shm path is BROKEN!");
@@ -514,28 +564,96 @@ pub fn setup_oscomp_env() {
     bin_dentry.insert("ip".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())));
 }
 
+// 挂载 /sys/kernel/mm/hugepages
 fn mount_hugepages() -> Arc<super::Dentry> {
     let root = ROOT_DENTRY.clone();
-    let sys_dentry = if let Some(sys) = root.find_tree("/sys", true) {
+    let sys_dentry = if let Ok(sys) = root.find_tree("/sys", true) {
         sys
     } else {
-        root.insert("sys".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+        root.mount_child("sys".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
-    let kernel_dentry = if let Some(kernel) = sys_dentry.find_tree("/sys/kernel", true) {
+    let kernel_dentry = if let Ok(kernel) = sys_dentry.find_tree("/sys/kernel", true) {
         kernel
     } else {
         sys_dentry.insert("kernel".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
-    let mm_dentry = if let Some(mm) = kernel_dentry.find_tree("/sys/kernel/mm", true) {
+    let mm_dentry = if let Ok(mm) = kernel_dentry.find_tree("/sys/kernel/mm", true) {
         mm
     } else {
         kernel_dentry.insert("mm".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
-    let hugepages_dentry = if let Some(hugepages) = mm_dentry.find_tree("/sys/kernel/mm/hugepages", true) {
+    let hugepages_dentry = if let Ok(hugepages) = mm_dentry.find_tree("/sys/kernel/mm/hugepages", true) {
         hugepages
     } else {
         mm_dentry.insert("hugepages".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
-    info!("[VFS] Mounted /dev/hugepages");
+    info!("[VFS] Mounted /sys/kernel/mm/hugepages");
     hugepages_dentry
+}
+pub struct TmpfsFsSymbolicLinkInode {
+    target: String,
+    stat: Mutex<Stat>,
+}
+impl VfsInode for TmpfsFsSymbolicLinkInode {
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize { 
+        let target_bytes = self.target.as_bytes();
+        if offset >= target_bytes.len() {
+            return 0;
+        }
+        let copy_len = core::cmp::min(buf.len(), target_bytes.len() - offset);
+        buf[..copy_len].copy_from_slice(&target_bytes[offset..offset + copy_len]);
+        copy_len
+    }
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn get_size(&self) -> usize { self.target.len() }
+    fn get_stat(&self) -> super::Stat {
+        let mut stat = *self.stat.lock();
+        stat.size = self.target.len() as i64;
+        stat
+    }
+    fn get_statx(&self) -> super::Statx { super::stat_to_statx(self.get_stat()) }
+    fn get_perm(&self) -> PermStat {
+        let stat = self.stat.lock();
+        PermStat {
+            mode: FileMode::from_bits_truncate(stat.mode as u16),
+            uid: stat.uid,
+            gid: stat.gid,
+        }
+    }
+    fn set_perm(&self, perm: PermStat) -> bool {
+        let mut stat = self.stat.lock();
+        stat.mode = perm.mode.bits() as u32;
+        stat.uid = perm.uid;
+        stat.gid = perm.gid;
+        true
+    }
+    fn set_time(&self, atime: &super::TimeSpec, mtime: &super::TimeSpec) -> isize {
+        println!("VFS: set_time called on TmpfsFsSymbolicLinkInode, atime=({}, {}), mtime=({}, {})", atime.tv_sec, atime.tv_nsec, mtime.tv_sec, mtime.tv_nsec);
+        let mut stat = self.stat.lock();
+        stat.atime_sec = atime.tv_sec as i64;
+        stat.atime_nsec = atime.tv_nsec as i64;
+        stat.mtime_sec = mtime.tv_sec as i64;
+        stat.mtime_nsec = mtime.tv_nsec as i64;
+        0
+    }
+    fn type_name(&self) -> &'static str { "TmpfsFsSymbolicLinkInode" }
+    fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
+    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
+    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
+    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
+    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
+    fn ino(&self) -> u64 { self.stat.lock().ino }
+}
+impl TmpfsFsSymbolicLinkInode{
+    fn new(target: String) -> Self {
+        let mut stat = Stat::default();
+        stat.mode = 0o120777; // S_IFLNK
+        stat.nlink = 1;
+        stat.blksize = 4096;
+        stat.ino = get_next_ino();
+        Self {
+            target,
+            stat: Mutex::new(stat),
+        }
+    }
 }

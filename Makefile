@@ -1,8 +1,12 @@
-MODE ?= debug
+export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
+export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
+
+MODE ?= release
 RV_SMP ?= 1
-LA_SMP ?= 4
+LA_SMP ?= 1
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
+# default, sh, ltp
 INIT ?= default
 RV_ELF ?= os/target/riscv64gc-unknown-none-elf/$(MODE)/os
 LA_ELF ?= os/target/loongarch64-unknown-none/$(MODE)/os
@@ -19,28 +23,28 @@ endif
 all: build-user copy-user build copy
 
 build-rv:
-	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INITPROC=$(INITPROC)
+	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)
 build-la:
-	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INITPROC=$(INITPROC)
+	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)
 
 build-user-rv:
-	cd user-rv && $(MAKE) build
+	cd user && $(MAKE) build ARCH=riscv64
 build-user-la:
-	cd user-la && $(MAKE) build
+	cd user && $(MAKE) build ARCH=loongarch64
 build-user: build-user-rv build-user-la
 
-copy-rv:
+copy-rv:	
 	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv
 copy-la:
 	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la
 
 copy-user-rv:
-	cd user-rv && find target/riscv64gc-unknown-none-elf/release/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/riscv/ \;
+	cd user && find target/riscv64gc-unknown-none-elf/release/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/riscv/ \;
 copy-user-la:
-	cd user-la && find target/loongarch64-unknown-none/release/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/la/ \;
+	cd user && find target/loongarch64-unknown-none/release/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/la/ \;
 copy-user: copy-user-rv copy-user-la
 
-copy: copy-rv copy-la copy-user-rv copy-user-la
+copy: copy-rv  copy-user-rv copy-la  copy-user-la
 
 build: build-rv build-la
 
@@ -73,6 +77,7 @@ test-la: build-user-la copy-user-la build-la copy-la
 	-rtc base=utc \
 	| tee kernel_output.log
 
+debug-rv: MODE = debug
 debug-rv: build-user-rv copy-user-rv build-rv copy-rv
 	@rm -f kernel_output.log
 	@qemu-system-riscv64 -machine virt \
@@ -87,6 +92,7 @@ debug-rv: build-user-rv copy-user-rv build-rv copy-rv
 	-S -gdb tcp::$(RV_GDB_PORT) \
 	| tee kernel_output.log
 
+debug-la: MODE = debug
 debug-la: build-user-la copy-user-la build-la copy-la
 	@rm -f kernel_output.log
 	@qemu-system-loongarch64 \

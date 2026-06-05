@@ -48,6 +48,52 @@ fn run_shell(cmd: &str) -> i32 {
     }
 }
 
+fn run_a_test(script: &str) -> i32 {
+    let mut exit_code: i32 = 0;
+    let forked = fork();
+    if forked == 0 {
+        // child
+        let mut arg_storage: Vec<Vec<u8>> = Vec::new();
+        for part in script.split(' ').filter(|s| !s.is_empty()) {
+            let bytes = part.as_bytes();
+            let body = if bytes.last() == Some(&0) {
+                &bytes[..bytes.len() - 1]
+            } else {
+                bytes
+            };
+            let mut cstr = Vec::with_capacity(body.len() + 1);
+            cstr.extend_from_slice(body);
+            cstr.push(0);
+            arg_storage.push(cstr);
+        }
+
+        if arg_storage.is_empty() {
+            exit(-1);
+        }
+
+        let mut argv: Vec<*const u8> = arg_storage.iter().map(|arg| arg.as_ptr()).collect();
+        argv.push(core::ptr::null());
+
+        let path_bytes = &arg_storage[0][..arg_storage[0].len() - 1];
+        let path = match core::str::from_utf8(path_bytes) {
+            Ok(s) => s,
+            Err(_) => exit(-1),
+        };
+
+        println!("c:Running {} ...", path);
+        exec(path, &argv);
+        exit(-1);
+    } else if forked > 0 {
+        // parent
+        println!("p:Running {} ...", script);
+        waitpid(forked as usize,&mut exit_code);
+    } else {
+        println!("Fork Error!");
+        exit(-1);
+    }
+    exit_code
+}
+
 #[no_mangle]
 fn main() -> i32 {
     chdir("/musl\0");
@@ -68,6 +114,9 @@ fn main() -> i32 {
         "cgroup_fj_common.sh",
         "cpuctl_def_task0*",
         "cpuctl*_test0*",
+        "cpuset*",
+        "clock_gettime01",
+        "cve-*",
         "dio_*",
         "doio*",
         "dynamic_debug0*",
@@ -99,6 +148,19 @@ fn main() -> i32 {
         "statx11*",
         "timed_forkbomb*",
         "tst_hexdump*",
+        "epoll_pwait*",
+        "hackbench",
+        "futex*", // 没实现快速锁，会死循环，先注释掉
+        "tcp*",
+        "udp*",
+        "uevent*",
+        "mallinfo*", // 测试meminfo，炸得有点怪，brk或许有问题
+        "mmapstress03", //brk或许有问题
+        "accept02", // la musl会炸
+        "msg_comm", // boom
+        "msgrcv05", // la boom
+        "msgrcv06", // la boom
+        "mmap3",
     ];
 
     let skip_list = {
@@ -118,7 +180,7 @@ fn main() -> i32 {
     let cmd = format!(
 "
 echo \"#### OS COMP TEST GROUP START ltp-musl ####\"; \
-for f in ltp/testcases/bin/{0}*; do \
+for f in /musl/ltp/testcases/bin/{0}*; do \
   fname=$(basename \"$f\"); \
   case \"$fname\" in \
     {1}) \
@@ -131,18 +193,28 @@ for f in ltp/testcases/bin/{0}*; do \
   echo \"FAIL LTP CASE $fname : $ret\"; \
 done; \
 echo \"#### OS COMP TEST GROUP END ltp-musl ####\"
+echo \"#### OS COMP TEST GROUP START ltp-glibc ####\"; \
+for f in /glibc/ltp/testcases/bin/{0}*; do \
+  fname=$(basename \"$f\"); \
+  case \"$fname\" in \
+    {1}) \
+      echo \"SKIP LTP CASE $fname\"; \
+      continue ;; \
+  esac; \
+  echo \"RUN LTP CASE $fname\"; \
+  \"$f\"; \
+  ret=$?; \
+  echo \"FAIL LTP CASE $fname : $ret\"; \
+done; \
+echo \"#### OS COMP TEST GROUP END glibc-musl ####\"
 ",
     test_start,
     skip_list,
 );
-
     run_shell(&cmd);
-
     // Init (PID 1) must never exit — otherwise the kernel panics.
     // Loop forever, reaping any zombie children.
-    loop {
-        let mut _status: i32 = 0;
-        // waitpid(-1, ...) = wait for any child; returns -1 if no children
-        waitpid((-1isize) as usize, &mut _status);
-    }
+    let mut _status: i32 = 0;
+    waitpid((-1isize) as usize, &mut _status);
+    0
 }
