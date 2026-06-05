@@ -38,7 +38,7 @@ fn get_futex_wait_queue(uaddr: usize) -> Arc<Mutex<WaitQueue>> {
         .clone()
 }
 pub use crate::{
-    arch::timer::{ADJ_ESTERROR, ADJ_FREQUENCY, ADJ_MAXERROR, ADJ_MICRO, ADJ_NANO, ADJ_OFFSET, ADJ_OFFSET_SINGLESHOT, ADJ_OFFSET_SS_READ, ADJ_SETOFFSET, ADJ_STATUS, ADJ_TAI, ADJ_TICK, ADJ_TIMECONST, CLOCK_ADJ_ALLOWED_MODES, CLOCK_ADJ_RW_STATUS, CLOCK_ADJ_STATE, CLOCK_ADJ_VALID_STATUS, CLOCK_REALTIME_OFFSET_NS, ITimerVal, RtcTime, STA_CLOCKERR, STA_CLK, STA_DEL, STA_FLL, STA_FREQHOLD, STA_INS, STA_MODE, STA_NANO, STA_PLL, STA_PPSERROR, STA_PPSFREQ, STA_PPSJITTER, STA_PPSSIGNAL, STA_PPSTIME, STA_PPSWANDER, STA_UNSYNC, TIME_ERROR, TIME_OK, TimeSpec, TimeVal, Timex, get_real_time_ns, get_time_ms, get_time_us, get_timer_ticks}, 
+    timer::*,
     fs::*, 
     mm::{PageTable, UserBuffer, VirtAddr, mmap, translated_byte_buffer, translated_str, translated_byte_buffer_mut, translated_write}, 
     process::{
@@ -659,7 +659,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             }
         }
         TIOCGWINSZ => {
-            if fd > 2 {
+            if fd > 3 {
                 warn!("[kernel] sys_ioctl: TIOCGWINSZ request on non-tty fd {}", fd);
                 return ENOTTY.as_isize();
             }
@@ -1176,19 +1176,18 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
 
     // 2. 继续执行逻辑
     if let Some(mut app_inode) = app_inode_opt {
-        let stat = app_inode.inode.get_stat();
-        let is_dir = (stat.mode & 0o170000) == 0o040000; 
-        let can_exec = (stat.mode & 0o111) != 0;        
-        if is_dir || !can_exec {
-            return EACCES.as_isize();
+        {
+            let stat = app_inode.inode.get_stat();
+            let is_dir = (stat.mode & 0o170000) == 0o040000;
+            let perm = app_inode.get_perm();
+            let can_exec = perm.can_execute(uid, gid);
+            if is_dir || !can_exec {
+                warn!("[kernel] sys_exec: target '{}' is not executable (is_dir={}, mode={:#o})", path_str, is_dir, stat.mode);
+                return EACCES.as_isize();
+            }
         }
-        debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
         
-        // 鉴权逻辑，但当前实现用户几乎一定是root，所以似乎没用
-        let perm = app_inode.get_perm();
-        if !perm.can_execute(uid, gid) {
-            return EACCES.as_isize();
-        }
+        debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
 
         let app_name = app_inode.get_dentry().name.clone();
 
@@ -2109,79 +2108,6 @@ pub fn sys_mprotect(_start: usize, _len: usize, _prot: usize) -> isize {
     0
 }
 
-/// YOUR JOB: Implement mmap.
-pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: usize) -> isize {
-    trace!("kernel:pid[{}] sys_mmap called with start={:#x}, len={:#x}, prot={:#x}, flags={:#x}, fd={}, off={:#x}", 
-        current_task().unwrap().process().pid.0, start, len, port, flags, fd, _off);
-    let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
-    let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
-
-    let is_anonymous = mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS);
-    let is_shared = mmap_flags.contains(mmap::MMapFlags::MAP_SHARED);
-    let mut file_inner = None;
-
-    // 前置检查并提取文件对象
-    if !is_anonymous {
-        if fd < 0 {
-            return Errno::EBADF.as_isize();
-        }
-        let task = current_task().unwrap();
-        let process = task.process();
-        let inner = process.inner_exclusive_access();
-        let fd_usize = fd as usize;
-        
-        if fd_usize < inner.fd_table.len() {
-            if let Some(file) = &inner.fd_table[fd_usize].file {
-                file_inner = Some(file.clone()); // 拿到文件的 Arc 强引用
-            } else {
-                return Errno::EBADF.as_isize();
-            }
-        } else {
-            return Errno::EBADF.as_isize();
-        }
-    }
-
-    //将 file_inner 和 _off 逐层转发给 do_mmap
-    let ret = match mmap::do_mmap(start, len, mmap_prot, mmap_flags, file_inner.clone(), _off) {
-        Ok(addr) => addr,
-        Err(_) => {
-            return Errno::ENOMEM.as_isize(); // 内存不足
-        }
-    };
-
-    // 
-    // 只有在非匿名且非共享（即传统的 MAP_PRIVATE 读文件到内存）时，执行你原有的手动读取
-    if !is_anonymous && !is_shared {
-        if let Some(file) = file_inner {
-            if file.readable() {
-                let token = current_user_token();
-                // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
-                let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
-                // 使用 read_at 确保不受 FD 当前 offset 影响
-                file.read_at(_off, user_buf);
-            }
-        }
-    }
-    #[cfg(target_arch = "loongarch64")]
-    // 手动刷新指令缓存
-    unsafe { core::arch::asm!("ibar 0"); }
-    
-    debug!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
-    ret as isize
-}
-
-/// YOUR JOB: Implement munmap.
-pub fn sys_munmap(start: usize, len: usize) -> isize {
-    let task = current_task().unwrap();
-    let process = task.process();
-    trace!("kernel:pid[{}] sys_munmap NOT COMPLITED", process.pid.0);
-    if let Ok(_) = mmap::do_munmap(start,len) {
-        0
-    } else {
-        EINVAL.as_isize() // 目标地址不合法
-    }
-}
-
 /// 修改断点（调整堆空间）
 /// addr如果为0表示查询当前断点
 pub fn sys_brk(addr: usize) -> isize {
@@ -2642,32 +2568,34 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
     0 
 }
 
-
-pub fn sys_ftruncate(fd: usize, _len: usize) -> isize {
+/// 调整文件大小
+pub fn sys_ftruncate(fd: usize, len: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
     
-    // 1. 严谨校验 FD 合法性 (不能越界)
+    // 校验
     if fd >= inner.fd_table.len() {
         return EBADF.as_isize(); // -EBADF (Bad file descriptor)
     }
     
-    // 2. 获取文件对象
+    // 获取文件
     if let Some(file) = &inner.fd_table[fd].file {
-        // 3. 严谨校验：ftruncate 要求文件必须是以可写模式打开的
+        // 鉴权
         if !file.writable() {
-            return EINVAL.as_isize(); // -EINVAL (Invalid argument) 或者 EBADF
+            return EACCES.as_isize();
         }
-        
-        // 文件有效且可写！
-        // 由于你的 File trait 目前没有定义 truncate 方法，
-        // 且 LTP 这里只是初始化临时测试文件，我们在内存鉴权通过后直接放行。
-        return 0;
+        // 调用文件系统的 truncate 方法
+        if file.truncate(len) {
+            return 0;
+        } else {
+            // 文件系统不支持 truncate（如 pipe、socket 等）
+            return EINVAL.as_isize();
+        }
     }
     
-    // FD 为空（被 close 了或者没分配）
-    EBADF.as_isize() // -EBADF
+    // fd 指定文件不存在
+    EBADF.as_isize()
 }
 
 /// 信号处理完成后的恢复
@@ -2915,10 +2843,7 @@ pub fn sys_request_key(_type: *const u8, _desc: *const u8, _callout_info: *const
 pub fn sys_keyctl(_operation: i32, _arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
     ENOSYS.as_isize()
 }
-pub fn sys_msync(_addr: usize, _len: usize, _flags: u32) -> isize {
-    // 我们的 shm 是纯内存文件系统，数据实时可见，不需要刷盘，直接伪装成功！
-    0
-}
+
 pub fn sys_times(tms_ptr: *mut usize) -> isize {
     //println!("[kernel] sys_times called with tms_ptr={:#x}", tms_ptr as usize);
     let token = current_user_token();
@@ -3264,8 +3189,11 @@ pub fn sys_rt_sigtimedwait(
             suspend_current_and_run_next();
             
         } else {
+            suspend_current_and_run_next();
+            /*
             let sig_queue_guard = SIGNAL_WAIT_QUEUE.lock();
             current_task_to_sleep(sig_queue_guard);
+             */
         }
     }
 }

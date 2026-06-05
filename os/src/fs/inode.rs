@@ -243,13 +243,19 @@ impl File for OSInode {
         // 5. 成功返回新的偏移量
         new_offset as isize
     }
-
-    fn as_any(&self) -> &dyn Any { self }
+    
     fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
         // 转发给底层的具体文件系统 Inode
         self.inode.get_shared_page(page_offset)
     }
+
+    fn truncate(&self, len: usize) -> bool {
+        self.inode.truncate(len)
+    }
+
+    fn as_any(&self) -> &dyn Any { self }
 }
+
 bitflags! {
     ///  The flags argument to the open() system call is constructed by ORing together zero or more of the following values:
     pub struct OpenFlags: u32 {

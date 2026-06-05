@@ -1,7 +1,6 @@
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, lazy};
 use crate::fs::ROOT_DENTRY;
 use crate::fs::Dentry;
@@ -18,10 +17,9 @@ use crate::drivers::loopdev::*;
 use crate::mm::{FrameTracker, PhysPageNum };
 use crate::mm::frame_alloc;
 use crate::mm::PageSize::Page4K;
+use crate::fs::ino::get_next_ino;
 
 use crate::PAGE_SIZE;
-// 全局唯一的 Inode 分配器
-pub static TMPFS_INO_COUNTER: AtomicUsize = AtomicUsize::new(10000);
 
 use lazy_static::lazy_static;
 /// 大页目录
@@ -31,7 +29,6 @@ lazy_static! {
 
 /// 临时文件inode
 pub struct TmpfsFileInode {
-    ino: usize,
     pages: Mutex<BTreeMap<usize, FrameTracker>>,
     size: Mutex<usize>,
     stat: Mutex<Stat>,
@@ -49,9 +46,8 @@ impl TmpfsFileInode {
         stat.mode = full_mode;
         stat.nlink = 1;
         stat.blksize = 4096;
-        stat.ino = TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst) as u64;
+        stat.ino = get_next_ino();
         Self {
-            ino: stat.ino as usize,
             pages: Mutex::new(BTreeMap::new()),
             size: Mutex::new(0),
             stat: Mutex::new(stat),
@@ -131,6 +127,21 @@ impl super::VfsInode for TmpfsFileInode {
     fn get_size(&self) -> usize {
         *self.size.lock()
     }
+    fn truncate(&self, len: usize) -> bool {
+        let mut size = self.size.lock();
+        let mut pages = self.pages.lock();
+        let old_size = *size;
+        // 更新大小信息
+        *size = len;
+
+        if len < old_size {
+            // 收缩：释放超出部分的物理页
+            let new_end_page = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+            pages.retain(|&page_idx, _| page_idx < new_end_page);
+        }
+        // 扩张：tmpfs 用惰性分配策略，跳过
+        true
+    }
     fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
         let mut frames = self.pages.lock();
         // 如果 mmap 映射的页超出了当前文件大小，Linux 允许直接分配空白页给它
@@ -142,12 +153,14 @@ impl super::VfsInode for TmpfsFileInode {
         });
         Some(frame.ppn)
     }
+    fn ino(&self) -> u64 {
+        self.stat.lock().ino
+    }
     fn get_stat(&self) -> super::Stat {
         let file_size = self.get_size() as i64;
         let mut stat = *self.stat.lock();
         stat.size = file_size;
         stat.blocks = (file_size + 511) / 512;
-        stat.ino = self.ino as u64;
         stat
     }
     
@@ -189,7 +202,6 @@ impl super::VfsInode for TmpfsFileInode {
 
 /// 临时目录inode
 pub struct TmpfsDirInode {
-    ino: usize,
     entries: Mutex<BTreeMap<String, Arc<dyn super::VfsInode>>>,
     stat: Mutex<Stat>,
 }
@@ -201,9 +213,8 @@ impl TmpfsDirInode {
         stat.mode = full_mode;
         stat.nlink = 2;
         stat.blksize = 512;
-        stat.ino = TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst) as u64;
+        stat.ino = get_next_ino();
         Self {
-            ino: stat.ino as usize,
             entries: Mutex::new(BTreeMap::new()),
             stat: Mutex::new(stat),
         }
@@ -227,11 +238,10 @@ impl super::VfsInode for TmpfsDirInode {
     fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
     fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.stat.lock().ino }
     
     fn get_stat(&self) -> super::Stat {
-        let mut stat = *self.stat.lock();
-        stat.ino = self.ino as u64;
-        stat
+        *self.stat.lock()
     }
     
     fn get_statx(&self) -> super::Statx { 
@@ -259,7 +269,7 @@ impl super::VfsInode for TmpfsDirInode {
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn super::VfsInode>> {
         if mode == 0o120777 {
             let symlink_inode = Arc::new(TmpfsFsSymbolicLinkInode {
-                ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
+                ino: get_next_ino() as usize,
                 target: String::new(),
                 stat: Mutex::new({
                     let mut s = Stat::default();
@@ -304,7 +314,7 @@ impl super::VfsInode for TmpfsDirInode {
         }
     }
     fn create_symlink(&self, name: &str, target: &str) -> Option<Arc<dyn VfsInode>> {
-        let inodeid = TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let inodeid = get_next_ino() as usize;
         //println!("Creating symlink: name={}, target={}, assigned ino={}", name, target, inodeid);
         let symlink_inode = Arc::new(TmpfsFsSymbolicLinkInode {
             ino: inodeid,
@@ -591,6 +601,7 @@ impl VfsInode for TmpfsFsSymbolicLinkInode {
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
+    fn ino(&self) -> u64 { self.ino as u64 }
 }
 impl TmpfsFsSymbolicLinkInode{
     fn new(target: String) -> Self {
@@ -598,7 +609,7 @@ impl TmpfsFsSymbolicLinkInode{
         stat.mode = 0o120777; // S_IFLNK
         stat.nlink = 1;
         stat.blksize = 4096;
-        stat.ino = TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst) as u64;
+        stat.ino = get_next_ino();
         Self {
             ino: stat.ino as usize,
             target,

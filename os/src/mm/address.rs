@@ -153,7 +153,7 @@ impl PhysAddr {
     }
     /// Get the (ceil) physical page number
     pub fn std_ceil(&self) -> PhysPageNum {
-        PhysPageNum((self.0 - 1 + PAGE_SIZE) / PAGE_SIZE)
+        PhysPageNum((self.0  + PAGE_SIZE - 1) / PAGE_SIZE)
     }
     /// Get the page offset of physical address
     pub fn std_page_offset(&self) -> usize {
@@ -290,6 +290,9 @@ where
     }
     pub fn get_end(&self) -> T {
         self.r
+    }
+    pub fn contains(&self, t: T) -> bool {
+        self.l <= t && t < self.r
     }
 }
 impl<T> IntoIterator for SimpleRange<T>

@@ -1,6 +1,6 @@
 // 为LA64部分重写，尚未完善
 
-pub use crate::arch::timer_common::*;
+pub use crate::timer::*;
 
 use crate::arch::config::UNCHACHED_KERNEL_BASE;
 use core::arch::asm;

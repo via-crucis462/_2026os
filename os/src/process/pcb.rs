@@ -14,6 +14,8 @@ use crate::{
         translated_write, MapArea, MapPermission, MapType, PageSize},
     sync::{MPSafeCell, WaitQueue},
     syscall::errno::Errno::*,
+    ipc::namespace::*,
+    ipc::*,
 };
 use alloc::{
     string::String,
@@ -90,6 +92,7 @@ impl FileDescriptor {
 pub struct ProcessControlBlock {
     pub pid: Arc<PidHandle>,
     pub oom_score_adj: AtomicI32,
+    pub ns_proxy: NsProxy,
     pub inner: MPSafeCell<ProcessControlBlockInner>,
 }
 
@@ -174,6 +177,7 @@ impl ProcessControlBlock {
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),// 注意：实际上只克隆了指针
             oom_score_adj: AtomicI32::new(0),
+            ns_proxy: NsProxy::new(IPCNamespace::new()),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: true, // initproc和shell默认在主核运行
                 pname: String::from("initproc"),
@@ -414,6 +418,7 @@ impl ProcessControlBlock {
         }
         // 内核栈无须改变（fork时已经分配了新的）但需要重新映射
         // 先回收旧的 memory_set 资源，避免物理页泄露
+        proc_inner.memory_set.sync_shared_pages();
         proc_inner.memory_set.recycle_data_pages();
         proc_inner.memory_set = memory_set;
 
@@ -525,6 +530,7 @@ impl ProcessControlBlock {
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
             oom_score_adj: AtomicI32::new(self.oom_score_adj.load(Ordering::SeqCst)),
+            ns_proxy: self.ns_proxy.clone(),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: false, 
                 pname: parent_inner.pname.clone(),
@@ -880,12 +886,12 @@ impl ProcessControlBlockInner {
     //回收进程资源，返回子进程组，用于给initproc回收
     pub fn recycle_on_exit(&mut self, exit_code: i32) -> Vec<Arc<ProcessControlBlock>> {
         self.exit_code = exit_code;
+        self.memory_set.sync_shared_pages();
         self.memory_set.recycle_data_pages();
         self.fd_table.clear();
         self.signals = SignalFlags::empty();
         core::mem::take(&mut self.children)
     }
-
     pub fn is_zombie(&self) -> bool {
         self.alive_task_count == 0
     }

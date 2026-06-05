@@ -80,6 +80,9 @@ impl VfsInode for Ext4Inode {
             ..Default::default()
         }
     }
+    fn ino(&self) -> u64 {
+        self.inode_id as u64
+    }
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>> {
         if !self.is_dir() {
             return None;

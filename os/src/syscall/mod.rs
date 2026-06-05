@@ -122,6 +122,11 @@ const SYSCALL_GETEGID: usize = 177;
 const SYSCALL_GETTID: usize = 178;
 const SYSCALL_SYSINFO: usize = 179;
 
+const SYSCALL_MSGGET: usize = 186;
+const SYSCALL_MSGCTL: usize = 187;
+const SYSCALL_MSGRCV: usize = 188;
+const SYSCALL_MSGSND: usize = 189;
+
 const SYSCALL_SHMGET: usize = 194;
 
 const SYSCALL_SOCKET: usize = 198;
@@ -151,6 +156,7 @@ const SYSCALL_EXEC: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MSYNC: usize = 227;
+const SYSCALL_FSYNC: usize = 82;
 /// waitpid syscall
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
@@ -187,12 +193,15 @@ const SYSCALL_RESQ: usize = 293;
 const SYSCALL_ACCESSAT: usize = 48;
 pub mod bpf;
 pub mod fs;
-use bpf::*;
+pub mod errno;
 mod process;
 mod prctl;
-pub mod errno;
 mod mm;
 mod net;
+mod ipc;
+
+use ipc::*;
+use bpf::*;
 use fs::*;
 use process::*;
 use prctl::*;
@@ -378,6 +387,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         args[3]
         ),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2] as u32),
+        SYSCALL_FSYNC => sys_fsync(args[0]),
         SYSCALL_ADD_KEY => sys_add_key(args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3], args[4] as i32),
         SYSCALL_REQUEST_KEY => sys_request_key(args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3] as i32),
         SYSCALL_KEYCTL => sys_keyctl(args[0] as i32, args[1], args[2], args[3], args[4]),
@@ -405,6 +415,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
         SYSCALL_COPY_FILE_RANGE => sys_copy_file_range(args[0], args[1] as *mut i64, args[2], args[3] as *mut i64, args[4], args[5] as u32),
         SYSCALL_SHMGET => sys_shmget(args[0] as i32, args[1], args[2] as i32),
+        SYSCALL_MSGGET => sys_msgget(args[0] as u32, args[1]),
+        SYSCALL_MSGSND => sys_msgsnd(args[0], args[1], args[2], args[3]),
+        SYSCALL_MSGRCV => sys_msgrcv(args[0], args[1], args[2], args[3] as isize, args[4]),
+        SYSCALL_MSGCTL => sys_msgctl(args[0] as u32, args[1], args[2]),
         SYSCALL_CLOCK_ADJTIME => sys_clock_adjtime(args[0] as i32, args[1] as *mut Timex),
         SYSCALL_CLOCK_SETTIME => sys_clock_settime(args[0] as i32, args[1] as *const TimeSpec),
         SYSCALL_WAITID => sys_waitid(args[0] as i32, args[1] as i32, args[2] as *mut SigInfo, args[3] as i32),
@@ -440,6 +454,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             syscall_id, args[0], args[1], args[2], args[3], args[4], ret
         );*/
     //println!("[K] hart[{}] PID{} finished syscall {} with return value {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
-    info!("[K] hart[{}] PID{} finished syscall {} with return value {}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
+    info!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
     ret
 }
