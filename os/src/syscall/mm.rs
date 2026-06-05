@@ -121,11 +121,17 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: u
 pub fn sys_munmap(start: usize, len: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
+    
+    // 参数检查：地址必须页对齐，长度不能为0，且映射区域不能超过用户空间上限
+    if start + len >= USER_APP_MAX_SIZE || start % PAGE_SIZE != 0 || len == 0 {
+        return EINVAL.as_isize();
+    }
+
     trace!("kernel:pid[{}] sys_munmap NOT COMPLITED", process.pid.0);
     if let Ok(_) = mmap::do_munmap(start,len) {
         0
     } else {
-        EINVAL.as_isize() // 目标地址不合法
+        EINVAL.as_isize()
     }
 }
 

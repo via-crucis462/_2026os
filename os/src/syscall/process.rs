@@ -5,7 +5,7 @@
 use core::{panic, result};
 
 use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
-use crate::{get_hart_id};
+use crate::{USER_APP_MAX_SIZE, get_hart_id};
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
 use alloc::collections::btree_map::Values;
@@ -3212,6 +3212,7 @@ pub fn sys_prlimit64(
     const RLIMIT_NOFILE: i32 = 7;
     const RLIMIT_MEMLOCK: i32 = 8;
     const RLIMIT_CORE: i32 = 4;
+    const RLIMIT_DATA: i32 = 2;
     info!("sys_prlimit64 called with pid={}, resource={}, new_limit={:#x}, old_limit={:#x}", pid, resource, new_limit as usize, old_limit as usize);
     if pid != 0 {
         return Errno::EPERM.as_isize(); // 不允许修改其他进程
@@ -3254,6 +3255,13 @@ pub fn sys_prlimit64(
             // core dump 文件大小限制，伪实现
             if !old_limit.is_null() {
                 translated_write(token, old_limit, Rlimit64 { cur_lmt: 0, max_lmt: 0 });
+            }
+            0
+        }
+        RLIMIT_DATA => {
+            // 数据段大小限制，不允许修改，设为USER_APP_MAX_SIZE
+            if !old_limit.is_null() {
+                translated_write(token, old_limit, Rlimit64 { cur_lmt: USER_APP_MAX_SIZE, max_lmt: USER_APP_MAX_SIZE });
             }
             0
         }

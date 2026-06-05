@@ -99,7 +99,7 @@ fn main() -> i32 {
     chdir("/musl\0");
 
     // 测例首字母
-    let test_start = "mmap";
+    let test_start = "munmap";
 
     // 测例黑名单
     const SKIP_CASES: &[&str] = &[
