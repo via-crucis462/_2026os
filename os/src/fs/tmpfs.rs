@@ -562,6 +562,9 @@ pub fn setup_oscomp_env() {
     "#;
     sbin_dentry.insert("ip".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())));
     bin_dentry.insert("ip".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())));
+    //处理一个绝对路径脚本
+    let symlink_inode: Arc<dyn super::VfsInode> = Arc::new(TmpfsFsSymbolicLinkInode::new("/musl/ltp/testcases".to_string()));
+    root.mount_child("testcases".to_string(), symlink_inode);
 }
 
 // 挂载 /sys/kernel/mm/hugepages

@@ -151,7 +151,6 @@ fn main() -> i32 {
         "epoll_pwait*",
         "hackbench",
         "futex*", // 没实现快速锁，会死循环，先注释掉
-        "tcp*",
         "udp*",
         "uevent*",
         "mallinfo*", // 测试meminfo，炸得有点怪，brk或许有问题

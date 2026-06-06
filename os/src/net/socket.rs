@@ -13,7 +13,8 @@ use crate::fs::{File, Stat};    // 引入 File trait 和 Stat
 use crate::mm::UserBuffer;      // 引入 UserBuffer
 use crate::net::vec;
 use crate::auth::{PermStat, FileMode}; // 引入权限相关的类型
-
+use smoltcp::socket::raw::{Socket as RawSocketSmol, PacketBuffer as RawPacketBuffer, PacketMetadata as RawPacketMetadata};
+use smoltcp::wire::{IpVersion, IpProtocol};
 pub struct TcpSocket {
     pub handle: SocketHandle,
 }
@@ -179,7 +180,7 @@ impl UdpSocket {
         *bound = Some(port);
         
         // 把自己的接收队列注册到全局映射表里！
-        // 这样别人往这个端口发数据，就会直接掉进我们的 recv_queue 里。
+        // 这样别人往这个端口发数据，就会直接进 recv_queue 里。
         map.insert(port, self.recv_queue.clone());
         0 // 成功
     }
@@ -200,7 +201,7 @@ impl UdpSocket {
                 let src_port = self.bound_port.lock().unwrap_or(49152); // 没 bind 则用个临时端口
                 let src_ep = IpEndpoint::new(IpAddress::v4(127, 0, 0, 1), src_port);
                 
-                // 3. 🌟 核心：直接把数据塞进目标 Socket 的嘴里！
+                // 把数据塞进目标 Socket 
                 target_queue.lock().push_back((src_ep, buf.to_vec()));
                 return buf.len() as isize;
             } else {
@@ -423,5 +424,113 @@ impl File for UnixSocket {
 
     fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
 
+    fn as_any(&self) -> &dyn Any { self }
+}
+pub struct RawSocket {
+    pub handle: SocketHandle,
+}
+
+impl RawSocket {
+    /// protocol 对应 IP 层协议号，例如 IPPROTO_ICMP = 1
+    pub fn new(protocol: u8) -> Self {
+        // 分配接收和发送缓冲区，需携带 Metadata 以保存报文边界
+        let rx_buffer = RawPacketBuffer::new(
+            vec![RawPacketMetadata::EMPTY; 32],
+            vec![0; 8192]
+        );
+        let tx_buffer = RawPacketBuffer::new(
+            vec![RawPacketMetadata::EMPTY; 32],
+            vec![0; 8192]
+        );
+        
+        // 创建 smoltcp 的 Raw Socket，绑定到 IPv4 和指定的协议号
+        let socket = RawSocketSmol::new(
+            IpVersion::Ipv4, 
+            IpProtocol::from(protocol), 
+            rx_buffer, 
+            tx_buffer
+        );
+        
+        // 加入全局 SocketSet 中进行调度
+        let handle = SOCKET_SET.exclusive_access().add(socket);
+        Self { handle }
+    }
+}
+
+impl File for RawSocket {
+    fn readable(&self) -> bool {
+        let mut sockets = SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
+        socket.can_recv()
+    }
+
+    fn writable(&self) -> bool {
+        let mut sockets = SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
+        socket.can_send()
+    }
+
+    fn read(&self, mut buf: UserBuffer) -> usize {
+        let mut sockets = SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
+        
+        if socket.can_recv() {
+            if let Ok(recv_slice) = socket.recv() {
+                let len = recv_slice.len();
+                let mut current = 0;
+                // 分散读：将底层的 IP 报文拷贝到用户态的 IoVec 数组中
+                for buffer in buf.buffers.iter_mut() {
+                    let copy_len = buffer.len().min(len.saturating_sub(current));
+                    if copy_len == 0 { break; }
+                    buffer[..copy_len].copy_from_slice(&recv_slice[current..current + copy_len]);
+                    current += copy_len;
+                    if current == len { break; }
+                }
+                return current;
+            }
+        }
+        0 // 阻塞逻辑请根据你内核的机制调整（例如返回 EWOULDBLOCK 或挂起）
+    }
+
+    fn write(&self, buf: UserBuffer) -> usize {
+        let mut sockets = SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
+        
+        if socket.can_send() {
+            let total_len = buf.len();
+            // 聚集写：将用户态多段内存拼凑成一个完整的报文
+            let mut data = vec![0u8; total_len];
+            let mut current = 0;
+            for buffer in buf.buffers.iter() {
+                let copy_len = buffer.len();
+                data[current..current + copy_len].copy_from_slice(buffer);
+                current += copy_len;
+            }
+            
+            // 发射原始数据包
+            if let Ok(_) = socket.send_slice(&data) {
+                return total_len;
+            }
+        }
+        0
+    }
+
+    fn get_stat(&self) -> Stat {
+        Stat {
+            dev: 0, ino: 0, mode: 0o140000 | 0o666, // 标记为 Socket
+            nlink: 1, uid: 0, gid: 0, rdev: 0, __pad: 0,
+            size: 0, blksize: 0, __pad2: 0, blocks: 0,
+            atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
+            ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
+        }
+    }
+
+    fn get_perm(&self) -> PermStat {
+        let stat = self.get_stat();
+        let mode = FileMode::from_bits_truncate(stat.mode as u16);
+        PermStat { mode, uid: stat.uid, gid: stat.gid }
+    }
+
+    fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
     fn as_any(&self) -> &dyn Any { self }
 }
