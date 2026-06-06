@@ -298,7 +298,7 @@ impl OpenFlags {
     }
 }
 pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> Option<Arc<OSInode>> {
-    debug!("VFS: open_file - path='{}', flags={:?},cwd={}", path, flags, base.name);
+    warn!("VFS: open_file - path='{}', flags={:?},cwd={}", path, flags, base.name);
     let start_node = if path.starts_with('/') {
         ROOT_DENTRY.clone() // 绝对路径，从根开始
     } else {

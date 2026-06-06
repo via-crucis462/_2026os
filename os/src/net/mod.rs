@@ -10,6 +10,14 @@ use crate::sync::MPSafeCell;
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use crate::drivers::block::NET_DEVICE;
+use crate::process::wake_up_one;
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
+use spin::Mutex;
+use crate::sync::WaitQueue;
+use smoltcp::iface::SocketHandle;
+
+
 
 pub struct VirtioNetDevice;
 
@@ -121,7 +129,7 @@ impl phy::TxToken for TxToken {
 
 lazy_static! {
     pub static ref SOCKET_SET: MPSafeCell<SocketSet<'static>> = MPSafeCell::new(SocketSet::new(vec![]));
-
+    pub static ref SOCKET_WAIT_QUEUES: Mutex<BTreeMap<SocketHandle, Arc<Mutex<WaitQueue>>>> = Mutex::new(BTreeMap::new());
     pub static ref NET_IFACE: MPSafeCell<Interface> = {
 
         #[cfg(target_arch = "riscv64")]
@@ -151,4 +159,30 @@ pub fn net_poll() {
     let mut device = VirtioNetDevice;
     let timestamp = Instant::from_millis(crate::arch::timer::get_time_ms() as i64);
     iface.poll(timestamp, &mut device, &mut sockets);
+    let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+    // 遍历底层大数组里的所有套接字
+    for (handle, socket) in sockets.iter_mut() {
+        let mut has_data = false;
+        //检查具体的套接字是否可读
+        match socket {
+            smoltcp::socket::Socket::Raw(raw_sock) => {
+                if raw_sock.can_recv() { has_data = true; }
+            }
+            smoltcp::socket::Socket::Tcp(tcp_sock) => {
+                if tcp_sock.can_recv() { has_data = true; }
+            }
+            smoltcp::socket::Socket::Udp(udp_sock) => {
+                if udp_sock.can_recv() { has_data = true; }
+            }
+            _ => {}
+        }
+        if has_data {
+            if let Some(queue_arc) = queues.get(&handle) {
+                let queue_guard = queue_arc.lock();
+                if !queue_guard.is_empty() {
+                    wake_up_one(queue_guard); 
+                }
+            }
+        }
+    }
 }

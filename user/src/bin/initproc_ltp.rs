@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-#[macro_use]
+
 extern crate user_lib;
 extern crate alloc;
 
@@ -48,7 +48,7 @@ fn run_shell(cmd: &str) -> i32 {
     }
 }
 
-fn run_a_test(script: &str) -> i32 {
+fn _run_a_test(script: &str) -> i32 {
     let mut exit_code: i32 = 0;
     let forked = fork();
     if forked == 0 {

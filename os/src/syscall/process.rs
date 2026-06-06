@@ -3296,13 +3296,19 @@ pub fn sys_prlimit64(
     old_limit: *mut Rlimit64
 ) -> isize {
     const UL_SETFSIZE: i32 = 1;
-    const RLIMIT_NPROC: i32 = 3;
-    const RLIMIT_NOFILE: i32 = 7;
-    const RLIMIT_MEMLOCK: i32 = 8;
-    const RLIMIT_CORE: i32 = 4;
+    const RLIMIT_DATA: i32 = 2;      // 数据段大小
+    const RLIMIT_STACK: i32 = 3;     // 栈大小
+    const RLIMIT_CORE: i32 = 4;      // Core dump 大小
+    const RLIMIT_NPROC: i32 = 6;     // 最大进程数
+    const RLIMIT_NOFILE: i32 = 7;    // 最大打开文件数
+    const RLIMIT_MEMLOCK: i32 = 8;   // 锁定内存大小
+    const RLIMIT_AS: i32 = 9;        // 虚拟地址空间大小
+    
     info!("sys_prlimit64 called with pid={}, resource={}, new_limit={:#x}, old_limit={:#x}", pid, resource, new_limit as usize, old_limit as usize);
     if pid != 0 {
-        return Errno::EPERM.as_isize(); // 不允许修改其他进程
+       if pid != current_task().unwrap().process().getpid() {
+            return Errno::EPERM.as_isize(); 
+        } 
     }
     let token = current_user_token();
     match resource {
@@ -3363,6 +3369,37 @@ pub fn sys_prlimit64(
                 }
             }
             0
+        }
+        RLIMIT_DATA | RLIMIT_NPROC | RLIMIT_AS => {
+            let task = current_task().unwrap();
+            let process = task.process();
+            let mut proc_inner = process.inner_exclusive_access();
+            
+            // 匹配对应的资源字段
+            let target_limit = match resource {
+                RLIMIT_DATA => &mut proc_inner.rlimit_data,
+                RLIMIT_NPROC => &mut proc_inner.rlimit_nproc,
+                RLIMIT_AS => &mut proc_inner.rlimit_as,
+                _ => unreachable!(), 
+            };
+
+            // 如果传了 old_limit，把当前内核的值写回给用户
+            if !old_limit.is_null() {
+                if !try_translated_write(token, old_limit, *target_limit) {
+                    return EFAULT.as_isize();
+                }
+            }
+
+            // 如果传了 new_limit，把用户的新值更新到内核
+            if !new_limit.is_null() {
+                if let Some(new) = try_translated_read(token, new_limit) {
+                    *target_limit = new; 
+                } else {
+                    return EFAULT.as_isize();
+                }
+            }
+            
+            0 // 返回成功
         }
         // 其他请求暂不支持
         _ => Errno::EINVAL.as_isize()

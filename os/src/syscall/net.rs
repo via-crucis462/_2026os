@@ -427,42 +427,33 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process(); 
     let mut inner = process.inner_exclusive_access();
-    
     // 1. 提取标志位
     let cloexec = (socket_type & 0o2000000) != 0;
     let nonblock = (socket_type & 0o4000) != 0;
-    
     // 2. 提取真正的 socket 核心类型 (屏蔽掉标志位)
     let real_socket_type = socket_type & 0xff;
-
     if domain != 2 && domain != 1 {
         // We only support AF_INET(2) and AF_UNIX(1) for now
         return crate::syscall::errno::Errno::EAFNOSUPPORT.as_isize();
     }
-    
-    if real_socket_type == 3 {
-        // SOCK_RAW
-        return crate::syscall::errno::Errno::ESOCKTNOSUPPORT.as_isize();
-    }
-    
     // 3. 寻找空闲 FD
     let allocated_fd = inner.alloc_fd();
-    
     // 4. 根据类型分配不同的 Socket
-    let socket_file: Arc<dyn crate::fs::File> = if real_socket_type == 2 {
-        // 如果是 UDP，分配 UdpSocket
+    let socket_file: Arc<dyn crate::fs::File> = if real_socket_type == 3 {
+        // 如果是 RAW 套接字，分配 RawSocket，并传入协议号
+        Arc::new(crate::net::socket::RawSocket::new(protocol as u8))
+    } else if real_socket_type == 2 {
+        // 如果是 UDP (SOCK_DGRAM)
         Arc::new(crate::net::socket::UdpSocket::new()) 
     } else {
-        // 否则默认按 TCP 处理
+        // 否则默认按 TCP (SOCK_STREAM) 处理
         Arc::new(crate::net::socket::TcpSocket::new()) 
     };
-    
     let fd_desc = FileDescriptor {
         file: Some(socket_file),
         flags: FdFlags::from_bits_truncate(if nonblock { 0o4000 } else { 0 } | if cloexec { 0o2000000 } else { 0 }),
         status: if nonblock { 0o4000 } else { 0 },
     };
-    
     let fd = if let Some(idx) = allocated_fd {
         inner.fd_table[idx] = fd_desc;
         idx
@@ -475,7 +466,7 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
         "[kernel] sys_socket: pid={} created {} {} socket, protocol={}, nonblock={}, allocated fd={}",
         process.getpid(),                             // 当前进程 PID
         if domain == 2 { "AF_INET" } else { "AF_UNIX" }, // 协议族字符串化
-        if real_socket_type == 2 { "UDP" } else { "TCP" }, // 核心类型字符串化
+        match real_socket_type { 3 => "RAW", 2 => "UDP", _ => "TCP" },// 核心类型字符串化
         protocol,                                 // 协议号
         nonblock,                                 // 是否是非阻塞
         fd                                        // 分配到的文件描述符

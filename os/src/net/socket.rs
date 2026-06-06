@@ -15,6 +15,9 @@ use crate::net::vec;
 use crate::auth::{PermStat, FileMode}; // 引入权限相关的类型
 use smoltcp::socket::raw::{Socket as RawSocketSmol, PacketBuffer as RawPacketBuffer, PacketMetadata as RawPacketMetadata};
 use smoltcp::wire::{IpVersion, IpProtocol};
+use crate::sync::WaitQueue;
+use crate::process::current_task_to_sleep;
+
 pub struct TcpSocket {
     pub handle: SocketHandle,
 }
@@ -428,6 +431,7 @@ impl File for UnixSocket {
 }
 pub struct RawSocket {
     pub handle: SocketHandle,
+    pub rx_wait_queue: Arc<Mutex<WaitQueue>>,
 }
 
 impl RawSocket {
@@ -453,7 +457,9 @@ impl RawSocket {
         
         // 加入全局 SocketSet 中进行调度
         let handle = SOCKET_SET.exclusive_access().add(socket);
-        Self { handle }
+        let rx_wait_queue = Arc::new(Mutex::new(WaitQueue::new()));
+        crate::net::SOCKET_WAIT_QUEUES.lock().insert(handle, rx_wait_queue.clone());
+        Self { handle,rx_wait_queue: Arc::new(Mutex::new(WaitQueue::new())), }
     }
 }
 
@@ -471,25 +477,30 @@ impl File for RawSocket {
     }
 
     fn read(&self, mut buf: UserBuffer) -> usize {
-        let mut sockets = SOCKET_SET.exclusive_access();
-        let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
-        
-        if socket.can_recv() {
-            if let Ok(recv_slice) = socket.recv() {
-                let len = recv_slice.len();
-                let mut current = 0;
-                // 分散读：将底层的 IP 报文拷贝到用户态的 IoVec 数组中
-                for buffer in buf.buffers.iter_mut() {
-                    let copy_len = buffer.len().min(len.saturating_sub(current));
-                    if copy_len == 0 { break; }
-                    buffer[..copy_len].copy_from_slice(&recv_slice[current..current + copy_len]);
-                    current += copy_len;
-                    if current == len { break; }
+        loop {
+            // 1. 每次循环开始，先获取全局 sockets 锁去检查数据
+            let mut sockets = SOCKET_SET.exclusive_access();
+            let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
+            
+            if socket.can_recv() {
+                if let Ok(recv_slice) = socket.recv() {
+                    let len = recv_slice.len();
+                    let mut current = 0;
+                    // 分散读：将底层的 IP 报文拷贝到用户态的 IoVec 数组中
+                    for buffer in buf.buffers.iter_mut() {
+                        let copy_len = buffer.len().min(len.saturating_sub(current));
+                        if copy_len == 0 { break; }
+                        buffer[..copy_len].copy_from_slice(&recv_slice[current..current + copy_len]);
+                        current += copy_len;
+                        if current == len { break; }
+                    }
+                    return current; 
                 }
-                return current;
             }
+            drop(sockets); 
+            let queue_guard = self.rx_wait_queue.lock();     
+            current_task_to_sleep(queue_guard);
         }
-        0 // 阻塞逻辑请根据你内核的机制调整（例如返回 EWOULDBLOCK 或挂起）
     }
 
     fn write(&self, buf: UserBuffer) -> usize {
