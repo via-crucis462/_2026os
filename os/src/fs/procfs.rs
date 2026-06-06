@@ -547,17 +547,19 @@ impl VfsInode for ProcStatusInode {
             None => return 0, 
         };
 
-        let (uid, euid, gid, egid) = {
+        let (uid, euid, gid, egid, locked_kb) = {
  
             let inner = process.inner.exclusive_access(); 
-            (inner.ruid, inner.euid, inner.gid, inner.egid)
+            let locked_kb = inner.locked_bytes / 1024;
+            (inner.ruid, inner.euid, inner.gid, inner.egid, locked_kb)
         };
 
 
         let status_str = format!(
-            "Name:\toscomp_proc\nState:\tR (running)\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t0\n",
+            "Name:\toscomp_proc\nState:\tR (running)\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t0\nVmLck:\t{:>8} kB\n",
             uid, euid, uid, uid, 
-            gid, egid, gid, gid
+            gid, egid, gid, gid,
+            locked_kb
         );
 
         let status_bytes = status_str.as_bytes();

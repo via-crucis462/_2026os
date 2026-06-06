@@ -210,6 +210,7 @@ impl ProcessControlBlock {
                 alive_task_count: 0,
                 tasks: Vec::new(),
                 personality: 0, // 默认 personality 为 0 (通常表示标准 Linux 兼容模式)
+                locked_bytes: 0,
             })
         });
         // 为pcb创建主线程
@@ -558,6 +559,7 @@ impl ProcessControlBlock {
                 tasks: Vec::new(),
                 alive_task_count: 1, // 初始有一个线程
                 personality: parent_inner.personality,
+                locked_bytes: 0, // fork 时不继承父进程的锁定内存
             })
         });
         let new_task = Arc::new(TaskControlBlock {
@@ -835,6 +837,8 @@ pub struct ProcessControlBlockInner {
     pub alive_task_count: isize,
     // 专用于syscall92的personality
     pub personality: usize,
+    // MAP_LOCKED 锁定的内存字节数（用于 /proc/self/status VmLck 字段）
+    pub locked_bytes: usize,
 }
 
 impl ProcessControlBlockInner {

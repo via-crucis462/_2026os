@@ -590,6 +590,7 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
     }
     0
 }
+
 const TCGETS: u32 = 0x5401;
 const TIOCGWINSZ: u32 = 0x5413;
 const RTC_RD_TIME: u32 = 0x80247009; // 真实的 RTC 读取指令号
@@ -635,6 +636,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     if fd >= fd_table.len() || fd_table[fd].file.is_none() {
         return EBADF.as_isize();
     }
+    info!("[kernel] sys_ioctl: fd={}, request={:#x}, argp={:#x}", fd, request, argp);
     let token = proc.inner_exclusive_access().get_user_token();
     match request as u32 {
         TCGETS => {

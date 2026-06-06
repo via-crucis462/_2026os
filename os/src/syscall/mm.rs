@@ -114,6 +114,17 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: u
     unsafe { core::arch::asm!("ibar 0"); }
     
     debug!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
+
+    // 处理 MAP_LOCKED：记录锁定的内存量（用于 /proc/self/status VmLck）
+    // 目前是伪实现，只单纯记录，实际上没“阻止换出”
+    // 但是当前内核没有真正的swap，所以也不需要阻止换出（所有页都在内存中）
+    if mmap_flags.contains(mmap::MMapFlags::MAP_LOCKED) {
+        let task = current_task().unwrap();
+        let proc = task.process();
+        let mut inner = proc.inner_exclusive_access();
+        inner.locked_bytes = inner.locked_bytes.saturating_add(len);
+    }
+
     ret as isize
 }
 
