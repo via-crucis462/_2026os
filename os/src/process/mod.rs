@@ -453,10 +453,15 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
         let cur_mask = task_inner.signal_mask;
         task_inner.signal_mask_backup.push(cur_mask);
         
-        // 屏蔽 action 中指定的掩码 + 当前信号自身
+        // 屏蔽 action 中指定的掩码
         task_inner.signal_mask |= mask;
-        task_inner.signal_mask.insert(signal);
-        
+
+        const SA_NODEFER: usize = 0x40000000;
+        // 如果没有 SA_NODEFER 标志，则在处理信号时自动屏蔽该信号
+        if action.flags & SA_NODEFER == 0 {
+            task_inner.signal_mask.insert(signal);
+        }
+
         let trap_ctx = task_inner.get_trap_cx();
         task_inner.trap_ctx_backup.push(*trap_ctx);
         

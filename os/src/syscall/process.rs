@@ -2604,7 +2604,8 @@ pub fn sys_sigreturn() -> isize {
     
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
-
+    // 验证长度一致
+    assert_eq!(inner.trap_ctx_backup.len(), inner.signal_mask_backup.len(), "Trap context backup and signal mask backup should be in sync");
     // 从trap_ctx备份栈取出上一层备份来恢复
     if let Some(backup) = inner.trap_ctx_backup.pop() {
         let trap_ctx = inner.get_trap_cx();

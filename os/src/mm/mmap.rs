@@ -2,7 +2,6 @@
 #![allow(missing_docs)]
 
 use bitflags::*;
-use riscv::register;
 use crate::{mm::{FrameTracker, MapArea, PhysPageNum, UserBuffer, frame_alloc}, task::processor::*};
 use alloc::{
     collections::BTreeMap,
