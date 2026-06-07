@@ -1055,7 +1055,7 @@ pub fn sys_uname(uts: *mut UtsName) -> isize {
     0
 }
 
-pub fn sys_fork(stack: Option<usize> , _flags: usize) -> isize {
+pub fn sys_fork(stack: Option<usize>, _flags: usize) -> isize {
 	let current_task = current_task().unwrap();
     let current_process = current_task.process();
 	trace!("kernel:pid[{}] old_sys_fork", current_process.pid.0);
@@ -1080,8 +1080,7 @@ pub const CLONE_THREAD: usize = 0x00010000;
 
 // 部分实现
 pub fn sys_clone(flags: usize, stack: usize, _ptid: usize) -> isize {
-    //println!("sys_clone called with flags={:#x}, stack={:#x}, ptid={:#x}", flags, stack, _ptid);
-    if flags & CLONE_THREAD != 0 {
+    if flags & 0xffffff00 != 0 {
         println!("sys_clone: CLONE_THREAD flag is set, cloning a thread with stack={:#x} and ptid={:#x}", stack, _ptid);
         //do_clone_thread(0, stack, flags, _ptid)
         return EINVAL.as_isize()
@@ -1089,6 +1088,78 @@ pub fn sys_clone(flags: usize, stack: usize, _ptid: usize) -> isize {
         //println!("sys_clone: CLONE_THREAD flag is not set, cloning a process with stack={:#x} and ptid={:#x}", stack, _ptid);
         sys_fork((stack != 0).then_some(stack), flags)
     }
+}
+pub fn sys_pthread_create(thread: *mut usize, attr: *const usize, start_routine: usize, arg: usize) -> isize {
+    println!("sys_pthread_create: thread={:#x}, attr={:#x}, start_routine={:#x}, arg={:#x}", thread as usize, attr as usize, start_routine, arg);
+    
+    let token = current_user_token();
+    let current_task = current_task().unwrap();
+    let current_proc = current_task.process();
+    
+    // 1. 尝试从 attr 中读取用户指定的栈地址
+    // pthread_attr_t 布局 (musl): 
+    //   offset 0: __detach_state (4 bytes)
+    //   offset 4: __sched_policy (4 bytes)  
+    //   offset 8: __sched_priority (4 bytes)
+    //   offset 16: __stack (8 bytes on 64-bit)
+    //   offset 24: __stack_size (8 bytes)
+    let user_stack: Option<usize> = if attr as usize != 0 {
+        // 读取 __stack 字段 (offset 16 in pthread_attr_t)
+        let stack_ptr: usize = if let Some(val) = try_translated_read(token, unsafe { (attr as *const usize).add(2) }) {
+            val
+        } else {
+            0
+        };
+        if stack_ptr != 0 {
+            // 读取 __stack_size (offset 24)
+            let stack_size: usize = if let Some(val) = try_translated_read(token, unsafe { (attr as *const usize).add(3) }) {
+                val
+            } else {
+                0
+            };
+            if stack_size > 0 {
+                // 栈顶 = 栈底 + 栈大小 (栈向下增长)
+                Some(stack_ptr + stack_size)
+            } else {
+                Some(stack_ptr)
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    
+    // 2. 创建内核线程，共享父进程地址空间
+    let new_task = current_proc.clone_thread(user_stack, current_task.clone());
+    let new_tid = new_task.gettid();
+    
+    // 3. 设置新线程的入口点和参数
+    {
+        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
+        #[cfg(target_arch = "riscv64")]
+        {
+            trap_cx.sepc = start_routine;
+        }
+        #[cfg(target_arch = "loongarch64")]
+        {
+            trap_cx.era = start_routine;
+        }
+        trap_cx.set_a0(arg);
+    }
+    
+    // 4. 将 TID 写回用户空间
+    if thread as usize != 0 {
+        if !try_translated_write(token, thread, new_tid as usize) {
+            warn!("sys_pthread_create: failed to write TID to user space");
+        }
+    }
+    
+    // 5. 加入调度队列
+    add_task(new_task);
+    
+    println!("sys_pthread_create: created thread with TID {}", new_tid);
+    new_tid as isize
 }
 // path elf路径
 // args 参数数组，必须以0结尾
