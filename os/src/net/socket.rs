@@ -636,3 +636,4 @@ impl File for RawSocket {
     fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
     fn as_any(&self) -> &dyn Any { self }
 }
+

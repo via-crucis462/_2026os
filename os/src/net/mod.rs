@@ -1,6 +1,6 @@
 // os/src/net/mod.rs
 pub mod socket; 
-
+pub mod netlink;
 use alloc::vec;
 use alloc::vec::Vec;
 use smoltcp::phy::{self, Device, DeviceCapabilities};

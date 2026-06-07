@@ -8,6 +8,7 @@ use crate::syscall::errno::Errno;
 use alloc::vec;
 use crate::net::MsgHdr;
 use crate::net::IoVec;
+use crate::net::netlink::StandardNetlinkSocket;
 
 
 /// 获取指定 Socket 的本地地址和端口信息。
@@ -432,14 +433,19 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     let nonblock = (socket_type & 0o4000) != 0;
     // 2. 提取真正的 socket 核心类型 (屏蔽掉标志位)
     let real_socket_type = socket_type & 0xff;
-    if domain != 2 && domain != 1 {
-        // We only support AF_INET(2) and AF_UNIX(1) for now
+    const AF_UNIX: usize = 1;
+    const AF_INET: usize = 2;
+    const AF_NETLINK: usize = 16;
+    if domain != AF_INET && domain != AF_UNIX && domain != AF_NETLINK {
         return crate::syscall::errno::Errno::EAFNOSUPPORT.as_isize();
     }
     // 3. 寻找空闲 FD
     let allocated_fd = inner.alloc_fd();
     // 4. 根据类型分配不同的 Socket
-    let socket_file: Arc<dyn crate::fs::File> = if real_socket_type == 3 {
+    let socket_file: Arc<dyn crate::fs::File> = if domain == AF_NETLINK {
+        // netlink 
+        Arc::new(crate::net::netlink::StandardNetlinkSocket::new(protocol as i32))
+    } else if real_socket_type == 3 {
         // 如果是 RAW 套接字，分配 RawSocket，并传入协议号
         Arc::new(crate::net::socket::RawSocket::new(protocol as u8))
     } else if real_socket_type == 2 {
@@ -538,6 +544,15 @@ pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
 
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     drop(inner); // 提早释放锁
+    if let Some(_netlink_sock) = file.as_any().downcast_ref::<StandardNetlinkSocket>() {
+        // 对于简化的 Netlink 实现，不需要真实的端口绑定逻辑，返回成功即可
+        return 0;
+    }
+
+    //  Raw Socket，防止等会儿 ping 的时候报同样的错
+    if let Some(_raw_sock) = file.as_any().downcast_ref::<crate::net::socket::RawSocket>() {
+        return 0;
+    }
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         // 从 addr 中安全读取端口信息
         let port = {
