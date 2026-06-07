@@ -62,7 +62,7 @@ impl TmpfsFileInode {
 }
 
 impl super::VfsInode for TmpfsFileInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let size = *self.size.lock();
         if offset >= size {
             return 0; 
@@ -93,7 +93,7 @@ impl super::VfsInode for TmpfsFileInode {
     }
 
     // 2. 适配页缓存的文件写入（支持动态自动扩容分配物理页）
-    fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+    fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize {
         let mut size = self.size.lock();
         let mut pages = self.pages.lock();
         let end_offset = offset + buf.len();
@@ -142,7 +142,7 @@ impl super::VfsInode for TmpfsFileInode {
         // 扩张：tmpfs 用惰性分配策略，跳过
         true
     }
-    fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
+    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<Mutex<crate::mm::mmap::PageCache>>> {
         let mut frames = self.pages.lock();
         // 如果 mmap 映射的页超出了当前文件大小，Linux 允许直接分配空白页给它
         let frame = frames.entry(page_offset).or_insert_with(|| {
@@ -151,7 +151,8 @@ impl super::VfsInode for TmpfsFileInode {
             unsafe { core::slice::from_raw_parts_mut(page_kvaddr as *mut u8, PAGE_SIZE).fill(0); }
             f
         });
-        Some(frame.ppn)
+        let page_cache = crate::mm::mmap::PageCache::new(frame.clone());
+        Some(Arc::new(Mutex::new(page_cache)))
     }
     fn ino(&self) -> u64 {
         self.stat.lock().ino
@@ -235,8 +236,8 @@ impl TmpfsDirInode {
 }
 
 impl super::VfsInode for TmpfsDirInode {
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     fn ino(&self) -> u64 { self.stat.lock().ino }
     
@@ -550,7 +551,7 @@ pub struct TmpfsFsSymbolicLinkInode {
     stat: Mutex<Stat>,
 }
 impl VfsInode for TmpfsFsSymbolicLinkInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize { 
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize { 
         let target_bytes = self.target.as_bytes();
         if offset >= target_bytes.len() {
             return 0;
@@ -559,7 +560,7 @@ impl VfsInode for TmpfsFsSymbolicLinkInode {
         buf[..copy_len].copy_from_slice(&target_bytes[offset..offset + copy_len]);
         copy_len
     }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { self.target.len() }
     fn get_stat(&self) -> super::Stat {
         let mut stat = *self.stat.lock();

@@ -2077,3 +2077,11 @@ pub fn sys_fsync(_fd: usize) -> isize {
     0
 }
 
+/// sync: 将所有文件系统缓存同步到磁盘
+/// 暂时和msync同语义
+pub fn sys_sync() -> isize {
+    info!("kernel:pid[{}] sys_sync called", current_task().unwrap().process().pid.0);
+    crate::mm::mmap::sync_shared_page_cache();
+    0
+}
+

@@ -147,8 +147,8 @@ impl VfsInode for ProcPidDirInode {
     }
 
     // --- 目录占位方法 ---
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     fn ino(&self) -> u64 { self.ino }
 
@@ -198,7 +198,7 @@ impl ProcStatInode {
 }
 
 impl VfsInode for ProcStatInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let Some(process) = get_process(self.pid) else {
             return 0;
         };
@@ -229,7 +229,7 @@ impl VfsInode for ProcStatInode {
         read_len
     }
 
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> super::Stat {
@@ -268,7 +268,7 @@ impl VfsInode for OomScoreAdjInode {
     fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { 
         None 
     }
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         // 1. 去进程管理器里获取真实的 PCB
         let score = if let Some(process) = get_process(self.pid) {
             // 直接无锁读取里面真实的 oom_score_adj 值！
@@ -290,7 +290,7 @@ impl VfsInode for OomScoreAdjInode {
         read_len
     }
 
-    fn write_at(&self, _offset: usize, buf: &[u8]) -> usize {
+    fn raw_write_at(&self, _offset: usize, buf: &[u8]) -> usize {
         // 1. 解析 LTP 传进来的 "-1000" 等字符串
         let s = core::str::from_utf8(buf).unwrap_or("").trim();
         if let Ok(score) = s.parse::<i32>() {
@@ -354,7 +354,7 @@ impl ProcMapsInode {
     }
 }
 impl VfsInode for ProcMapsInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let mut maps_str = alloc::string::String::new();
         
         if let Some(process) = crate::task::get_process(self.pid) {
@@ -388,7 +388,7 @@ impl VfsInode for ProcMapsInode {
         read_len
     }
 
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
 
     fn get_stat(&self) -> super::Stat {
         super::Stat {
@@ -437,8 +437,8 @@ impl VfsInode for ProcRootInode {
         None
     }
 
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> super::Stat {
@@ -494,8 +494,8 @@ impl<'a> Write for StackBuffer<'a> {
     }
 }
 impl VfsInode for ProcDirInode {
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {
@@ -540,7 +540,7 @@ impl ProcStatusInode {
 }
 
 impl VfsInode for ProcStatusInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
 
         let process = match get_process(self.pid) {
             Some(p) => p,
@@ -573,7 +573,7 @@ impl VfsInode for ProcStatusInode {
         read_len
     }
 
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize {
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize {
 
         0
     }
@@ -605,7 +605,7 @@ impl ProcSelfSymlinkInode {
 }
 
 impl VfsInode for ProcSelfSymlinkInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
  
         let current_task = crate::task::current_task().unwrap();
         let pid = current_task.getpid();
@@ -651,7 +651,7 @@ impl VfsInode for ProcSelfSymlinkInode {
         }
     }
 
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     fn ino(&self) -> u64 { self.ino }
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
@@ -687,8 +687,8 @@ impl VfsInode for ProcNsDirInode {
         }
     }
 
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     fn ino(&self) -> u64 { self.ino }
     impl_default_statx!();
@@ -707,8 +707,8 @@ impl ProcNsFileInode {
 }
 
 impl VfsInode for ProcNsFileInode {
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
 
     fn get_stat(&self) -> Stat {
         // 给不同的 ns 类型分配真实的 Linux 默认 Inode 编号
@@ -746,7 +746,7 @@ impl MemInfoInode {
 }
 
 impl VfsInode for MemInfoInode {
-   fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+   fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let free_frames = get_free_frames(); 
         let free_kb = free_frames * 4;
         let total_kb = crate::arch::config::MEMORY_SIZE / 1024;
@@ -769,7 +769,7 @@ impl VfsInode for MemInfoInode {
         
         read_len
     }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {
@@ -849,7 +849,7 @@ impl MountsInode {
 }
 
 impl VfsInode for MountsInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         if offset > 0 { return 0; }
         // 伪造的标准 Linux 挂载信息表
         let mounts_str = "rootfs / rootfs rw 0 0\nproc /proc proc rw 0 0\ndevtmpfs /dev devtmpfs rw 0 0\n";
@@ -859,7 +859,7 @@ impl VfsInode for MountsInode {
         len
     }
 
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {
@@ -927,7 +927,7 @@ impl CgroupsInode {
 }
 
 impl VfsInode for CgroupsInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         if offset > 0 { return 0; }
         let content = b"#subsys_name\thierarchy\tnum_cgroups\tenabled\n";
         let len = content.len().min(buf.len());
@@ -935,7 +935,7 @@ impl VfsInode for CgroupsInode {
         len
     }
 
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {

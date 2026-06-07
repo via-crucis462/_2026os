@@ -176,14 +176,14 @@ impl VfsInode for LoopDevice {
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
         -1 // 不支持设置时间
     }
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let inner = self.inner.exclusive_access();
-        // Also just forward read
+        // Loop 设备本身无存储，转发到 backing file 的缓存路径
         inner.backing_file.as_ref().unwrap().read_at(inner.offset + offset, buf)
     }
-    fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+    fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize {
         let inner = self.inner.exclusive_access();
-        // Just forward the write to the backing file without size limitation to allow file extension if needed
+        // Loop 设备本身无存储，转发到 backing file 的缓存路径
         inner.backing_file.as_ref().unwrap().write_at(inner.offset + offset, buf)
     }
     fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>> {
@@ -251,8 +251,8 @@ impl VfsInode for LoopControlInode {
     fn get_size(&self) -> usize { 0 }
     fn ino(&self) -> u64 { self.ino }
     fn set_time(&self, _atime: &crate::fs::TimeSpec, _mtime: &crate::fs::TimeSpec) -> isize { 0 }
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, buf: &[u8]) -> usize { buf.len() }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, buf: &[u8]) -> usize { buf.len() }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn get_stat(&self) -> crate::fs::Stat {

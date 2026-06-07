@@ -64,6 +64,7 @@ pub struct ShmidDs {
     pub shm_ctime: usize,
     pub shm_cpid: usize,
     pub shm_lpid: usize,
+    // 当前连接数，即被映射到多少个进程
     pub shm_nattch: usize,
 }
 
@@ -71,7 +72,7 @@ pub struct Shm {
     id: u32,
     // 需要保证顺序
     frames: Vec<FrameTracker>,
-    // 状态信息
+    // 状态信息，注意和inode stat不同
     pub stat: Mutex<ShmidDs>,
 }
 
@@ -106,6 +107,24 @@ impl Shm {
     }
     pub fn get_key(&self) -> i32 {
         self.stat.lock().shm_perm.key
+    }
+    pub fn get_frames(&self) -> &Vec<FrameTracker> {
+        &self.frames
+    }
+    pub fn inc_nattch(&self) {
+        self.stat.lock().shm_nattch += 1;
+    }
+    pub fn dec_nattch(&self) {
+        let mut stat = self.stat.lock();
+        if stat.shm_nattch > 0 {
+            stat.shm_nattch -= 1;
+        }
+    }
+    pub fn get_perm(&self) -> IpcPerm {
+        self.stat.lock().shm_perm
+    }
+    pub fn get_stat(&self) -> ShmidDs {
+        *self.stat.lock()
     }
 }
 

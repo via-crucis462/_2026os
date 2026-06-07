@@ -124,6 +124,31 @@ impl File for OSInode {
         write_len
     }
 
+    fn raw_read_at(&self, offset: usize, mut buf: UserBuffer) -> usize {
+        let mut total_read = 0;
+        let mut current_offset = offset;
+        for slice in buf.buffers.iter_mut() {
+            let read_len = self.inode.raw_read_at(current_offset, *slice);
+            if read_len == 0 { break; }
+            current_offset += read_len;
+            total_read += read_len;
+        }
+        total_read
+    }
+
+    fn raw_write_at(&self, offset: usize, buf: UserBuffer) -> usize {
+        let mut total_write = 0;
+        let mut current_offset = offset;
+        for slice in buf.buffers.iter() {
+            let write_len = self.inode.raw_write_at(current_offset, *slice);
+            if write_len == 0 { break; }
+            current_offset += write_len;
+            total_write += write_len;
+        }
+        total_write
+    }
+
+    /// 带页缓存的读取，调用 VfsInode::read_at
     fn read_at(&self, offset: usize, mut buf: UserBuffer) -> usize {
         let mut total_read = 0;
         let mut current_offset = offset;
@@ -136,6 +161,7 @@ impl File for OSInode {
         total_read
     }
 
+    /// 带页缓存的写入，调用 VfsInode::write_at
     fn write_at(&self, offset: usize, buf: UserBuffer) -> usize {
         let mut total_write = 0;
         let mut current_offset = offset;
@@ -244,7 +270,7 @@ impl File for OSInode {
         new_offset as isize
     }
     
-    fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
+    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<Mutex<crate::mm::mmap::PageCache>>> {
         // 转发给底层的具体文件系统 Inode
         self.inode.get_shared_page(page_offset)
     }

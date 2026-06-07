@@ -4,7 +4,7 @@
 use crate::{
     auth::{FileMode, PermSet, PermStat},
     ipc::{msg::*, shm::*, namespace::*, IpcPerm},
-    mm::{UserBuffer, try_translated_byte_buffer, try_translated_byte_buffer_mut, try_translated_read, try_translated_write},
+    mm::{UserBuffer, mmap, try_translated_byte_buffer, try_translated_byte_buffer_mut, try_translated_read, try_translated_write},
     process::current_user_token,
 };
 use super::*;
@@ -357,4 +357,112 @@ pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
 pub fn sys_shmctl(shmid: u32, cmd: i32, flags: i32) -> isize {
     let cmd = ShmCtlCmd::from_bits_truncate(cmd);
     ENOSYS.as_isize()
+}
+
+/// 附加共享内存段
+///
+/// 将 shmid 标识的共享内存段附加到调用进程的地址空间
+/// 参数:
+///   shmid - 共享内存标识符
+///   shmaddr - 建议的附加地址（NULL 表示内核决定）
+///   shmflg - 标志位
+/// 
+/// 成功返回附加地址
+pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: i32) -> isize {
+    const SHM_RDONLY: i32 = 0o10000;
+    const SHM_RND: i32 = 0o20000;
+
+    info!("kernel:pid[{}] sys_shmat: shmid={}, addr={:#x}, flg={:#o}",
+        current_task().unwrap().process().pid.0, shmid, shmaddr, shmflg);
+
+    // 获取共享内存段
+    let ns = current_ipc_namespace();
+    let mut ns_lckd = ns.lock();
+    let shm = match ns_lckd.shm_manager().get_shm(shmid as u32) {
+        Some(s) => s,
+        None => return EINVAL.as_isize(),
+    };
+
+    let shm_size = shm.get_size();
+    let shm_perm = shm.get_perm();
+
+    // 权限检查
+    let (uid, gid) = {
+        let proc = current_task().unwrap().process.upgrade().unwrap();
+        let inner = proc.inner_exclusive_access();
+        (inner.euid, inner.egid)
+    };
+    let is_readonly = (shmflg & SHM_RDONLY) != 0;
+    let perm_stat = PermStat::new(
+        FileMode::from_bits_truncate(shm_perm.mode),
+        shm_perm.uid,
+        shm_perm.gid,
+    );
+    perm_stat.current_perm_set();
+    if !perm_stat.can_read(uid, gid) {
+        return EACCES.as_isize();
+    }
+    if !is_readonly && !perm_stat.can_write(uid, gid) {
+        return EACCES.as_isize();
+    }
+
+    // 确定附加地址
+    let attach_addr = if shmaddr == 0 {
+        // 由内核选择地址，通过 do_mmap 自动分配
+        0
+    } else if (shmflg & SHM_RND) != 0 {
+        // SHM_RND: 向下对齐到 SHMLBA（通常等于 PAGE_SIZE）
+        shmaddr & !(crate::PAGE_SIZE - 1)
+    } else {
+        if shmaddr % crate::PAGE_SIZE != 0 {
+            return EINVAL.as_isize();
+        }
+        shmaddr
+    };
+
+    // 使用 mmap 分配虚拟地址空间并映射
+    let prot = if is_readonly {
+        mmap::MMapProt::PROT_READ
+    } else {
+        mmap::MMapProt::PROT_READ | mmap::MMapProt::PROT_WRITE
+    };
+    let mmap_flags = mmap::MMapFlags::MAP_ANONYMOUS | mmap::MMapFlags::MAP_SHARED;
+
+    let mapped_addr = match mmap::do_mmap(attach_addr, shm_size, prot, mmap_flags, None, 0) {
+        Ok(addr) => addr,
+        Err(e) => return e,
+    };
+
+    // 将共享内存数据拷贝到映射区域
+    let token = current_user_token();
+    let frames = shm.get_frames();
+    let page_size = crate::PAGE_SIZE;
+    let num_pages = (shm_size + page_size - 1) / page_size;
+    
+    for i in 0..num_pages.min(frames.len()) {
+        let va = mapped_addr + i * page_size;
+        let bytes_to_copy = if i == num_pages - 1 && shm_size % page_size != 0 {
+            shm_size % page_size
+        } else {
+            page_size
+        };
+        
+        // 从 Shm 物理帧读取数据
+        let shm_data = &frames[i].get_bytes_array()[..bytes_to_copy];
+        
+        // 写入用户空间映射区域
+        if let Some(user_buf) = try_translated_byte_buffer_mut(
+            token,
+            va as *mut u8,
+            bytes_to_copy,
+        ) {
+            let mut user_buf = UserBuffer::new(user_buf);
+            user_buf.write(shm_data);
+        }
+    }
+
+    // 更新附加计数
+    shm.inc_nattch();
+
+    mapped_addr as isize
 }

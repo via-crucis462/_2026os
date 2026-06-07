@@ -1007,7 +1007,7 @@ impl MemorySet {
         if is_shared && !is_anonymous {
             // 共享文件映射 
             let file = file_inner.as_ref().unwrap();
-            let area = MapArea {
+            let mut area = MapArea {
                 vpn_range: VPNRange::new(
                     VirtAddr::from(start_va).std_floor(), 
                     VirtAddr::from(start_va + length).std_ceil()
@@ -1031,14 +1031,14 @@ impl MemorySet {
                 if file_page_offset >= file_end_page_offset {
                     break;
                 }
-                if let Some(shared_ppn) = file.get_shared_page(file_page_offset) {
-                    /* 前面检查过了
-                    if self.page_table.translate(VirtPageNum::from(vpn)).is_some() {
-                        self.page_table.unmap(VirtPageNum::from(vpn)); 
-                    }
-                    */
+                if let Some(cache) = file.get_shared_page(file_page_offset) {
+                    let page = cache.lock();
+                    let ppn = page.frame.ppn;
+                    // clone FrameTracker: 引用计数 +1
+                    let frame_clone = page.frame.clone();
                     let pte_flags = PTEFlags::from_bits(permission.bits).unwrap();
-                    self.page_table.map(VirtPageNum::from(vpn), shared_ppn, pte_flags,Page4K);
+                    self.page_table.map(VirtPageNum::from(vpn), ppn, pte_flags,Page4K);
+                    area.data_frames.insert(VirtPageNum::from(vpn), frame_clone);
                 } else {
                     return Err(Errno::ENOMEM.as_isize());
                 }
@@ -1387,18 +1387,17 @@ impl MapArea {
         if page_table.translate(vpn).is_some() {
             page_table.unmap(vpn);
         }
-        // 如果是私有匿名映射，需要将私有物理帧从 data_frames 里移除释放
-        if !self.is_shared {
-            self.data_frames.remove(&vpn);
-        } else if self.backing_file.is_some() {
-            // 共享文件映射：写回内容，根据相对虚拟页号偏移计算文件页偏移
+        // 共享文件映射：写回脏数据后才释放 FrameTracker clone
+        if self.is_shared && self.backing_file.is_some() {
             if let Some((file, base_offset)) = &self.backing_file {
                 let file_page_offset = *base_offset + (vpn.0 - self.vpn_range.get_start().0);
                 let ino = file.ino();
                 let man = &super::mmap::SHARED_PAGE_CACHE_MANAGER;
-                man.write_back_shared_page_cache(ino, file_page_offset, file);
+                man.write_back_page_cache(ino, file_page_offset, file);
             }
         }
+        // 从frames中释放，减少引用计数
+        self.data_frames.remove(&vpn);
     }
 
     /// 用于 Split 时复制出相同属性的新区域
@@ -1554,13 +1553,13 @@ impl MapArea {
     }
     /// 将段内数据全部写回文件（如果是共享文件映射）
     pub fn sync_back_to_file(&mut self) {
-        let man = &super::mmap::SHARED_PAGE_CACHE_MANAGER;
         if self.is_shared {
             if let Some((file, offset)) = &self.backing_file {
                 let ino = file.ino();
                 for vpn in self.vpn_range.clone() {
                     let file_page_offset = *offset + (vpn.0 - self.vpn_range.get_start().0);
-                    man.write_back_shared_page_cache(ino, file_page_offset, file);
+                    let man = &super::mmap::SHARED_PAGE_CACHE_MANAGER;
+                    man.write_back_page_cache(ino, file_page_offset, file);
                 }
             }
         }

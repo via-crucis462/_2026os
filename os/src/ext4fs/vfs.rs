@@ -49,16 +49,82 @@ impl VfsInode for Ext4Inode {
         None
     }
 
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        self.read_at(offset, buf) // 调用 Ext4Inode 自身的方法
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        self.raw_read_at(offset, buf) // 调用 Ext4Inode 的底层磁盘读取
     }
 
+    fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize {
+        self.raw_write_at(offset, buf) // 调用 Ext4Inode 的底层磁盘写入
+    }
+
+    /// 带页缓存的读取
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        let page_size = crate::PAGE_SIZE;
+        let file_size = self.get_size();
+        if offset >= file_size { return 0; }
+        let read_end = core::cmp::min(offset + buf.len(), file_size);
+        let start_page = offset / page_size;
+        let end_page = (read_end - 1) / page_size;
+
+        let mut buf_offset = 0;
+        for page_idx in start_page..=end_page {
+            let page_off = if page_idx == start_page { offset % page_size } else { 0 };
+            let copy_len = core::cmp::min(page_size - page_off, read_end - (page_idx * page_size + page_off));
+
+            let cache = self.get_shared_page(page_idx).unwrap();
+            let page = cache.lock();
+            // clone FrameTracker：持有期间物理页不会被释放
+            let _guard = page.frame.clone();
+            let src = &page.frame.get_bytes_array()[page_off..page_off + copy_len];
+            buf[buf_offset..buf_offset + copy_len].copy_from_slice(src);
+            buf_offset += copy_len;
+        }
+        buf_offset
+    }
+
+    /// 带页缓存的写入
     fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
-        self.write_at(offset, buf) // 调用 Ext4Inode 自身的方法
+        let page_size = crate::PAGE_SIZE;
+        let write_end = offset + buf.len();
+        let start_page = offset / page_size;
+        let end_page = (write_end - 1) / page_size;
+
+        let mut buf_offset = 0;
+        for page_idx in start_page..=end_page {
+            let page_off = if page_idx == start_page { offset % page_size } else { 0 };
+            let copy_len = core::cmp::min(page_size - page_off, write_end - (page_idx * page_size + page_off));
+
+            let cache = self.get_shared_page(page_idx).unwrap();
+            let mut page = cache.lock();
+            // clone FrameTracker：持有期间物理页不会被释放
+            let _guard = page.frame.clone();
+            let dst = &mut page.frame.get_bytes_array()[page_off..page_off + copy_len];
+            dst.copy_from_slice(&buf[buf_offset..buf_offset + copy_len]);
+            page.dirty = true;
+            buf_offset += copy_len;
+        }
+
+
+        // 更新文件大小（如果需要）
+        let old_size = self.get_size();
+        if write_end > old_size {
+            let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
+            let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
+            block_cache.lock().modify(inode_offset, |disk_inode: &mut Ext4InodeDisk| {
+                disk_inode.i_size_lo = write_end as u32;
+                disk_inode.i_size_high = (write_end >> 32) as u32;
+            });
+        }
+
+        buf_offset
     }
     
     fn get_size(&self) -> usize {
         self.size as usize
+    }
+
+    fn truncate(&self, len: usize) -> bool {
+        self.truncate(len)
     }
 
     fn get_stat(&self) -> crate::fs::Stat {
@@ -339,74 +405,69 @@ impl VfsInode for Ext4Inode {
         true
     }
     fn rename_dir_entry(&self, old_name: &str, new_name: &str) -> bool {
-    if new_name.len() > old_name.len() {
-        return false; 
-    }
-
-    let mut offset = 0;
-    let block_size = BLOCK_SZ; 
-    let disk_inode = self.fs.get_disk_inode(self.inode_id);
-    let file_size_bytes = disk_inode.size() as usize;
-
-   
-
-    while offset < file_size_bytes {
-        let logical_block = (offset / block_size) as u32;
-        let physical_block = self.find_physical_block(logical_block);
-        if physical_block == 0 { break; }
-
-        let block_cache = get_block_cache(physical_block as usize, self.fs.block_dev.clone());
-        let mut cache = block_cache.lock();
-
-        let found = cache.modify(0, |block: &mut [u8; 4096]| {
-            let mut block_offset = 0;
-            while block_offset < block_size {
-                let dirent_ptr = block.as_mut_ptr().wrapping_add(block_offset) as *mut Ext4DirEntry;
-                let dirent = unsafe { &mut *dirent_ptr };
-
-                let rec_len = dirent.rec_len as usize;
-                if rec_len == 0 { break; } // 防止死循环
-
-                if dirent.inode != 0 {
-              
-                    let _tmp_inode = dirent.inode;
-                    let _tmp_name_len = dirent.name_len;
-  
-                
-                   
-                    
-                    if dirent.name() == old_name {
-                    
-                     
-                        
-                        dirent.name_len = new_name.len() as u8;
-                        let name_bytes = new_name.as_bytes();
-                        
-                        for i in 0..name_bytes.len() {
-                            dirent.name[i] = name_bytes[i];
-                        }
-                        
-                        for i in name_bytes.len()..old_name.len() {
-                            dirent.name[i] = 0; 
-                        }
-                        
-                        return true; 
-                    }
-                }
-                block_offset += rec_len;
-            }
-            false
-        });
-
-        if found {
-            cache.sync();
-            return true;
+        if new_name.len() > old_name.len() {
+            return false; 
         }
-        offset += block_size;
+
+        let mut offset = 0;
+        let block_size = BLOCK_SZ; 
+        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        let file_size_bytes = disk_inode.size() as usize;
+
+    
+
+        while offset < file_size_bytes {
+            let logical_block = (offset / block_size) as u32;
+            let physical_block = self.find_physical_block(logical_block);
+            if physical_block == 0 { break; }
+
+            let block_cache = get_block_cache(physical_block as usize, self.fs.block_dev.clone());
+            let mut cache = block_cache.lock();
+
+            let found = cache.modify(0, |block: &mut [u8; 4096]| {
+                let mut block_offset = 0;
+                while block_offset < block_size {
+                    let dirent_ptr = block.as_mut_ptr().wrapping_add(block_offset) as *mut Ext4DirEntry;
+                    let dirent = unsafe { &mut *dirent_ptr };
+
+                    let rec_len = dirent.rec_len as usize;
+                    if rec_len == 0 { break; } // 防止死循环
+
+                    if dirent.inode != 0 {
+                
+                        let _tmp_inode = dirent.inode;
+                        let _tmp_name_len = dirent.name_len;
+                        
+                        if dirent.name() == old_name {
+
+                            dirent.name_len = new_name.len() as u8;
+                            let name_bytes = new_name.as_bytes();
+                            
+                            for i in 0..name_bytes.len() {
+                                dirent.name[i] = name_bytes[i];
+                            }
+                            
+                            for i in name_bytes.len()..old_name.len() {
+                                dirent.name[i] = 0; 
+                            }
+                            
+                            return true; 
+                        }
+                    }
+                    block_offset += rec_len;
+                }
+                false
+            });
+
+            if found {
+                cache.sync();
+                return true;
+            }
+            offset += block_size;
+        }
+        false
     }
-    false
-}
-fn set_time(&self, atime: &TimeSpec, mtime: &TimeSpec) -> isize {
+    fn set_time(&self, atime: &TimeSpec, mtime: &TimeSpec) -> isize {
         // 1. 获取当前 Inode 在磁盘上的具体位置 (块号和块内偏移)
         let (block_id, offset) = self.fs.get_inode_pos(self.inode_id);
         

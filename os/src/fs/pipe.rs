@@ -339,11 +339,11 @@ impl File for Pipe {
         }
     }
 
-    fn read_at(&self, _offset: usize, buf: UserBuffer) -> usize {
+    fn raw_read_at(&self, _offset: usize, buf: UserBuffer) -> usize {
         self.read(buf)
     }
 
-    fn write_at(&self, _offset: usize, buf: UserBuffer) -> usize {
+    fn raw_write_at(&self, _offset: usize, buf: UserBuffer) -> usize {
         self.write(buf)
     }
 

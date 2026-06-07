@@ -2583,6 +2583,26 @@ pub fn sys_ftruncate(fd: usize, len: usize) -> isize {
     
     // 获取文件
     if let Some(file) = &inner.fd_table[fd].file {
+        let typ = file.get_stat();
+        // 打印具体文件结构体类型
+        let file_type_name: &str = {
+            let a = file.as_any();
+            if a.downcast_ref::<OSInode>().is_some()          { "OSInode" }
+            else if a.downcast_ref::<Stdin>().is_some()       { "Stdin" }
+            else if a.downcast_ref::<Stdout>().is_some()      { "Stdout" }
+            else if a.downcast_ref::<Stderr>().is_some()      { "Stderr" }
+            else if a.downcast_ref::<Pipe>().is_some()        { "Pipe" }
+            else if a.downcast_ref::<EpollFile>().is_some()   { "EpollFile" }
+            else if a.downcast_ref::<crate::fs::epoll::EventFile>().is_some() { "EventFile" }
+            else if a.downcast_ref::<UserPageFaultInfo>().is_some() { "UserPageFaultInfo" }
+            else if a.downcast_ref::<TcpSocket>().is_some()   { "TcpSocket" }
+            else if a.downcast_ref::<crate::net::socket::UdpSocket>().is_some() { "UdpSocket" }
+            else if a.downcast_ref::<crate::net::socket::UnixSocket>().is_some() { "UnixSocket" }
+            else if a.downcast_ref::<crate::syscall::bpf::BpfMapFile>().is_some() { "BpfMapFile" }
+            else if a.downcast_ref::<crate::syscall::bpf::BpfProgFile>().is_some() { "BpfProgFile" }
+            else { "Unknown" }
+        };
+        warn!("[kernel] sys_ftruncate: fd={}, file_type={}, mode={:#o}", fd, file_type_name, typ.mode);
         // 鉴权
         if !file.writable() {
             return EACCES.as_isize();

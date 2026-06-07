@@ -151,3 +151,47 @@ pub fn sys_msync(_addr: usize, _len: usize, _flags: u32) -> isize {
     crate::mm::mmap::sync_shared_page_cache();
     0
 }
+
+/// madvise - 给内核关于内存使用的建议
+///
+/// 参数:
+/// - addr: 起始地址（必须页对齐）
+/// - len: 长度
+/// - advice: 建议类型
+///
+/// 返回值: 成功返回 0
+pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> isize {
+    const MADV_NORMAL: i32 = 0;
+    const MADV_RANDOM: i32 = 1;
+    const MADV_SEQUENTIAL: i32 = 2;
+    const MADV_WILLNEED: i32 = 3;
+    const MADV_DONTNEED: i32 = 4;
+    const MADV_FREE: i32 = 8;
+
+    // 对齐到页边界
+    if addr % PAGE_SIZE != 0
+        || len % PAGE_SIZE != 0 
+        || addr + len >= USER_APP_MAX_SIZE
+    {
+        return EINVAL.as_isize();
+    }
+
+
+    match advice {
+        MADV_DONTNEED => {
+            // MADV_DONTNEED: 告知内核这些页不再需要，可以释放
+            // 对于匿名映射，等同于 munmap；内核会释放物理页
+            match mmap::do_munmap(addr, len) {
+                Ok(_) => 0,
+                Err(_) => 0, // 不必报错，静默忽略
+            }
+        }
+        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_FREE => {
+            // 使用建议（优化用），伪实现
+            0
+        }
+        _ => {
+            EINVAL.as_isize()
+        }
+    }
+}

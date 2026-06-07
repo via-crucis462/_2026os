@@ -123,11 +123,11 @@ impl MemFdInode {
 }
 
 impl super::VfsInode for MemFdInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         self.do_read_at(offset, buf)
     }
 
-    fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+    fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize {
         self.do_write_at(offset, buf)
     }
 

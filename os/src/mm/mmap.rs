@@ -1,3 +1,6 @@
+//! mmap syscall
+//! 还包含页缓存管理器
+
 #![deny(warnings)]
 #![allow(missing_docs)]
 
@@ -6,6 +9,7 @@ use crate::{mm::{FrameTracker, MapArea, PhysPageNum, UserBuffer, frame_alloc}, t
 use alloc::{
     collections::BTreeMap,
     sync::{Arc, Weak},
+    vec::Vec,
 };
 
 use crate::fs::File;
@@ -95,79 +99,133 @@ lazy_static! {
 
 /// 共享映射页缓存管理器
 pub struct SharedPageCacheManager {
-    // (ino, page_offset) -> SharedPageCache
-    page_cache_map: Mutex<BTreeMap<(u64, usize), FrameTracker>>,
+    // (ino, page_offset) -> Arc<Mutex<PageCache>>
+    page_cache_map: Mutex<BTreeMap<(u64, usize), Arc<Mutex<PageCache>>>>,
     // ino -> Weak<File>，用于回写找到文件
     file_register: Mutex<BTreeMap<u64, Weak<dyn File + Send + Sync>>>,
 }
 
+/// 单个页缓存条目
+pub struct PageCache {
+    pub frame: FrameTracker,
+    pub dirty: bool,
+}
+
+impl PageCache {
+    pub fn new(frame: FrameTracker) -> Self {
+        Self { frame, dirty: false }
+    }
+}
+
 impl SharedPageCacheManager {
-    /// 获取共享页缓存，返回页框和是否新分配的标志
-    pub fn get_shared_page_cache(&self, ino: u64, page_offset: usize) -> (FrameTracker, bool) {
+    /// 获取页缓存条目。返回 (Arc<Mutex<PageCache>>, 是否新分配)。
+    /// 新分配的页内容为零，调用者负责从磁盘填充。
+    pub fn get_page_cache(&self, ino: u64, page_offset: usize) -> (Arc<Mutex<PageCache>>, bool) {
         let mut map = self.page_cache_map.lock();
         let key = (ino, page_offset);
         if let Some(cache) = map.get(&key) {
-            (cache.clone(), false)
+            (Arc::clone(cache), false)
         } else {
             let frame = frame_alloc(super::PageSize::Page4K).unwrap();
-            map.insert(key, frame.clone());
-            (frame, true)
+            let page = Arc::new(Mutex::new(PageCache::new(frame)));
+            map.insert(key, Arc::clone(&page));
+            (page, true)
         }
     }
-    /// 将共享页缓存内容写回文件
-    pub fn write_back_shared_page_cache(&self, ino: u64, page_offset: usize, file: &Arc<dyn File + Send + Sync>) {
-        let mut map = self.page_cache_map.lock();
-        let key = (ino, page_offset);
-        if let Some(cache) = map.get(&key) {
-            let buf = cache.get_bytes_array();
-            let buffer = UserBuffer::new(alloc::vec![buf]);
-            file.write_at(page_offset * crate::PAGE_SIZE, buffer);
-        } else {
-            // 部分文件系统（如 tmpfs）在自己的内部存储中维护页缓存，走到这里比较正常
-            #[cfg(not(log_level = "OFF"))]
-            {
-                let name = file.get_dentry().unwrap().get_full_path();
-                warn!("Shared page cache not found for file {}: ino {}, page_offset {} (may be managed by FS internally)", name, ino, page_offset);
+
+    /// 标记缓存页为脏。内核 write_at 写入后调用。
+    pub fn mark_dirty(&self, ino: u64, page_offset: usize) {
+        let map = self.page_cache_map.lock();
+        if let Some(cache) = map.get(&(ino, page_offset)) {
+            cache.lock().dirty = true;
+        }
+    }
+
+    /// 将共享页缓存写回文件（仅当脏时）。在调用前需要保证释放掉所有cache的锁以避免死锁。
+    pub fn write_back_page_cache(&self, ino: u64, page_offset: usize, file: &Arc<dyn File + Send + Sync>) {
+        // 锁内判断是否需要写回，并拷贝出数据
+        let buffer_data: Option<UserBuffer> = {
+            let map = self.page_cache_map.lock();
+            let key = (ino, page_offset);
+            if let Some(cache) = map.get(&key) {
+                let page = cache.lock();
+                if page.dirty {
+                    let buf = page.frame.get_bytes_array();
+                    Some(UserBuffer::new(alloc::vec![buf]))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        // 锁外写回文件（用 raw_write_at 绕过页缓存，避免重新进入 page cache）
+        if let Some(buffer) = buffer_data {
+            file.raw_write_at(page_offset * crate::PAGE_SIZE, buffer);
+            // 写回完成后清除 dirty 标记
+            if let Some(cache) = self.page_cache_map.lock().get(&(ino, page_offset)) {
+                cache.lock().dirty = false;
             }
         }
     }
+
     // 注册文件以便回写时找到
     pub fn register_file(&self, ino: u64, file: &Arc<dyn File + Send + Sync>) {
         let mut reg = self.file_register.lock();
         reg.insert(ino, Arc::downgrade(file));
     }
-    // 注销文件，同时释放该文件对应的所有缓存页
+
+    // 注销文件，同时释放该文件对应的所有未被引用的缓存页
     pub fn unregister_file(&self, ino: u64) {
         let mut reg = self.file_register.lock();
         reg.remove(&ino);
-        // 释放掉该文件对应的所有缓存页
+        // 释放掉该文件对应的所有缓存页（仅当物理帧无外部引用时释放）
         let mut map = self.page_cache_map.lock();
-        map.retain(|(_ino, _), _| *_ino != ino);
+        map.retain(|(key_ino, _), cache| {
+            if *key_ino != ino {
+                return true; // 保留其他文件的缓存
+            }
+            // 检查物理帧引用计数：仅当只有 PageCache 自己持有时才能释放
+            // maparea持有一份，unmap时自动drop减少引用计数
+            // 另外访问缓存时应该手动克隆一次frame增加引用计数
+            let page = cache.lock();
+            super::frame_ref_count(page.frame.ppn) == 1
+        });
     }
-    // 释放共享页缓存
-    pub fn remove_shared_page_cache(&self, ino: u64, page_offset: usize) {
-        let mut map = self.page_cache_map.lock();
-        let key = (ino, page_offset);
-        map.remove(&key);
-    }
+
     /// 清理已关闭文件的注册
     pub fn clear_closed_files(&self) {
         let mut register = self.file_register.lock();
         register.retain(|_, weak_file| weak_file.upgrade().is_some());
     }
-    /// 同步共享页缓存，将所有缓存内容写回对应文件
+
+    /// 同步共享页缓存，将所有脏页写回对应文件
     pub fn sync_shared_page_cache(&self) {
-        let map = self.page_cache_map.lock();
-        let reg = self.file_register.lock();
-        for weak_file in reg.values(){
-            if let Some(file) = weak_file.upgrade() {
-                let ino = file.ino();
-                let start = (ino, 0);
-                let end = (ino + 1, 0);
-                for ((_, page_offset), _) in map.range(start..end) {
-                    self.write_back_shared_page_cache(ino, *page_offset, &file);
+        // 收集所有需要写回的 (ino, page_offset) 以及对应的 File
+        let pending: Vec<(u64, usize, Arc<dyn File + Send + Sync>)> = {
+            let map = self.page_cache_map.lock();
+            let reg = self.file_register.lock();
+            let mut result = Vec::new();
+            for weak_file in reg.values() {
+                if let Some(file) = weak_file.upgrade() {
+                    let ino = file.ino();
+                    let start = (ino, 0);
+                    let end = (ino + 1, 0);
+                    for ((_, page_offset), cache) in map.range(start..end) {
+                        let page = cache.lock();
+                        if page.dirty {
+                            result.push((ino, *page_offset, file.clone()));
+                        }
+                    }
                 }
             }
+            result
+        }; // map 和 reg 的锁在这里释放
+
+        // 逐页写回
+        for (ino, page_offset, file) in pending {
+            self.write_back_page_cache(ino, page_offset, &file);
         }
     }
 }
