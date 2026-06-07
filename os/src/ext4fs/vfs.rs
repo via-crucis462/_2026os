@@ -5,6 +5,7 @@ use super::block_cache::get_block_cache;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::string::String;
+use core::sync::atomic::Ordering;
 use crate::fs::TimeSpec;
 use crate::fs::VfsInode;
 use crate::syscall::fs::Statfs;
@@ -15,7 +16,7 @@ impl VfsInode for Ext4Inode {
             return None;
         }
         let mut offset = 0;
-        let file_size_bytes = self.size as usize;
+        let file_size_bytes = self.size.load(Ordering::Relaxed) as usize;
 
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; 4096];
@@ -54,7 +55,14 @@ impl VfsInode for Ext4Inode {
     }
 
     fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize {
-        self.raw_write_at(offset, buf) // 调用 Ext4Inode 的底层磁盘写入
+        let written = self.raw_write_at(offset, buf); // 调用 Ext4Inode 的底层磁盘写入
+        // 底层可能扩展了文件大小，同步更新缓存的 size
+        let new_end = (offset + written) as u64;
+        let old = self.size.load(Ordering::Relaxed);
+        if new_end > old {
+            self.size.store(new_end, Ordering::Relaxed);
+        }
+        written
     }
 
     /// 带页缓存的读取
@@ -108,6 +116,7 @@ impl VfsInode for Ext4Inode {
         // 更新文件大小（如果需要）
         let old_size = self.get_size();
         if write_end > old_size {
+            self.size.store(write_end as u64, Ordering::Relaxed);
             let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
             let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
             block_cache.lock().modify(inode_offset, |disk_inode: &mut Ext4InodeDisk| {
@@ -120,7 +129,7 @@ impl VfsInode for Ext4Inode {
     }
     
     fn get_size(&self) -> usize {
-        self.size as usize
+        self.size.load(Ordering::Relaxed) as usize
     }
 
     fn truncate(&self, len: usize) -> bool {
@@ -263,7 +272,7 @@ impl VfsInode for Ext4Inode {
             return -1;
         }
         let mut buf_offset = 0;
-        let file_size_bytes = self.size as usize;
+        let file_size_bytes = self.size.load(Ordering::Relaxed) as usize;
         let buf_len = buf.len();
         let mut last_name = String::new();
 

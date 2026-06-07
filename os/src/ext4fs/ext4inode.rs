@@ -1,6 +1,7 @@
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::string::String;
+use core::sync::atomic::{AtomicU64, Ordering};
 use crate::ext4fs::BLOCK_SZ;
 
 use super::{ext4::Ext4FS, ext4_dir_entry::Ext4DirEntry, block_cache::get_block_cache};
@@ -147,8 +148,8 @@ pub struct Ext4Inode {
     pub inode_id: u32,
     /// 文件类型（目录/普通文件）
     pub mode: u16,
-    /// 文件大小
-    pub size: u64,
+    /// 文件大小（Atomic 以支持通过 &self 在 write 后更新缓存）
+    pub size: AtomicU64,
     /// 标志位 (例如是否使用 Extents)
     pub flags: u32,
     /// 数据块指针（直接块、间接块等）
@@ -221,7 +222,7 @@ impl Ext4Inode {
         Self {
             inode_id,
             mode: disk_inode.i_mode,
-            size: disk_inode.size(), // 使用 DiskInode 已有的方法计算大小
+            size: AtomicU64::new(disk_inode.size()), // 使用 DiskInode 已有的方法计算大小
             flags: disk_inode.i_flags,
             i_block: disk_inode.i_block,
             fs,
@@ -422,7 +423,7 @@ impl Ext4Inode {
             return;
         }
         let mut offset = 0;
-        let file_size = self.size as usize;
+        let file_size = self.size.load(Ordering::Relaxed) as usize;
 
         while offset < file_size {
             // 1. 先读 8 个字节拿到头部 (inode, rec_len, name_len, file_type)
