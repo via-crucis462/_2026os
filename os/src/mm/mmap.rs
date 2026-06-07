@@ -141,7 +141,7 @@ impl SharedPageCacheManager {
         }
     }
 
-    /// 将共享页缓存写回文件（仅当脏时）。在调用前需要保证释放掉所有cache的锁以避免死锁。
+    /// 将共享页缓存写回文件，无论脏不脏
     pub fn write_back_page_cache(&self, ino: u64, page_offset: usize, file: &Arc<dyn File + Send + Sync>) {
         // 锁内判断是否需要写回，并拷贝出数据
         let buffer_data: Option<UserBuffer> = {
@@ -149,12 +149,8 @@ impl SharedPageCacheManager {
             let key = (ino, page_offset);
             if let Some(cache) = map.get(&key) {
                 let page = cache.lock();
-                if page.dirty {
-                    let buf = page.frame.get_bytes_array();
-                    Some(UserBuffer::new(alloc::vec![buf]))
-                } else {
-                    None
-                }
+                let buf = page.frame.get_bytes_array();
+                Some(UserBuffer::new(alloc::vec![buf]))
             } else {
                 None
             }

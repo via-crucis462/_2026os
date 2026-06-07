@@ -1145,16 +1145,17 @@ impl MemorySet {
                     // 情况1：All（当前块被目标区域完全包裹，全部删掉）
                     let mut vpn = a_start;
                     while vpn < a_end {
-                        area.unmap_one_safe(&mut self.page_table, vpn);
+                        area.unmap_one(&mut self.page_table, vpn);
                         vpn.step_by(step);
                     }
                     area.resize(a_start, a_start); // 长度设为0，稍后统一 retain 清理
                     
                 } else if !delete_left && !delete_right {
+                    panic!("munmap: test : split area in the middle");
                     // 情况2：Split（目标区域在当前块中间，一分为二）
                     // 2.1 清理中间被 unmap 的页表和物理页
                     for vpn in VPNRange::new(start_vpn, end_vpn) {
-                        area.unmap_one_safe(&mut self.page_table, vpn);
+                        area.unmap_one(&mut self.page_table, vpn);
                     }
                     // 2.2 切出右半部分保留的物理帧
                     let right_frames = area.data_frames.split_off(&end_vpn);
@@ -1169,7 +1170,7 @@ impl MemorySet {
                     // 情况3：Inc_Left（删掉左边部分）
                     let mut vpn = a_start;
                     while vpn < end_vpn {
-                        area.unmap_one_safe(&mut self.page_table, vpn);
+                        area.unmap_one(&mut self.page_table, vpn);
                         vpn.step_by(step);
                     }
                     
@@ -1179,7 +1180,7 @@ impl MemorySet {
                     // 情况4：Inc_Right（删掉右边部分）
                     let mut vpn = start_vpn;
                     while vpn < a_end {
-                        area.unmap_one_safe(&mut self.page_table, vpn);
+                        area.unmap_one(&mut self.page_table, vpn);
                         vpn.step_by(step);
                     }
                     area.resize(a_start, start_vpn);
@@ -1382,22 +1383,31 @@ impl MapArea {
             page_size: another.page_size,
         }
     }
-    /// 如果是共享映射写回内容，如果是私有匿名映射则释放物理页
-    pub fn unmap_one_safe(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
-        if page_table.translate(vpn).is_some() {
-            page_table.unmap(vpn);
-        }
-        // 共享文件映射：写回脏数据后才释放 FrameTracker clone
-        if self.is_shared && self.backing_file.is_some() {
-            if let Some((file, base_offset)) = &self.backing_file {
-                let file_page_offset = *base_offset + (vpn.0 - self.vpn_range.get_start().0);
-                let ino = file.ino();
-                let man = &super::mmap::SHARED_PAGE_CACHE_MANAGER;
-                man.write_back_page_cache(ino, file_page_offset, file);
+    /// 解除单页映射并释放物理帧
+    pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+        match self.map_type {
+            MapType::Framed | MapType::File => {
+                // 共享文件映射需要先写回内容
+                if self.is_shared {
+                    if let Some((file, base_offset)) = &self.backing_file {
+                        let file_page_offset = *base_offset + (vpn.0 - self.vpn_range.get_start().0);
+                        let man = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
+                        man.write_back_page_cache(file.ino(), file_page_offset, file);
+                    }
+                }
+
+                // 先 drop FrameTracker，主要针对 clone_vm 子进程继承父进程页表的情况
+                // 调了好久才发现这种情况，如果不判断是否有frame就改页表，会炸掉:(
+                if self.data_frames.remove(&vpn).is_some() {
+                    // 解除映射页表
+                    page_table.unmap(vpn);
+                }
             }
+            MapType::Identical => {
+                page_table.unmap(vpn);
+            }
+            MapType::Guard => {}
         }
-        // 从frames中释放，减少引用计数
-        self.data_frames.remove(&vpn);
     }
 
     /// 用于 Split 时复制出相同属性的新区域
@@ -1442,14 +1452,15 @@ impl MapArea {
         #[cfg(target_arch = "riscv64")]
         page_table.map(vpn, ppn, pte_flags, page_size);
     }
-    pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+    /* pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         match self.map_type {
             MapType::Framed | MapType::File => {
                 if self.data_frames.remove(&vpn).is_some() {
-                    page_table.unmap(vpn);
+                    // 共享映射的 PTE 可能已被 munmap 解除，先检查
+                    if page_table.translate(vpn).is_some() {
+                        page_table.unmap(vpn);
+                    }
                 } else if self.is_shared {
-                    // 共享页在全局管理器中，这里只解除页表的映射即可。
-                    // 至于文件内容，在解除映射前其实已经写回了。
                     if page_table.translate(vpn).is_some() && page_table.translate(vpn).unwrap().is_valid() {
                         page_table.unmap(vpn);
                     }
@@ -1460,7 +1471,7 @@ impl MapArea {
             }
             MapType::Guard => {}
         }
-    }
+    }*/
     pub fn map(&mut self, page_table: &mut PageTable) {
         let step = self.page_size.num_pages();
         let mut vpn = self.vpn_range.get_start();
