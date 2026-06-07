@@ -602,6 +602,7 @@ pub const SIOCGIFADDR: u32  = 0x8915; // 获取网卡当前的 IP 地址
 pub const SIOCSIFADDR: u32  = 0x8916; // 设置网卡当前的 IP 地址
 pub const SIOC_NET_START: u32 = 0x8900;
 pub const SIOC_NET_END: u32   = 0x89FF;
+pub const SIOCGIFINDEX: u32 = 0x8933;
 // Loop 设备相关的 ioctl 命令
 const LOOP_SET_FD: u32 = 0x4C00; //设置 Loop 设备的后端文件描述符
 const LOOP_CLR_FD: u32 = 0x4C01; //清除 Loop 设备的后端文件描述符
@@ -964,7 +965,22 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 0
             } else { EFAULT.as_isize() }
         }
-        0x8900..=0x89ff => {// 对 ifconfig / ip 命令的配置请求，返回 0 
+        SIOCGIFINDEX => { 
+            if let Some(mut ifr) = try_translated_read::<IfReq>(token, argp as *const IfReq) {
+                // 在标准的 struct ifreq 中，ifr_ifindex 和 ifr_hwaddr 属于同一个 union
+                // 占用 ifru_data 的前 4 个字节（是一个 i32 类型的整数）
+                let ifindex: i32 = 1; // 网卡 eth0 的 index 是 1
+                ifr.ifru_data[0..4].copy_from_slice(&ifindex.to_ne_bytes());
+                
+                if try_translated_write(token, argp as *mut IfReq, ifr) {
+                    0 // 成功返回
+                } else {
+                    EFAULT.as_isize()
+                }
+            } else { EFAULT.as_isize() }
+        }
+
+        0x8900..=0x89ff => {// 兜底：对其他未实现的 ifconfig / ip 命令配置请求返回 0 
             0
         }
         _ => {

@@ -149,58 +149,69 @@ impl File for StandardNetlinkSocket {
         const NLMSG_ERROR: u16 = 2;
         const NLM_F_DUMP: u16 = 0x300;
         const NLM_F_MULTI: u16 = 2;
-        const IFA_ADDRESS: u16 = 1;
         const IFA_LOCAL: u16 = 2;
         const IFLA_IFNAME: u16 = 3;
 
-
-        // 用户态发起 DUMP 请求 (例如：ip addr show 或添加后触发的查询)
-
+        // ====================================================
+        // 🚀 场景一：用户态发起 DUMP 请求 (查询链路状态或地址)
+        // ====================================================
         if (hdr.nlmsg_flags & NLM_F_DUMP) != 0 || hdr.nlmsg_type == RTM_GETLINK || hdr.nlmsg_type == RTM_GETADDR {
             let mut rx_lock = self.rx_buffer.lock();
 
-            // 1. 如果请求的是链路层状态 (GETLINK)，伪造一个标准的 eth0 链路层通知
+            // 1. 🌟【修复核心】：链路层状态应答，必须保证 4 字节严格对齐，彻底消除 remnant 残余
             if hdr.nlmsg_type == RTM_GETLINK {
+                // 报文严格对齐计算：
+                // NlMsgHdr(16) + ifinfomsg(16) = 32 字节
+                // RtAttr头(4) + "eth0\0"(5) = 9 字节 -> 强制4字节对齐后 = 12 字节 (末尾补3个0)
+                // 整个报文总长 = 32 + 12 = 44 字节
                 let mut link_reply = vec![0u8; 44];
+                
                 let reply_hdr = NlMsgHdr {
-                    nlmsg_len: 32,
+                    nlmsg_len: 44, // 严格标注总长为 44
                     nlmsg_type: RTM_NEWLINK,
                     nlmsg_flags: NLM_F_MULTI,
                     nlmsg_seq: hdr.nlmsg_seq,
                     nlmsg_pid: hdr.nlmsg_pid,
                 };
                 unsafe { core::ptr::copy_nonoverlapping(&reply_hdr as *const NlMsgHdr as *const u8, link_reply.as_mut_ptr(), size_of::<NlMsgHdr>()); }
-                link_reply[16] = 0; // AF_UNSPEC
-                link_reply[18] = 1; // ARPHRD_ETHER
-                link_reply[20..24].copy_from_slice(&1u32.to_ne_bytes()); // ifindex = 1 (网卡序号)
-                link_reply[24..28].copy_from_slice(&0x1003u32.to_ne_bytes()); // flags: IFF_UP | IFF_RUNNING
+                
+                // 填充标准的 ifinfomsg 结构体 (16字节)
+                link_reply[16] = 0; // af_family: AF_UNSPEC
+                link_reply[18] = 1; // ifi_type: ARPHRD_ETHER (以太网)
+                link_reply[20..24].copy_from_slice(&1u32.to_ne_bytes()); // ifi_index = 1
+                link_reply[24..28].copy_from_slice(&0x1003u32.to_ne_bytes()); // flags: IFF_UP | IFF_RUNNING | IFF_BROADCAST
+                
+                // 追加网卡名字属性头 (IFLA_IFNAME)
                 let rta_name = RtAttr {
-                    rta_len: 9, // RtAttr头(4) + "eth0\0"(5) = 9 字节
-                    rta_type: IFLA_IFNAME, // 3: 网卡名属性
+                    rta_len: 9, // 🌟 按照 Linux 标准：rta_len 依然填真实的 9（4头+5数据）
+                    rta_type: IFLA_IFNAME,
                 };
                 unsafe { core::ptr::copy_nonoverlapping(&rta_name as *const RtAttr as *const u8, link_reply.as_mut_ptr().add(32), size_of::<RtAttr>()); }
-                link_reply[36..41].copy_from_slice(b"eth0\0");
+                
+                // 写入真实网卡名字符串 "eth0\0" (5字节)
+                // 此时 link_reply[41], link_reply[42], link_reply[43] 默认为 0，自动充当了 4 字节对齐的 Padding！
+                link_reply[36..41].copy_from_slice(b"eth0\0"); 
+
                 rx_lock.push_back(link_reply);
             }
 
-            // 2.：如果请求的是地址列表 (GETADDR)，实时去底层网卡得到IP！
+            // 2. 如果请求的是地址列表 (GETADDR)，实时去底层网卡捞出所有的真 IP！
             if hdr.nlmsg_type == RTM_GETADDR || (hdr.nlmsg_flags & NLM_F_DUMP) != 0 {
-                // 独占锁定网卡总管，捞出 smoltcp 内部维护的真实 IP 列表
                 let iface = crate::net::NET_IFACE.exclusive_access();
                 let ip_addrs = iface.ip_addrs();
 
                 for cidr in ip_addrs.iter() {
                     let smoltcp::wire::IpCidr::Ipv4(v4_cidr) = cidr;
+
                     let addr = v4_cidr.address(); 
                     let ip_bytes = addr.as_bytes(); 
-                    let prefix_len = v4_cidr.prefix_len();       // 掩码，如 24
+                    let prefix_len = v4_cidr.prefix_len();
 
-                    // 动态计算报文长度：NlMsgHdr(16) + IfAddressMsg(8) + RtAttr(4) + IP数据(4) = 32 字节
                     let mut addr_reply = vec![0u8; 32];
                     
                     let reply_hdr = NlMsgHdr {
                         nlmsg_len: 32,
-                        nlmsg_type: RTM_NEWADDR, // 回应 RTM_NEWADDR 报文
+                        nlmsg_type: RTM_NEWADDR,
                         nlmsg_flags: NLM_F_MULTI,
                         nlmsg_seq: hdr.nlmsg_seq,
                         nlmsg_pid: hdr.nlmsg_pid,
@@ -210,34 +221,32 @@ impl File for StandardNetlinkSocket {
                         ifa_family: 2, // AF_INET (IPv4)
                         ifa_prefixlen: prefix_len as u8,
                         ifa_flags: 0,
-                        ifa_scope: 0,   // RT_SCOPE_UNIVERSE
-                        ifa_index: 1,   // 网卡 index 绑定为 1
+                        ifa_scope: 0,   
+                        ifa_index: 1,   // 网卡序号保持为 1
                     };
 
                     let rta = RtAttr {
-                        rta_len: 8,       // RtAttr头(4字节) + Value(4字节) = 8
-                        rta_type: IFA_LOCAL, // 2: 本地操作地址
+                        rta_len: 8,       
+                        rta_type: IFA_LOCAL, 
                     };
 
-                    // 严格按字节无缝拷贝拼接成标准的 Linux 报文流
                     unsafe {
                         let ptr = addr_reply.as_mut_ptr();
                         core::ptr::copy_nonoverlapping(&reply_hdr as *const NlMsgHdr as *const u8, ptr, size_of::<NlMsgHdr>());
                         core::ptr::copy_nonoverlapping(&ifa as *const IfAddressMsg as *const u8, ptr.add(16), size_of::<IfAddressMsg>());
                         core::ptr::copy_nonoverlapping(&rta as *const RtAttr as *const u8, ptr.add(24), size_of::<RtAttr>());
                     }
-                    addr_reply[28..32].copy_from_slice(ip_bytes); // 塞入底层的真实 IP 字节
+                    addr_reply[28..32].copy_from_slice(ip_bytes);
 
                     rx_lock.push_back(addr_reply);
-                    
                 }
             }
 
-        
+            // 3. 告诉 Busybox：批量数据传输完毕
             let mut done_reply = vec![0u8; 20];
             let done_hdr = NlMsgHdr {
                 nlmsg_len: 20,
-                nlmsg_type: NLMSG_DONE, // 3: NLMSG_DONE 代表批量导出结束
+                nlmsg_type: NLMSG_DONE, 
                 nlmsg_flags: NLM_F_MULTI,
                 nlmsg_seq: hdr.nlmsg_seq,
                 nlmsg_pid: hdr.nlmsg_pid,
@@ -248,9 +257,9 @@ impl File for StandardNetlinkSocket {
             return total_len;
         }
 
-
-        // 用户态发起普通的 RTM_NEWADDR (添加新 IP 命令)
-
+        // ====================================================
+        // 🚀 场景二：用户态发起普通的 RTM_NEWADDR (添加新 IP 命令)
+        // ====================================================
         if hdr.nlmsg_type == RTM_NEWADDR {
             let ifa_offset = size_of::<NlMsgHdr>();
             if ifa_offset + size_of::<IfAddressMsg>() <= data.len() {
