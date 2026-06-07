@@ -432,7 +432,9 @@ impl File for UnixSocket {
 pub struct RawSocket {
     pub handle: SocketHandle,
     pub rx_wait_queue: Arc<Mutex<WaitQueue>>,
+    pub local_rx_buffer: Arc<Mutex<VecDeque<Vec<u8>>>>,
 }
+
 
 impl RawSocket {
     /// protocol 对应 IP 层协议号，例如 IPPROTO_ICMP = 1
@@ -459,7 +461,12 @@ impl RawSocket {
         let handle = SOCKET_SET.exclusive_access().add(socket);
         let rx_wait_queue = Arc::new(Mutex::new(WaitQueue::new()));
         crate::net::SOCKET_WAIT_QUEUES.lock().insert(handle, rx_wait_queue.clone());
-        Self { handle,rx_wait_queue: Arc::new(Mutex::new(WaitQueue::new())), }
+       Self { 
+            handle,
+            rx_wait_queue, 
+            // 初始化环回队列
+            local_rx_buffer: Arc::new(Mutex::new(VecDeque::new())),
+        }
     }
 }
 
@@ -478,7 +485,22 @@ impl File for RawSocket {
 
     fn read(&self, mut buf: UserBuffer) -> usize {
         loop {
-            // 1. 每次循环开始，先获取全局 sockets 锁去检查数据
+            // 优先检查有没有本地环回的包
+            let mut local_queue = self.local_rx_buffer.lock();
+            if let Some(packet) = local_queue.pop_front() {
+                let len = packet.len();
+                let mut current = 0;
+                for buffer in buf.buffers.iter_mut() {
+                    let copy_len = buffer.len().min(len.saturating_sub(current));
+                    if copy_len == 0 { break; }
+                    buffer[..copy_len].copy_from_slice(&packet[current..current + copy_len]);
+                    current += copy_len;
+                    if current == len { break; }
+                }
+                return current;
+            }
+            drop(local_queue);
+            // 获取全局 sockets 锁去检查数据
             let mut sockets = SOCKET_SET.exclusive_access();
             let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
             
@@ -504,6 +526,75 @@ impl File for RawSocket {
     }
 
     fn write(&self, buf: UserBuffer) -> usize {
+        let total_len = buf.len();
+        let mut data = vec![0u8; total_len];
+        let mut current = 0;
+        for buffer in buf.buffers.iter() {
+            let copy_len = buffer.len();
+            data[current..current + copy_len].copy_from_slice(buffer);
+            current += copy_len;
+        }
+
+        // FIB 路由短路与 ICMP 回环交付
+        if data.len() >= 20 { // 确保至少有完整的 IP 头
+            // 提取目标 IP (IP 报文第 16-19 字节)
+            let dst_ip_bytes = [data[16], data[17], data[18], data[19]];
+            // 查表：判断目标 IP 是否属于网卡上的 IP 之一
+            let is_local = {
+                let iface = crate::net::NET_IFACE.exclusive_access();
+                iface.ip_addrs().iter().any(|cidr| {
+                    let smoltcp::wire::IpAddress::Ipv4(ipv4) = cidr.address() ;
+                    ipv4.0 == dst_ip_bytes
+                    
+                })
+            };
+            if is_local {
+                // 如果协议号是 1 (ICMP)
+                if data[9] == 1 {
+                    let ihl = (data[0] & 0x0F) as usize * 4;
+                    // 确保包长包含完整的 ICMP 头，且类型为 8 (Echo Request)
+                    if data.len() >= ihl + 8 && data[ihl] == 8 {
+                        // 交换 Src IP 和 Dst IP
+                        for i in 0..4 {
+                            let temp = data[12 + i];
+                            data[12 + i] = data[16 + i];
+                            data[16 + i] = temp;
+                        }
+                        // 将 ICMP Type 修改为 0 (Echo Reply)
+                        data[ihl] = 0;
+                        // 重算 ICMP Checksum (设为 0，然后计算 Payload 的 16 位累加反码)
+                        data[ihl + 2] = 0;
+                        data[ihl + 3] = 0;
+                        let mut sum = 0u32;
+                        let mut i = ihl;
+                        while i < data.len() {
+                            let word = if i + 1 < data.len() {
+                                ((data[i] as u32) << 8) | (data[i+1] as u32)
+                            } else {
+                                (data[i] as u32) << 8
+                            };
+                            sum = sum.wrapping_add(word);
+                            i += 2;
+                        }
+                        while (sum >> 16) > 0 {
+                            sum = (sum & 0xFFFF) + (sum >> 16);
+                        }
+                        let cksum = !sum as u16;
+                        data[ihl + 2] = (cksum >> 8) as u8;
+                        data[ihl + 3] = (cksum & 0xFF) as u8;
+                    }
+                }
+                // 将回环的包塞入本地队列
+                self.local_rx_buffer.lock().push_back(data);
+                // 唤醒可能正在阻塞的进程 (Ping 进程)
+                let queue_guard = self.rx_wait_queue.lock();
+                if !queue_guard.is_empty() {
+                    crate::process::wake_up_one(queue_guard); 
+                }
+                // 直接返回成功，不再向外网卡发送
+                return total_len;
+            }
+        }
         let mut sockets = SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
         

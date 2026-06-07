@@ -26,3 +26,6 @@ replace-with = "vendored-sources"
 
 [source.vendored-sources]
 directory = "vendor"
+
+[env]
+SMOLTCP_IFACE_MAX_ADDR_COUNT = "128"

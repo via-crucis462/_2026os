@@ -550,11 +550,22 @@ pub fn setup_oscomp_env() {
     bin_dentry.insert("expr".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())));
     usr_bin_dentry.insert("expr".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())));
 
-    // 伪造并转发 ip 命令，现在还没配置Netlink 协议簇，没法用ip配置网卡
     let fake_ip = r#"#!/bin/sh
+    # 拦截添加 IP 的命令，并转交给真实的 ifconfig
+    if [ "$1" = "addr" ] && [ "$2" = "add" ]; then
+        # 此时参数为: $1=addr, $2=add, $3=10.0.0.2/24, $4=dev, $5=eth0
+
+        IP=$(echo "$3" | cut -d'/' -f1)
+        DEV="$5"
+        
+        # 调用 ifconfig
+        busybox ifconfig "$DEV" "$IP" up
+        exit 0
+    fi
+
+    # 兜底逻辑：应对 LTP 查询网卡状态的请求，继续骗它
     case "$*" in
         *link*|*addr*) 
-
             echo "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP"
             ;;
     esac

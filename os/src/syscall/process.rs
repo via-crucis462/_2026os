@@ -596,6 +596,12 @@ const RTC_RD_TIME: u32 = 0x80247009; // 真实的 RTC 读取指令号
 const TIOCGPGRP: u32 = 0x540F; // 获取终端的前台进程组
 const TIOCSPGRP: u32 = 0x5410; // 设置终端的前台进程组
 const TIOCSCTTY: u32 = 0x540E; // 设置控制终端
+//  网络接口相关命令 (Socket IOCTL)
+pub const SIOCGIFFLAGS: u32 = 0x8913; // 获取网卡运行状态标志
+pub const SIOCGIFADDR: u32  = 0x8915; // 获取网卡当前的 IP 地址
+pub const SIOCSIFADDR: u32  = 0x8916; // 设置网卡当前的 IP 地址
+pub const SIOC_NET_START: u32 = 0x8900;
+pub const SIOC_NET_END: u32   = 0x89FF;
 // Loop 设备相关的 ioctl 命令
 const LOOP_SET_FD: u32 = 0x4C00; //设置 Loop 设备的后端文件描述符
 const LOOP_CLR_FD: u32 = 0x4C01; //清除 Loop 设备的后端文件描述符
@@ -624,7 +630,14 @@ struct LoopInfo64 {
     lo_encrypt_key: [u8; 32],
     lo_init: [u64; 2],
 }
-
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct IfReq {
+    // 网卡名称
+    pub ifr_name: [u8; 16],
+    // 联合体数据 (包含了 sockaddr_in 或 flags 等)
+    pub ifru_data: [u8; 24], 
+}
 /// ioctl
 /// io设备控制系统调用
 /// 虽然loop设备驱动实现好了，但这里部分loop设备操作是伪实现的
@@ -900,6 +913,58 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             0
         }
         0x5402 => { /* TCSETS */
+            0
+        }
+        SIOCGIFFLAGS => { // 获取网卡运行状态
+        if let Some(mut ifr) = try_translated_read::<IfReq>(token, argp as *const IfReq) {
+            // 网卡处于 UP (1) 且 RUNNING (0x40) 状态
+            let flags: u16 = 0x1 | 0x40; 
+            ifr.ifru_data[0..2].copy_from_slice(&flags.to_ne_bytes());
+            try_translated_write(token, argp as *mut IfReq, ifr);
+            0
+        } else { EFAULT.as_isize() }
+        }
+        SIOCGIFADDR => { // 获取网卡当前的 IP
+            if let Some(mut ifr) = try_translated_read::<IfReq>(token, argp as *const IfReq) {
+                let iface = crate::net::NET_IFACE.exclusive_access();
+                if let Some(ip) = iface.ip_addrs().first() {
+                     let smoltcp::wire::IpAddress::Ipv4(ipv4) = ip.address() ;
+                        ifr.ifru_data[0..2].copy_from_slice(&2u16.to_ne_bytes()); // AF_INET 协议族
+                        ifr.ifru_data[2..4].copy_from_slice(&0u16.to_ne_bytes()); // 端口设为 0
+                        ifr.ifru_data[4..8].copy_from_slice(&ipv4.0);             // 真实的 IPv4 地址
+                        try_translated_write(token, argp as *mut IfReq, ifr);
+                    
+                }
+                0
+            } else { EFAULT.as_isize() }
+        }
+        SIOCSIFADDR => { // 给 eth0 绑定新 IP！
+            if let Some(ifr) = try_translated_read::<IfReq>(token, argp as *const IfReq) {
+                // 从 ifreq.sockaddr_in 中提取 IPv4 字节流 
+                let ip_bytes = &ifr.ifru_data[4..8];
+                let ip = smoltcp::wire::Ipv4Address::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+                let cidr = smoltcp::wire::IpCidr::new(smoltcp::wire::IpAddress::Ipv4(ip), 24); // 默认 24 位掩码
+                let mut push_failed = false;
+                //  将新 IP塞入协议栈！
+                let mut iface = crate::net::NET_IFACE.exclusive_access();
+                iface.update_ip_addrs(|addrs| {
+                    // 如果这个 IP 还没绑过，就动态加进去
+                    if !addrs.iter().any(|a| *a == cidr) {
+                    if let Err(_) = addrs.push(cidr) {
+                                push_failed = true; // 记录失败了
+                            }
+                    }
+                    
+                });
+                if push_failed {
+                    warn!("[kernel]  动态添加网卡 IP 失败：IP 池已满！");
+                    return ENOBUFS.as_isize(); 
+                }
+                info!("[kernel]  动态添加网卡 IP: {}", ip);
+                0
+            } else { EFAULT.as_isize() }
+        }
+        0x8900..=0x89ff => {// 对 ifconfig / ip 命令的配置请求，返回 0 
             0
         }
         _ => {
