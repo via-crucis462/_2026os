@@ -1,4 +1,4 @@
-use super::ext4inode::{Ext4Inode,Ext4InodeDisk, EXT4_EXTENTS_FL};
+use super::ext4inode::{Ext4Inode, Ext4InodeDisk, Ext4ExtentHeader, EXT4_EXTENTS_FL};
 use crate::ext4fs::BLOCK_SZ;
 use super::ext4_dir_entry::Ext4DirEntry;
 use super::block_cache::get_block_cache;
@@ -182,13 +182,22 @@ impl VfsInode for Ext4Inode {
             // 判断是否开启 extents
             if (self.fs.superblock.incompat_features & 0x40) != 0 {
                 disk_inode.i_flags = EXT4_EXTENTS_FL;
-                for i in 0..15 { disk_inode.i_block[i] = 0; }
-                // 初始化空的 extent header: magic=0xF30A, entries=0, max=4, depth=0
-                disk_inode.i_block[0] = 0xF30A; // magic: low 16 bits, entries: high 16 bits (0)
-                disk_inode.i_block[1] = 0x0004; // max: low 16 bits (4), depth: high 16 bits (0)
+                disk_inode.i_block.fill(0);
+                // 初始化空的 extent header
+                let header = Ext4ExtentHeader {
+                    eh_magic: 0xF30A,
+                    eh_entries: 0,
+                    eh_max: 4,
+                    eh_depth: 0,
+                    eh_generation: 0,
+                };
+                unsafe {
+                    (disk_inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader)
+                        .write_unaligned(header);
+                }
             } else {
                 disk_inode.i_flags = 0;
-                for i in 0..15 { disk_inode.i_block[i] = 0; }
+                disk_inode.i_block.fill(0);
             }
         });
 
@@ -235,7 +244,7 @@ impl VfsInode for Ext4Inode {
             disk_inode.i_links_count = 2; // 目录初始链接数为2 (self + .)
             disk_inode.i_blocks_lo = 0;
             disk_inode.i_flags = 0;
-            for i in 0..15 { disk_inode.i_block[i] = 0; }
+            disk_inode.i_block.fill(0);
         });
 
         // 4. 在父目录的数据块中写入目录项 (文件类型 2)
