@@ -21,18 +21,25 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
 
     // 1. 检查 fd 是否合法
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
-        return -9; // EBADF
+        return EBADF.as_isize(); // EBADF
     }
 
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     drop(inner); // 提前释放进程锁
-
+    // 获取用户传进来的最初限制长度
+    let mut user_len = unsafe {
+        if let Some(ul) = try_translated_read(token, addrlen) {
+            ul
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
     // 2. 检查这个文件是不是 Socket
     // 这里利用 Any trait 向下转型
     if let Some(_udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
     return 0; 
     }
-    if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
+    else if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
         
         // 3. 提取地址和端口
         let local_ep = socket.local_endpoint();
@@ -84,7 +91,60 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         }
 
         return 0; // 成功
-    } else {
+    }
+    else if let Some(_nl_socket) = file.as_any().downcast_ref::<StandardNetlinkSocket>() {
+        // Netlink 的地址结构是 sockaddr_nl，标准长度为 12 字节
+        let family: u16 = 16; // AF_NETLINK = 16
+        let mut sockaddr_bytes = [0u8; 12];
+        sockaddr_bytes[0..2].copy_from_slice(&family.to_ne_bytes());
+        // 绑定的本地端口号通常就是当前进程的 PID（或者0），暂时填 0 即可
+        sockaddr_bytes[4..8].copy_from_slice(&0u32.to_ne_bytes()); 
+
+        let copy_len = (user_len as usize).min(12);
+        let mut current_addr = addr as usize;
+        for i in 0..copy_len {
+            unsafe {
+                if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                    return crate::syscall::errno::Errno::EFAULT.as_isize();
+                }
+            }
+            current_addr += 1;
+        }
+
+        unsafe {
+            if !try_translated_write(token, addrlen, 12u32) {
+                return crate::syscall::errno::Errno::EFAULT.as_isize();
+            }
+        }
+        return 0;
+    }
+    // 匹配 AF_UNIX 套接字 (根据你实际的结构体名称改名)
+    else if let Some(_unix_socket) = file.as_any().downcast_ref::<crate::net::socket::UnixSocket>() {
+        // AF_UNIX 的地址结构是 sockaddr_un，通常包含一个路径
+        let family: u16 = 1; // AF_UNIX = 1
+        let mut sockaddr_bytes = [0u8; 110]; // 标准大小
+        sockaddr_bytes[0..2].copy_from_slice(&family.to_ne_bytes());
+        // 后续是本地绑定的抽象路径名，通常全 0 即可满足应用层安全检查
+
+        let copy_len = (user_len as usize).min(110);
+        let mut current_addr = addr as usize;
+        for i in 0..copy_len {
+            unsafe {
+                if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                    return crate::syscall::errno::Errno::EFAULT.as_isize();
+                }
+            }
+            current_addr += 1;
+        }
+
+        unsafe {
+            if !try_translated_write(token, addrlen, copy_len as u32) {
+                return crate::syscall::errno::Errno::EFAULT.as_isize();
+            }
+        }
+        return 0;
+    } 
+    else {
         return ENOTSOCK.as_isize(); // ENOTSOCK (不是一个 Socket)
     }
 }
@@ -468,10 +528,15 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
         inner.fd_table.push(fd_desc);
         idx
     };
-    info!(
+    warn!(
         "[kernel] sys_socket: pid={} created {} {} socket, protocol={}, nonblock={}, allocated fd={}",
         process.getpid(),                             // 当前进程 PID
-        if domain == 2 { "AF_INET" } else { "AF_UNIX" }, // 协议族字符串化
+        match domain {
+            1 => "AF_UNIX",
+            2 => "AF_INET",
+            16 => "AF_NETLINK",
+            _ => "UNKNOWN",
+        },
         match real_socket_type { 3 => "RAW", 2 => "UDP", _ => "TCP" },// 核心类型字符串化
         protocol,                                 // 协议号
         nonblock,                                 // 是否是非阻塞
@@ -698,12 +763,12 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: *mut MsgHdr, _flags: i32) -> isize {
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     drop(inner);
 
-    if !file.readable() {
+    /*if !file.readable() {
         return crate::syscall::errno::Errno::EACCES.as_isize();
-    }
+    }*/
 
     // 1. 读出 MsgHdr 控制结构
-    let msg = crate::mm::translated_read(token, msg_ptr);
+    let mut msg = crate::mm::translated_read(token, msg_ptr);
 
     // 2. 遍历提取用户的读缓冲 (IoVec)
     let mut buffers = alloc::vec::Vec::new();
@@ -722,6 +787,32 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: *mut MsgHdr, _flags: i32) -> isize {
     let user_buf = crate::mm::UserBuffer::new(buffers);
     let read_len = file.read(user_buf);
 
+    if read_len > 0 && msg.msg_name != 0 && msg.msg_namelen >= 12 {
+        // 构造合法的 sockaddr_nl
+        if file.as_any().is::<StandardNetlinkSocket>(){
+        let mut sa_nl = [0u8; 12];
+        sa_nl[0..2].copy_from_slice(&16u16.to_ne_bytes()); // nl_family = AF_NETLINK
+        sa_nl[4..8].copy_from_slice(&0u32.to_ne_bytes());  // nl_pid = 0
+        
+        // 安全地将 12 字节写入用户态提供的 msg_name 指针
+        let mut name_bufs = crate::mm::translated_byte_buffer_mut(token, msg.msg_name as *mut u8, 12);
+        let mut current = 0;
+        for buf in name_bufs.iter_mut() {
+            let copy_len = buf.len().min(12 - current);
+            buf[..copy_len].copy_from_slice(&sa_nl[current..current + copy_len]);
+            current += copy_len;
+            if current == 12 { break; }
+        }
+        
+        // 更新实际写回的名字长度
+        msg.msg_namelen = 12; 
+        crate::mm::translated_write(token, msg_ptr, msg);
+        }
+    }
 
+    // 如果读不到数据，返回 EAGAIN 让应用层重试
+    if read_len == 0 {
+        return EAGAIN.as_isize(); 
+    }
     read_len as isize
 }

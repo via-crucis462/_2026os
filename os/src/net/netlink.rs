@@ -124,23 +124,7 @@ impl File for StandardNetlinkSocket {
     fn readable(&self) -> bool { !self.rx_buffer.lock().is_empty() }
     fn writable(&self) -> bool { true }
 
-    fn write(&self, buf: UserBuffer) -> usize {
-        let total_len = buf.len();
-        let mut data = vec![0u8; total_len];
-        let mut current = 0;
-        for buffer in buf.buffers.iter() {
-            let copy_len = buffer.len();
-            data[current..current + copy_len].copy_from_slice(buffer);
-            current += copy_len;
-        }
-
-        if data.len() < size_of::<NlMsgHdr>() {
-            return total_len;
-        }
-
-        let hdr = unsafe { &*(data.as_ptr() as *const NlMsgHdr) };
-
-        // 核心常量定义
+fn write(&self, buf: UserBuffer) -> usize {
         const RTM_NEWLINK: u16 = 16;
         const RTM_NEWADDR: u16 = 20;
         const RTM_GETLINK: u16 = 18;
@@ -151,163 +135,148 @@ impl File for StandardNetlinkSocket {
         const NLM_F_MULTI: u16 = 2;
         const IFA_LOCAL: u16 = 2;
         const IFLA_IFNAME: u16 = 3;
+        let total_len = buf.len();
+        let mut data = vec![0u8; total_len];
+        let mut current = 0;
+        for buffer in buf.buffers.iter() {
+            let copy_len = buffer.len();
+            data[current..current + copy_len].copy_from_slice(buffer);
+            current += copy_len;
+        }
 
-        // ====================================================
-        // 🚀 场景一：用户态发起 DUMP 请求 (查询链路状态或地址)
-        // ====================================================
-        if (hdr.nlmsg_flags & NLM_F_DUMP) != 0 || hdr.nlmsg_type == RTM_GETLINK || hdr.nlmsg_type == RTM_GETADDR {
+        let mut offset = 0;
+        
+        // 支持 Netlink 批处理！循环 buffer 里的所有请求
+        while offset + size_of::<NlMsgHdr>() <= data.len() {
+            let hdr = unsafe { &*(data.as_ptr().add(offset) as *const NlMsgHdr) };
+            let msg_len = hdr.nlmsg_len as usize;
+            
+            // 防止恶意长度导致越界
+            if msg_len < size_of::<NlMsgHdr>() || offset + msg_len > data.len() {
+                break;
+            }
+
+            // 严格按 4 字节跨度步进
+            let aligned_msg_len = (msg_len + 3) & !3;
+            let msg_data = &data[offset..offset + msg_len];
+
+
             let mut rx_lock = self.rx_buffer.lock();
 
-            // 1. 🌟【修复核心】：链路层状态应答，必须保证 4 字节严格对齐，彻底消除 remnant 残余
-            if hdr.nlmsg_type == RTM_GETLINK {
-                // 报文严格对齐计算：
-                // NlMsgHdr(16) + ifinfomsg(16) = 32 字节
-                // RtAttr头(4) + "eth0\0"(5) = 9 字节 -> 强制4字节对齐后 = 12 字节 (末尾补3个0)
-                // 整个报文总长 = 32 + 12 = 44 字节
-                let mut link_reply = vec![0u8; 44];
-                
-                let reply_hdr = NlMsgHdr {
-                    nlmsg_len: 44, // 严格标注总长为 44
-                    nlmsg_type: RTM_NEWLINK,
-                    nlmsg_flags: NLM_F_MULTI,
-                    nlmsg_seq: hdr.nlmsg_seq,
-                    nlmsg_pid: hdr.nlmsg_pid,
-                };
-                unsafe { core::ptr::copy_nonoverlapping(&reply_hdr as *const NlMsgHdr as *const u8, link_reply.as_mut_ptr(), size_of::<NlMsgHdr>()); }
-                
-                // 填充标准的 ifinfomsg 结构体 (16字节)
-                link_reply[16] = 0; // af_family: AF_UNSPEC
-                link_reply[18] = 1; // ifi_type: ARPHRD_ETHER (以太网)
-                link_reply[20..24].copy_from_slice(&1u32.to_ne_bytes()); // ifi_index = 1
-                link_reply[24..28].copy_from_slice(&0x1003u32.to_ne_bytes()); // flags: IFF_UP | IFF_RUNNING | IFF_BROADCAST
-                
-                // 追加网卡名字属性头 (IFLA_IFNAME)
-                let rta_name = RtAttr {
-                    rta_len: 9, // 🌟 按照 Linux 标准：rta_len 依然填真实的 9（4头+5数据）
-                    rta_type: IFLA_IFNAME,
-                };
-                unsafe { core::ptr::copy_nonoverlapping(&rta_name as *const RtAttr as *const u8, link_reply.as_mut_ptr().add(32), size_of::<RtAttr>()); }
-                
-                // 写入真实网卡名字符串 "eth0\0" (5字节)
-                // 此时 link_reply[41], link_reply[42], link_reply[43] 默认为 0，自动充当了 4 字节对齐的 Padding！
-                link_reply[36..41].copy_from_slice(b"eth0\0"); 
+            // 引入 is_dump 变量，采用 == NLM_F_DUMP 进行严格的全掩码匹配
+            // 这样能够完美避开 ip addr add 携带的 NLM_F_EXCL (0x200) 带来的位碰撞
+            let is_dump = (hdr.nlmsg_flags & NLM_F_DUMP) == NLM_F_DUMP;
 
-                rx_lock.push_back(link_reply);
-            }
-
-            // 2. 如果请求的是地址列表 (GETADDR)，实时去底层网卡捞出所有的真 IP！
-            if hdr.nlmsg_type == RTM_GETADDR || (hdr.nlmsg_flags & NLM_F_DUMP) != 0 {
-                let iface = crate::net::NET_IFACE.exclusive_access();
-                let ip_addrs = iface.ip_addrs();
-
-                for cidr in ip_addrs.iter() {
-                    let smoltcp::wire::IpCidr::Ipv4(v4_cidr) = cidr;
-
-                    let addr = v4_cidr.address(); 
-                    let ip_bytes = addr.as_bytes(); 
-                    let prefix_len = v4_cidr.prefix_len();
-
-                    let mut addr_reply = vec![0u8; 32];
-                    
-                    let reply_hdr = NlMsgHdr {
-                        nlmsg_len: 32,
-                        nlmsg_type: RTM_NEWADDR,
-                        nlmsg_flags: NLM_F_MULTI,
-                        nlmsg_seq: hdr.nlmsg_seq,
-                        nlmsg_pid: hdr.nlmsg_pid,
-                    };
-
-                    let ifa = IfAddressMsg {
-                        ifa_family: 2, // AF_INET (IPv4)
-                        ifa_prefixlen: prefix_len as u8,
-                        ifa_flags: 0,
-                        ifa_scope: 0,   
-                        ifa_index: 1,   // 网卡序号保持为 1
-                    };
-
-                    let rta = RtAttr {
-                        rta_len: 8,       
-                        rta_type: IFA_LOCAL, 
-                    };
-
-                    unsafe {
-                        let ptr = addr_reply.as_mut_ptr();
-                        core::ptr::copy_nonoverlapping(&reply_hdr as *const NlMsgHdr as *const u8, ptr, size_of::<NlMsgHdr>());
-                        core::ptr::copy_nonoverlapping(&ifa as *const IfAddressMsg as *const u8, ptr.add(16), size_of::<IfAddressMsg>());
-                        core::ptr::copy_nonoverlapping(&rta as *const RtAttr as *const u8, ptr.add(24), size_of::<RtAttr>());
+            // 查询状态或 DUMP 
+            if is_dump || hdr.nlmsg_type == RTM_GETLINK || hdr.nlmsg_type == RTM_GETADDR {
+                if hdr.nlmsg_type == RTM_GETLINK {
+                    #[repr(C)]
+                    struct IfInfoMsg {
+                        ifi_family: u8, __pad: u8, ifi_type: u16, ifi_index: i32, ifi_flags: u32, ifi_change: u32,
                     }
-                    addr_reply[28..32].copy_from_slice(ip_bytes);
-
-                    rx_lock.push_back(addr_reply);
+                    #[repr(C)]
+                    struct LinkReplyPacket {
+                        nl_hdr: NlMsgHdr, if_msg: IfInfoMsg, attr_hdr: RtAttr, ifname: [u8; 8], 
+                    }
+                    let mut packet = LinkReplyPacket {
+                        nl_hdr: NlMsgHdr { nlmsg_len: 44, nlmsg_type: RTM_NEWLINK, nlmsg_flags: NLM_F_MULTI, nlmsg_seq: hdr.nlmsg_seq, nlmsg_pid: hdr.nlmsg_pid },
+                        if_msg: IfInfoMsg { ifi_family: 0, __pad: 0, ifi_type: 1, ifi_index: 1, ifi_flags: 0x1003, ifi_change: 0 },
+                        attr_hdr: RtAttr { rta_len: 9, rta_type: IFLA_IFNAME },
+                        ifname: [0; 8],
+                    };
+                    packet.ifname[0..5].copy_from_slice(b"eth0\0");
+                    let mut link_reply = vec![0u8; 44];
+                    unsafe { core::ptr::copy_nonoverlapping(&packet as *const _ as *const u8, link_reply.as_mut_ptr(), 44); }
+                    rx_lock.push_back(link_reply);
                 }
-            }
 
-            // 3. 告诉 Busybox：批量数据传输完毕
-            let mut done_reply = vec![0u8; 20];
-            let done_hdr = NlMsgHdr {
-                nlmsg_len: 20,
-                nlmsg_type: NLMSG_DONE, 
-                nlmsg_flags: NLM_F_MULTI,
-                nlmsg_seq: hdr.nlmsg_seq,
-                nlmsg_pid: hdr.nlmsg_pid,
-            };
-            unsafe { core::ptr::copy_nonoverlapping(&done_hdr as *const NlMsgHdr as *const u8, done_reply.as_mut_ptr(), size_of::<NlMsgHdr>()); }
-            rx_lock.push_back(done_reply);
+                if hdr.nlmsg_type == RTM_GETADDR || is_dump {
+                    let iface = crate::net::NET_IFACE.exclusive_access();
+                    for cidr in iface.ip_addrs().iter() {
+                        let smoltcp::wire::IpCidr::Ipv4(v4_cidr) = cidr;
+                        let addr = v4_cidr.address(); 
+                        let ip_bytes = addr.as_bytes(); 
+                        let prefix_len = v4_cidr.prefix_len();
 
-            return total_len;
-        }
+                        let mut addr_reply = vec![0u8; 32];
+                        let reply_hdr = NlMsgHdr { nlmsg_len: 32, nlmsg_type: RTM_NEWADDR, nlmsg_flags: NLM_F_MULTI, nlmsg_seq: hdr.nlmsg_seq, nlmsg_pid: hdr.nlmsg_pid };
+                        let ifa = IfAddressMsg { ifa_family: 2, ifa_prefixlen: prefix_len as u8, ifa_flags: 0, ifa_scope: 0, ifa_index: 1 };
+                        let rta = RtAttr { rta_len: 8, rta_type: IFA_LOCAL };
 
-        // ====================================================
-        // 🚀 场景二：用户态发起普通的 RTM_NEWADDR (添加新 IP 命令)
-        // ====================================================
-        if hdr.nlmsg_type == RTM_NEWADDR {
-            let ifa_offset = size_of::<NlMsgHdr>();
-            if ifa_offset + size_of::<IfAddressMsg>() <= data.len() {
-                let ifa = unsafe { &*(data.as_ptr().add(ifa_offset) as *const IfAddressMsg) };
-                let attr_offset = ifa_offset + size_of::<IfAddressMsg>();
-                let payload_end = hdr.nlmsg_len as usize;
+                        unsafe {
+                            let ptr = addr_reply.as_mut_ptr();
+                            core::ptr::copy_nonoverlapping(&reply_hdr as *const _ as *const u8, ptr, size_of::<NlMsgHdr>());
+                            core::ptr::copy_nonoverlapping(&ifa as *const _ as *const u8, ptr.add(16), size_of::<IfAddressMsg>());
+                            core::ptr::copy_nonoverlapping(&rta as *const _ as *const u8, ptr.add(24), size_of::<RtAttr>());
+                        }
+                        addr_reply[28..32].copy_from_slice(ip_bytes);
+                        rx_lock.push_back(addr_reply);
+                    }
+                }
+
+                let mut done_reply = vec![0u8; 20];
+                let done_hdr = NlMsgHdr { nlmsg_len: 20, nlmsg_type: NLMSG_DONE, nlmsg_flags: NLM_F_MULTI, nlmsg_seq: hdr.nlmsg_seq, nlmsg_pid: hdr.nlmsg_pid };
+                unsafe { core::ptr::copy_nonoverlapping(&done_hdr as *const _ as *const u8, done_reply.as_mut_ptr(), size_of::<NlMsgHdr>()); }
+                rx_lock.push_back(done_reply);
                 
-                if attr_offset < payload_end && payload_end <= data.len() {
-                    let attr_payload = &data[attr_offset..payload_end];
-                    self.parse_rt_attributes(attr_payload, ifa.ifa_prefixlen);
+            } else {
+                // 普通的请求 (如 RTM_NEWADDR 添加 IP)
+                if hdr.nlmsg_type == RTM_NEWADDR {
+                    let ifa_offset = size_of::<NlMsgHdr>();
+                    if ifa_offset + size_of::<IfAddressMsg>() <= msg_len {
+                        let ifa = unsafe { &*(msg_data.as_ptr().add(ifa_offset) as *const IfAddressMsg) };
+                        let attr_offset = ifa_offset + size_of::<IfAddressMsg>();
+                        if attr_offset < msg_len {
+                            let attr_payload = &msg_data[attr_offset..msg_len];
+                            self.parse_rt_attributes(attr_payload, ifa.ifa_prefixlen);
+                        }
+                    }
                 }
+
+                // 正常的操作返回成功 ACK，序列号严格与当前这个 msg_data 对应！
+                let ack_hdr = NlMsgHdr { nlmsg_len: 36, nlmsg_type: NLMSG_ERROR, nlmsg_flags: 0, nlmsg_seq: hdr.nlmsg_seq, nlmsg_pid: hdr.nlmsg_pid };
+                let ack_err = NlMsgErr { error: 0, msg: *hdr };
+                let mut ack_packet = vec![0u8; 36];
+                unsafe {
+                    core::ptr::copy_nonoverlapping(&ack_hdr as *const _ as *const u8, ack_packet.as_mut_ptr(), size_of::<NlMsgHdr>());
+                    core::ptr::copy_nonoverlapping(&ack_err as *const _ as *const u8, ack_packet.as_mut_ptr().add(size_of::<NlMsgHdr>()), size_of::<NlMsgErr>());
+                }
+                rx_lock.push_back(ack_packet);
             }
+  
+            offset += aligned_msg_len;
         }
 
-        // 正常的操作返回标准的成功 ACK 回执
-        let ack_hdr = NlMsgHdr {
-            nlmsg_len: (size_of::<NlMsgHdr>() + size_of::<NlMsgErr>()) as u32,
-            nlmsg_type: NLMSG_ERROR,
-            nlmsg_flags: 0,
-            nlmsg_seq: hdr.nlmsg_seq,
-            nlmsg_pid: hdr.nlmsg_pid,
-        };
-        let ack_err = NlMsgErr { error: 0, msg: *hdr };
-
-        let mut ack_packet = vec![0u8; size_of::<NlMsgHdr>() + size_of::<NlMsgErr>()];
-        unsafe {
-            core::ptr::copy_nonoverlapping(&ack_hdr as *const NlMsgHdr as *const u8, ack_packet.as_mut_ptr(), size_of::<NlMsgHdr>());
-            core::ptr::copy_nonoverlapping(&ack_err as *const NlMsgErr as *const u8, ack_packet.as_mut_ptr().add(size_of::<NlMsgHdr>()), size_of::<NlMsgErr>());
-        }
-
-        self.rx_buffer.lock().push_back(ack_packet);
         total_len
     }
-
     fn read(&self, mut buf: UserBuffer) -> usize {
-        if let Some(packet) = self.rx_buffer.lock().pop_front() {
-            let len = packet.len();
-            let mut current = 0;
-            for buffer in buf.buffers.iter_mut() {
-                let copy_len = buffer.len().min(len.saturating_sub(current));
-                if copy_len == 0 { break; }
-                buffer[..copy_len].copy_from_slice(&packet[current..current + copy_len]);
-                current += copy_len;
-                if current == len { break; }
+        let mut rx_lock = self.rx_buffer.lock();
+        
+        // 🌟 核心突破 2：将所有零碎的小包裹融合成一个连续的字节流 (Flat Data)
+        let mut flat_data = alloc::vec::Vec::new();
+        while let Some(packet) = rx_lock.front() {
+            if flat_data.len() + packet.len() > buf.len() {
+                break; // 如果超出了用户态的麻袋大小，就留到下一次 read 再给它
             }
-            return current;
+            let packet = rx_lock.pop_front().unwrap();
+            flat_data.extend_from_slice(&packet);
         }
-        0
+
+        if flat_data.is_empty() {
+            return 0;
+        }
+
+        // 🌟 核心突破 3：将融合好的大包裹，一次性倒进用户态的物理页缓冲中！消灭 OVERRUN 错乱
+        let mut current = 0;
+        for buffer in buf.buffers.iter_mut() {
+            let copy_len = buffer.len().min(flat_data.len() - current);
+            if copy_len == 0 { break; }
+            buffer[..copy_len].copy_from_slice(&flat_data[current..current + copy_len]);
+            current += copy_len;
+            if current == flat_data.len() { break; }
+        }
+
+        current
     }
 
     fn get_stat(&self) -> Stat {
