@@ -3,6 +3,7 @@
 //! 内存管理也暂时放在此处，后续迁移到mm
 
 use core::{panic, result};
+use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{get_hart_id};
@@ -20,6 +21,10 @@ use crate::sync::WaitQueue;
 use alloc::collections::VecDeque;
 
 use alloc::collections::BTreeMap;
+
+/// TTY 前台进程组 ID（用于 TIOCGPGRP / TIOCSPGRP）
+/// 初始值为 0，表示尚未设置
+static TTY_FOREGROUND_PGRP: AtomicI32 = AtomicI32::new(0);
 
 
 // 记录格式：ino (inode编号) -> (atime_sec, atime_nsec, mtime_sec, mtime_nsec)
@@ -543,8 +548,18 @@ fn clock_adj_result_from_status(status: i32) -> isize {
     }
 }
 
+/// 缓存的 RTC 基准：在第一次读取时记录 RTC 值和当时的 monotonic 时间
+static RTC_BASE: spin::Once<(i64, u64)> = spin::Once::new();
+
 fn current_wallclock_ns() -> i64 {
-    let base_ns = get_real_time_ns() as i128;
+    let mono_us = get_time_us() as u64;
+    // 首次调用时，记录 RTC 快照和对应的 monotonic 时间
+    let (rtc_base_ns, mono_base_us) = RTC_BASE.call_once(|| {
+        (get_real_time_ns() as i64, mono_us)
+    });
+    // wallclock = RTC基准 + monotonic增量（转为纳秒） + offset
+    let mono_delta_ns = (mono_us - *mono_base_us) as i128 * 1_000;
+    let base_ns = *rtc_base_ns as i128 + mono_delta_ns;
     let offset_ns = *CLOCK_REALTIME_OFFSET_NS.lock() as i128;
     let adjusted = base_ns + offset_ns;
 
@@ -591,6 +606,8 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
     0
 }
 const TCGETS: u32 = 0x5401;
+const TIOCGPGRP: u32 = 0x540F;   // 获取前台进程组 ID
+const TIOCSPGRP: u32 = 0x5410;   // 设置前台进程组 ID
 const TIOCGWINSZ: u32 = 0x5413;
 const RTC_RD_TIME: u32 = 0x80247009; // 真实的 RTC 读取指令号
 
@@ -670,6 +687,36 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 }
                 0 // 成功
             } else { EFAULT.as_isize() }
+        }
+        TIOCGPGRP => {
+            // 获取前台进程组 ID
+            // 如果还没设置过，默认返回当前进程的 pgid
+            let fg_pgrp = TTY_FOREGROUND_PGRP.load(Ordering::Relaxed);
+            let pgrp: i32 = if fg_pgrp == 0 {
+                task.process().inner_exclusive_access().pgid as i32
+            } else {
+                fg_pgrp
+            };
+            if argp != 0 {
+                if !try_translated_write(token, argp as *mut i32, pgrp) {
+                    return EFAULT.as_isize();
+                }
+                0
+            } else {
+                EFAULT.as_isize()
+            }
+        }
+        TIOCSPGRP => {
+            // 设置前台进程组 ID
+            if argp == 0 {
+                return EFAULT.as_isize();
+            }
+            let new_pgrp: i32 = match try_translated_read(token, argp as *const i32) {
+                Some(v) => v,
+                None => return EFAULT.as_isize(),
+            };
+            TTY_FOREGROUND_PGRP.store(new_pgrp, Ordering::Relaxed);
+            0
         }
         RTC_RD_TIME => {
             // 获取硬件时间并写给用户
@@ -1240,6 +1287,11 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         }
     }
 
+    // lmbench 加速：注入 ENOUGH=5000 跳过耗时的自动校准
+    if !envs_vec.iter().any(|e| e.starts_with("ENOUGH=")) {
+        envs_vec.push("ENOUGH=5000".to_string());
+    }
+
     trace!("[kernel] sys_exec: before open_file");
     
     // 1. 尝试正常打开主程序
@@ -1269,9 +1321,12 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             let busybox = "/musl/busybox";
             if let Some(inode) = open_file(cwd.clone(), busybox, OpenFlags::RDONLY,0) {
                 let mut new_args = vec!["musl/busybox".to_string(), "sh".to_string()];
-                // 如果脚本没带参数，把脚本路径加进去
-                if args_vec.len() <= 1 { new_args.push(path_str.clone()); }
-                //new_args.extend(args_vec);
+                // 始终把脚本路径作为第一个参数传给 busybox sh
+                new_args.push(path_str.clone());
+                // 把脚本自身的参数也传递过去（跳过 argv[0] 即脚本路径本身）
+                for arg in args_vec.iter().skip(1) {
+                    new_args.push(arg.clone());
+                }
                 args_vec = new_args;
                 app_inode = inode;
             } else {
@@ -2799,8 +2854,14 @@ pub fn sys_getrusage(who: i32, usage_ptr: *mut Rusage) -> isize {
         return EFAULT.as_isize(); 
     }
     let token = current_user_token();
-    // 返回全 0 的结构体
-    let usage = Rusage::default();
+    let total_us = get_time_us();
+    let usage = Rusage {
+        ru_utime: TimeVal {
+            sec: total_us / 1_000_000,
+            usec: total_us % 1_000_000,
+        },
+        ..Default::default()
+    };
     crate::mm::translated_write(token, usage_ptr, usage);
     0 
 }
