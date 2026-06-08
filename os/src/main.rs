@@ -60,7 +60,7 @@ use crate::arch::la;
 
 pub use arch::timer::*;
 
-use crate::drivers::block::NET_DEVICE;
+use crate::arch::drivers::block::NET_DEVICE;
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::*;

@@ -1,5 +1,5 @@
-// os/src/net/mod.rs
-pub mod socket; // 声明我们有一个 socket 子模块！
+//! os/src/net/mod.rs
+pub mod socket;
 
 use alloc::vec;
 use alloc::vec::Vec;
