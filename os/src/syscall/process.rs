@@ -1186,14 +1186,7 @@ pub fn sys_pthread_create(thread: *mut usize, attr: *const usize, start_routine:
     // 3. 设置新线程的入口点和参数
     {
         let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
-        #[cfg(target_arch = "riscv64")]
-        {
-            trap_cx.sepc = start_routine;
-        }
-        #[cfg(target_arch = "loongarch64")]
-        {
-            trap_cx.era = start_routine;
-        }
+        trap_cx.set_rt(start_routine);
         trap_cx.set_a0(arg);
     }
     
