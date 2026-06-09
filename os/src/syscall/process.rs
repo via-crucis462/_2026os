@@ -1298,6 +1298,21 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     warn!("[kernel] sys_exec: trying to exec '{}', args={:?}, envs={:?}", path_str, args_vec, envs_vec);
     // 1. 尝试正常打开主程序
     let mut app_inode_opt = open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY,0);
+    let mut using_busybox_fallback = false;
+
+    // 文件不存在时的回退策略：尝试用 /musl/busybox 运行
+    if app_inode_opt.is_none() {
+        warn!("[kernel] sys_exec: '{}' not found, trying /musl/busybox fallback", path_str);
+        if let Some(bb) = open_file(cwd.clone(), "/musl/busybox", OpenFlags::RDONLY, 0) {
+            app_inode_opt = Some(bb);
+            using_busybox_fallback = true;
+            // busybox 约定：argv[0]="busybox", argv[1]=原始命令路径, 后续是原参数
+            let mut new_args = vec!["busybox".to_string(), path_str.clone()];
+            new_args.extend(args_vec.clone());
+            args_vec = new_args;
+            warn!("[kernel] sys_exec: busybox fallback, new args={:?}", args_vec);
+        }
+    }
 
     // 2. 继续执行逻辑
     if let Some(mut app_inode) = app_inode_opt {
@@ -1316,8 +1331,8 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
 
         let app_name = app_inode.get_dentry().name.clone();
 
-        // 脚本处理逻辑 (.sh)
-        if app_name.ends_with(".sh") {
+        // 脚本处理逻辑 (.sh)——仅在非 busybox 回退模式下生效
+        if !using_busybox_fallback && app_name.ends_with(".sh") {
             info!("[kernel] sys_exec: detected script '{}', trying to execute with busybox", app_name);
             let busybox = "/musl/busybox";
             if let Some(inode) = open_file(cwd.clone(), busybox, OpenFlags::RDONLY,0) {
