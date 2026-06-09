@@ -118,6 +118,8 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let status = inner.fd_table[fd].status;
         drop(inner);
     if !file.writable() {
+        info!("pid[{}] [sys_write] EACCES fd={} readable={} writable={}",
+            proc.pid.0, fd, file.readable(), file.writable());
         return EACCES.as_isize(); 
     }
     if let Some(err) = file.check_write_error() {
@@ -233,7 +235,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
     let path_str = normalize_leading_dot_path(
         if let Some(s) = try_translated_str(token, path) { s } else { return EFAULT.as_isize(); }
     );
-    //println!("kernel:pid[{}] tid[{}] sys_openat, dirfd={}, path={}", task.process().pid.0, task.gettid(), dirfd, path_str);
+    //warn!("kernel:pid[{}] tid[{}] sys_openat, dirfd={}, path={}", task.process().pid.0, task.gettid(), dirfd, path_str);
     //debug!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
     const O_TMPFILE: u32 = 0x400000;
     let (readable, writable) = match flags & 0x3 {
@@ -391,7 +393,7 @@ pub fn sys_mknod(dirfd: isize, path: *const u8, mode: u32, _dev: u64) -> isize {
 }
 
 pub fn sys_close(fd: usize) -> isize {
-	trace!("kernel:pid[{}] sys_close, aim fd = {}", current_task().unwrap().process().pid.0, fd);
+	warn!("kernel:pid[{}] sys_close, aim fd = {}", current_task().unwrap().process().pid.0, fd);
     let task = current_task().unwrap();
     let proc = task.process();
     let mut inner = proc.inner_exclusive_access();
@@ -461,7 +463,7 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, mode: u32, _flags: u32) -> is
 }
 
 pub fn sys_pipe(pipe: *mut usize) -> isize {
-	trace!("kernel:pid[{}] sys_pipe", current_task().unwrap().process().pid.0);
+	warn!("kernel:pid[{}] sys_pipe", current_task().unwrap().process().pid.0);
     let task = current_task().unwrap();
     let proc = task.process();
     let token = current_user_token();
@@ -478,12 +480,15 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
+    warn!("kernel:pid[{}] sys_pipe: allocated read_fd={}", task.process().pid.0, read_fd);
     inner.set_fd(read_fd, pipe_read, FdFlags::empty(), 0);
     let write_fd = match inner.alloc_fd() {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
     inner.set_fd(write_fd, pipe_write, FdFlags::empty(), O_WRONLY as usize);
+    // 诊断：打印管道 fd 分配
+    warn!("kernel:pid[{}] sys_pipe: allocated write_fd={}", task.process().pid.0, write_fd);
     // 释放锁，因为下面的write会访问用户锁
     drop(inner);
     // User ABI for pipe is int pipefd[2], i.e. two 32-bit entries.
@@ -494,17 +499,17 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     if !try_translated_write(token, unsafe { pipe_u32.add(1) }, write_fd as u32) {
         return EFAULT.as_isize();
     }
-    //println!("pipe done");
+    //warn!("pipe done");
     0
 }
 
 pub fn sys_dup(fd: usize) -> isize {
 	trace!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().process().pid.0, fd);
-    // println!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().process().pid.0, fd);
+    // warn!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().process().pid.0, fd);
     let task = current_task().unwrap();
     let proc = task.process();
     let mut inner = proc.inner_exclusive_access();
-    // println!("table len = {}", inner.fd_table.len());
+    // warn!("table len = {}", inner.fd_table.len());
     if fd >= inner.fd_table.len() {
         return EBADF.as_isize();
     }
@@ -515,7 +520,7 @@ pub fn sys_dup(fd: usize) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
-    // println!("[kernel] sys_dup: new fd allocated: {}", new_fd);
+    // warn!("[kernel] sys_dup: new fd allocated: {}", new_fd);
     let file = Arc::clone(inner.fd_table[fd].file.as_ref().unwrap());
     let old_status = inner.fd_table[fd].status;
     inner.set_fd(new_fd, file, FdFlags::empty(), old_status);
@@ -523,7 +528,7 @@ pub fn sys_dup(fd: usize) -> isize {
 }
 
 pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> isize {
-    // println!("[DEBUG VFS] sys_lseek: fd={}, offset={}, whence={}", fd, offset, whence);
+    // warn!("[DEBUG VFS] sys_lseek: fd={}, offset={}, whence={}", fd, offset, whence);
     let token = current_user_token();
     let task = current_task().unwrap();
     let proc = task.process();
@@ -880,7 +885,7 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
 }
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
-    //println!("sys_fcntl fd={}, cmd={}, arg={:#x}", fd, cmd, arg);
+    //warn!("sys_fcntl fd={}, cmd={}, arg={:#x}", fd, cmd, arg);
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
 
@@ -1320,7 +1325,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usiz
     match target_dentry {
         Ok(dentry) => {
             let stat = dentry.inode.get_stat();
-            //println!("mtime = {}.{} , atime = {}.{}, inode={}", stat.mtime_sec, stat.mtime_nsec, stat.atime_sec, stat.atime_nsec, dentry.name);
+            //warn!("mtime = {}.{} , atime = {}.{}, inode={}", stat.mtime_sec, stat.mtime_nsec, stat.atime_sec, stat.atime_nsec, dentry.name);
             if !try_translated_write(token, st, stat) {
                 return EFAULT.as_isize();
             }
@@ -1652,7 +1657,7 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
 }
 
 pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> isize {
-    //println!("fd={}, iov={:?}, iovcnt={}, flags={:#x}", fd, iov, iovcnt, flags);
+    //warn!("fd={}, iov={:?}, iovcnt={}, flags={:#x}", fd, iov, iovcnt, flags);
     const IOV_MAX: usize = 1024;
     const IOV_BUF_MAX: usize = 1024 * 1024; // 1 MiB per iovec element
     const SPLICE_F_MOVE: u32 = 0x01;
@@ -1679,7 +1684,7 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
 
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
-        println!("vmsplice target fd {} out of range", fd);
+        warn!("vmsplice target fd {} out of range", fd);
         return EBADF.as_isize();
     }
 
@@ -1687,7 +1692,7 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
     let file = match fd_entry.file.as_ref() {
         Some(f) => f.clone(),
         None => {
-            println!("vmsplice target fd {} has no associated file", fd);
+            warn!("vmsplice target fd {} has no associated file", fd);
             return EBADF.as_isize();
         }
     };
@@ -1696,11 +1701,11 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
 
     // vmsplice(..., fd, ...) writes user iov into a pipe.
     if !file.writable() && !file.readable() {
-        println!("vmsplice target fd {} is not writable", fd);
+        warn!("vmsplice target fd {} is not writable", fd);
         return EBADF.as_isize();
     }
     if (file.get_stat().mode & S_IFMT) != crate::fs::S_IFIFO {
-        println!("vmsplice target fd {} is not a pipe", fd);
+        warn!("vmsplice target fd {} is not a pipe", fd);
         return EBADF.as_isize();
     }
     if file.writable(){
@@ -1799,7 +1804,7 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
 }
 
 pub fn sys_splice(fd_in: usize, off_in: *mut i64, fd_out: usize, off_out: *mut i64, len: usize, flags: u32) -> isize {
-    println!("fd_in , off_in , fd_out , off_out , len , flags : {} {} {} {} {} {}", fd_in, off_in as usize, fd_out, off_out as usize, len, flags);
+    warn!("fd_in , off_in , fd_out , off_out , len , flags : {} {} {} {} {} {}", fd_in, off_in as usize, fd_out, off_out as usize, len, flags);
     const SPLICE_F_MOVE: u32 = 0x01;
     const SPLICE_F_NONBLOCK: u32 = 0x02;
     const SPLICE_F_MORE: u32 = 0x04;
@@ -2059,7 +2064,7 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
     };
 
     // 通过父目录的 inode 创建符号链接
-    //println!("parent_path_str={}, name={}, target_str={}", parent_dentry.inode.type_name(), name, target_str);
+    //warn!("parent_path_str={}, name={}, target_str={}", parent_dentry.inode.type_name(), name, target_str);
     if let Some(symlink_inode) = parent_dentry.inode.create_symlink(&name, &target_str) {
         // 将新创建的 Inode 挂到 VFS 树
         parent_dentry.insert(name, symlink_inode);

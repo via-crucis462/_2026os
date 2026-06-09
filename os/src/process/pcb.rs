@@ -468,7 +468,7 @@ impl ProcessControlBlock {
     /// Fork from parent to child
     /// 已编辑，添加了stack参数 
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
-    pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>, caller_task: Arc<TaskControlBlock>, _flags: usize)-> (Arc<Self>, Arc<TaskControlBlock>) {
+    pub fn fork(self: &Arc<ProcessControlBlock>, sp: usize, caller_task: Arc<TaskControlBlock>, _flags: usize)-> (Arc<Self>, Arc<TaskControlBlock>) {
         const CLONE_VM: usize = 0x00000100; // 共享内存空间
         const CLONE_THREAD: usize = 0x00010000; // 共享线程组（即父子线程共享 PCB）
         const CLONE_CHILD_CLEARTID: usize = 0x00200000; // 子线程退出时清除父线程中的子线程 ID（即 clear_child_tid）
@@ -592,8 +592,21 @@ impl ProcessControlBlock {
         {
             trap_cx.kernel_sp = kernel_stack_top;
         }
-        if let Some(sp) = sp {
+        if sp != 0 {
             trap_cx.set_sp(sp);
+        }
+        else if _flags & CLONE_VM != 0 {
+            // clone 但没传栈：mmap 一块新栈
+            const STACK_SIZE: usize = 0x20000; // 128KB
+            let stack_bottom = proc_control_block.inner_exclusive_access().memory_set.mmap(
+                0, STACK_SIZE,
+                mmap::MMapProt::from_bits_truncate(3),      // PROT_READ | PROT_WRITE
+                mmap::MMapFlags::MAP_PRIVATE | mmap::MMapFlags::MAP_ANONYMOUS,
+                None, 0,
+            ).unwrap_or(0);
+            if stack_bottom != 0 {
+                trap_cx.set_sp(stack_bottom + STACK_SIZE); // 栈顶 = 栈底 + 大小
+            }
         }
         // 把任务加入进程的线程列表
         proc_control_block.inner.exclusive_access().tasks.push(new_task.clone());

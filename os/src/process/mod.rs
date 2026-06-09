@@ -176,7 +176,9 @@ pub fn exit_current_and_run_next(exit_code: i32){
         panic!("All applications completed!");
     }
 
-    //println!("[kernel] Process {} is exiting with code {} ...", process.getpid(), exit_code);
+    warn!("[EXIT] PID {} (tid {}) exit_code={}, alive_tasks={}", 
+        process.getpid(), task.gettid(), exit_code, 
+        process.inner_exclusive_access().alive_task_count);
     drop(task);
     let mut proc_inner = process.inner_exclusive_access();
     proc_inner.alive_task_count -= 1;
@@ -489,7 +491,8 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
                 // 此处标注为kill后稍后会调用exit_current_and_run_next，这里不直接调用
                 task_inner.killed = true;
                 task_inner.term_signal = Some(sig as i32 + 1);
-                warn!("[K] default terminate for signal {:?}", signal);
+                let pid = task.process().pid.0;
+                warn!("[SIG_DEATH] PID {} killed by signal {} ({:?})", pid, sig as i32 + 1, signal);
             }
         }
     }
