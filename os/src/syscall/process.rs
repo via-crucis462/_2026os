@@ -573,7 +573,7 @@ fn current_wallclock_ns() -> i64 {
 }
 
 pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
-    //println!("kernel: sys_clock_gettime: clock_id={}, tp={:#x}", clock_id, tp as usize);
+    //warn!("kernel: sys_clock_gettime: clock_id={}, tp={:#x}", clock_id, tp as usize);
     if tp as usize == 0 {
         return EFAULT.as_isize();
     }
@@ -645,7 +645,7 @@ struct LoopInfo64 {
 /// io设备控制系统调用
 /// 虽然loop设备驱动实现好了，但这里部分loop设备操作是伪实现的
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
-    //println!("kernel: sys_ioctl: fd={}, request={:#x}, argp={:#x}", fd, request, argp);
+    //warn!("kernel: sys_ioctl: fd={}, request={:#x}, argp={:#x}", fd, request, argp);
     let task = current_task().unwrap();
     let proc = task.process();
     let fd_table = proc.inner_exclusive_access().fd_table.clone();
@@ -1111,7 +1111,7 @@ pub fn sys_fork(stack: usize, _flags: usize) -> isize {
     let proc = current_task.process();
     let (new_proc, new_task) = proc.fork(stack, current_task, _flags);//此处添加了一个 None 参数
     let new_pid = new_proc.pid.0;
-    //println!("sys_fork: created new process with PID {}", new_pid);
+    //warn!("sys_fork: created new process with PID {}", new_pid);
     // modify trap context of new_task, because it returns immediately after switching
     let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
     // we do not have to move to next instruction since we have done it before
@@ -1129,17 +1129,17 @@ pub const CLONE_THREAD: usize = 0x00010000;
 
 // 部分实现
 pub fn sys_clone(flags: usize, stack: usize, _ptid: usize) -> isize {
-    println!("sys_clone called with flags={:#x}, stack={:#x}, ptid={:#x}", flags, stack, _ptid);
+    warn!("sys_clone called with flags={:#x}, stack={:#x}, ptid={:#x}", flags, stack, _ptid);
     if flags & 0xffffff00 != 0 {
-        println!("sys_clone: CLONE_THREAD flag is set, cloning a thread with stack={:#x} and ptid={:#x}", stack, _ptid);
+        warn!("sys_clone: CLONE_THREAD flag is set, cloning a thread with stack={:#x} and ptid={:#x}", stack, _ptid);
         return EINVAL.as_isize()
     } else {
-        //println!("sys_clone: CLONE_THREAD flag is not set, cloning a process with stack={:#x} and ptid={:#x}", stack, _ptid);
+        //warn!("sys_clone: CLONE_THREAD flag is not set, cloning a process with stack={:#x} and ptid={:#x}", stack, _ptid);
         sys_fork(stack, flags)
     }
 }
 pub fn sys_pthread_create(thread: *mut usize, attr: *const usize, start_routine: usize, arg: usize) -> isize {
-    println!("sys_pthread_create: thread={:#x}, attr={:#x}, start_routine={:#x}, arg={:#x}", thread as usize, attr as usize, start_routine, arg);
+    warn!("sys_pthread_create: thread={:#x}, attr={:#x}, start_routine={:#x}, arg={:#x}", thread as usize, attr as usize, start_routine, arg);
     
     let token = current_user_token();
     let current_task = current_task().unwrap();
@@ -1207,7 +1207,7 @@ pub fn sys_pthread_create(thread: *mut usize, attr: *const usize, start_routine:
     // 5. 加入调度队列
     add_task(new_task);
     
-    println!("sys_pthread_create: created thread with TID {}", new_tid);
+    warn!("sys_pthread_create: created thread with TID {}", new_tid);
     new_tid as isize
 }
 // path elf路径
@@ -1215,7 +1215,7 @@ pub fn sys_pthread_create(thread: *mut usize, attr: *const usize, start_routine:
 // envp 环境变量数组，必须以0结尾
 pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize) -> isize {
     
-    //println!("curent core id: {}, sys_exec called with path: {:?}, args: {:?}", get_hart_id(), path, args);
+    //warn!("curent core id: {}, sys_exec called with path: {:?}, args: {:?}", get_hart_id(), path, args);
     let token = current_user_token();
     let task = current_task().unwrap();
     let cwd = task.process().inner_exclusive_access().cwd.clone();
@@ -1237,7 +1237,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             return ENAMETOOLONG.as_isize(); 
         }
     }
-    //println!("exec: normalized path: '{}'", path_str);
+    //warn!("exec: normalized path: '{}'", path_str);
 
 
     let mut args_vec: Vec<String> = Vec::new();
@@ -1295,7 +1295,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     }
 
     trace!("[kernel] sys_exec: before open_file");
-    
+    warn!("[kernel] sys_exec: trying to exec '{}', args={:?}, envs={:?}", path_str, args_vec, envs_vec);
     // 1. 尝试正常打开主程序
     let mut app_inode_opt = open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY,0);
 
@@ -1331,7 +1331,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
                 args_vec = new_args;
                 app_inode = inode;
             } else {
-                println!("[kernel] sys_exec: failed to open busybox for script execution");
+                warn!("[kernel] sys_exec: failed to open busybox for script execution");
                 return ENOENT.as_isize();
             }
         }
@@ -1445,7 +1445,7 @@ const SIGCHLD_NUM: i32 = 17;
 
 /// 等待子进程退出
 pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
-    //println!("[wait4] Called with pid={}, options={:#x}", pid, options);
+    //warn!("[wait4] Called with pid={}, options={:#x}", pid, options);
     loop {
         let task = current_task().unwrap();
         let proc = task.process();
@@ -1459,7 +1459,7 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
                 has_match = !proc_inner.children.is_empty();
                 for (idx, child) in proc_inner.children.iter().enumerate() {
                     if child.inner_exclusive_access().is_zombie() {
-                        //println!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
+                        //warn!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
                         exit_code = child.inner_exclusive_access().exit_code;
                         child_pid = child.getpid();
                         child_idx = Some(idx);
@@ -1473,7 +1473,7 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
                     if child_pgid == proc_inner.pgid {
                         has_match = true;
                         if child.inner_exclusive_access().is_zombie() {
-                            //println!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
+                            //warn!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
                             exit_code = child.inner_exclusive_access().exit_code;
                             child_pid = child.getpid();
                             child_idx = Some(idx);
@@ -1488,7 +1488,7 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
                     if child.getpid() == value as usize {
                         has_match = true;
                         if child.inner_exclusive_access().is_zombie() {
-                            //println!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
+                            //warn!("[wait4] P{} found a zombie child P{} with exit code {}", proc.getpid(), child.getpid(), child.inner_exclusive_access().exit_code);
                             exit_code = child.inner_exclusive_access().exit_code;
                             child_pid = child.getpid();
                             child_idx = Some(idx);
@@ -1538,7 +1538,7 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
                 panic!("sys_wait4: logic error, child_pid is set but child_idx is None?");
             }
             if exit_code_ptr as usize != 0 {
-                //println!("[wait4] Writing exit code {} to user space for child P{}", exit_code, child_pid);
+                //warn!("[wait4] Writing exit code {} to user space for child P{}", exit_code, child_pid);
                 let status = if exit_code >= 0 {
                     (exit_code & 0xff) << 8
                 } else {
@@ -1559,7 +1559,7 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
             return child_pid as isize;
         }
     }
-    //println!("sys_wait4 called with pid={}, options={:#x}", pid, options);
+    //warn!("sys_wait4 called with pid={}, options={:#x}", pid, options);
 /*  let task = current_task().unwrap();
     let proc = task.process();
     // 提前拿到当前进程的 pgid
@@ -1606,7 +1606,7 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
             has_match = true;
             let child_inner = child.inner_exclusive_access();
             if child_inner.is_zombie() {
-                println!("[wait4] P{} found a zombie child P{} with exit code {}", current_pgid, child_pid, child_inner.exit_code);
+                warn!("[wait4] P{} found a zombie child P{} with exit code {}", current_pgid, child_pid, child_inner.exit_code);
                 zombie_child = Some((child_pid, child_inner.exit_code));
                 break;
             }
@@ -1849,6 +1849,7 @@ pub fn sys_waitid(idtype: i32, id: i32, infop: *mut SigInfo, options: i32) -> is
     }
 }
 pub fn sys_kill(pid: isize, signum: i32) -> isize {
+    warn!("sys_kill called with pid={}, signum={}", pid, signum);
     if signum < 0 || signum as usize > MAX_SIG {
         return EINVAL.as_isize();
     }
@@ -1868,7 +1869,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
 
     if pid > 0 {
         // 发送给单pid
-        // println!("sys_kill: sending signal {} to PID {}", signum, pid);
+        // warn!("sys_kill: sending signal {} to PID {}", signum, pid);
         if let Some(proc) = get_process(pid as usize) {
             if signum == 0 { return 0; } // 探测成功
 
@@ -2038,7 +2039,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 pub const UTIME_NOW: usize = 0x3fffffff;
 pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usize) -> isize {
-    //println!("sys_utimensat called with dirfd={}, path_ptr={:#x}, times_ptr={:#x}, flags={:#x}", dirfd, path_ptr, times_ptr, _flags);
+    //warn!("sys_utimensat called with dirfd={}, path_ptr={:#x}, times_ptr={:#x}, flags={:#x}", dirfd, path_ptr, times_ptr, _flags);
     let task = current_task().unwrap();
     let proc = task.process();
 
@@ -2084,7 +2085,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
 
             let path_str = {
                 if let Some(s) = try_translated_str(token, path_ptr as *const u8) {
-                    //println!("sys_utimensat: translated path string: {}", s);
+                    //warn!("sys_utimensat: translated path string: {}", s);
                     s
                 } else {
                     return EFAULT.as_isize();
@@ -2097,7 +2098,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
                 Ok(dentry) => {
                 let stat = dentry.inode.get_stat();
                 let ino = stat.ino;
-                //println!("sys_utimensat: found target inode with ino={}, atime=({}, {}), mtime=({}, {})", ino, stat.atime_sec, stat.atime_nsec, stat.mtime_sec, stat.mtime_nsec);
+                //warn!("sys_utimensat: found target inode with ino={}, atime=({}, {}), mtime=({}, {})", ino, stat.atime_sec, stat.atime_nsec, stat.mtime_sec, stat.mtime_nsec);
                 let old_atime = TimeSpec { tv_sec: stat.atime_sec as _, tv_nsec: stat.atime_nsec as _ };
                 let old_mtime = TimeSpec { tv_sec: stat.mtime_sec as _, tv_nsec: stat.mtime_nsec as _ };
                 let (old_atime, old_mtime) = if ino != 0 {
@@ -2145,22 +2146,22 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
     if let Some(file) = target_file.as_ref() {
         file.set_time(&new_atime, &new_mtime);
     } else if let Some(inode) = target_inode.as_ref() {
-        //println!("sys_utimensat: target_inode type={}, ino={}, new_atime=({}, {}), new_mtime=({}, {})",    inode.type_name(), ino, new_atime.tv_sec, new_atime.tv_nsec, new_mtime.tv_sec, new_mtime.tv_nsec);
+        //warn!("sys_utimensat: target_inode type={}, ino={}, new_atime=({}, {}), new_mtime=({}, {})",    inode.type_name(), ino, new_atime.tv_sec, new_atime.tv_nsec, new_mtime.tv_sec, new_mtime.tv_nsec);
         inode.set_time(&new_atime, &new_mtime);
     }
 
     // 5. 存入 TIME_CACHE 解决底层 Ext4 32位时间戳截断问题
     if ino != 0 {
-        //println!("sys_utimensat: updating TIME_CACHE for ino={}, atime=({}, {}), mtime=({}, {})", 
+        //warn!("sys_utimensat: updating TIME_CACHE for ino={}, atime=({}, {}), mtime=({}, {})", 
             //ino, new_atime.tv_sec, new_atime.tv_nsec, new_mtime.tv_sec, new_mtime.tv_nsec);
         TIME_CACHE.lock().insert(
             ino, 
             (new_atime.tv_sec as i64, new_atime.tv_nsec as i64, new_mtime.tv_sec as i64, new_mtime.tv_nsec as i64)
         );
     } else {
-        println!("[utime_debug] sys_utimensat: WARNING! ino is 0, cache skipped!");
+        warn!("[utime_debug] sys_utimensat: WARNING! ino is 0, cache skipped!");
     }
-    //println!("sys_utimensat: finished, returning 0");
+    //warn!("sys_utimensat: finished, returning 0");
     0
 }
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
@@ -2234,79 +2235,6 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
 }
 pub fn sys_mprotect(_start: usize, _len: usize, _prot: usize) -> isize {
     0
-}
-
-/// YOUR JOB: Implement mmap.
-pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: usize) -> isize {
-    println!("kernel:pid[{}] sys_mmap called with start={:#x}, len={:#x}, prot={:#x}, flags={:#x}, fd={}, off={:#x}", 
-        current_task().unwrap().process().pid.0, start, len, port, flags, fd, _off);
-    let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
-    let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
-
-    let is_anonymous = mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS);
-    let is_shared = mmap_flags.contains(mmap::MMapFlags::MAP_SHARED);
-    let mut file_inner = None;
-
-    // 前置检查并提取文件对象
-    if !is_anonymous {
-        if fd < 0 {
-            return Errno::EBADF.as_isize();
-        }
-        let task = current_task().unwrap();
-        let process = task.process();
-        let inner = process.inner_exclusive_access();
-        let fd_usize = fd as usize;
-        
-        if fd_usize < inner.fd_table.len() {
-            if let Some(file) = &inner.fd_table[fd_usize].file {
-                file_inner = Some(file.clone()); // 拿到文件的 Arc 强引用
-            } else {
-                return Errno::EBADF.as_isize();
-            }
-        } else {
-            return Errno::EBADF.as_isize();
-        }
-    }
-
-    //将 file_inner 和 _off 逐层转发给 do_mmap
-    let ret = match mmap::do_mmap(start, len, mmap_prot, mmap_flags, file_inner.clone(), _off) {
-        Ok(addr) => addr,
-        Err(_) => {
-            return Errno::ENOMEM.as_isize(); // 内存不足
-        }
-    };
-
-    // 
-    // 只有在非匿名且非共享（即传统的 MAP_PRIVATE 读文件到内存）时，执行你原有的手动读取
-    if !is_anonymous && !is_shared {
-        if let Some(file) = file_inner {
-            if file.readable() {
-                let token = current_user_token();
-                // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
-                let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
-                // 使用 read_at 确保不受 FD 当前 offset 影响
-                file.read_at(_off, user_buf);
-            }
-        }
-    }
-    #[cfg(target_arch = "loongarch64")]
-    // 手动刷新指令缓存
-    unsafe { core::arch::asm!("ibar 0"); }
-    
-    debug!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
-    ret as isize
-}
-
-/// YOUR JOB: Implement munmap.
-pub fn sys_munmap(start: usize, len: usize) -> isize {
-    let task = current_task().unwrap();
-    let process = task.process();
-    trace!("kernel:pid[{}] sys_munmap NOT COMPLITED", process.pid.0);
-    if let Ok(_) = mmap::do_munmap(start,len) {
-        0
-    } else {
-        EINVAL.as_isize() // 目标地址不合法
-    }
 }
 
 /// 修改断点（调整堆空间）
@@ -2399,7 +2327,7 @@ pub fn sys_sigprocmask(
             _ => return EINVAL.as_isize() // EINVAL
         }
     }
-    //println!("sys_sigprocmask: updated signal mask to {:064b}", inner.signal_mask.bits());
+    //warn!("sys_sigprocmask: updated signal mask to {:064b}", inner.signal_mask.bits());
     0
 }
 
@@ -2965,8 +2893,8 @@ pub fn sys_rt_sigaction(
 pub fn sys_pselect6(
     nfds: usize,
     readfds_ptr: *mut usize,
-    _writefds_ptr: *mut usize,
-    _exceptfds_ptr: *mut usize,
+    writefds_ptr: *mut usize,
+    exceptfds_ptr: *mut usize,
     _timeout: *const usize,
     _sigmask: *const usize,
 ) -> isize {
@@ -2981,11 +2909,36 @@ pub fn sys_pselect6(
     let process = task.process();
     let token = process.inner_exclusive_access().get_user_token();
     
+    // 从用户空间读取 readfds 位图
     let mut readfds = 0usize;
     if readfds_ptr as usize != 0 {
         readfds = {
             if let Some(rf) = try_translated_read(token, readfds_ptr) {
                 rf
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
+    }
+    
+    // 从用户空间读取 writefds 位图
+    let mut writefds = 0usize;
+    if writefds_ptr as usize != 0 {
+        writefds = {
+            if let Some(wf) = try_translated_read(token, writefds_ptr) {
+                wf
+            } else {
+                return EFAULT.as_isize();
+            }
+        };
+    }
+    
+    // 读取 exceptfds 位图（异常条件，目前不支持，仅用于清零回写）
+    let mut exceptfds = 0usize;
+    if exceptfds_ptr as usize != 0 {
+        exceptfds = {
+            if let Some(ef) = try_translated_read(token, exceptfds_ptr) {
+                ef
             } else {
                 return EFAULT.as_isize();
             }
@@ -3018,31 +2971,60 @@ pub fn sys_pselect6(
         deadline_ms = get_time_ms().saturating_add(timeout_ms);
     }
 
-    // debug!("[kernel] pselect6 nfds={} has_timeout={} timeout_ms={}", nfds, has_timeout, timeout_ms);
     loop {
         let mut process_inner = process.inner_exclusive_access();
         let fd_table = &process_inner.fd_table.clone();
         drop(process_inner); // 写回前先释放锁
         let mut ready_count = 0;
         let mut ready_readfds = 0usize;
+        let mut ready_writefds = 0usize;
+        let mut ready_exceptfds = 0usize;
         
         // 遍历轮询用户关心的 FD
         for fd in 0..nfds {
-            if (readfds & (1usize << fd)) != 0 {
-                if fd < fd_table.len() {
-                    if let Some(file) = &fd_table[fd].file {
-                        if file.readable() {
+            if fd < fd_table.len() {
+                if let Some(file) = &fd_table[fd].file {
+                    // 检查 readfds
+                    if (readfds & (1usize << fd)) != 0 {
+                        if file.ready_to_read() {
                             ready_readfds |= 1usize << fd;
                             ready_count += 1;
                         }
                     }
+                    // 检查 writefds
+                    if (writefds & (1usize << fd)) != 0 {
+                        if file.ready_to_write() {
+                            ready_writefds |= 1usize << fd;
+                            ready_count += 1;
+                        }
+                    }
+                    // exceptfds：异常条件（OOB数据等），暂不支持，始终清零
+                    // 但需要保留用户设置的位以便回写时清零
                 }
             }
         }
         
         if ready_count > 0 {
+            warn!("[PSELECT6] READY: pid={} ready_count={} readfds_before={:#x} ready_readfds={:#x}",
+                current_task().unwrap().getpid(), ready_count, readfds, ready_readfds);
+            // 回写 readfds：只保留就绪的位
             if readfds_ptr as usize != 0 {
-                if !try_translated_write(token, readfds_ptr, ready_readfds) {
+                let write_ok = try_translated_write(token, readfds_ptr, ready_readfds);
+                warn!("[PSELECT6] READY: write readfds ptr={:#x} val={:#x} ok={}",
+                    readfds_ptr as usize, ready_readfds, write_ok);
+                if !write_ok {
+                    return EFAULT.as_isize();
+                }
+            }
+            // 回写 writefds：只保留就绪的位
+            if writefds_ptr as usize != 0 {
+                if !try_translated_write(token, writefds_ptr, ready_writefds) {
+                    return EFAULT.as_isize();
+                }
+            }
+            // 回写 exceptfds：始终清零（无异常条件支持）
+            if exceptfds_ptr as usize != 0 {
+                if !try_translated_write(token, exceptfds_ptr, 0usize) {
                     return EFAULT.as_isize();
                 }
             }
@@ -3050,6 +3032,27 @@ pub fn sys_pselect6(
         }
         
         if has_timeout && get_time_ms() >= deadline_ms {
+            warn!("[PSELECT6] TIMEOUT: pid={} has_timeout={} timeout_ms={} nfds={} readfds_ptr={:#x}",
+                current_task().unwrap().getpid(), has_timeout, timeout_ms, nfds, readfds_ptr as usize);
+            // 超时：回写全零到所有 fd_set，符合 POSIX 规范
+            if readfds_ptr as usize != 0 {
+                let write_ok = try_translated_write(token, readfds_ptr, 0usize);
+                warn!("[PSELECT6] TIMEOUT: write readfds ptr={:#x} val=0 ok={}",
+                    readfds_ptr as usize, write_ok);
+                if !write_ok {
+                    return EFAULT.as_isize();
+                }
+            }
+            if writefds_ptr as usize != 0 {
+                if !try_translated_write(token, writefds_ptr, 0usize) {
+                    return EFAULT.as_isize();
+                }
+            }
+            if exceptfds_ptr as usize != 0 {
+                if !try_translated_write(token, exceptfds_ptr, 0usize) {
+                    return EFAULT.as_isize();
+                }
+            }
             return 0;
         }
         suspend_current_and_run_next();
@@ -3073,7 +3076,7 @@ pub fn sys_keyctl(_operation: i32, _arg2: usize, _arg3: usize, _arg4: usize, _ar
 }
 
 pub fn sys_times(tms_ptr: *mut usize) -> isize {
-    //println!("[kernel] sys_times called with tms_ptr={:#x}", tms_ptr as usize);
+    //warn!("[kernel] sys_times called with tms_ptr={:#x}", tms_ptr as usize);
     let token = current_user_token();
     // 暂时伪实现，写0
     let tms_val = Tms {

@@ -963,7 +963,7 @@ impl MemorySet {
         let mut start_va = addr;
         if start_va == 0 {
             if let Some(new_addr) = self.find_free_area(length) {
-                println!("[kernel] mmap: found free area at {:#x} for length {:#x}", new_addr, length);
+                //println!("[kernel] mmap: found free area at {:#x} for length {:#x}", new_addr, length);
                 start_va = new_addr;
             } else {
                 error!("mmap failed: no suitable free area found for length {:#x}", length);
@@ -1051,7 +1051,7 @@ impl MemorySet {
             self.areas.push(area);
         } else {
             // 普通映射
-            println!("[kernel] mmap: inserting file area at [{:#x}, {:#x}) with permissions {:?} and shared={}", start_va, start_va + length, permission, is_shared);
+            //println!("[kernel] mmap: inserting file area at [{:#x}, {:#x}) with permissions {:?} and shared={}", start_va, start_va + length, permission, is_shared);
             self.insert_file_area(
                 VirtAddr::from(start_va),
                 VirtAddr::from(start_va + length),
