@@ -452,13 +452,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             Errno::ENOSYS.as_isize()
         }
     };
-    /*if syscall_id == SYSCALL_MMAP || syscall_id == SYSCALL_MUNMAP || syscall_id == SYSCALL_BRK {
+    if syscall_id == SYSCALL_MMAP || syscall_id == SYSCALL_MUNMAP || syscall_id == SYSCALL_BRK {
         let proc = current_task().unwrap().process();
         let inner = proc.inner_exclusive_access();
         for i in inner.memory_set.areas().iter() {
             println!("after exec memory syscall mmap area: {:#x} - {:#x} ", i.get_vpn_range().get_start().0 << 12, i.get_vpn_range().get_end().0 << 12);
         }
-    }*/
+    }
         /*println!(
             "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], args[3], args[4], ret

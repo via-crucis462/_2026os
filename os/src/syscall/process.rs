@@ -1104,7 +1104,7 @@ pub fn sys_uname(uts: *mut UtsName) -> isize {
     0
 }
 
-pub fn sys_fork(stack: Option<usize>, _flags: usize) -> isize {
+pub fn sys_fork(stack: usize, _flags: usize) -> isize {
 	let current_task = current_task().unwrap();
     let current_process = current_task.process();
 	trace!("kernel:pid[{}] old_sys_fork", current_process.pid.0);
@@ -1129,13 +1129,13 @@ pub const CLONE_THREAD: usize = 0x00010000;
 
 // 部分实现
 pub fn sys_clone(flags: usize, stack: usize, _ptid: usize) -> isize {
+    println!("sys_clone called with flags={:#x}, stack={:#x}, ptid={:#x}", flags, stack, _ptid);
     if flags & 0xffffff00 != 0 {
         println!("sys_clone: CLONE_THREAD flag is set, cloning a thread with stack={:#x} and ptid={:#x}", stack, _ptid);
-        //do_clone_thread(0, stack, flags, _ptid)
         return EINVAL.as_isize()
     } else {
         //println!("sys_clone: CLONE_THREAD flag is not set, cloning a process with stack={:#x} and ptid={:#x}", stack, _ptid);
-        sys_fork((stack != 0).then_some(stack), flags)
+        sys_fork(stack, flags)
     }
 }
 pub fn sys_pthread_create(thread: *mut usize, attr: *const usize, start_routine: usize, arg: usize) -> isize {
@@ -2234,6 +2234,79 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
 }
 pub fn sys_mprotect(_start: usize, _len: usize, _prot: usize) -> isize {
     0
+}
+
+/// YOUR JOB: Implement mmap.
+pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, _off: usize) -> isize {
+    println!("kernel:pid[{}] sys_mmap called with start={:#x}, len={:#x}, prot={:#x}, flags={:#x}, fd={}, off={:#x}", 
+        current_task().unwrap().process().pid.0, start, len, port, flags, fd, _off);
+    let mmap_flags = mmap::MMapFlags::from_bits_truncate(flags);
+    let mmap_prot = mmap::MMapProt::from_bits_truncate(port);
+
+    let is_anonymous = mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS);
+    let is_shared = mmap_flags.contains(mmap::MMapFlags::MAP_SHARED);
+    let mut file_inner = None;
+
+    // 前置检查并提取文件对象
+    if !is_anonymous {
+        if fd < 0 {
+            return Errno::EBADF.as_isize();
+        }
+        let task = current_task().unwrap();
+        let process = task.process();
+        let inner = process.inner_exclusive_access();
+        let fd_usize = fd as usize;
+        
+        if fd_usize < inner.fd_table.len() {
+            if let Some(file) = &inner.fd_table[fd_usize].file {
+                file_inner = Some(file.clone()); // 拿到文件的 Arc 强引用
+            } else {
+                return Errno::EBADF.as_isize();
+            }
+        } else {
+            return Errno::EBADF.as_isize();
+        }
+    }
+
+    //将 file_inner 和 _off 逐层转发给 do_mmap
+    let ret = match mmap::do_mmap(start, len, mmap_prot, mmap_flags, file_inner.clone(), _off) {
+        Ok(addr) => addr,
+        Err(_) => {
+            return Errno::ENOMEM.as_isize(); // 内存不足
+        }
+    };
+
+    // 
+    // 只有在非匿名且非共享（即传统的 MAP_PRIVATE 读文件到内存）时，执行你原有的手动读取
+    if !is_anonymous && !is_shared {
+        if let Some(file) = file_inner {
+            if file.readable() {
+                let token = current_user_token();
+                // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
+                let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
+                // 使用 read_at 确保不受 FD 当前 offset 影响
+                file.read_at(_off, user_buf);
+            }
+        }
+    }
+    #[cfg(target_arch = "loongarch64")]
+    // 手动刷新指令缓存
+    unsafe { core::arch::asm!("ibar 0"); }
+    
+    debug!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
+    ret as isize
+}
+
+/// YOUR JOB: Implement munmap.
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    let task = current_task().unwrap();
+    let process = task.process();
+    trace!("kernel:pid[{}] sys_munmap NOT COMPLITED", process.pid.0);
+    if let Ok(_) = mmap::do_munmap(start,len) {
+        0
+    } else {
+        EINVAL.as_isize() // 目标地址不合法
+    }
 }
 
 /// 修改断点（调整堆空间）
