@@ -118,6 +118,8 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let status = inner.fd_table[fd].status;
         drop(inner);
     if !file.writable() {
+        info!("pid[{}] [sys_write] EACCES fd={} readable={} writable={}",
+            proc.pid.0, fd, file.readable(), file.writable());
         return EACCES.as_isize(); 
     }
     if let Some(err) = file.check_write_error() {
@@ -478,12 +480,15 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
+    warn!("kernel:pid[{}] sys_pipe: allocated read_fd={}", task.process().pid.0, read_fd);
     inner.set_fd(read_fd, pipe_read, FdFlags::empty(), 0);
     let write_fd = match inner.alloc_fd() {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
     inner.set_fd(write_fd, pipe_write, FdFlags::empty(), O_WRONLY as usize);
+    // 诊断：打印管道 fd 分配
+    warn!("kernel:pid[{}] sys_pipe: allocated write_fd={}", task.process().pid.0, write_fd);
     // 释放锁，因为下面的write会访问用户锁
     drop(inner);
     // User ABI for pipe is int pipefd[2], i.e. two 32-bit entries.

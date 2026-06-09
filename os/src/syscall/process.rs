@@ -3001,7 +3001,9 @@ pub fn sys_pselect6(
                 if let Some(file) = &fd_table[fd].file {
                     // 检查 readfds
                     if (readfds & (1usize << fd)) != 0 {
-                        if file.ready_to_read() {
+                        let is_readable = file.readable();
+                        let ready = file.ready_to_read();
+                        if ready {
                             ready_readfds |= 1usize << fd;
                             ready_count += 1;
                         }
@@ -3047,8 +3049,6 @@ pub fn sys_pselect6(
         }
         
         if has_timeout && get_time_ms() >= deadline_ms {
-            warn!("[PSELECT6] TIMEOUT: pid={} has_timeout={} timeout_ms={} nfds={} readfds_ptr={:#x}",
-                current_task().unwrap().getpid(), has_timeout, timeout_ms, nfds, readfds_ptr as usize);
             // 超时：回写全零到所有 fd_set，符合 POSIX 规范
             if readfds_ptr as usize != 0 {
                 let write_ok = try_translated_write(token, readfds_ptr, 0usize);
@@ -3479,7 +3479,8 @@ pub fn sys_prlimit64(
             let task = current_task().unwrap();
             let process = task.process();
             let mut proc_inner = process.inner_exclusive_access();
-            proc_inner.recycle_fd();
+            // 不neng在此调用 recycle_fd()！压缩 fd 表会改变已有 fd 编号，
+            // 导致用户态持有的 fd 引用失效（如 lmbench 的 pipe 通信）。
             let old = proc_inner.get_rlimit64();
             if !old_limit.is_null() {
                 translated_write(token, old_limit, old);

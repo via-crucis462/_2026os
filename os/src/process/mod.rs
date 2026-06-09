@@ -492,7 +492,7 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
                 task_inner.killed = true;
                 task_inner.term_signal = Some(sig as i32 + 1);
                 let pid = task.process().pid.0;
-                println!("[SIG_DEATH] PID {} killed by signal {} ({:?})", pid, sig as i32 + 1, signal);
+                warn!("[SIG_DEATH] PID {} killed by signal {} ({:?})", pid, sig as i32 + 1, signal);
             }
         }
     }
