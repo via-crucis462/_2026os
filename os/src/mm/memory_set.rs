@@ -291,17 +291,17 @@ impl MemorySet {
                 ekernel_addr,
             );
             info!("mapping physical memory");
-            // 临时：留下最后0x100_0000给内核栈
+            // 内核栈可用空间
             memory_set.push(
                 MapArea::new(
-                    (ekernel_addr + DMA_SIZE).into(),
-                    (MEMORY_END - 0x100_0000).into(),
+                    (LOWRAM_BASE).into(),
+                    (LOWRAM_END).into(),
                     MapType::Identical,
                     MapPermission::R | MapPermission::W,
                     PageSize::Page4K
                 ),
                 None,
-                ekernel_addr + DMA_SIZE,
+                LOWRAM_BASE,
             );
         }
         // --- 等到大页映射完再映射标准页，避免产生碎片（虽然会被放进回收栈，影响很小） ---

@@ -1,11 +1,14 @@
 use alloc::{sync::Arc, vec::Vec};
 use alloc::vec;
 use alloc::string::String;
+use xmas_elf::header;
 use core::sync::atomic::{AtomicU64, Ordering};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 use crate::ext4fs::BLOCK_SZ;
+use super::{ext4::Ext4FS, ext4_dir_entry::Ext4DirEntry, block_modify_inode};
 
-use super::{ext4::Ext4FS, ext4_dir_entry::Ext4DirEntry, block_cache::get_block_cache};
+use core::arch::asm;
+
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ext4InodeDisk {
@@ -299,45 +302,24 @@ impl Ext4Inode {
     pub fn add_extent_entry(&self, logical_block_id: u32, physical_block_id: u32) -> Option<u32> {
         info!("add_extent_entry: ino={} logical={} physical={}", self.inode_id, logical_block_id, physical_block_id);
         let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
-        let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
-        let mut cache = block_cache.lock();
-        
-        cache.modify(inode_offset, |disk_inode: &mut Ext4InodeDisk| {
+        let mut buf = [0u8; BLOCK_SZ];
+        self.fs.block_dev.read_block(block_id as usize, &mut buf);
+        let disk_inode: &mut Ext4InodeDisk = unsafe { &mut *(buf.as_mut_ptr().add(inode_offset) as *mut Ext4InodeDisk) };
+
+        let result: Option<u32> = 'body: {
             // 用 raw pointer 读魔数（i_block 是 [u8;60]，对齐=1，无 UB）
             if unsafe { &*(disk_inode.i_block.as_ptr() as *const Ext4ExtentHeader) }.eh_magic != 0xF30A {
                 error!("VFS: add_extent_entry - invalid magic 0x{:X}",
                     unsafe { &*(disk_inode.i_block.as_ptr() as *const Ext4ExtentHeader) }.eh_magic as usize);
-                return None;
+                break 'body None;
             }
-
-            struct FunctionContext {
-                /// 本节点数据块起始指针（即 Ext4ExtentHeader 所在位置）
-                data_ptr: *mut u8,
-                /// 数据块长度：60 = i_block 根节点，4096 = 独立块子节点
-                data_len: usize,
-                /// 父节点中引用到本节点的那条 Ext4ExtentIndex 指针
-                /// 用于节点分裂后回写父节点（根节点此字段为 None）
-                parent_entry: Option<*mut Ext4ExtentIndex>,
-                /// 持有子节点数据块缓冲区（根节点为 None）
-                _block_buf: Option<alloc::vec::Vec<u8>>,
-                /// 本节点的物理块号（根节点为 0，子节点从 alloc_block 获取）
-                phys_block: u32,
-            }
-
-            let mut ctx_stack: Vec<FunctionContext> = Vec::new();
-            ctx_stack.push(FunctionContext {
-                data_ptr: disk_inode.i_block.as_mut_ptr(),
-                data_len: 60,
-                parent_entry: None,
-                _block_buf: None,
-                phys_block: 0, // 根节点在 i_block 中，由 block cache 管理刷盘
-            });
 
             // 在节点条目中二分查找 logical_block 所属的条目
-            // 返回指向 12 字节条目的裸指针
-            // depth>0 → Ext4ExtentIndex，depth==0 → Ext4ExtentLeaf
+            // 返回的条目是满足 block <= logical_block 的最后一个条目
+            // (一个 extent 条目覆盖 [ee_block, 同级下一个条目的 ee_block) 的逻辑块范围)
+            // 返回裸指针，需要调用者自行转换
             let find_aim = |data: &[u8], eh_entries: u16, logical_block: u32|
-                -> Option<*const u8>
+                -> Option<*mut u8>
             {
                 let max_entries: u16 = if data.len() == 60 { 4 } else { 340 };
                 let entries = eh_entries.min(max_entries) as usize;
@@ -358,448 +340,373 @@ impl Ext4Inode {
                 }
                 let idx = lo - 1;
                 if idx < 0 { None }
-                else { Some(unsafe { data.as_ptr().add(12 + (idx as usize) * 12) }) }
+                else { Some(unsafe { data.as_ptr().add(12 + (idx as usize) * 12) as *mut u8 }) }
             };
 
-            // 将子节点 buffer 写回磁盘（根节点由 block cache 管理，无需手动刷）
-            let flush_ctx = |ctx: &FunctionContext| {
-                if ctx.phys_block != 0 {
-                    let buf = unsafe { core::slice::from_raw_parts(ctx.data_ptr, ctx.data_len) };
-                    self.fs.block_dev.write_block(ctx.phys_block as usize, buf);
+            // 将子节点 buffer 写回磁盘
+            let write_back_block = |phys_block: u32, ptr: *const u8, len| {
+                if phys_block != 0 {
+                    let buf = unsafe { core::slice::from_raw_parts(ptr, len) };
+                    self.fs.block_dev.write_block(phys_block as usize, buf);
                 }
             };
 
-            // 待向上传播的索引条目：(12 字节条目, 父节点中引用本节点的索引条目指针)
-            let mut pending: Option<([u8; 12], Option<*mut Ext4ExtentIndex>)> = None;
+            // 从内核堆上分配一个临时函数调用栈，避免内核栈溢出
+            const TEMP_STACK_SIZE: usize = 65536; // 64KB
+            let mut temp_stack: Vec<u8> = vec![0; TEMP_STACK_SIZE];
+            let stack_bottom = temp_stack.as_ptr() as usize + TEMP_STACK_SIZE;
 
-            // ===== 阶段一：下钻到叶子 =====
-            loop {
-                let cur = ctx_stack.last().unwrap();
-                let cur_data = unsafe { core::slice::from_raw_parts(cur.data_ptr, cur.data_len) };
-                let header = unsafe { &*(cur.data_ptr as *const Ext4ExtentHeader) };
-                let depth = header.eh_depth;
-                let eh_entries = header.eh_entries;
-                let eh_max = header.eh_max;
+            // 每次函数调用后调用这个闭包检查栈是否溢出
+            let temp_stack_check = || {
+                let sp: usize;
+                unsafe {
+                    #[cfg(target_arch = "riscv64")]
+                    asm!("mv {}, sp", out(reg) sp);
+                    #[cfg(target_arch = "loongarch64")]
+                    asm!("move {}, $sp", out(reg) sp);
+                }
+                if sp > stack_bottom || sp < temp_stack.as_ptr() as usize {
+                    panic!("temp_stack_alloc: stack overflow");
+                }
+            };
 
-                let aim_ptr = find_aim(cur_data, eh_entries, logical_block_id);
+            // 递归处理插入逻辑
+            // 返回值: Option<(分裂产生的新块的物理块号, 新块的第一个逻辑块号)>
+            // Option表示子节点是否发生了分裂
+            // 
+            // 注：“节点（block）” 包含多个 “条目（index / leaf）”，
+            // “条目” 指向下一级 “节点”，
+            // 类似页表 page 和 entry 的关系。
+            fn add_extent_in_tree (
+                ext4_inode: &Ext4Inode,
+                temp_stack_check: &dyn Fn(),
+                write_back_block: &dyn Fn(u32, *const u8, usize),
+                find_aim: &dyn Fn(&[u8], u16, u32) -> Option<*mut u8>,
+                logical_block_id: u32, 
+                physical_block_id: u32,
+                current_block_phys: u32, // 当前节点的物理块号，0=in-inode
+                current_data_ptr: *mut u8,
+            ) -> Option<(u32, u32)> {
 
-                if depth == 0 {
-                    // ===== 叶子节点 =====
-                    if let Some(entry_ptr) = aim_ptr {
-                        let leaf = unsafe { &*(entry_ptr as *const Ext4ExtentLeaf) };
-                        // 尝试直接扩展：物理块连续 且 ee_len 未溢出
-                        let expected_phys = leaf.start_phys() + leaf.actual_len() as u64;
-                        if expected_phys == physical_block_id as u64
-                            && leaf.actual_len() < 32768
-                        {
-                            let leaf_mut = unsafe { &mut *(entry_ptr as *mut Ext4ExtentLeaf) };
-                            leaf_mut.ee_len += 1;
-                            disk_inode.i_blocks_lo += (BLOCK_SZ / 512) as u32;
-                            flush_ctx(cur);
-                            return Some(physical_block_id);
-                        }
-                    }
+                temp_stack_check();
 
-                    // 计算插入位置（供「有空位」和「分裂」共用）
-                    let insert_idx = match aim_ptr {
-                        Some(p) => {
-                            let leaf = unsafe { &*(p as *const Ext4ExtentLeaf) };
-                            if leaf.ee_block == logical_block_id {
-                                error!("add_extent_entry: block {} already mapped", logical_block_id);
-                                return None;
-                            }
-                            ((p as usize - cur.data_ptr as usize - 12) / 12 + 1) as usize
-                        }
-                        None => 0,
+                let header = unsafe { &mut *(current_data_ptr as *mut Ext4ExtentHeader) };
+                let is_leaf = header.eh_depth == 0;
+                let max_entries = header.eh_max as usize;
+
+                // find_aim 返回满足 block <= logical_block 的最后一个条目指针
+                let aim_ptr = find_aim(
+                    unsafe { core::slice::from_raw_parts(current_data_ptr, 4096) },
+                    header.eh_entries,
+                    logical_block_id,
+                );
+
+                // new_entry_for_split: 当本节点需要分裂时，保存待插入的 12 字节条目
+                let mut new_entry_for_split: Option<[u8; 12]> = None;
+                // split_info: 目标条目指针相对 cur_data_ptr 的偏移
+                let split_info: Option<usize> = if !is_leaf { // 索引节点，访问下一级
+
+                     // 子节点数据缓冲区
+                    let mut child_buf_box = alloc::boxed::Box::new([0u8; 4096]);
+
+                    let aim_ptr = aim_ptr.expect("non-leaf must have at least one index entry");
+                    let (child_phys, child_data_ptr) = {
+                        let aim_idx = Ext4ExtentIndex::mut_from_bytes(
+                            unsafe { core::slice::from_raw_parts_mut(aim_ptr, 12) }
+                        ).unwrap();
+                        let next_block = aim_idx.leaf_phys();
+                        ext4_inode.fs.block_dev.read_block(next_block as usize, child_buf_box.as_mut_slice());
+                        let ptr = child_buf_box.as_mut_ptr();
+                        (next_block as u32, ptr)
                     };
 
-                    if eh_entries < eh_max {
-                        // 有空位：直接插入
-                        let entry_off = 12 + insert_idx * 12;
-                        let move_len = (eh_entries as usize - insert_idx) * 12;
-                        if move_len > 0 {
+                    let child_result = add_extent_in_tree(
+                        ext4_inode,
+                        temp_stack_check,
+                        write_back_block,
+                        find_aim,
+                        logical_block_id,
+                        physical_block_id,
+                        child_phys,
+                        child_data_ptr,
+                    );
+
+                    // 子节点在函数调用中已经写回了磁盘，释放box
+                    unsafe { drop(child_buf_box); }
+
+                    if let Some((new_child_blk, new_child_first_logical)) = child_result {
+                        // 子节点希望分裂，需要在当前节点插入其返回的新索引条目
+                        let new_index = Ext4ExtentIndex {
+                            ei_block: new_child_first_logical,
+                            ei_leaf_lo: new_child_blk as u32,
+                            ei_leaf_hi: 0,
+                            ei_unused: 0,
+                        };
+
+                        // 计算偏移量
+                        let aim_offset = unsafe { aim_ptr.offset_from(current_data_ptr) } as usize;
+                        // 插入到当前条目之后
+                        // 这里解释一下：B+树插入时，选择的idx应该是 逻辑块号 <= aim 的最后一个idx，
+                        // 因此子节点分裂时，子节点的全部条目都应该比父节点的block大。
+                        let insert_offset = aim_offset + 12;
+
+                        if (header.eh_entries as usize) < max_entries {
+                            // 空间充足，直接插入
+                            let entries_after = header.eh_entries as usize - aim_offset / 12;
+                            // 平移插入位置之后的条目
                             unsafe {
+                                let insert_ptr = current_data_ptr.add(insert_offset);
                                 core::ptr::copy(
-                                    cur.data_ptr.add(entry_off),
-                                    cur.data_ptr.add(entry_off + 12),
-                                    move_len,
+                                    insert_ptr,
+                                    insert_ptr.add(12),
+                                    entries_after * 12,
                                 );
-                            }
-                        }
-                        let new_leaf = Ext4ExtentLeaf {
-                            ee_block: logical_block_id,
-                            ee_len: 1,
-                            ee_start_hi: 0,
-                            ee_start_lo: physical_block_id as u32,
-                        };
-                        unsafe {
-                            core::ptr::write_unaligned(
-                                cur.data_ptr.add(entry_off) as *mut Ext4ExtentLeaf,
-                                new_leaf,
-                            );
-                        }
-                        unsafe { &mut *(cur.data_ptr as *mut Ext4ExtentHeader) }.eh_entries += 1;
-                        disk_inode.i_blocks_lo += (BLOCK_SZ / 512) as u32;
-                        flush_ctx(cur);
-                        let n = unsafe { (cur.data_ptr as *const Ext4ExtentHeader).read_unaligned().eh_entries };
-                        info!("add_extent_entry: simple insert OK, entries={}", n);
-                        return Some(physical_block_id);
-                    }
-
-                    // ===== 叶子已满：分裂 =====
-                    let max_entries: usize = if cur.data_len == 60 { 4 } else { 340 };
-
-                    // 1) 收集所有条目（现有 + 新）排序
-                    let mut all: alloc::vec::Vec<[u8; 12]> =
-                        alloc::vec::Vec::with_capacity(max_entries + 1);
-                    for i in 0..eh_entries as usize {
-                        let mut buf = [0u8; 12];
-                        unsafe {
-                            buf.copy_from_slice(core::slice::from_raw_parts(
-                                cur.data_ptr.add(12 + i * 12), 12));
-                        }
-                        all.push(buf);
-                    }
-                    {
-                        let leaf = Ext4ExtentLeaf {
-                            ee_block: logical_block_id,
-                            ee_len: 1,
-                            ee_start_hi: 0,
-                            ee_start_lo: physical_block_id as u32,
-                        };
-                        all.insert(insert_idx, leaf.to_bytes());
-                    }
-                    let total = all.len();
-                    let half = total / 2; // 留在旧节点的条目数
-
-                    // 2) 分配新兄弟块
-                    let new_phys = match self.fs.alloc_block() {
-                        Some(p) => p,
-                        None => { error!("add_extent_entry: no free block for split"); return None; }
-                    };
-                    let mut new_buf = alloc::vec![0u8; BLOCK_SZ];
-                    unsafe {
-                        core::ptr::write_unaligned(
-                            new_buf.as_mut_ptr() as *mut Ext4ExtentHeader,
-                            Ext4ExtentHeader {
-                                eh_magic: 0xF30A,
-                                eh_entries: (total - half) as u16,
-                                eh_max: 340,
-                                eh_depth: 0,
-                                eh_generation: 0,
-                            },
-                        );
-                    }
-
-                    // 3) 前半写入旧节点，后半写入新节点
-                    for i in 0..half {
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                all[i].as_ptr(), cur.data_ptr.add(12 + i * 12), 12);
-                        }
-                    }
-                    for i in half..max_entries {
-                        unsafe { core::ptr::write_bytes(cur.data_ptr.add(12 + i * 12), 0, 12); }
-                    }
-                    unsafe { &mut *(cur.data_ptr as *mut Ext4ExtentHeader) }.eh_entries = half as u16;
-
-                    for i in half..total {
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                all[i].as_ptr(),
-                                new_buf.as_mut_ptr().add(12 + (i - half) * 12), 12);
-                        }
-                    }
-                    self.fs.block_dev.write_block(new_phys as usize, &new_buf);
-
-                    // 数据块 physical_block_id + 新兄弟元数据块 new_phys
-                    disk_inode.i_blocks_lo += (BLOCK_SZ / 512) as u32 * 2;
-
-                    // 4) 若旧节点首个条目发生变化，更新父节点中的索引条目
-                    let new_first_block = u32::from_le_bytes(all[0][0..4].try_into().unwrap());
-                    if let Some(pe_ptr) = cur.parent_entry {
-                        let old_first =
-                            u32::from_le_bytes(unsafe { core::slice::from_raw_parts(pe_ptr as *const u8, 4) }
-                                .try_into().unwrap());
-                        if new_first_block != old_first {
-                            unsafe { (pe_ptr as *mut u32).write_unaligned(new_first_block); }
-                        }
-                    }
-
-                    // 5) 构造待插入父节点的索引条目（指向新兄弟）
-                    let sibling_first_block = u32::from_le_bytes(all[half][0..4].try_into().unwrap());
-                    let mut idx_bytes = [0u8; 12];
-                    idx_bytes[0..4].copy_from_slice(&sibling_first_block.to_le_bytes());
-                    idx_bytes[4..8].copy_from_slice(&(new_phys as u32).to_le_bytes());
-                    idx_bytes[8..10].copy_from_slice(&0u16.to_le_bytes());
-
-                    pending = Some((idx_bytes, cur.parent_entry));
-                    // 旧叶子已修改，若为子节点则刷盘
-                    flush_ctx(cur);
-                    break; // 退出下钻，进入向上传播阶段
-                } else {
-                    // ===== 索引节点：加载子节点压栈继续下钻 =====
-                    if let Some(entry_ptr) = aim_ptr {
-                        let idx = unsafe { &*(entry_ptr as *const Ext4ExtentIndex) };
-                        let child_phys = idx.leaf_phys();
-                        let mut child_buf = alloc::vec![0u8; BLOCK_SZ];
-                        self.fs.block_dev.read_block(child_phys as usize, &mut child_buf);
-
-                        ctx_stack.push(FunctionContext {
-                            data_ptr: child_buf.as_mut_ptr(),
-                            data_len: BLOCK_SZ,
-                            parent_entry: Some(entry_ptr as *mut Ext4ExtentIndex),
-                            _block_buf: Some(child_buf),
-                            phys_block: child_phys as u32,
-                        });
-                    } else {
-                        error!("add_extent_entry: no index covers block {} at depth {}",
-                            logical_block_id, depth);
-                        return None;
-                    }
-                }
-            } // end descent loop
-
-            // ===== 阶段二：向上传播分裂 =====
-            loop {
-                let (idx_bytes, _parent_entry_ptr) = match pending.take() {
-                    Some(v) => v,
-                    None => {
-                        info!("add_extent_entry: propagation done, success");
-                        return Some(physical_block_id);
-                    }
-                };
-
-                // 弹出当前节点（已处理完分裂），暴露父节点
-                ctx_stack.pop();
-
-                match ctx_stack.last() {
-                    Some(parent_ctx) => {
-                        // --- 有父节点：在父节点中插入索引条目 ---
-                        let p_data = unsafe {
-                            core::slice::from_raw_parts(parent_ctx.data_ptr, parent_ctx.data_len)
-                        };
-                        let p_header = unsafe {
-                            &*(parent_ctx.data_ptr as *const Ext4ExtentHeader)
-                        };
-                        let p_entries = p_header.eh_entries;
-                        let p_max = p_header.eh_max;
-
-                        // 二分查找父节点中的插入位置
-                        let new_ei_block = u32::from_le_bytes(idx_bytes[0..4].try_into().unwrap());
-                        let p_aim = find_aim(p_data, p_entries, new_ei_block);
-                        let p_insert_idx = match p_aim {
-                            Some(p) => {
-                                ((p as usize - parent_ctx.data_ptr as usize - 12) / 12 + 1) as usize
-                            }
-                            None => 0,
-                        };
-
-                        let p_max_u = if parent_ctx.data_len == 60 {
-                            4usize
-                        } else {
-                            340usize
-                        };
-
-                        if (p_entries as usize) < p_max_u {
-                            // 父节点有空位，插入后完成
-                            let entry_off = 12 + p_insert_idx * 12;
-                            let move_len = (p_entries as usize - p_insert_idx) * 12;
-                            if move_len > 0 {
-                                unsafe {
-                                    core::ptr::copy(
-                                        parent_ctx.data_ptr.add(entry_off),
-                                        parent_ctx.data_ptr.add(entry_off + 12),
-                                        move_len,
-                                    );
-                                }
-                            }
-                            unsafe {
                                 core::ptr::copy_nonoverlapping(
-                                    idx_bytes.as_ptr(),
-                                    parent_ctx.data_ptr.add(entry_off),
+                                    &new_index as *const Ext4ExtentIndex as *const u8,
+                                    insert_ptr,
                                     12,
                                 );
                             }
-                            unsafe {
-                                &mut *(parent_ctx.data_ptr as *mut Ext4ExtentHeader)
-                            }.eh_entries += 1;
-                            flush_ctx(parent_ctx);
-                            return Some(physical_block_id);
+                            header.eh_entries += 1;
+                            // 写回当前节点
+                            write_back_block(current_block_phys, current_data_ptr, 4096);
+                            None
+                        } else { // 本节点空间不足，保存希望插入条目的信息，交由后续分裂逻辑处理
+                            new_entry_for_split = Some(new_index.as_bytes().try_into().unwrap());
+                            Some(aim_offset) // 分裂信息
                         }
-
-                        // --- 父节点也满了：分裂父节点 ---
-                        let mut all_idx: alloc::vec::Vec<[u8; 12]> =
-                            alloc::vec::Vec::with_capacity(p_max_u + 1);
-                        for i in 0..p_entries as usize {
-                            let mut buf = [0u8; 12];
-                            unsafe {
-                                buf.copy_from_slice(core::slice::from_raw_parts(
-                                    parent_ctx.data_ptr.add(12 + i * 12), 12));
-                            }
-                            all_idx.push(buf);
-                        }
-                        all_idx.insert(p_insert_idx, idx_bytes);
-                        let total = all_idx.len();
-                        let half = total / 2;
-
-                        let new_idx_phys = match self.fs.alloc_block() {
-                            Some(p) => p,
-                            None => {
-                                error!("add_extent_entry: no free block for idx split");
-                                return None;
-                            }
-                        };
-                        let mut new_idx_buf = alloc::vec![0u8; BLOCK_SZ];
-                        unsafe {
-                            core::ptr::write_unaligned(
-                                new_idx_buf.as_mut_ptr() as *mut Ext4ExtentHeader,
-                                Ext4ExtentHeader {
-                                    eh_magic: 0xF30A,
-                                    eh_entries: (total - half) as u16,
-                                    eh_max: 340,
-                                    eh_depth: p_header.eh_depth,
-                                    eh_generation: 0,
-                                },
-                            );
-                        }
-
-                        for i in 0..half {
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    all_idx[i].as_ptr(),
-                                    parent_ctx.data_ptr.add(12 + i * 12), 12);
-                            }
-                        }
-                        for i in half..p_max_u {
-                            unsafe {
-                                core::ptr::write_bytes(
-                                    parent_ctx.data_ptr.add(12 + i * 12), 0, 12);
-                            }
-                        }
-                        unsafe {
-                            &mut *(parent_ctx.data_ptr as *mut Ext4ExtentHeader)
-                        }.eh_entries = half as u16;
-
-                        for i in half..total {
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    all_idx[i].as_ptr(),
-                                    new_idx_buf.as_mut_ptr().add(12 + (i - half) * 12), 12);
-                            }
-                        }
-                        self.fs.block_dev.write_block(new_idx_phys as usize, &new_idx_buf);
-                        // 新索引元数据块 + 旧父节点（前半）刷盘
-                        disk_inode.i_blocks_lo += (BLOCK_SZ / 512) as u32;
-                        flush_ctx(parent_ctx);
-
-                        // 若旧节点首个条目变化，更新父父节点中的索引
-                        let new_first_block = u32::from_le_bytes(all_idx[0][0..4].try_into().unwrap());
-                        if let Some(pe_ptr) = parent_ctx.parent_entry {
-                            let old_first = u32::from_le_bytes(
-                                unsafe { core::slice::from_raw_parts(pe_ptr as *const u8, 4) }
-                                    .try_into().unwrap(),
-                            );
-                            if new_first_block != old_first {
-                                unsafe { (pe_ptr as *mut u32).write_unaligned(new_first_block); }
-                            }
-                        }
-
-                        let mut new_parent_idx = [0u8; 12];
-                        new_parent_idx[0..4].copy_from_slice(&all_idx[half][0..4]);
-                        new_parent_idx[4..8]
-                            .copy_from_slice(&(new_idx_phys as u32).to_le_bytes());
-                        new_parent_idx[8..10]
-                            .copy_from_slice(&0u16.to_le_bytes());
-
-                        pending = Some((new_parent_idx, parent_ctx.parent_entry));
-                        // 继续向上传播
+                    } else {
+                        None
                     }
-                    None => {
-                        // --- 到达根节点：根分裂 ---
-                        // 当前 i_block 中存的是分裂后的前半部分
-                        // 把 i_block 内容复制到新块 child_0，
-                        // i_block 变为深度+1 的索引节点，指向 child_0 和新兄弟
-                        let root_header = unsafe {
-                            &*(disk_inode.i_block.as_ptr() as *const Ext4ExtentHeader)
-                        };
-                        let root_entries = root_header.eh_entries as usize;
-                        let root_depth = root_header.eh_depth;
+                } else { // 当前层级是叶子节点
+                    let aim_offset = match &aim_ptr {
+                        Some(p) => unsafe { (*p).offset_from(current_data_ptr) as usize },
+                        None => 12, // 没有条目时插入到 header 之后
+                    };
+                    // 有 aim 条目时插入其后(+12)，否则插入到条目区起始(12)
+                    let insert_offset = if aim_ptr.is_some() { aim_offset + 12 } else { 12 };
 
-                        let child0_phys = match self.fs.alloc_block() {
-                            Some(p) => p,
-                            None => {
-                                error!("add_extent_entry: no free block for root split");
-                                return None;
-                            }
-                        };
-                        let mut child0_buf = alloc::vec![0u8; BLOCK_SZ];
-                        let copy_len = 12 + root_entries * 12;
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                disk_inode.i_block.as_ptr(),
-                                child0_buf.as_mut_ptr(),
-                                copy_len,
-                            );
+                    // 尝试和现有 leaf 合并（仅当 aim_ptr 存在且块号匹配时）
+                    if let Some(ap) = aim_ptr {
+                        let aim_leaf = Ext4ExtentLeaf::mut_from_bytes(
+                            unsafe { core::slice::from_raw_parts_mut(ap, 12) }
+                        ).unwrap();
+                        if aim_leaf.ee_block == logical_block_id
+                            && aim_leaf.phys_end() == (physical_block_id as u64)
+                        {
+                            aim_leaf.ee_len = aim_leaf.actual_len() as u16 + 1;
+                            write_back_block(current_block_phys, current_data_ptr, 4096);
+                            return None;
                         }
+                    }
+
+                    let new_leaf = Ext4ExtentLeaf {
+                        ee_block: logical_block_id,
+                        ee_len: 1,
+                        ee_start_hi: 0 as u16,
+                        ee_start_lo: physical_block_id as u32,
+                    };
+
+                    if (header.eh_entries as usize) < max_entries {
+                        // 空间充足，直接插入（插入到 aim 条目之后的位置）
+                        let insert_ptr = unsafe { current_data_ptr.add(insert_offset) };
+                        let entrys_end_offset = 12 + (header.eh_entries as usize) * 12;
+                        let bytes_after = entrys_end_offset - insert_offset;
                         unsafe {
-                            let h = &mut *(child0_buf.as_mut_ptr() as *mut Ext4ExtentHeader);
-                            h.eh_max = 340;
-                        }
-                        self.fs.block_dev.write_block(child0_phys as usize, &child0_buf);
-                        // child_0 元数据块
-                        disk_inode.i_blocks_lo += (BLOCK_SZ / 512) as u32;
-
-                        // child_1 从阶段一已写入磁盘，从 idx_bytes 提取物理块号
-                        let child1_phys = {
-                            let lo = u32::from_le_bytes(idx_bytes[4..8].try_into().unwrap());
-                            let hi = u16::from_le_bytes(idx_bytes[8..10].try_into().unwrap());
-                            ((hi as u64) << 32) | (lo as u64)
-                        };
-
-                        // 索引条目 0：指向 child_0
-                        let idx0_block = u32::from_le_bytes(
-                            unsafe {
-                                core::slice::from_raw_parts(child0_buf.as_ptr().add(12), 4)
-                            }
-                            .try_into()
-                            .unwrap(),
-                        );
-                        let mut idx0 = [0u8; 12];
-                        idx0[0..4].copy_from_slice(&idx0_block.to_le_bytes());
-                        idx0[4..8].copy_from_slice(&(child0_phys as u32).to_le_bytes());
-                        idx0[8..10].copy_from_slice(&0u16.to_le_bytes());
-
-                        // 重写 i_block 为新根
-                        unsafe {
-                            core::ptr::write_unaligned(
-                                disk_inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader,
-                                Ext4ExtentHeader {
-                                    eh_magic: 0xF30A,
-                                    eh_entries: 2,
-                                    eh_max: 4,
-                                    eh_depth: root_depth + 1,
-                                    eh_generation: 0,
-                                },
+                            core::ptr::copy(
+                                insert_ptr,
+                                insert_ptr.add(12),
+                                bytes_after,
                             );
                             core::ptr::copy_nonoverlapping(
-                                idx0.as_ptr(),
-                                disk_inode.i_block.as_mut_ptr().add(12),
+                                &new_leaf as *const Ext4ExtentLeaf as *const u8,
+                                insert_ptr,
                                 12,
                             );
-                            core::ptr::copy_nonoverlapping(
-                                idx_bytes.as_ptr(),
-                                disk_inode.i_block.as_mut_ptr().add(24),
-                                12,
-                            );
-                            core::ptr::write_bytes(
-                                disk_inode.i_block.as_mut_ptr().add(36), 0, 24);
                         }
-                        return Some(physical_block_id);
+                        header.eh_entries += 1;
+                        write_back_block(current_block_phys, current_data_ptr, 4096);
+                        None
+                    } else {
+                        new_entry_for_split = Some(new_leaf.as_bytes().try_into().unwrap());
+                        Some(aim_offset) // 分裂信息
                     }
+                };
+
+                // 本级节点空间不足，分裂本级，将右半部分条目写入新块，并将新块的索引条目返回给上级
+                // 上级需要重新索引该节点，以及分裂出的新右节点
+                if let Some(aim_offset) = split_info {
+                    let new_bytes = new_entry_for_split.unwrap();
+                    // 这里的 idx 计算包含了header
+                    let insert_offset = aim_offset + 12;
+
+                    // 分裂前的条目数
+                    let entry_count = header.eh_entries as usize;
+                    // 满了才会分裂
+                    assert!(entry_count == max_entries, "Spliting when not full!"); 
+                    // 当前节点的有效数据切片（仅 header + 有效条目，不含尾部 padding）
+                    let current_bytes = unsafe {
+                        core::slice::from_raw_parts(current_data_ptr, 12 + entry_count * 12)
+                    };
+
+                    // 构建合并后的条目列表：[0..insert_idx] + [new] + [insert_idx..]
+                    let total = entry_count + 1;
+                    let mid = total / 2; // 左半保留条目数
+                    let mut combined: Vec<u8> = Vec::with_capacity(total * 12);
+                    combined.extend_from_slice(&current_bytes[..insert_offset]);
+                    combined.extend_from_slice(&new_bytes);
+                    combined.extend_from_slice(&current_bytes[insert_offset..]);
+
+                    // 左半写入当前节点（仅当新条目落在左半时才需要搬移条目数据）
+                    // aim_offset 是 aim 条目在块内的字节偏移，新条目插入后位于 aim_offset 处（条目区）
+                    if aim_offset < mid * 12 {
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                combined.as_ptr().add(12), // 跳过 combined 中的 header
+                                current_data_ptr.add(12),  // 跳过当前块的 header
+                                mid * 12,
+                            );
+                        }
+                    }
+                    header.eh_entries = mid as u16;
+                    write_back_block(current_block_phys, current_data_ptr, 4096);
+
+                    // 右半写入新块
+                    let new_block_id = ext4_inode.fs.alloc_block().unwrap();
+                    let mut new_buf = [0u8; 4096];
+                    let right_len = total - mid;
+                    // 新增的块一定是一个完整的磁盘块，最多可容纳 340 个条目
+                    // 不应复制当前层的最大条目数（否则从根开始向上传递一直是4）
+                    let new_header = Ext4ExtentHeader {
+                        eh_magic: 0xF30A,
+                        eh_entries: right_len as u16,
+                        eh_max: ((BLOCK_SZ - 12) / 12) as u16, // 340
+                        eh_depth: header.eh_depth,
+                        eh_generation: 0,
+                    };
+                    new_buf[..12].copy_from_slice(new_header.as_bytes());
+                    new_buf[12..12 + right_len * 12]
+                        .copy_from_slice(&combined[12 + mid * 12..]);
+                    write_back_block(new_block_id, new_buf.as_ptr(), 4096);
+
+                    // 返回分裂信息
+                    let right_first_block = u32::from_le_bytes(
+                        combined[12 + mid * 12..12 + mid * 12 + 4].try_into().unwrap()
+                    );
+                    Some((new_block_id, right_first_block))
+                } else {
+                    None
+                }
+            };
+
+            // 备份sp
+            let sp_back: usize;
+
+            // 切换栈指针
+            unsafe {
+                #[cfg(target_arch = "riscv64")]
+                asm!(
+                    "mv {}, sp", 
+                    "mv sp, {}", 
+                    out(reg) sp_back,
+                    in(reg) stack_bottom,
+                );
+                #[cfg(target_arch = "loongarch64")]
+                asm!(
+                    "move {}, $sp", 
+                    "move $sp, {}", 
+                    out(reg) sp_back,
+                    in(reg) stack_bottom,
+                );
+            }
+
+            // 初始调用：从 inode 的 i_block 开始遍历 extent 树
+            let current_data_ptr = disk_inode.i_block.as_mut_ptr();
+            let result = add_extent_in_tree(
+                self,
+                &temp_stack_check,
+                &write_back_block,
+                &find_aim,
+                logical_block_id,
+                physical_block_id,
+                0, // current_block_phys=0 表示 in-inode
+                current_data_ptr,
+            );
+
+            // 处理根节点分裂：in-inode 需要从叶子/索引节点升级为索引节点
+            if let Some((right_blk, right_first_logical)) = result {
+                let old_header = unsafe { &*(current_data_ptr as *const Ext4ExtentHeader) };
+                let old_depth = old_header.eh_depth;
+
+                // 将左半（当前在 in-inode 中）移入新块
+                let left_blk = self.fs.alloc_block().unwrap();
+                let mut left_buf = [0u8; 4096];
+                // 新块一定是一个完整的磁盘块，最多可容纳 340 个条目
+                let left_header = Ext4ExtentHeader {
+                    eh_magic: 0xF30A,
+                    eh_entries: old_header.eh_entries,
+                    eh_max: ((BLOCK_SZ - 12) / 12) as u16, // 340
+                    eh_depth: old_depth,
+                    eh_generation: 0,
+                };
+                left_buf[..12].copy_from_slice(left_header.as_bytes());
+                // 复制条目数据
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        current_data_ptr.add(12),
+                        left_buf.as_mut_ptr().add(12),
+                        old_header.eh_entries as usize * 12,
+                    );
+                }
+                write_back_block(left_blk, left_buf.as_ptr(), 4096);
+
+                // 在 in-inode 中构建新的索引根节点
+                let new_root_header = Ext4ExtentHeader {
+                    eh_magic: 0xF30A,
+                    eh_entries: 2,
+                    eh_max: 4, // in-inode 最多 4 个索引条目
+                    eh_depth: old_depth + 1,
+                    eh_generation: 0,
+                };
+                unsafe { (current_data_ptr as *mut Ext4ExtentHeader).write_unaligned(new_root_header); }
+
+                // 索引条目 0 → 左子块（取左半的首个逻辑块号）
+                let left_first_logical = u32::from_le_bytes(
+                    left_buf[12..16].try_into().unwrap()
+                );
+                let idx0 = Ext4ExtentIndex {
+                    ei_block: left_first_logical,
+                    ei_leaf_lo: left_blk as u32,
+                    ei_leaf_hi: 0,
+                    ei_unused: 0,
+                };
+                let idx1 = Ext4ExtentIndex {
+                    ei_block: right_first_logical,
+                    ei_leaf_lo: right_blk as u32,
+                    ei_leaf_hi: 0,
+                    ei_unused: 0,
+                };
+                unsafe {
+                    let idx_base = current_data_ptr.add(12) as *mut Ext4ExtentIndex;
+                    idx_base.write_unaligned(idx0);
+                    idx_base.add(1).write_unaligned(idx1);
                 }
             }
-        })
+
+            // 恢复栈指针
+            unsafe {
+                #[cfg(target_arch = "riscv64")]
+                asm!("mv sp, {}", in(reg) sp_back);
+                #[cfg(target_arch = "loongarch64")]
+                asm!("move $sp, {}", in(reg) sp_back);
+            }
+
+
+           Some(physical_block_id)
+        };
+
+        self.fs.block_dev.write_block(block_id as usize, &buf);
+        result
     }
 
     pub fn read_dirents(&self) {
@@ -889,14 +796,11 @@ impl Ext4Inode {
         let end = offset + buf.len();
         info!("raw_write_at: ino={} offset={} len={} old_size={}", self.inode_id, offset, buf.len(), old_size_bytes);
         if self.is_symlink() && end <= 60 {
-            let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
-            let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
-            block_cache.lock().modify(inode_offset, |disk_inode: &mut Ext4InodeDisk| {
-                // i_block 已经是 [u8; 60]，直接读写
+            block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
                 let mut i_block_bytes = disk_inode.i_block;
                 i_block_bytes[offset..end].copy_from_slice(buf);
                 disk_inode.i_block = i_block_bytes;
-                
+
                 if end > old_size_bytes {
                     disk_inode.i_size_lo = end as u32;
                     disk_inode.i_size_high = 0;
@@ -917,9 +821,7 @@ impl Ext4Inode {
                     if disk_inode.i_flags & EXT4_EXTENTS_FL == 0 {
                         // 传统的直接块模式
                         if inner_block_id < 12 {
-                            let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
-                            let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
-                            block_cache.lock().modify(inode_offset, |disk_inode: &mut Ext4InodeDisk| {
+                            block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
                                 let base = (inner_block_id as usize) * 4;
                                 disk_inode.i_block[base..base + 4].copy_from_slice(&new_block_id.to_le_bytes());
                                 disk_inode.i_blocks_lo += (block_size / 512) as u32;
@@ -965,9 +867,7 @@ impl Ext4Inode {
         info!("raw_write_at: done actual_write={} new_size={}", actual_write, new_size_bytes);
         
         if new_size_bytes > old_size_bytes {
-            let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
-            let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
-            block_cache.lock().modify(inode_offset, |disk_inode: &mut Ext4InodeDisk| {
+            block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
                 disk_inode.i_size_lo = new_size_bytes as u32;
                 disk_inode.i_size_high = (new_size_bytes >> 32) as u32;
             });
@@ -1075,19 +975,16 @@ impl Ext4Inode {
     /// - len > 当前大小：只更新 i_size（稀疏文件，空洞读为零）
     pub fn truncate(&self, len: usize) -> bool {
         let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
-        let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
-        let mut cache = block_cache.lock();
+        let mut buf = [0u8; BLOCK_SZ];
+        self.fs.block_dev.read_block(block_id as usize, &mut buf);
+        let disk_inode: &mut Ext4InodeDisk = unsafe { &mut *(buf.as_mut_ptr().add(inode_offset) as *mut Ext4InodeDisk) };
 
-        let old_size = cache.read(inode_offset, |disk_inode: &Ext4InodeDisk| {
-            disk_inode.size() as usize
-        });
+        let old_size = disk_inode.size() as usize;
 
         if len > old_size {
-            // 扩展：仅更新 i_size，不分配块（稀疏文件）
-            cache.modify(inode_offset, |disk_inode: &mut Ext4InodeDisk| {
-                disk_inode.i_size_lo = len as u32;
-                disk_inode.i_size_high = (len >> 32) as u32;
-            });
+            disk_inode.i_size_lo = len as u32;
+            disk_inode.i_size_high = (len >> 32) as u32;
+            self.fs.block_dev.write_block(block_id as usize, &buf);
             return true;
         }
 
@@ -1100,26 +997,24 @@ impl Ext4Inode {
         let new_end_block = if len == 0 { 0 } else { ((len - 1) / block_size) as u32 + 1 };
         let mut blocks_to_free: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
 
-        cache.modify(inode_offset, |disk_inode: &mut Ext4InodeDisk| {
-            let flags = disk_inode.i_flags;
-            let old_blocks = disk_inode.i_blocks_lo;
+        let flags = disk_inode.i_flags;
 
-            if flags & EXT4_EXTENTS_FL != 0 {
-                let header_ptr = disk_inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader;
-                let mut header: Ext4ExtentHeader = unsafe { header_ptr.read_unaligned() };
+        if flags & EXT4_EXTENTS_FL != 0 {
+            let header_ptr = disk_inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader;
+            let mut header: Ext4ExtentHeader = unsafe { header_ptr.read_unaligned() };
 
-                if header.eh_magic != 0xF30A {
-                    disk_inode.i_size_lo = len as u32;
-                    disk_inode.i_size_high = (len >> 32) as u32;
-                    return;
-                }
-                if header.eh_depth != 0 {
-                    warn!("[ext4 truncate] depth > 0 not supported, only updating size");
-                    disk_inode.i_size_lo = len as u32;
-                    disk_inode.i_size_high = (len >> 32) as u32;
-                    return;
-                }
-
+            if header.eh_magic != 0xF30A {
+                disk_inode.i_size_lo = len as u32;
+                disk_inode.i_size_high = (len >> 32) as u32;
+                self.fs.block_dev.write_block(block_id as usize, &buf);
+                return true;
+            }
+            if header.eh_depth != 0 {
+                warn!("[ext4 truncate] depth > 0 not supported, only updating size");
+                disk_inode.i_size_lo = len as u32;
+                disk_inode.i_size_high = (len >> 32) as u32;
+            } else {
+                let old_blocks = disk_inode.i_blocks_lo;
                 let max_entries: u16 = 4;
                 let actual_entries = header.eh_entries.min(max_entries) as usize;
                 let leaf_base = disk_inode.i_block.as_ptr() as *const Ext4ExtentLeaf;
@@ -1198,26 +1093,28 @@ impl Ext4Inode {
 
                 let blocks_per_sector = (block_size / 512) as u32;
                 disk_inode.i_blocks_lo = old_blocks.saturating_sub(freed_blocks * blocks_per_sector);
-            } else {
-                // 传统直接块模式
-                for i in new_end_block as usize..12 {
-                    let base = i * 4;
-                    let val = u32::from_le_bytes(disk_inode.i_block[base..base + 4].try_into().unwrap());
-                    if val != 0 {
-                        blocks_to_free.push(val);
-                        disk_inode.i_block[base..base + 4].fill(0);
-                        disk_inode.i_blocks_lo = disk_inode
-                            .i_blocks_lo
-                            .saturating_sub((block_size / 512) as u32);
-                    }
+            }
+        } else {
+            // 传统直接块模式
+            for i in new_end_block as usize..12 {
+                let base = i * 4;
+                let val = u32::from_le_bytes(disk_inode.i_block[base..base + 4].try_into().unwrap());
+                if val != 0 {
+                    blocks_to_free.push(val);
+                    disk_inode.i_block[base..base + 4].fill(0);
+                    disk_inode.i_blocks_lo = disk_inode
+                        .i_blocks_lo
+                        .saturating_sub((block_size / 512) as u32);
                 }
             }
+        }
 
-            disk_inode.i_size_lo = len as u32;
-            disk_inode.i_size_high = (len >> 32) as u32;
-        });
+        disk_inode.i_size_lo = len as u32;
+        disk_inode.i_size_high = (len >> 32) as u32;
 
-        // 第二阶段：释放收集到的物理块（在 cache 锁外进行，避免死锁）
+        self.fs.block_dev.write_block(block_id as usize, &buf);
+
+        // 第二阶段：释放收集到的物理块
         for phys in blocks_to_free {
             self.fs.dealloc_block(phys);
         }

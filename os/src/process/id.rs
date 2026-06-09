@@ -87,7 +87,10 @@ pub fn tid_alloc() -> TIdHandle {
 /// Return (bottom, top) of a kernel stack in kernel space.
 #[cfg(target_arch = "loongarch64")]
 pub fn kernel_stack_position(app_id: usize) -> (usize, usize) {
-    let top = 0x800_0000 - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE);
+    if app_id >= (LOWRAM_END - LOWRAM_BASE) / KERNEL_STACK_SIZE {
+        panic!("Too many processes! app_id {} exceeds limit!", app_id);
+    } 
+    let top = LOWRAM_END - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE);
     let bottom = top - KERNEL_STACK_SIZE;
     (bottom, top)
 }
