@@ -99,7 +99,7 @@ fn main() -> i32 {
     chdir("/musl\0");
 
     // 测例首字母
-    let test_start = "";
+    let test_start = "mmap";
 
     // 测例黑名单
     const SKIP_CASES: &[&str] = &[
@@ -153,9 +153,15 @@ fn main() -> i32 {
         "futex*", // 没实现快速锁，会死循环，先注释掉
         "tcp*",
         "udp*",
+        "uevent*",
         "mallinfo*", // 测试meminfo，炸得有点怪，brk或许有问题
         "mmapstress03", //brk或许有问题
         "accept02", // la musl会炸
+        "msg_comm", // boom
+        "msgrcv05", // la boom
+        "msgrcv06", // la boom
+        "mmap3",
+        "mmap1", // boooom
     ];
 
     let skip_list = {

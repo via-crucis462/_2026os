@@ -12,6 +12,7 @@ use alloc::format;
 use crate::mm::MapPermission;
 use crate::fs::DirEntry;
 use crate::process::TaskStatus;
+use crate::fs::ino::get_next_ino;
 
 fn dirent_type_from_mode(mode: u32) -> u8 {
     match mode & 0o170000 {
@@ -120,33 +121,41 @@ macro_rules! impl_unsupported_ops {
 }
 pub struct ProcPidDirInode {
     pub pid: usize,
+    pub ino: u64,
+}
+
+impl ProcPidDirInode {
+    pub fn new(pid: usize) -> Self {
+        Self { pid, ino: get_next_ino() }
+    }
 }
 
 impl VfsInode for ProcPidDirInode {
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
         match name {
             // 当查找 oom_score_adj 时，返回一个绑定了该 PID 的特殊文件
-            "oom_score_adj" => Some(Arc::new(OomScoreAdjInode { pid: self.pid })),
-            "stat" => Some(Arc::new(ProcStatInode { pid: self.pid })),
+            "oom_score_adj" => Some(Arc::new(OomScoreAdjInode::new(self.pid))),
+            "stat" => Some(Arc::new(ProcStatInode::new(self.pid))),
             
 
-            "status" => Some(Arc::new(ProcStatusInode { pid: self.pid })),
-            "ns" => Some(Arc::new(ProcNsDirInode { pid: self.pid })),
-            "maps" => Some(Arc::new(ProcMapsInode { pid: self.pid })),
+            "status" => Some(Arc::new(ProcStatusInode::new(self.pid))),
+            "ns" => Some(Arc::new(ProcNsDirInode::new(self.pid))),
+            "maps" => Some(Arc::new(ProcMapsInode::new(self.pid))),
             
             _ => None,
         }
     }
 
     // --- 目录占位方法 ---
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
 
     fn get_stat(&self) -> super::Stat {
         super::Stat {
             dev: 0, 
-            ino: (10000 + self.pid) as u64, // 用 pid 生成一个假 ino 防止冲突
+            ino: self.ino,
             mode: 0o040555, // 动态目录给只读和执行权限
             nlink: 2,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
@@ -179,10 +188,17 @@ impl VfsInode for ProcPidDirInode {
 }
 pub struct ProcStatInode {
     pub pid: usize,
+    pub ino: u64,
+}
+
+impl ProcStatInode {
+    pub fn new(pid: usize) -> Self {
+        Self { pid, ino: get_next_ino() }
+    }
 }
 
 impl VfsInode for ProcStatInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let Some(process) = get_process(self.pid) else {
             return 0;
         };
@@ -213,12 +229,13 @@ impl VfsInode for ProcStatInode {
         read_len
     }
 
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> super::Stat {
         super::Stat {
             dev: 0,
-            ino: (11000 + self.pid) as u64,
+            ino: self.ino,
             mode: 0o100444,
             nlink: 1,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
@@ -238,13 +255,20 @@ impl VfsInode for ProcStatInode {
 }
 pub struct OomScoreAdjInode {
     pub pid: usize,
+    pub ino: u64,
+}
+
+impl OomScoreAdjInode {
+    pub fn new(pid: usize) -> Self {
+        Self { pid, ino: get_next_ino() }
+    }
 }
 
 impl VfsInode for OomScoreAdjInode {
     fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { 
         None 
     }
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         // 1. 去进程管理器里获取真实的 PCB
         let score = if let Some(process) = get_process(self.pid) {
             // 直接无锁读取里面真实的 oom_score_adj 值！
@@ -266,7 +290,7 @@ impl VfsInode for OomScoreAdjInode {
         read_len
     }
 
-    fn write_at(&self, _offset: usize, buf: &[u8]) -> usize {
+    fn raw_write_at(&self, _offset: usize, buf: &[u8]) -> usize {
         // 1. 解析 LTP 传进来的 "-1000" 等字符串
         let s = core::str::from_utf8(buf).unwrap_or("").trim();
         if let Ok(score) = s.parse::<i32>() {
@@ -279,10 +303,11 @@ impl VfsInode for OomScoreAdjInode {
         buf.len()
     }
     fn get_size(&self) -> usize { 0 }
-fn get_stat(&self) -> super::Stat {
+    fn ino(&self) -> u64 { self.ino }
+    fn get_stat(&self) -> super::Stat {
         super::Stat {
             dev: 0, 
-            ino: 998, 
+            ino: self.ino, 
            
             mode: 0o100666, 
             nlink: 1, 
@@ -302,35 +327,44 @@ fn get_stat(&self) -> super::Stat {
     }
 
 }
-pub struct ProcDirInode;
+pub struct ProcDirInode {
+    ino: u64,
+}
+
+impl ProcDirInode {
+    pub fn new() -> Self { Self { ino: get_next_ino() } }
+}
 
 struct StackBuffer<'a> {
     buf: &'a mut [u8],
     len: usize,
 }
 pub struct ProcRootInode {
-    static_entries: TmpfsDirInode, 
+    static_entries: TmpfsDirInode,
+    ino: u64,
 }
 pub struct ProcMapsInode {
     pub pid: usize,
+    pub ino: u64,
+}
+
+impl ProcMapsInode {
+    pub fn new(pid: usize) -> Self {
+        Self { pid, ino: get_next_ino() }
+    }
 }
 impl VfsInode for ProcMapsInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let mut maps_str = alloc::string::String::new();
         
-
         if let Some(process) = crate::task::get_process(self.pid) {
             let inner = process.inner_exclusive_access();
             
-
             for area in inner.memory_set.areas.iter() {
-
                 let start_va: usize = area.vpn_range.get_start().into();
                 let end_va: usize = area.vpn_range.get_end().into();
                 
-
                 let perm = area.get_map_permission();
-                
 
                 let r = if perm.contains(MapPermission::R) { 'r' } else { '-' };
                 let w = if perm.contains(MapPermission::W) { 'w' } else { '-' };
@@ -354,11 +388,11 @@ impl VfsInode for ProcMapsInode {
         read_len
     }
 
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
 
     fn get_stat(&self) -> super::Stat {
         super::Stat {
-            dev: 0, ino: 8888, 
+            dev: 0, ino: self.ino, 
             mode: 0o100444, 
             nlink: 1, uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
             blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
@@ -367,6 +401,7 @@ impl VfsInode for ProcMapsInode {
     fn get_size(&self) -> usize {
         0
     }
+    fn ino(&self) -> u64 { self.ino }
     fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
     impl_default_statx!();
 
@@ -375,7 +410,10 @@ impl VfsInode for ProcMapsInode {
 }
 impl ProcRootInode {
     pub fn new() -> Self {
-        Self { static_entries: TmpfsDirInode::new(0o777) }
+        Self {
+            static_entries: TmpfsDirInode::new(0o777),
+            ino: get_next_ino()
+        }
     }
     pub fn insert_static(&self, name: String, inode: Arc<dyn VfsInode>) {
         self.static_entries.insert(name, inode);
@@ -389,22 +427,24 @@ impl VfsInode for ProcRootInode {
         }
 
         if let Ok(pid) = name.parse::<usize>() {
-
             if get_process(pid).is_some() { 
-                return Some(Arc::new(ProcPidDirInode { pid }));
+                return Some(Arc::new(
+                    ProcPidDirInode {pid, ino: get_next_ino() }
+                ));
             }
         }
 
         None
     }
 
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> super::Stat {
         super::Stat {
             dev: 0, 
-            ino: 998, // 给一个固定的 inode 号
+            ino: self.ino,
             mode: 0o040555, 
             nlink: 2,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
@@ -454,13 +494,14 @@ impl<'a> Write for StackBuffer<'a> {
     }
 }
 impl VfsInode for ProcDirInode {
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {
         Stat {
             dev: 0,
-            ino: 998,
+            ino: self.ino,
             mode: 0o040555,
             nlink: 2,
             // 下面是补齐的缺漏字段
@@ -489,27 +530,36 @@ impl VfsInode for ProcDirInode {
 
 pub struct ProcStatusInode {
     pub pid: usize,
+    pub ino: u64,
+}
+
+impl ProcStatusInode {
+    pub fn new(pid: usize) -> Self {
+        Self { pid, ino: get_next_ino() }
+    }
 }
 
 impl VfsInode for ProcStatusInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
 
         let process = match get_process(self.pid) {
             Some(p) => p,
             None => return 0, 
         };
 
-        let (uid, euid, gid, egid) = {
+        let (uid, euid, gid, egid, locked_kb) = {
  
             let inner = process.inner.exclusive_access(); 
-            (inner.ruid, inner.euid, inner.gid, inner.egid)
+            let locked_kb = inner.locked_bytes / 1024;
+            (inner.ruid, inner.euid, inner.gid, inner.egid, locked_kb)
         };
 
 
         let status_str = format!(
-            "Name:\toscomp_proc\nState:\tR (running)\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t0\n",
+            "Name:\toscomp_proc\nState:\tR (running)\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t0\nVmLck:\t{:>8} kB\n",
             uid, euid, uid, uid, 
-            gid, egid, gid, gid
+            gid, egid, gid, gid,
+            locked_kb
         );
 
         let status_bytes = status_str.as_bytes();
@@ -523,18 +573,19 @@ impl VfsInode for ProcStatusInode {
         read_len
     }
 
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize {
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize {
 
         0
     }
 
     fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
-    fn get_size(&self) -> usize { 0 } 
+    fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
 
     fn get_stat(&self) -> super::Stat {
         super::Stat {
             dev: 0, 
-            ino: 999, 
+            ino: self.ino, 
             mode: 0o100444, 
             nlink: 1,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
@@ -542,13 +593,19 @@ impl VfsInode for ProcStatusInode {
         }
     }
     
-   impl_default_statx!();
-    impl_unsupported_ops!(0);
+impl_default_statx!();
+impl_unsupported_ops!(0);
 }
-pub struct ProcSelfSymlinkInode;
+pub struct ProcSelfSymlinkInode {
+    ino: u64,
+}
+
+impl ProcSelfSymlinkInode {
+    pub fn new() -> Self { Self { ino: get_next_ino() } }
+}
 
 impl VfsInode for ProcSelfSymlinkInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
  
         let current_task = crate::task::current_task().unwrap();
         let pid = current_task.getpid();
@@ -573,7 +630,7 @@ impl VfsInode for ProcSelfSymlinkInode {
 
         Stat {
             dev: 0,
-            ino: 1,        
+            ino: self.ino,        
             mode: 0o120777, 
             nlink: 1,
             uid: 0,
@@ -594,25 +651,28 @@ impl VfsInode for ProcSelfSymlinkInode {
         }
     }
 
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
-    
-    
+    fn ino(&self) -> u64 { self.ino }
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
     impl_default_statx!();
     impl_unsupported_ops!(-1);
 }
 pub struct ProcNsDirInode {
     pub pid: usize,
+    pub ino: u64,
+}
+
+impl ProcNsDirInode {
+    pub fn new(pid: usize) -> Self {
+        Self { pid, ino: get_next_ino() }
+    }
 }
 impl VfsInode for ProcNsDirInode {
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
         match name {
             "pid" | "net" | "mnt" | "uts" | "ipc" | "user" | "cgroup" => {
-                Some(Arc::new(ProcNsFileInode {
-                    _pid: self.pid,
-                    ns_type: String::from(name),
-                }))
+                Some(Arc::new(ProcNsFileInode::new(self.pid, String::from(name))))
             }
             _ => None,
         }
@@ -620,28 +680,35 @@ impl VfsInode for ProcNsDirInode {
 
     fn get_stat(&self) -> Stat {
         Stat {
-            dev: 0, ino: 2, 
+            dev: 0, ino: self.ino, 
             mode: 0o040555, // S_IFDIR (0o040000) | r-xr-xr-x (0o555) 目录权限
             nlink: 2, uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
             blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
         }
     }
 
-    
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     impl_default_statx!();
     impl_unsupported_ops!(0);
 }
 pub struct ProcNsFileInode {
     pub _pid: usize,
     pub ns_type: String,
+    pub ino: u64,
+}
+
+impl ProcNsFileInode {
+    pub fn new(pid: usize, ns_type: String) -> Self {
+        Self { _pid: pid, ns_type, ino: get_next_ino() }
+    }
 }
 
 impl VfsInode for ProcNsFileInode {
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
 
     fn get_stat(&self) -> Stat {
         // 给不同的 ns 类型分配真实的 Linux 默认 Inode 编号
@@ -665,14 +732,21 @@ impl VfsInode for ProcNsFileInode {
         }
     }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     impl_default_statx!();
     impl_unsupported_ops!(0);
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
 }
-pub struct MemInfoInode;
+pub struct MemInfoInode {
+    ino: u64,
+}
+
+impl MemInfoInode {
+    pub fn new() -> Self { Self { ino: get_next_ino() } }
+}
 
 impl VfsInode for MemInfoInode {
-   fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+   fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let free_frames = get_free_frames(); 
         let free_kb = free_frames * 4;
         let total_kb = crate::arch::config::MEMORY_SIZE / 1024;
@@ -695,12 +769,13 @@ impl VfsInode for MemInfoInode {
         
         read_len
     }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {
         Stat {
             dev: 0, 
-            ino: 999, 
+            ino: self.ino, 
             mode: 0o100444, 
             nlink: 1,
             // 下面是补齐的缺漏字段
@@ -765,10 +840,16 @@ impl VfsInode for MemInfoInode {
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
 
-pub struct MountsInode;
+pub struct MountsInode {
+    ino: u64,
+}
+
+impl MountsInode {
+    pub fn new() -> Self { Self { ino: get_next_ino() } }
+}
 
 impl VfsInode for MountsInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         if offset > 0 { return 0; }
         // 伪造的标准 Linux 挂载信息表
         let mounts_str = "rootfs / rootfs rw 0 0\nproc /proc proc rw 0 0\ndevtmpfs /dev devtmpfs rw 0 0\n";
@@ -778,11 +859,12 @@ impl VfsInode for MountsInode {
         len
     }
 
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {
         Stat {
-            dev: 0, ino: 997, mode: 0o100444, nlink: 1, // 普通文件只读
+            dev: 0, ino: self.ino, mode: 0o100444, nlink: 1, // 普通文件只读
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
             blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
             ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
@@ -836,10 +918,16 @@ impl VfsInode for MountsInode {
 /// /proc/cgroups — 报告内核支持的 cgroup 子系统列表
 /// 当前内核不支持 cgroup，因此仅返回表头行，
 /// 这样 LTP 测例可通过 grep "cpu" 检测到不支持并正确 TCONF 跳过。
-pub struct CgroupsInode;
+pub struct CgroupsInode {
+    ino: u64,
+}
+
+impl CgroupsInode {
+    pub fn new() -> Self { Self { ino: get_next_ino() } }
+}
 
 impl VfsInode for CgroupsInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         if offset > 0 { return 0; }
         let content = b"#subsys_name\thierarchy\tnum_cgroups\tenabled\n";
         let len = content.len().min(buf.len());
@@ -847,11 +935,12 @@ impl VfsInode for CgroupsInode {
         len
     }
 
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {
         Stat {
-            dev: 0, ino: 996, mode: 0o100444, nlink: 1,
+            dev: 0, ino: self.ino, mode: 0o100444, nlink: 1,
             uid: 0, gid: 0, rdev: 0, __pad: 0, size: 0, blksize: 512, __pad2: 0,
             blocks: 0, atime_sec: 0, atime_nsec: 0, mtime_sec: 0, mtime_nsec: 0,
             ctime_sec: 0, ctime_nsec: 0, __unused: [0; 2],
@@ -876,9 +965,9 @@ pub fn mount_procfs() {
     );
     sys_dir.insert(String::from("kernel"), kernel_dir);
     proc_root.insert_static(String::from("sys"), sys_dir);
-    proc_root.insert_static(String::from("meminfo"), Arc::new(MemInfoInode));
-    proc_root.insert_static(String::from("mounts"), Arc::new(MountsInode));
-    proc_root.insert_static(String::from("cgroups"), Arc::new(CgroupsInode));
+    proc_root.insert_static(String::from("meminfo"), Arc::new(MemInfoInode::new()));
+    proc_root.insert_static(String::from("mounts"), Arc::new(MountsInode::new()));
+    proc_root.insert_static(String::from("cgroups"), Arc::new(CgroupsInode::new()));
     let self_dentry = Arc::new(TmpfsDirInode::new(0o777));
     self_dentry.insert(
         String::from("oom_score_adj"), 
@@ -886,7 +975,7 @@ pub fn mount_procfs() {
     );
     self_dentry.insert(String::from("maps"), Arc::new(TmpfsFileInode::new(0o777)));
     
-    proc_root.insert_static(String::from("self"), Arc::new(ProcSelfSymlinkInode));
+    proc_root.insert_static(String::from("self"), Arc::new(ProcSelfSymlinkInode::new()));
     // 4. 正式把完整的动态 /proc 挂载到操作系统的 ROOT_DENTRY！
     ROOT_DENTRY.mount_child(String::from("proc"), proc_root);
    

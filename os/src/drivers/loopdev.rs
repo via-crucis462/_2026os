@@ -13,6 +13,7 @@ use crate::ext4fs::BlockDevice;
 use crate::ext4fs::ext4::Ext4FS;
 use crate::ext4fs::ext4inode::Ext4Inode;
 use crate::mm::UserBuffer;
+use crate::fs::get_next_ino;
 use crate::process::id::RecycleAllocator;
 use crate::syscall::errno::Errno;
 
@@ -43,6 +44,7 @@ impl LoopDeviceManager {
         let loop_device = Arc::new(LoopDevice {
             inner: Arc::new(MPSafeCell::new(LoopDeviceInner::new(backing_file, offset, size))),
             device_id: self.id_allocator.exclusive_access().alloc(),
+            ino: get_next_ino(),
         });
         self.inner.exclusive_access().devices.push(loop_device.clone());
         loop_device
@@ -104,6 +106,7 @@ pub struct LoopDeviceManagerInner {
 pub struct LoopDevice {
     pub inner: Arc<MPSafeCell<LoopDeviceInner>>,
     pub device_id: usize, // Loop设备的ID，可以用于标识不同的Loop设备
+    pub ino: u64,
 }
 
 impl BlockDevice for LoopDevice {
@@ -169,17 +172,18 @@ impl VfsInode for LoopDevice {
             0
         }
     }
+    fn ino(&self) -> u64 { self.ino }
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
         -1 // 不支持设置时间
     }
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let inner = self.inner.exclusive_access();
-        // Also just forward read
+        // Loop 设备本身无存储，转发到 backing file 的缓存路径
         inner.backing_file.as_ref().unwrap().read_at(inner.offset + offset, buf)
     }
-    fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+    fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize {
         let inner = self.inner.exclusive_access();
-        // Just forward the write to the backing file without size limitation to allow file extension if needed
+        // Loop 设备本身无存储，转发到 backing file 的缓存路径
         inner.backing_file.as_ref().unwrap().write_at(inner.offset + offset, buf)
     }
     fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>> {
@@ -190,6 +194,7 @@ impl VfsInode for LoopDevice {
     }
     fn get_stat(&self) -> crate::fs::Stat {
         crate::fs::Stat {
+            ino: self.ino,
             mode: 0o060666, // 块设备标志位 (S_IFBLK) | rw-rw-rw-
             blksize: 512,
             size: self.get_size() as i64,
@@ -234,21 +239,25 @@ pub fn mount_loop_device(loop_device: Arc<LoopDevice>, mount_point: &str) -> Res
 }
 
 /// loop control设备
-pub struct LoopControlInode {}
+pub struct LoopControlInode {
+    ino: u64,
+}
 
 impl LoopControlInode {
-    pub fn new() -> Self { Self {} }
+    pub fn new() -> Self { Self { ino: get_next_ino() } }
 }
 
 impl VfsInode for LoopControlInode {
     fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
     fn set_time(&self, _atime: &crate::fs::TimeSpec, _mtime: &crate::fs::TimeSpec) -> isize { 0 }
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, buf: &[u8]) -> usize { buf.len() }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, buf: &[u8]) -> usize { buf.len() }
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn get_stat(&self) -> crate::fs::Stat {
         crate::fs::Stat {
+            ino: self.ino,
             mode: 0o20666, // S_IFCHR
             blksize: 512,
             ..Default::default()

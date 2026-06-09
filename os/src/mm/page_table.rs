@@ -197,7 +197,7 @@ impl PageTable {
         *pte = PageTableEntry::new_defualt(ppn);
         *pte = PageTableEntry { bits: pte.bits | from_riscv_flags(flags).bits() as usize};
         if (flags & PTEFlags::W) != PTEFlags::empty() {
-            pte.set_dirty();
+            // pte.set_dirty(); // 现在改为写入才在handler里设置
         }
     }
     /// remove the map between virtual page number and physical page number
@@ -298,6 +298,34 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         start = end_va.into();
     }
     v
+}
+
+pub fn try_translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Option<Vec<&'static mut [u8]>> {
+    if !prepare_user_read(token, ptr as usize, len) {
+        return None;
+    }
+    let page_table = PageTable::from_token(token);
+    let mut start = ptr as usize;
+    let end = start + len;
+    let mut v = Vec::new();
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let mut vpn = start_va.std_floor();
+        let (ppn, size) = match page_table.translate_and_get_size(vpn) {
+            Some((pte, size)) if pte.is_valid() => (pte.ppn(), size),
+            _ => return None,
+        };
+        vpn.step_by(size.num_pages());
+        let mut end_va: VirtAddr = vpn.into();
+        end_va = end_va.min(VirtAddr::from(end));
+        if end_va.actual_page_offset(size) == 0 {
+            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..]);
+        } else {
+            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..end_va.actual_page_offset(size)]);
+        }
+        start = end_va.into();
+    }
+    Some(v)
 }
 
 pub fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
@@ -406,6 +434,34 @@ pub fn translated_byte_buffer_mut(token: usize, ptr: *const u8, len: usize) -> V
         return Vec::new();
     }
     translated_byte_buffer(token, ptr, len)
+}
+
+pub fn try_translated_byte_buffer_mut(token: usize, ptr: *mut u8, len: usize) -> Option<Vec<&'static mut [u8]>> {
+    if !prepare_user_write(token, ptr as usize, len) {
+        return None;
+    }
+    let page_table = PageTable::from_token(token);
+    let mut start = ptr as usize;
+    let end = start + len;
+    let mut v = Vec::new();
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let mut vpn = start_va.std_floor();
+        let (ppn, size) = match page_table.translate_and_get_size(vpn) {
+            Some((pte, size)) if pte.is_valid() => (pte.ppn(), size),
+            _ => return None,
+        };
+        vpn.step_by(size.num_pages());
+        let mut end_va: VirtAddr = vpn.into();
+        end_va = end_va.min(VirtAddr::from(end));
+        if end_va.actual_page_offset(size) == 0 {
+            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..]);
+        } else {
+            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..end_va.actual_page_offset(size)]);
+        }
+        start = end_va.into();
+    }
+    Some(v)
 }
 
 /// Translate&Copy a ptr[u8] array end with `\0` to a `String` Vec through page table

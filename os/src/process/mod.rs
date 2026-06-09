@@ -453,10 +453,15 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
         let cur_mask = task_inner.signal_mask;
         task_inner.signal_mask_backup.push(cur_mask);
         
-        // 屏蔽 action 中指定的掩码 + 当前信号自身
+        // 屏蔽 action 中指定的掩码
         task_inner.signal_mask |= mask;
-        task_inner.signal_mask.insert(signal);
-        
+
+        const SA_NODEFER: usize = 0x40000000;
+        // 如果没有 SA_NODEFER 标志，则在处理信号时自动屏蔽该信号
+        if action.flags & SA_NODEFER == 0 {
+            task_inner.signal_mask.insert(signal);
+        }
+
         let trap_ctx = task_inner.get_trap_cx();
         task_inner.trap_ctx_backup.push(*trap_ctx);
         
@@ -467,9 +472,11 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
     } else { 
         // 由内核处理
         match signal {
-            SignalFlags::SIGCHLD | SignalFlags::SIGURG | SignalFlags::SIGWINCH => {
+            SignalFlags::SIGCHLD 
+            | SignalFlags::SIGURG 
+            | SignalFlags::SIGWINCH => {
                 // 目前的实现这些默认忽略
-                // trace!("[K] ignore default signal {:?}", signal);
+                info!("[K] ignore default signal {:?}", signal);
             }
              SignalFlags::SIGSTOP => {
                 task_inner.frozen = true;
@@ -482,7 +489,7 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
                 // 此处标注为kill后稍后会调用exit_current_and_run_next，这里不直接调用
                 task_inner.killed = true;
                 task_inner.term_signal = Some(sig as i32 + 1);
-                // println!("[K] default terminate for signal {:?}", signal);
+                warn!("[K] default terminate for signal {:?}", signal);
             }
         }
     }
@@ -491,6 +498,17 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
 fn set_sig_ret(trap_ctx: &mut TrapContext) {
     use crate::arch::config::*;
     trap_ctx.set_ra(*SIG_RT_ADDR);
+}
+
+/// 检查当前任务是否有未屏蔽的挂起信号
+pub fn check_pending_signal() -> bool {
+    let task = current_task().unwrap();
+    let task_inner = task.inner_exclusive_access();
+    let pending = task_inner.signals.bits() & !(
+        task_inner.signal_mask.bits() & 
+        !(SignalFlags::SIGKILL | SignalFlags::SIGSTOP).bits()
+    );
+    pending!= 0
 }
 
 /* rcore的实现修改而来，目前不被调用了，留作参考

@@ -55,7 +55,7 @@ impl BlockCache {
     pub fn read<T, V>(&self, offset: usize, f: impl FnOnce(&T) -> V) -> V {
         f(self.get_ref(offset))
     }
-
+    /// 将缓存指定偏移的块执行f操作，其中f是一个闭包
     pub fn modify<T, V>(&mut self, offset: usize, f: impl FnOnce(&mut T) -> V) -> V {
         f(self.get_mut(offset))
     }

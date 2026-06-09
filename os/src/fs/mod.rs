@@ -9,7 +9,10 @@ mod file_tree;
 mod procfs;
 mod devfs;
 mod userpagefault;
+mod ino;
+
 pub mod memfd;
+use alloc::vec::{self, Vec};
 pub use memfd::*;
 pub mod tmpfs;
 pub use tmpfs::setup_oscomp_env;
@@ -19,11 +22,14 @@ pub use dir_entry::DirEntry;
 pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
 pub use file_tree::{Dentry};
 pub use fifo::{create_fifo_in_dentry, is_fifo_mode, open_fifo_file, S_IFIFO, S_IFMT};
-pub use crate::arch::timer::TimeSpec;
 pub use userpagefault::UserPageFaultInfo;
+use crate::PAGE_SIZE_BITS;
+pub use crate::timer::TimeSpec;
+pub use ino::get_next_ino;
 use crate::mm::UserBuffer;
 use crate::syscall::errno::Errno;
 use alloc::sync::Arc;
+use spin::Mutex;
 use alloc::string::String;
 use alloc::collections::VecDeque; 
 use core::any::Any;
@@ -47,10 +53,19 @@ pub trait File: Send + Sync {
     fn write_nonblock(&self, buf: UserBuffer) -> Result<usize, Errno> {
         Ok(self.write(buf))
     }
-    /// read from the file to buf at a given offset, return the number of bytes read
-    fn read_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
-    /// write to the file from buf at a given offset, return the number of bytes written
-    fn write_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
+    /// 底层原始读取（绕过页缓存，直接读存储）
+    fn raw_read_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
+    /// 底层原始写入（绕过页缓存，直接写存储）。回写脏页等场景使用。
+    fn raw_write_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
+
+    /// 带页缓存的读取。默认直接调用 raw_read_at。
+    fn read_at(&self, offset: usize, buf: UserBuffer) -> usize {
+        self.raw_read_at(offset, buf)
+    }
+    /// 带页缓存的写入。默认直接调用 raw_write_at。
+    fn write_at(&self, offset: usize, buf: UserBuffer) -> usize {
+        self.raw_write_at(offset, buf)
+    }
     /// 获取文件权限信息
     fn get_perm(&self) -> PermStat;
     /// 修改权限，返回是否成功
@@ -83,10 +98,17 @@ pub trait File: Send + Sync {
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
         0
     }
-    // 获取该文件指定页偏移的物理页号。
-    // 如果没有，文件内部负责分配一个并存起来。
-    fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
-        None // 默认不支持
+    fn ino(&self) -> u64 {
+        self.get_stat().ino
+    }
+    /// 截断/扩展文件到指定大小
+    fn truncate(&self, _len: usize) -> bool {
+        false // 默认不支持
+    }
+    // 这里是默认实现，需要为不同文件重写
+    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<Mutex<crate::mm::mmap::PageCache>>> {
+        error!("File type does not support shared pages: page_offset={}", page_offset);
+        None
     }
     /// ioctl 设备控制，默认返回 ENOTTY（不支持的 ioctl 请求）
     fn ioctl(&self, _request: u32, _argp: usize, _token: usize) -> isize {
@@ -173,9 +195,31 @@ pub struct StatxTimestamp {
 pub const UTIME_NOW: usize = 0x3fffffff;
 pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub trait VfsInode: Send + Sync {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize;
-    fn write_at(&self, offset: usize, buf: &[u8]) -> usize;
+    /// 底层原始读取，不经过页缓存。由具体文件系统实现。
+    /// 对于磁盘文件系统（Ext4），这直接读写磁盘块；
+    /// 对于虚拟文件系统（tmpfs/procfs/devfs），这就是它们的实际数据读取逻辑。
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize;
+    /// 底层原始写入，不经过页缓存。由具体文件系统实现。
+    fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize;
+
+    /// 带页缓存的读取。
+    /// 默认直接转发到 raw_read_at。磁盘文件系统（Ext4）应覆写此方法以接入 SharedPageCacheManager。
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        self.raw_read_at(offset, buf)
+    }
+    /// 带页缓存的写入。
+    /// 默认直接转发到 raw_write_at。磁盘文件系统（Ext4）应覆写此方法以接入 SharedPageCacheManager。
+    fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+        self.raw_write_at(offset, buf)
+    }
     fn get_size(&self) -> usize;
+    /// 截断/扩展文件到指定大小
+    /// len < 当前大小：丢弃超出部分
+    /// len > 当前大小：扩展并用零填充（对 tmpfs 等可以只更新 size）
+    fn truncate(&self, _len: usize) -> bool {
+        panic!("truncate not implemented for this inode type");
+        false // 默认不支持
+    }
     fn get_stat(&self) -> Stat;
     fn get_statx(&self) -> Statx;
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>>;
@@ -252,10 +296,32 @@ pub trait VfsInode: Send + Sync {
             f_namelen: 255, f_frsize: 0, f_flags: 0, f_spare: [0; 4],
         }
     }
-    fn get_shared_page(&self, _page_offset: usize) -> Option<PhysPageNum> {
-        None
+    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<Mutex<crate::mm::mmap::PageCache>>> {
+        let man = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
+        let (cache, newly_allocated) = 
+            man.get_page_cache(self.get_stat().ino, page_offset);
+        if newly_allocated {
+            // 读入文件数据到分配的页
+            info!("VFS: Allocated new shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
+            let mut page = cache.lock();
+            let (ppn, page_size) = (page.frame.ppn, page.frame.page_size);
+            let page_addr = ppn.0 << PAGE_SIZE_BITS;
+            // 检查是否对齐，防止传入的 frame 是大页
+            assert!(page_addr % page_size.size() == 0, "Shared page address not aligned to its size");
+            // 将物理页转换为缓冲区
+            let buffer = unsafe { 
+                core::slice::from_raw_parts_mut(page_addr as *mut u8, page_size.size())
+            };
+            // 从底层存储读取文件数据到缓存页（必须用 raw_read_at 绕过缓存，
+            // 否则当 read_at 本身依赖页缓存时会形成循环调用）
+            self.raw_read_at(page_offset * page_size.size(), buffer);
+        } else {
+            info!("VFS: Reusing existing shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
+        }
+        Some(cache)
     }
-
+    /// 返回该 inode 的唯一标识号（跨所有文件系统唯一）
+    fn ino(&self) -> u64 ;
 }
 
 bitflags! {

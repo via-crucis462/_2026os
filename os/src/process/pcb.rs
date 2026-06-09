@@ -14,6 +14,8 @@ use crate::{
         translated_write, MapArea, MapPermission, MapType, PageSize},
     sync::{MPSafeCell, WaitQueue},
     syscall::errno::Errno::*,
+    ipc::namespace::*,
+    ipc::*,
 };
 use alloc::{
     string::String,
@@ -90,6 +92,7 @@ impl FileDescriptor {
 pub struct ProcessControlBlock {
     pub pid: Arc<PidHandle>,
     pub oom_score_adj: AtomicI32,
+    pub ns_proxy: NsProxy,
     pub inner: MPSafeCell<ProcessControlBlockInner>,
 }
 
@@ -174,6 +177,7 @@ impl ProcessControlBlock {
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),// 注意：实际上只克隆了指针
             oom_score_adj: AtomicI32::new(0),
+            ns_proxy: NsProxy::new(IPCNamespace::new()),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: true, // initproc和shell默认在主核运行
                 pname: String::from("initproc"),
@@ -206,6 +210,7 @@ impl ProcessControlBlock {
                 alive_task_count: 0,
                 tasks: Vec::new(),
                 personality: 0, // 默认 personality 为 0 (通常表示标准 Linux 兼容模式)
+                locked_bytes: 0,
             })
         });
         // 为pcb创建主线程
@@ -414,6 +419,7 @@ impl ProcessControlBlock {
         }
         // 内核栈无须改变（fork时已经分配了新的）但需要重新映射
         // 先回收旧的 memory_set 资源，避免物理页泄露
+        proc_inner.memory_set.sync_shared_pages();
         proc_inner.memory_set.recycle_data_pages();
         proc_inner.memory_set = memory_set;
 
@@ -525,6 +531,7 @@ impl ProcessControlBlock {
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),
             oom_score_adj: AtomicI32::new(self.oom_score_adj.load(Ordering::SeqCst)),
+            ns_proxy: self.ns_proxy.clone(),
             inner: MPSafeCell::new(ProcessControlBlockInner {
                 on_main_hart: false, 
                 pname: parent_inner.pname.clone(),
@@ -552,6 +559,7 @@ impl ProcessControlBlock {
                 tasks: Vec::new(),
                 alive_task_count: 1, // 初始有一个线程
                 personality: parent_inner.personality,
+                locked_bytes: 0, // fork 时不继承父进程的锁定内存
             })
         });
         let new_task = Arc::new(TaskControlBlock {
@@ -829,6 +837,8 @@ pub struct ProcessControlBlockInner {
     pub alive_task_count: isize,
     // 专用于syscall92的personality
     pub personality: usize,
+    // MAP_LOCKED 锁定的内存字节数（用于 /proc/self/status VmLck 字段）
+    pub locked_bytes: usize,
 }
 
 impl ProcessControlBlockInner {
@@ -880,19 +890,19 @@ impl ProcessControlBlockInner {
     //回收进程资源，返回子进程组，用于给initproc回收
     pub fn recycle_on_exit(&mut self, exit_code: i32) -> Vec<Arc<ProcessControlBlock>> {
         self.exit_code = exit_code;
+        self.memory_set.sync_shared_pages();
         self.memory_set.recycle_data_pages();
         self.fd_table.clear();
         self.signals = SignalFlags::empty();
         core::mem::take(&mut self.children)
     }
-
     pub fn is_zombie(&self) -> bool {
         self.alive_task_count == 0
     }
     pub fn info_map_areas(&self) {
-            println!("mapping asid {}:", self.get_asid());
+            warn!("mapping asid {}:", self.get_asid());
         for i in self.memory_set.areas().iter() {
-            println!("mapping: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
+            warn!("mapping: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
         }
     }
 }

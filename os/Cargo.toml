@@ -19,6 +19,7 @@ lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 spin = "0.9.8"
 log = "0.4"
 xmas-elf = "0.7.0"
+zerocopy = { version = "0.8", features = ["derive"] }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }

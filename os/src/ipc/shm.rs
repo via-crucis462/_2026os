@@ -5,6 +5,8 @@ use spin::Mutex;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
+use super::IpcPerm;
+
 
 use lazy_static::lazy_static;
 
@@ -26,6 +28,14 @@ impl ShmManager {
             shms: BTreeMap::new(),
         }
     }
+    pub fn get_shm(&self, id: u32) -> Option<Arc<Shm>> {
+        self.shms.get(&id).cloned()
+    }
+
+    pub fn get_shm_by_key(&self, key: i32) -> Option<Arc<Shm>> {
+        self.shms.values().find(|s| s.get_key() == key).cloned()
+    }
+
     pub fn remove_shm(&mut self, id: u32) {
         self.shms.remove(&id);
         self.id_allocator.dealloc(id as usize);
@@ -42,18 +52,6 @@ impl ShmManager {
     }
 }
 
-/// System V IPC 权限信息
-#[derive(Debug, Clone, Copy, Default)]
-#[repr(C)]
-pub struct IpcPerm {
-    pub key: i32,
-    pub uid: u32,
-    pub gid: u32,
-    pub cuid: u32,
-    pub cgid: u32,
-    pub mode: u16,
-    pub seq: u16,
-}
 
 /// 对应 Linux shmid_ds
 #[derive(Debug, Clone, Copy, Default)]
@@ -66,6 +64,7 @@ pub struct ShmidDs {
     pub shm_ctime: usize,
     pub shm_cpid: usize,
     pub shm_lpid: usize,
+    // 当前连接数，即被映射到多少个进程
     pub shm_nattch: usize,
 }
 
@@ -73,7 +72,7 @@ pub struct Shm {
     id: u32,
     // 需要保证顺序
     frames: Vec<FrameTracker>,
-    // 状态信息
+    // 状态信息，注意和inode stat不同
     pub stat: Mutex<ShmidDs>,
 }
 
@@ -108,6 +107,24 @@ impl Shm {
     }
     pub fn get_key(&self) -> i32 {
         self.stat.lock().shm_perm.key
+    }
+    pub fn get_frames(&self) -> &Vec<FrameTracker> {
+        &self.frames
+    }
+    pub fn inc_nattch(&self) {
+        self.stat.lock().shm_nattch += 1;
+    }
+    pub fn dec_nattch(&self) {
+        let mut stat = self.stat.lock();
+        if stat.shm_nattch > 0 {
+            stat.shm_nattch -= 1;
+        }
+    }
+    pub fn get_perm(&self) -> IpcPerm {
+        self.stat.lock().shm_perm
+    }
+    pub fn get_stat(&self) -> ShmidDs {
+        *self.stat.lock()
     }
 }
 

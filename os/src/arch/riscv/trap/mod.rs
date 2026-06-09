@@ -143,6 +143,29 @@ pub fn trap_handler() -> ! {
                 drop(process_inner);
                 drop(process);
                 drop(task);
+            } else if process_inner.memory_set.check_mmap_page_fault(stval){
+                error!("[WATCHDOG][BUS] : {:#x}, PC: {:#x}", stval, sepc);
+                error!(
+                    "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
+                    crate::task::current_task().unwrap().process().pid.0,
+                    scause.cause(),
+                    current_trap_cx().get_rt(),
+                    stval
+                );
+                error!("[kernel] Trap! Source: User");
+                error!("[kernel] Scause: {:?} (Code: {})", scause.cause(), scause.bits());
+                error!("[kernel] Stval:  {:#x} (Bad Address)", stval);
+                error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, bad instruction = {:#x}",
+                scause.cause(),
+                current_task().unwrap().process().pid.0,
+                stval,
+                current_trap_cx().get_rt(),
+            );
+                // 触发了文件映射区域的page fault，说明是超出文件大小访问了，发送SIGBUS信号
+                drop(process_inner);
+                drop(process);
+                drop(task);
+                current_add_signal(SignalFlags::SIGBUS);
             } else {
                 // 【新增】检查 userfaultfd 注册范围
                 /*println!(

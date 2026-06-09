@@ -10,12 +10,12 @@ use crate::arch::config::PAGE_SIZE;
 use crate::task::current_user_token;
 use crate::syscall::errno::*;
 use super::{Dentry, File, VfsInode};
-use super::tmpfs::TMPFS_INO_COUNTER;
+use super::ino::get_next_ino;
 use super::tmpfs::HUGEPAGES_DENTRY;
 
 // 内存文件，后续用户可以mmap到用户空间
 pub struct MemFdInode {
-    ino: usize,
+    ino: u64,
     /// 物理页帧列表，需保证顺序
     phys_pages: Mutex<Vec<FrameTracker>>,
     /// 每个物理页的大小
@@ -28,7 +28,7 @@ pub struct MemFdInode {
 impl MemFdInode {
     pub fn new(page_size: PageSize) -> Self {
         Self {
-            ino: TMPFS_INO_COUNTER.fetch_add(1, Ordering::SeqCst),
+            ino: get_next_ino(),
             phys_pages: Mutex::new(Vec::new()),
             page_size,
             file_size: Mutex::new(0),
@@ -123,17 +123,19 @@ impl MemFdInode {
 }
 
 impl super::VfsInode for MemFdInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         self.do_read_at(offset, buf)
     }
 
-    fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+    fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize {
         self.do_write_at(offset, buf)
     }
 
     fn get_size(&self) -> usize {
         *self.file_size.lock()
     }
+
+    fn ino(&self) -> u64 { self.ino }
 
     fn get_perm(&self) -> PermStat {
         self.perms.lock().clone()
@@ -149,7 +151,7 @@ impl super::VfsInode for MemFdInode {
         let size = self.get_size();
         super::Stat {
             dev: 0,
-            ino: self.ino as u64,
+            ino: self.ino,
             mode: perms.mode.bits() as u32,
             nlink: 1,
             uid: perms.uid,

@@ -1368,7 +1368,7 @@ pub fn sys_fchmodat(dirfd: isize, path_ptr: *const u8, mode: u32) -> isize {
     let process = task.process(); 
     let mut inner = process.inner_exclusive_access();
     let token = inner.get_user_token();
-    let euid = inner.ruid;
+    let euid = inner.euid;
     
     let path = {
         if let Some(s) = try_translated_str(token, path_ptr) {
@@ -1428,7 +1428,7 @@ pub fn sys_fchmod(fd: usize, mode: u32) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
-    let euid = inner.ruid;
+    let euid = inner.euid;
 
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return EBADF.as_isize();
@@ -1465,7 +1465,7 @@ pub fn sys_fchownat(dirfd: isize, path_ptr: *const u8, owner: u32, group: u32) -
     let process = task.process(); 
     let mut inner = process.inner_exclusive_access();
     let token = inner.get_user_token();
-    let euid = inner.ruid;
+    let euid = inner.euid;
     info!("pid[{}] sys_fchownat: dirfd={}, owner={}, group={}", task.process().pid.0, dirfd, owner, group);
     let path = {
         if let Some(s) = try_translated_str(token, path_ptr) {
@@ -2068,3 +2068,20 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
         EACCES.as_isize()
     }
 }
+/// fsync: 将文件描述符关联文件的数据同步到磁盘
+/// 当前实现仅针对内存映射文件
+/// TODO: 完全实现 fsync 语义
+pub fn sys_fsync(_fd: usize) -> isize {
+    info!("kernel:pid[{}] sys_fsync: fd={}", current_task().unwrap().process().pid.0, _fd);
+    crate::mm::mmap::sync_shared_page_cache();
+    0
+}
+
+/// sync: 将所有文件系统缓存同步到磁盘
+/// 暂时和msync同语义
+pub fn sys_sync() -> isize {
+    info!("kernel:pid[{}] sys_sync called", current_task().unwrap().process().pid.0);
+    crate::mm::mmap::sync_shared_page_cache();
+    0
+}
+

@@ -36,7 +36,7 @@ pub const MMIO: &[(usize, usize)] = &[
     (0x10_1000, 0x1000), // 🌟 新增：Goldfish RTC
 ];
 
-/// 和la同步这个变量不过不设值
+/// 和la同步这个量，不设值
 pub const OFFSET_FOR_USER_APP: usize = 0;
 pub const USER_APP_BASE: usize = 0x4000_0000;
 /// sv39用户地址空间end
