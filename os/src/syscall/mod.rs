@@ -51,6 +51,7 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_READV: usize = 65;
 const SYSCALL_WRITEV: usize = 66;
 const SYSCALL_PREAD64: usize = 67;
+const SYSCALL_PWRITE64: usize = 68;
 const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_PPOLL: usize = 73;
@@ -420,6 +421,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RESQ => sys_resq(),
         SYSCALL_FSTATAT => sys_fstatat(args[0] as isize,args[1] as *const u8, args[2] as *mut Stat, args[3] as usize),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as usize),
+        SYSCALL_PWRITE64 => sys_pwrite64(args[0], args[1] as *const u8, args[2], args[3] as usize),
         SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
         SYSCALL_COPY_FILE_RANGE => sys_copy_file_range(args[0], args[1] as *mut i64, args[2], args[3] as *mut i64, args[4], args[5] as u32),
         SYSCALL_SHMGET => sys_shmget(args[0] as i32, args[1], args[2] as i32),
@@ -445,7 +447,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SYMLINK => sys_symlinkat(args[0] as *const u8, args[1] as isize, args[2] as *const u8),
         SYSCALL_PTHREADCREATE => sys_pthread_create(args[0] as *mut usize, args[1] as *const usize, args[2] as usize, args[3] as usize),
         _ => {
-            warn!(
+            println!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
                 syscall_id
             );

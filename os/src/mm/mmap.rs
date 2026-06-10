@@ -269,7 +269,7 @@ impl SharedPageCacheManager {
 
     /// 将页缓存写回 vfsinode 文件
     pub fn write_back_page_cache_vfs(ino: u64, page_offset: usize, vfs: &Arc<dyn VfsInode>) {
-        warn!("Writing back page cache for ino {}, page_offset {}", ino, page_offset);
+        // warn!("Writing back page cache for ino {}, page_offset {}", ino, page_offset);
 
         // 锁内提取数据
         let buffer_data = {
@@ -308,26 +308,36 @@ pub fn sync_shared_page_cache() {
         SharedPageCacheManager::write_back_page_cache_vfs(ino, page_offset, &vfs);
     }
     
-    // 更新最后一次全盘回写的时间
-    LAST_SYNC_TIME.store(crate::arch::timer::get_time_ms(), Ordering::Release);
+    // 更新最后一次页回写的时间
+    LAST_PAGE_SYNC_TIME.store(crate::arch::timer::get_time_ms(), Ordering::Release);
 }
 
 /// 周期性回写间隔，ms
-const SYNC_INTERVAL_MS: usize = 5000;
+const PAGE_SYNC_INTERVAL_MS: usize = 5000;
+const BLOCK_SYNC_INTERVAL_MS: usize = 50000;
 
-/// 最后一次触发自动回写的时间
-static LAST_SYNC_TIME: AtomicUsize = AtomicUsize::new(0);
+/// 最后一次触发自动页回写的时间
+static LAST_PAGE_SYNC_TIME: AtomicUsize = AtomicUsize::new(0);
+/// 最后一次触发自动块回写的时间
+static LAST_BLOCK_SYNC_TIME: AtomicUsize = AtomicUsize::new(0);
 
 // 计时器中断后触发
 pub fn tick_sync() {
     let now = crate::arch::timer::get_time_ms();
-    let last = LAST_SYNC_TIME.load(Ordering::Relaxed);
-    if now.wrapping_sub(last) >= SYNC_INTERVAL_MS {
-        println!("Auto sync triggered by timer interrupt");
-        // 仅成功更新时间的核负责执行 sync（多核互斥）
-        if LAST_SYNC_TIME.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+    let last_page = LAST_PAGE_SYNC_TIME.load(Ordering::Relaxed);
+    let last_block = LAST_BLOCK_SYNC_TIME.load(Ordering::Relaxed);
+    if now.wrapping_sub(last_page) >= PAGE_SYNC_INTERVAL_MS {
+        warn!("Auto page sync triggered by timer interrupt");
+        if LAST_PAGE_SYNC_TIME.compare_exchange(last_page, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
             sync_shared_page_cache();
-            println!("\n \n Auto sync completed \n \n");
+            warn!("Auto sync completed");
+        }
+    }
+    if now.wrapping_sub(last_block) >= BLOCK_SYNC_INTERVAL_MS {
+        warn!("Auto block sync triggered by timer interrupt");
+        if LAST_BLOCK_SYNC_TIME.compare_exchange(last_block, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            crate::drivers::block::block_cache::block_cache_sync_all();
+            warn!("Auto block sync completed");
         }
     }
 }
