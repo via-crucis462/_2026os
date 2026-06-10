@@ -330,6 +330,7 @@ pub fn trap_handler() -> ! {
                 asm!("csrwr {}, 0x44", in(reg) 1);// 清除定时器中断
             }
             net_poll();
+            crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
         }
         _ => {

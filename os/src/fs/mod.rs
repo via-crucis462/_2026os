@@ -297,9 +297,8 @@ pub trait VfsInode: Send + Sync {
         }
     }
     fn get_shared_page(&self, page_offset: usize) -> Option<Arc<Mutex<crate::mm::mmap::PageCache>>> {
-        let man = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
         let (cache, newly_allocated) = 
-            man.get_page_cache(self.get_stat().ino, page_offset);
+            crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER.lock().get_page_cache(self.get_stat().ino, page_offset);
         if newly_allocated {
             // 读入文件数据到分配的页
             info!("VFS: Allocated new shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);

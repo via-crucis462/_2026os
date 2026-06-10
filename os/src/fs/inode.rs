@@ -150,6 +150,11 @@ impl File for OSInode {
 
     /// 带页缓存的读取，调用 VfsInode::read_at
     fn read_at(&self, offset: usize, mut buf: UserBuffer) -> usize {
+        // 注册到全局页缓存管理器，以便周期性回写能找到此文件
+        crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
+            .lock()
+            .register_vfs_inode(self.inode.ino(), &self.inode);
+
         let mut total_read = 0;
         let mut current_offset = offset;
         for slice in buf.buffers.iter_mut() {
@@ -163,6 +168,11 @@ impl File for OSInode {
 
     /// 带页缓存的写入，调用 VfsInode::write_at
     fn write_at(&self, offset: usize, buf: UserBuffer) -> usize {
+        // 注册到全局页缓存管理器，以便周期性回写能找到此文件
+        crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
+            .lock()
+            .register_vfs_inode(self.inode.ino(), &self.inode);
+
         let mut total_write = 0;
         let mut current_offset = offset;
         for slice in buf.buffers.iter() {

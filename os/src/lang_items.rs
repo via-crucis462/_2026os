@@ -26,8 +26,10 @@ fn panic(info: &PanicInfo) -> ! {
     } else {
         println!("[kernel] Panicked: {}", info.message());
     }
-    crate::ext4fs::block_cache_sync_all();
 
+    println!("syncing disks...");
+    crate::ext4fs::block_cache_sync_all();
+    println!("shutting down...");
     shutdown(); // 调试时注释掉这行方便回溯调用栈
     loop{}
 }

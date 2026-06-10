@@ -116,6 +116,7 @@ pub fn trap_handler() -> ! {
                 }
             }
             net_poll();
+            crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
         }
         Trap::Exception(Exception::StorePageFault) |

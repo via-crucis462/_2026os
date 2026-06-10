@@ -1,7 +1,7 @@
 use super::{PhysAddr, PhysPageNum, PageSize};
 #[allow(unused)]
 use crate::arch::config::{DMA_SIZE, MEMORY_END};
-use crate::sync::MPSafeCell;
+use crate::{mm::mmap::free_up_mem_space, sync::MPSafeCell};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
@@ -249,10 +249,37 @@ pub fn init_frame_allocator() {
 
 /// Allocate a physical page frame in FrameTracker style
 pub fn frame_alloc(page_size: PageSize) -> Option<FrameTracker> {
+    let free_space = get_free_frames();
+
+    if free_space <= PageSize::Page2M.num_pages() {
+        free_up_mem_space(PageSize::Page2M.num_pages());
+    }
+
     let ppn = {
         let mut allocator = FRAME_ALLOCATOR.exclusive_access();
         allocator.alloc(page_size)
-    }?;
+    };
+
+    let ppn = if ppn.is_none() {
+        let mut times = 0;
+        let mut freed_frames = 0;
+        loop {
+            if times >= 10 {
+                // 尝试多次回收后仍无法分配，认为内存不足
+                return None;
+            }
+            free_up_mem_space(PageSize::Page2M.num_pages());
+            let mut allocator = FRAME_ALLOCATOR.exclusive_access();
+            let ppn = allocator.alloc(page_size);
+            if let Some(ppn) = ppn {
+                break ppn;
+            }
+            times += 1;
+        }
+    } else {
+        ppn.unwrap()
+    };
+
     FRAME_REF_COUNTS.exclusive_access().insert(ppn.0, 1);
     Some(FrameTracker::new(ppn, page_size))
 }

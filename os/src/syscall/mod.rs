@@ -445,7 +445,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SYMLINK => sys_symlinkat(args[0] as *const u8, args[1] as isize, args[2] as *const u8),
         SYSCALL_PTHREADCREATE => sys_pthread_create(args[0] as *mut usize, args[1] as *const usize, args[2] as usize, args[3] as usize),
         _ => {
-            println!(
+            warn!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
                 syscall_id
             );
