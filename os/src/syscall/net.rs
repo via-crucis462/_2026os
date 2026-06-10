@@ -812,7 +812,12 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: *mut MsgHdr, _flags: i32) -> isize {
 
     // 如果读不到数据，返回 EAGAIN 让应用层重试
     if read_len == 0 {
-        return EAGAIN.as_isize(); 
+        if (_flags & 0x40) != 0 { // MSG_DONTWAIT
+            return EAGAIN.as_isize(); 
+        } else {
+
+            return 0; 
+        }
     }
     read_len as isize
 }

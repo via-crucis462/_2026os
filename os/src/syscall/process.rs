@@ -1346,7 +1346,16 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
         envs_vec.push("RHOST_IFACES=eth0".to_string());               // 远端网卡名
     }
     trace!("[kernel] sys_exec: before open_file");
+    //给不支持的grep -1参数补成 -B
+    let is_grep = path_str.ends_with("grep") || args_vec.iter().any(|x| x == "grep");
     
+    if is_grep && args_vec.contains(&"-1".to_string()) {
+        if let Some(pos) = args_vec.iter().position(|x| x == "-1") {
+            info!("[kernel] sys_exec: caught 'grep -1', patching to '-B 1'...");
+            args_vec[pos] = "-B".to_string();
+            args_vec.insert(pos + 1, "1".to_string());
+        }
+    }
     // 1. 尝试正常打开主程序
     let mut app_inode_opt = open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY,0);
 

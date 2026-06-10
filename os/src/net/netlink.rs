@@ -143,121 +143,99 @@ fn write(&self, buf: UserBuffer) -> usize {
             data[current..current + copy_len].copy_from_slice(buffer);
             current += copy_len;
         }
-
         let mut offset = 0;
-        
-        // 支持 Netlink 批处理！循环 buffer 里的所有请求
         while offset + size_of::<NlMsgHdr>() <= data.len() {
             let hdr = unsafe { &*(data.as_ptr().add(offset) as *const NlMsgHdr) };
             let msg_len = hdr.nlmsg_len as usize;
-            
-            // 防止恶意长度导致越界
             if msg_len < size_of::<NlMsgHdr>() || offset + msg_len > data.len() {
                 break;
             }
-
-            // 严格按 4 字节跨度步进
             let aligned_msg_len = (msg_len + 3) & !3;
             let msg_data = &data[offset..offset + msg_len];
-
-
             let mut rx_lock = self.rx_buffer.lock();
+            if hdr.nlmsg_type == RTM_GETLINK {
+                #[repr(C)]
+                struct IfInfoMsg {
+                    ifi_family: u8, __pad: u8, ifi_type: u16, ifi_index: i32, ifi_flags: u32, ifi_change: u32,
+                }
+                const IFLA_ADDRESS: u16 = 1;
 
-            // 引入 is_dump 变量，采用 == NLM_F_DUMP 进行严格的全掩码匹配
-            // 这样能够完美避开 ip addr add 携带的 NLM_F_EXCL (0x200) 带来的位碰撞
-            let is_dump = (hdr.nlmsg_flags & NLM_F_DUMP) == NLM_F_DUMP;
-
-            // 查询状态或 DUMP 
-            if is_dump || hdr.nlmsg_type == RTM_GETLINK || hdr.nlmsg_type == RTM_GETADDR {
-                if hdr.nlmsg_type == RTM_GETLINK {
-                    #[repr(C)]
-                    struct IfInfoMsg {
-                        ifi_family: u8, __pad: u8, ifi_type: u16, ifi_index: i32, ifi_flags: u32, ifi_change: u32,
-                    }
-                   const IFLA_ADDRESS: u16 = 1; // MAC 地址属性类型
-
-                    #[repr(C)]
-                    struct LinkReplyPacket {
-                        nl_hdr: NlMsgHdr, 
-                        if_msg: IfInfoMsg, 
-                        // 网卡名字 
-                        attr_name_hdr: RtAttr, 
-                        ifname: [u8; 8], 
-                        // MAC地址
-                        attr_mac_hdr: RtAttr,
-                        mac_addr: [u8; 8], 
-                    }
-                    let iface = crate::net::NET_IFACE.exclusive_access();
-
-                    // 动态计算真实的 flags
-                    let mut real_flags = 0x0002; // 默认支持广播 (IFF_BROADCAST)
-                    real_flags |= 0x0001;
-                    real_flags |= 0x0040; // 只要进到这里说明内核网络驱动在跑 (IFF_RUNNING)
-                    real_flags |= 0x1000; // 模拟或读取真实的网线状态 (IFF_LOWER_UP)
-
-                    // 假设物理网卡固定分配索引为 2 (把 1 留给 lo)
-                    let real_index = 2; 
-
-                    // 填充到报文中
-                    let mut packet = LinkReplyPacket {
-                        nl_hdr: NlMsgHdr { 
-                            nlmsg_len: 56, 
-                            nlmsg_type: RTM_NEWLINK, 
-                            nlmsg_flags: NLM_F_MULTI, 
-                            nlmsg_seq: hdr.nlmsg_seq, 
-                            nlmsg_pid: hdr.nlmsg_pid 
-                        },
-                        if_msg: IfInfoMsg { 
-                            ifi_family: 0, 
-                            __pad: 0, 
-                            ifi_type: 1,          
-                            ifi_index: real_index, 
-                            ifi_flags: real_flags, 
-                            ifi_change: 0 
-                        },
-                        // 填充名字属性
-                        attr_name_hdr: RtAttr { rta_len: 12, rta_type: IFLA_IFNAME },
-                        ifname: [0; 8],
-                        // 填充 MAC 属性
-                        attr_mac_hdr: RtAttr { rta_len: 10, rta_type: IFLA_ADDRESS },
-                        mac_addr: [0; 8],
-                    };
-                    packet.ifname[0..5].copy_from_slice(b"eth0\0");
-                    packet.mac_addr[0..6].copy_from_slice(&[0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
-                    let mut link_reply = vec![0u8; 56];
-                    unsafe { core::ptr::copy_nonoverlapping(&packet as *const _ as *const u8, link_reply.as_mut_ptr(), 56); }
-                    rx_lock.push_back(link_reply);
+                #[repr(C)]
+                struct LinkReplyPacket {
+                    nl_hdr: NlMsgHdr, 
+                    if_msg: IfInfoMsg, 
+                    attr_name_hdr: RtAttr, 
+                    ifname: [u8; 8], 
+                    attr_mac_hdr: RtAttr,
+                    mac_addr: [u8; 8], 
                 }
 
-                if hdr.nlmsg_type == RTM_GETADDR || is_dump {
-                    let iface = crate::net::NET_IFACE.exclusive_access();
-                    for cidr in iface.ip_addrs().iter() {
-                        let smoltcp::wire::IpCidr::Ipv4(v4_cidr) = cidr;
-                        let addr = v4_cidr.address(); 
-                        let ip_bytes = addr.as_bytes(); 
-                        let prefix_len = v4_cidr.prefix_len();
+                let mut real_flags = 0x0002; // IFF_BROADCAST
+                real_flags |= 0x0001;        // IFF_UP
+                real_flags |= 0x0040;        // IFF_RUNNING
+                real_flags |= 0x1000;        // IFF_LOWER_UP
 
-                        let mut addr_reply = vec![0u8; 32];
-                        let reply_hdr = NlMsgHdr { nlmsg_len: 32, nlmsg_type: RTM_NEWADDR, nlmsg_flags: NLM_F_MULTI, nlmsg_seq: hdr.nlmsg_seq, nlmsg_pid: hdr.nlmsg_pid };
-                        let ifa = IfAddressMsg { ifa_family: 2, ifa_prefixlen: prefix_len as u8, ifa_flags: 0, ifa_scope: 0, ifa_index: 1 };
-                        let rta = RtAttr { rta_len: 8, rta_type: IFA_LOCAL };
+                let real_index = 2; 
+                #[cfg(target_arch = "riscv64")]
+                let real_mac = crate::net::NET_DEVICE.0.exclusive_access().mac();
+                #[cfg(target_arch = "loongarch64")]
+                let real_mac = crate::net::NET_DEVICE.0.exclusive_access().mac_address();
 
-                        unsafe {
-                            let ptr = addr_reply.as_mut_ptr();
-                            core::ptr::copy_nonoverlapping(&reply_hdr as *const _ as *const u8, ptr, size_of::<NlMsgHdr>());
-                            core::ptr::copy_nonoverlapping(&ifa as *const _ as *const u8, ptr.add(16), size_of::<IfAddressMsg>());
-                            core::ptr::copy_nonoverlapping(&rta as *const _ as *const u8, ptr.add(24), size_of::<RtAttr>());
-                        }
-                        addr_reply[28..32].copy_from_slice(ip_bytes);
-                        rx_lock.push_back(addr_reply);
-                    }
-                }
+                let mut packet = LinkReplyPacket {
+                    nl_hdr: NlMsgHdr { 
+                        nlmsg_len: 56, 
+                        nlmsg_type: RTM_NEWLINK, 
+                        nlmsg_flags: NLM_F_MULTI, 
+                        nlmsg_seq: hdr.nlmsg_seq, 
+                        nlmsg_pid: hdr.nlmsg_pid 
+                    },
+                    if_msg: IfInfoMsg { ifi_family: 0, __pad: 0, ifi_type: 1, ifi_index: real_index, ifi_flags: real_flags, ifi_change: 0 },
+                    attr_name_hdr: RtAttr { rta_len: 9, rta_type: IFLA_IFNAME },
+                    ifname: [0; 8],
+                    attr_mac_hdr: RtAttr { rta_len: 10, rta_type: IFLA_ADDRESS },
+                    mac_addr: [0; 8],
+                };
+                packet.ifname[0..5].copy_from_slice(b"eth0\0");
+                packet.mac_addr[0..6].copy_from_slice(&real_mac);
 
-                let mut done_reply = vec![0u8; 20];
-                let done_hdr = NlMsgHdr { nlmsg_len: 20, nlmsg_type: NLMSG_DONE, nlmsg_flags: NLM_F_MULTI, nlmsg_seq: hdr.nlmsg_seq, nlmsg_pid: hdr.nlmsg_pid };
-                unsafe { core::ptr::copy_nonoverlapping(&done_hdr as *const _ as *const u8, done_reply.as_mut_ptr(), size_of::<NlMsgHdr>()); }
+                let mut link_reply = vec![0u8; 56];
+                unsafe { core::ptr::copy_nonoverlapping(&packet as *const _ as *const u8, link_reply.as_mut_ptr(), 56); }
+                rx_lock.push_back(link_reply);
+
+                let mut done_reply = vec![0u8; 16];
+                let done_hdr = NlMsgHdr { nlmsg_len: 16, nlmsg_type: NLMSG_DONE, nlmsg_flags: NLM_F_MULTI, nlmsg_seq: hdr.nlmsg_seq, nlmsg_pid: hdr.nlmsg_pid };
+                unsafe { core::ptr::copy_nonoverlapping(&done_hdr as *const _ as *const u8, done_reply.as_mut_ptr(), 16); }
                 rx_lock.push_back(done_reply);
-                
+
+            } else if hdr.nlmsg_type == RTM_GETADDR {
+                let iface = crate::net::NET_IFACE.exclusive_access();
+                for cidr in iface.ip_addrs().iter() {
+                    let smoltcp::wire::IpCidr::Ipv4(v4_cidr) = cidr;
+                    let addr = v4_cidr.address(); 
+                    let ip_bytes = addr.as_bytes(); 
+                    let prefix_len = v4_cidr.prefix_len();
+
+                    let mut addr_reply = vec![0u8; 32];
+                    let reply_hdr = NlMsgHdr { nlmsg_len: 32, nlmsg_type: RTM_NEWADDR, nlmsg_flags: NLM_F_MULTI, nlmsg_seq: hdr.nlmsg_seq, nlmsg_pid: hdr.nlmsg_pid };
+                    let ifa = IfAddressMsg { ifa_family: 2, ifa_prefixlen: prefix_len as u8, ifa_flags: 0, ifa_scope: 0, ifa_index: 2 };
+                    let rta = RtAttr { rta_len: 8, rta_type: IFA_LOCAL };
+
+                    unsafe {
+                        let ptr = addr_reply.as_mut_ptr();
+                        core::ptr::copy_nonoverlapping(&reply_hdr as *const _ as *const u8, ptr, size_of::<NlMsgHdr>());
+                        core::ptr::copy_nonoverlapping(&ifa as *const _ as *const u8, ptr.add(16), size_of::<IfAddressMsg>());
+                        core::ptr::copy_nonoverlapping(&rta as *const _ as *const u8, ptr.add(24), size_of::<RtAttr>());
+                    }
+                    addr_reply[28..32].copy_from_slice(ip_bytes);
+                    rx_lock.push_back(addr_reply);
+                }
+
+
+                let mut done_reply = vec![0u8; 16];
+                let done_hdr = NlMsgHdr { nlmsg_len: 16, nlmsg_type: NLMSG_DONE, nlmsg_flags: NLM_F_MULTI, nlmsg_seq: hdr.nlmsg_seq, nlmsg_pid: hdr.nlmsg_pid };
+                unsafe { core::ptr::copy_nonoverlapping(&done_hdr as *const _ as *const u8, done_reply.as_mut_ptr(), 16); }
+                rx_lock.push_back(done_reply);
+
             } else {
                 // 普通的请求 (如 RTM_NEWADDR 添加 IP)
                 if hdr.nlmsg_type == RTM_NEWADDR {
@@ -271,8 +249,6 @@ fn write(&self, buf: UserBuffer) -> usize {
                         }
                     }
                 }
-
-                // 正常的操作返回成功 ACK，序列号严格与当前这个 msg_data 对应！
                 let ack_hdr = NlMsgHdr { nlmsg_len: 36, nlmsg_type: NLMSG_ERROR, nlmsg_flags: 0, nlmsg_seq: hdr.nlmsg_seq, nlmsg_pid: hdr.nlmsg_pid };
                 let ack_err = NlMsgErr { error: 0, msg: *hdr };
                 let mut ack_packet = vec![0u8; 36];
@@ -282,7 +258,6 @@ fn write(&self, buf: UserBuffer) -> usize {
                 }
                 rx_lock.push_back(ack_packet);
             }
-  
             offset += aligned_msg_len;
         }
 
@@ -295,7 +270,7 @@ fn write(&self, buf: UserBuffer) -> usize {
         let mut flat_data = alloc::vec::Vec::new();
         while let Some(packet) = rx_lock.front() {
             if flat_data.len() + packet.len() > buf.len() {
-                break; // 如果超出了用户态的麻袋大小，就留到下一次 read 再给它
+                break; 
             }
             let packet = rx_lock.pop_front().unwrap();
             flat_data.extend_from_slice(&packet);
