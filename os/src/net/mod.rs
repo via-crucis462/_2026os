@@ -16,7 +16,7 @@ use alloc::sync::Arc;
 use spin::Mutex;
 use crate::sync::WaitQueue;
 use smoltcp::iface::SocketHandle;
-
+use alloc::collections::VecDeque;
 
 
 pub struct VirtioNetDevice;
@@ -52,10 +52,13 @@ impl Device for VirtioNetDevice {
     type TxToken<'a> = TxToken where Self: 'a;
     #[cfg(target_arch = "riscv64")]
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        //  优先从环回队列拿包
+        if let Some(buf) = LOOPBACK_QUEUE.lock().pop_front() {
+            return Some((RxToken { buffer: buf }, TxToken));
+        }
         let mut driver = NET_DEVICE.0.exclusive_access();
         if driver.can_recv() {
             let mut buf = vec![0u8; 2048];
-            
             if let Ok(len) = driver.recv(&mut buf) {
                 buf.truncate(len); 
                 return Some((RxToken { buffer: buf }, TxToken));
@@ -110,6 +113,12 @@ impl phy::TxToken for TxToken {
     {
         let mut buffer = vec![0u8; len];
         let result = f(&mut buffer); 
+
+        //  统一环回拦截
+        if check_and_handle_loopback(&buffer) {
+            return result;
+        }
+
         let mut driver = NET_DEVICE.0.exclusive_access();
         driver.send(&buffer).expect("Failed to send network packet");
         result
@@ -129,6 +138,7 @@ impl phy::TxToken for TxToken {
 
 lazy_static! {
     pub static ref SOCKET_SET: MPSafeCell<SocketSet<'static>> = MPSafeCell::new(SocketSet::new(vec![]));
+    static ref LOOPBACK_QUEUE: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
     pub static ref SOCKET_WAIT_QUEUES: Mutex<BTreeMap<SocketHandle, Arc<Mutex<WaitQueue>>>> = Mutex::new(BTreeMap::new());
     pub static ref NET_IFACE: MPSafeCell<Interface> = {
 
@@ -152,37 +162,87 @@ lazy_static! {
         MPSafeCell::new(iface)
     };
 }
+/// 全通用的 L2/L3 本地环回 FIB 拦截器
+fn check_and_handle_loopback(packet: &[u8]) -> bool {
+    if packet.len() < 14 {
+        return false;
+    }
 
-pub fn net_poll() {
-    let mut iface = NET_IFACE.exclusive_access();
-    let mut sockets = SOCKET_SET.exclusive_access();
-    let mut device = VirtioNetDevice;
-    let timestamp = Instant::from_millis(crate::arch::timer::get_time_ms() as i64);
-    iface.poll(timestamp, &mut device, &mut sockets);
-    let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
-    // 遍历底层大数组里的所有套接字
-    for (handle, socket) in sockets.iter_mut() {
-        let mut has_data = false;
-        //检查具体的套接字是否可读
-        match socket {
-            smoltcp::socket::Socket::Raw(raw_sock) => {
-                if raw_sock.can_recv() { has_data = true; }
+    // 1. 拦截 IPv4 报文 (EtherType == 0x0800)
+    if packet[12] == 0x08 && packet[13] == 0x00 {
+        if packet.len() >= 34 {
+            // 提取目的 IP 地址 (IPv4 头偏移 16 字节，整个以太网帧偏移 14 + 16 = 30)
+            let dst_ip = [packet[30], packet[31], packet[32], packet[33]];
+            if dst_ip == [127, 0, 0, 1] || dst_ip == [10, 0, 2, 15] {
+                let mut loopback_packet = packet.to_vec();
+                // 关键点：强行将目的 MAC 改为发送端自身的 MAC (即以太网帧里的源 MAC 6..12)
+                loopback_packet[0..6].copy_from_slice(&packet[6..12]);
+                LOOPBACK_QUEUE.lock().push_back(loopback_packet);
+                return true;
             }
-            smoltcp::socket::Socket::Tcp(tcp_sock) => {
-                if tcp_sock.can_recv() { has_data = true; }
-            }
-            smoltcp::socket::Socket::Udp(udp_sock) => {
-                if udp_sock.can_recv() { has_data = true; }
-            }
-            _ => {}
         }
-        if has_data {
-            if let Some(queue_arc) = queues.get(&handle) {
-                let queue_guard = queue_arc.lock();
-                if !queue_guard.is_empty() {
-                    wake_up_one(queue_guard); 
+    }
+    // 2. 拦截 ARP 请求 (EtherType == 0x0806, Opcode == 1)
+    else if packet[12] == 0x08 && packet[13] == 0x06 {
+        if packet.len() >= 42 {
+            let op = [packet[20], packet[21]];
+            let target_ip = [packet[38], packet[39], packet[40], packet[41]];
+            // 劫持对 127.0.0.1 或本地 IP 的 ARP 请求，并就地伪造响应
+            if op == [0x00, 0x01] && (target_ip == [127, 0, 0, 1] || target_ip == [10, 0, 2, 15]) {
+                let mut reply = packet.to_vec();
+                reply[20..22].copy_from_slice(&[0x00, 0x02]); // 修改为 ARP Reply (2)
+                reply[32..38].copy_from_slice(&packet[22..28]); // Target MAC = 请求的 Sender MAC
+                reply[38..42].copy_from_slice(&packet[28..32]); // Target IP = 请求中的 Sender IP
+                reply[22..28].copy_from_slice(&packet[6..12]);   // Sender MAC = 本地 MAC
+                reply[28..32].copy_from_slice(&target_ip);       // Sender IP = 刚才请求的目标 IP
+                reply[0..6].copy_from_slice(&packet[6..12]);   // 目的 MAC
+                reply[6..12].copy_from_slice(&packet[6..12]);  // 源 MAC
+
+                LOOPBACK_QUEUE.lock().push_back(reply);
+                return true;
+            }
+        }
+    }
+    false
+}
+pub fn net_poll() {
+    // 通过大循环直至环回队列彻底清空
+    // 保证在同一个 poll 调度周期内完成完整的环回包对流（如 TCP 握手的 SYN -> SYN-ACK 交互）
+    loop {
+        let mut iface = NET_IFACE.exclusive_access();
+        let mut sockets = SOCKET_SET.exclusive_access();
+        let mut device = VirtioNetDevice;
+        let timestamp = Instant::from_millis(crate::arch::timer::get_time_ms() as i64);
+        
+        iface.poll(timestamp, &mut device, &mut sockets);
+        
+        // 如果刚才的 poll 动作触发了发送并产生了新的环回包，必须继续循环让 smoltcp 接收它
+        if LOOPBACK_QUEUE.lock().is_empty() {
+            let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+            for (handle, socket) in sockets.iter_mut() {
+                let mut has_data = false;
+                match socket {
+                    smoltcp::socket::Socket::Raw(raw_sock) => {
+                        if raw_sock.can_recv() { has_data = true; }
+                    }
+                    smoltcp::socket::Socket::Tcp(tcp_sock) => {
+                        if tcp_sock.can_recv() { has_data = true; }
+                    }
+                    smoltcp::socket::Socket::Udp(udp_sock) => {
+                        if udp_sock.can_recv() { has_data = true; }
+                    }
+                    _ => {}
+                }
+                if has_data {
+                    if let Some(queue_arc) = queues.get(&handle) {
+                        let queue_guard = queue_arc.lock();
+                        if !queue_guard.is_empty() {
+                            wake_up_one(queue_guard); 
+                        }
+                    }
                 }
             }
+            break;
         }
     }
 }

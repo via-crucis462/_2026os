@@ -436,7 +436,7 @@ pub fn setup_oscomp_env() {
                 "basename", "dirname", "sh", "grep", "sed", "awk", "cat", 
                 "ls", "rm", "echo", "true", "false", "wc", "mkdir", "rmdir", "touch", "env","cut",
                 "tr", "head", "tail", "sort", "uniq", "tee", "sleep", "id", "uname", 
-                "which", "find", "xargs", "chmod", "chown", "date", "printf", "clear","ps", "fgrep"
+                "which", "find", "xargs", "chmod", "chown", "date", "printf", "clear","ps", "fgrep","mktemp"
             ];
             
             for app in applets {
@@ -523,11 +523,6 @@ pub fn setup_oscomp_env() {
     bin_dentry.insert( "locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
     sbin_dentry.insert("locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
     usr_bin_dentry.insert("locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
-    // get_ifname：LTP 获取网卡名，打印 eth0 
-    let fake_get_ifname = "#!/bin/sh\necho eth0\n";
-    bin_dentry.insert("get_ifname".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_get_ifname.as_bytes())));
-    sbin_dentry.insert("get_ifname".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_get_ifname.as_bytes())));
-    usr_bin_dentry.insert("get_ifname".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_get_ifname.as_bytes())));
     // rsh远程连接sh
     let fake_rsh = r#"#!/bin/sh
     if [ "$1" = "-n" ]; then

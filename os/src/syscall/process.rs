@@ -603,6 +603,7 @@ pub const SIOCSIFADDR: u32  = 0x8916; // 设置网卡当前的 IP 地址
 pub const SIOC_NET_START: u32 = 0x8900;
 pub const SIOC_NET_END: u32   = 0x89FF;
 pub const SIOCGIFINDEX: u32 = 0x8933;
+pub const SIOCGIFTXQLEN: u32 = 0x8942;
 // Loop 设备相关的 ioctl 命令
 const LOOP_SET_FD: u32 = 0x4C00; //设置 Loop 设备的后端文件描述符
 const LOOP_CLR_FD: u32 = 0x4C01; //清除 Loop 设备的后端文件描述符
@@ -612,6 +613,7 @@ const LOOP_SET_STATUS: u32 = 0x4C02; //设置 Loop 设备的状态
 const LOOP_CTL_GET_FREE: u32 = 0x4C82; //获取一个空闲的 Loop 设备编号
 const LOOP_SET_BLOCK_SIZE: u32 = 0x4C09;
 const LOOP_CONFIGURE: u32 = 0x4C0A;
+
 const BLKGETSIZE64: u32 = 0x80081272; // BLKGETSIZE64
 
 
@@ -937,6 +939,18 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                     
                 }
                 0
+            } else { EFAULT.as_isize() }
+        }
+        SIOCGIFTXQLEN => {
+        if let Some(mut ifr) = try_translated_read::<IfReq>(token, argp as *const IfReq) {
+                let qlen: i32 = 1000;
+                // 将 1000 写入 union 的前 4 个字节
+                ifr.ifru_data[0..4].copy_from_slice(&qlen.to_ne_bytes());
+                if try_translated_write(token, argp as *mut IfReq, ifr) {
+                    0
+                } else {
+                    EFAULT.as_isize()
+                }
             } else { EFAULT.as_isize() }
         }
         SIOCSIFADDR => { // 给 eth0 绑定新 IP！
@@ -1360,6 +1374,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             let busybox = "/musl/busybox";
             if let Some(inode) = open_file(cwd.clone(), busybox, OpenFlags::RDONLY,0) {
                 let mut new_args = vec!["musl/busybox".to_string(), "sh".to_string()];
+                info!("[kernel] sys_exec: redirecting script path to args: {}", path_str);
                 // 把脚本自己的路径作为第三个参数加进去
                 new_args.push(path_str.clone()); 
                 if args_vec.len() > 1 {
@@ -1370,6 +1385,9 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
                 args_vec = new_args;
                 app_inode = inode;
                 all_data = app_inode.read_all();
+                let current_proc = current_task().unwrap().process();
+                let inner = current_proc.inner_exclusive_access();
+                info!("[kernel] sys_exec: script detour success. Current process PID: {}, basic children count: {}", current_proc.getpid(), inner.children.len());
             } else {
                 println!("[kernel] sys_exec: failed to open busybox for script execution");
                 return ENOENT.as_isize();

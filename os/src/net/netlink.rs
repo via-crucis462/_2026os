@@ -174,19 +174,58 @@ fn write(&self, buf: UserBuffer) -> usize {
                     struct IfInfoMsg {
                         ifi_family: u8, __pad: u8, ifi_type: u16, ifi_index: i32, ifi_flags: u32, ifi_change: u32,
                     }
+                   const IFLA_ADDRESS: u16 = 1; // MAC 地址属性类型
+
                     #[repr(C)]
                     struct LinkReplyPacket {
-                        nl_hdr: NlMsgHdr, if_msg: IfInfoMsg, attr_hdr: RtAttr, ifname: [u8; 8], 
+                        nl_hdr: NlMsgHdr, 
+                        if_msg: IfInfoMsg, 
+                        // 网卡名字 
+                        attr_name_hdr: RtAttr, 
+                        ifname: [u8; 8], 
+                        // MAC地址
+                        attr_mac_hdr: RtAttr,
+                        mac_addr: [u8; 8], 
                     }
+                    let iface = crate::net::NET_IFACE.exclusive_access();
+
+                    // 动态计算真实的 flags
+                    let mut real_flags = 0x0002; // 默认支持广播 (IFF_BROADCAST)
+                    real_flags |= 0x0001;
+                    real_flags |= 0x0040; // 只要进到这里说明内核网络驱动在跑 (IFF_RUNNING)
+                    real_flags |= 0x1000; // 模拟或读取真实的网线状态 (IFF_LOWER_UP)
+
+                    // 假设物理网卡固定分配索引为 2 (把 1 留给 lo)
+                    let real_index = 2; 
+
+                    // 填充到报文中
                     let mut packet = LinkReplyPacket {
-                        nl_hdr: NlMsgHdr { nlmsg_len: 44, nlmsg_type: RTM_NEWLINK, nlmsg_flags: NLM_F_MULTI, nlmsg_seq: hdr.nlmsg_seq, nlmsg_pid: hdr.nlmsg_pid },
-                        if_msg: IfInfoMsg { ifi_family: 0, __pad: 0, ifi_type: 1, ifi_index: 1, ifi_flags: 0x1003, ifi_change: 0 },
-                        attr_hdr: RtAttr { rta_len: 9, rta_type: IFLA_IFNAME },
+                        nl_hdr: NlMsgHdr { 
+                            nlmsg_len: 56, 
+                            nlmsg_type: RTM_NEWLINK, 
+                            nlmsg_flags: NLM_F_MULTI, 
+                            nlmsg_seq: hdr.nlmsg_seq, 
+                            nlmsg_pid: hdr.nlmsg_pid 
+                        },
+                        if_msg: IfInfoMsg { 
+                            ifi_family: 0, 
+                            __pad: 0, 
+                            ifi_type: 1,          
+                            ifi_index: real_index, 
+                            ifi_flags: real_flags, 
+                            ifi_change: 0 
+                        },
+                        // 填充名字属性
+                        attr_name_hdr: RtAttr { rta_len: 12, rta_type: IFLA_IFNAME },
                         ifname: [0; 8],
+                        // 填充 MAC 属性
+                        attr_mac_hdr: RtAttr { rta_len: 10, rta_type: IFLA_ADDRESS },
+                        mac_addr: [0; 8],
                     };
                     packet.ifname[0..5].copy_from_slice(b"eth0\0");
-                    let mut link_reply = vec![0u8; 44];
-                    unsafe { core::ptr::copy_nonoverlapping(&packet as *const _ as *const u8, link_reply.as_mut_ptr(), 44); }
+                    packet.mac_addr[0..6].copy_from_slice(&[0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+                    let mut link_reply = vec![0u8; 56];
+                    unsafe { core::ptr::copy_nonoverlapping(&packet as *const _ as *const u8, link_reply.as_mut_ptr(), 56); }
                     rx_lock.push_back(link_reply);
                 }
 
@@ -252,7 +291,7 @@ fn write(&self, buf: UserBuffer) -> usize {
     fn read(&self, mut buf: UserBuffer) -> usize {
         let mut rx_lock = self.rx_buffer.lock();
         
-        // 🌟 核心突破 2：将所有零碎的小包裹融合成一个连续的字节流 (Flat Data)
+
         let mut flat_data = alloc::vec::Vec::new();
         while let Some(packet) = rx_lock.front() {
             if flat_data.len() + packet.len() > buf.len() {
@@ -266,7 +305,7 @@ fn write(&self, buf: UserBuffer) -> usize {
             return 0;
         }
 
-        // 🌟 核心突破 3：将融合好的大包裹，一次性倒进用户态的物理页缓冲中！消灭 OVERRUN 错乱
+
         let mut current = 0;
         for buffer in buf.buffers.iter_mut() {
             let copy_len = buffer.len().min(flat_data.len() - current);
