@@ -43,7 +43,21 @@ impl Ext4DirEntry {
     pub fn from_bytes(buf: &[u8]) -> Option<&Self> {
         if buf.len() < 8 { return None; } // 最小头部长度 (4+2+1+1)
         let entry = unsafe { &*(buf.as_ptr() as *const Self) };
-        if entry.rec_len < 8 { return None; }
+        let rec_len = entry.rec_len as usize;
+        // 防御性检查：rec_len 必须 >= 8 且不能超出缓冲区
+        if rec_len < 8 || rec_len > buf.len() {
+            return None;
+        }
         Some(entry)
+    }
+
+    /// 安全获取文件名，限制长度不超过 rec_len 允许的范围
+    pub fn safe_name(&self) -> &str {
+        let max_name_len = (self.rec_len as usize).saturating_sub(8);
+        let len = core::cmp::min(self.name_len as usize, max_name_len);
+        if len == 0 {
+            return "";
+        }
+        core::str::from_utf8(&self.name[0..len]).unwrap_or("")
     }
 }

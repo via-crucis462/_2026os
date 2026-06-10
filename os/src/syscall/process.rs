@@ -2173,10 +2173,51 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
     0
 }
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
-    let start = get_time_ms();
     let token = current_user_token();
     let req_val = {
         if let Some(ts) = try_translated_read(token, req) {
+            ts
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
+    // nsec 范围检查
+    if req_val.tv_nsec >= 1_000_000_000 {
+        return EINVAL.as_isize();
+    }
+    // 防止过长睡眠
+    const MAX_SLEEP_SEC: usize = 20;
+    if req_val.tv_sec > MAX_SLEEP_SEC {
+        return EINVAL.as_isize();
+    }
+    nanosleep_impl(&req_val, rem)
+}
+
+/// clock_nanosleep 系统调用 (RISC-V Linux #115)
+/// glibc ≥2.34 的 sleep()/usleep()/nanosleep() 内部均通过此调用实现
+/// 签名: int clock_nanosleep(clockid_t clockid, int flags,
+///                           const struct timespec *request,
+///                           struct timespec *remain);
+/// - flags=0: 相对睡眠（request 为时长）
+/// - flags=TIMER_ABSTIME(1): 绝对时间睡眠（request 为目标时刻）
+pub fn sys_clock_nanosleep(
+    clock_id: usize,
+    flags: usize,
+    request: *const TimeSpec,
+    remain: *mut TimeSpec,
+) -> isize {
+    const TIMER_ABSTIME: usize = 1;
+    const CLOCK_REALTIME: usize = 0;
+    const CLOCK_MONOTONIC: usize = 1;
+
+    // 仅支持 REALTIME 和 MONOTONIC 两种时钟
+    if clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC {
+        return EINVAL.as_isize();
+    }
+
+    let token = current_user_token();
+    let req_val = {
+        if let Some(ts) = try_translated_read(token, request) {
             ts
         } else {
             return EFAULT.as_isize();
@@ -2188,12 +2229,42 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
         return EINVAL.as_isize();
     }
 
-    // 防止随机/恶意 tv_sec 导致过长睡眠
+    // 处理 TIMER_ABSTIME: 将绝对时间转换为相对时间
+    let effective_req = if flags == TIMER_ABSTIME {
+        let now_ms = get_time_ms();
+        let target_ms = req_val.tv_sec.saturating_mul(1000)
+            .saturating_add(req_val.tv_nsec / 1_000_000);
+        let now_ms_signed = now_ms as isize;
+        let target_ms_signed = target_ms as isize;
+        let diff_ms = target_ms_signed.saturating_sub(now_ms_signed);
+        if diff_ms <= 0 {
+            return 0; // 目标时间已过，立即返回
+        }
+        TimeSpec {
+            tv_sec: (diff_ms as usize) / 1000,
+            tv_nsec: ((diff_ms as usize) % 1000) * 1_000_000,
+        }
+    } else if flags != 0 {
+        return EINVAL.as_isize(); // 不支持的 flags
+    } else {
+        req_val
+    };
+
+    // 防止过长睡眠
     const MAX_SLEEP_SEC: usize = 20;
-    if req_val.tv_sec > MAX_SLEEP_SEC {
+    if effective_req.tv_sec > MAX_SLEEP_SEC {
         return EINVAL.as_isize();
     }
-    let duration_ms = req_val.tv_sec.saturating_mul(1000).saturating_add(req_val.tv_nsec / 1_000_000);
+
+    nanosleep_impl(&effective_req, remain)
+}
+
+/// nanosleep 核心实现：忙等 + 信号中断检测
+fn nanosleep_impl(req: &TimeSpec, rem: *mut TimeSpec) -> isize {
+    let start = get_time_ms();
+    let token = current_user_token();
+
+    let duration_ms = req.tv_sec.saturating_mul(1000).saturating_add(req.tv_nsec / 1_000_000);
 
     info!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
     while get_time_ms() < start.saturating_add(duration_ms) {
@@ -2231,7 +2302,7 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
             }
             
             //   3. 返回 -EINTR (-4)，触发外层的 trap_handler 调用 handle_signals
-            return -4; 
+            return EINTR.as_isize(); 
         }
 
         // 没有信号，继续让出 CPU
