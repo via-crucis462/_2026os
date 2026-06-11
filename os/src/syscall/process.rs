@@ -6,7 +6,7 @@ use core::{panic, result};
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
-use crate::{USER_APP_MAX_SIZE, get_hart_id};
+use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, get_hart_id};
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
 use alloc::collections::btree_map::Values;
@@ -1129,9 +1129,9 @@ pub const CLONE_THREAD: usize = 0x00010000;
 
 // 部分实现
 pub fn sys_clone(flags: usize, stack: usize, _ptid: usize) -> isize {
-    warn!("sys_clone called with flags={:#x}, stack={:#x}, ptid={:#x}", flags, stack, _ptid);
+    println!("sys_clone called with flags={:#x}, stack={:#x}, ptid={:#x}", flags, stack, _ptid);
     if flags & 0xffffff00 != 0 {
-        warn!("sys_clone: CLONE_THREAD flag is set, cloning a thread with stack={:#x} and ptid={:#x}", stack, _ptid);
+        println!("sys_clone: CLONE_THREAD flag is set, cloning a thread with stack={:#x} and ptid={:#x}", stack, _ptid);
         return EINVAL.as_isize()
     } else {
         //warn!("sys_clone: CLONE_THREAD flag is not set, cloning a process with stack={:#x} and ptid={:#x}", stack, _ptid);
@@ -2312,8 +2312,31 @@ fn nanosleep_impl(req: &TimeSpec, rem: *mut TimeSpec) -> isize {
     // 正常睡醒，返回 0
     0
 }
-pub fn sys_mprotect(_start: usize, _len: usize, _prot: usize) -> isize {
-    0
+pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> isize {
+    if start % PAGE_SIZE != 0 {
+        return EINVAL.as_isize();
+    }
+    if len == 0 {
+        return 0;
+    }
+    if start.checked_add(len).map_or(true, |end| end >= USER_APP_MAX_SIZE) {
+        return ENOMEM.as_isize();
+    }
+
+    let Some(mmap_prot) = mmap::MMapProt::from_bits(prot as i32) else {
+        return EINVAL.as_isize();
+    };
+
+    let task = current_task().unwrap();
+    let process = task.process();
+    match process.mprotect(start, len, mmap_prot) {
+        Ok(()) => {
+            #[cfg(target_arch = "loongarch64")]
+            unsafe { core::arch::asm!("ibar 0"); }
+            0
+        }
+        Err(errno) => errno,
+    }
 }
 
 /// 修改断点（调整堆空间）

@@ -791,6 +791,11 @@ impl ProcessControlBlock {
         let mut inner = self.inner_exclusive_access();
         inner.memory_set.munmap(addr, length)
     }
+
+    pub fn mprotect(&self, addr: usize, length: usize, prot: mmap::MMapProt) -> Result<(), isize> {
+        let mut inner = self.inner_exclusive_access();
+        inner.memory_set.mprotect(addr, length, prot)
+    }
 }
 
 pub struct ProcessControlBlockInner {
