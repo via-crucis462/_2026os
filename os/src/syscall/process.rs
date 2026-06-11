@@ -1126,17 +1126,69 @@ pub fn sys_fork(stack: usize, _flags: usize) -> isize {
 
 // 在当前进程中克隆出一个线程
 pub const CLONE_THREAD: usize = 0x00010000;
+const CLONE_VM: usize = 0x00000100;
+const CLONE_FS: usize = 0x00000200;
+const CLONE_FILES: usize = 0x00000400;
+const CLONE_SIGHAND: usize = 0x00000800;
+const CLONE_SETTLS: usize = 0x00080000;
+const CLONE_PARENT_SETTID: usize = 0x00100000;
+const CLONE_CHILD_CLEARTID: usize = 0x00200000;
+const CLONE_CHILD_SETTID: usize = 0x01000000;
 
-// 部分实现
-pub fn sys_clone(flags: usize, stack: usize, _ptid: usize) -> isize {
-    println!("sys_clone called with flags={:#x}, stack={:#x}, ptid={:#x}", flags, stack, _ptid);
-    if flags & 0xffffff00 != 0 {
-        println!("sys_clone: CLONE_THREAD flag is set, cloning a thread with stack={:#x} and ptid={:#x}", stack, _ptid);
-        return EINVAL.as_isize()
-    } else {
-        //warn!("sys_clone: CLONE_THREAD flag is not set, cloning a process with stack={:#x} and ptid={:#x}", stack, _ptid);
-        sys_fork(stack, flags)
+pub fn sys_clone(flags: usize, stack: usize, ptid: usize, ctid: usize, tls: usize) -> isize {
+    debug!(
+        "sys_clone: flags={:#x}, stack={:#x}, ptid={:#x}, ctid={:#x}, tls={:#x}",
+        flags, stack, ptid, ctid, tls
+    );
+
+    if flags & CLONE_THREAD == 0 {
+        return sys_fork(stack, flags);
     }
+
+    let required_thread_flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
+    if flags & required_thread_flags != required_thread_flags {
+        return EINVAL.as_isize();
+    }
+
+    let token = current_user_token();
+    let current_task = current_task().unwrap();
+    let current_proc = current_task.process();
+    let new_task = current_proc.clone_thread((stack != 0).then_some(stack), current_task.clone());
+    let new_tid = new_task.gettid();
+
+    {
+        let mut new_inner = new_task.inner_exclusive_access();
+        if flags & CLONE_CHILD_CLEARTID != 0 {
+            new_inner.clear_child_tid = ctid;
+        }
+
+        if flags & CLONE_SETTLS != 0 {
+            let trap_cx = new_inner.get_trap_cx();
+            #[cfg(target_arch = "riscv64")]
+            {
+                trap_cx.x[4] = tls;
+            }
+            #[cfg(target_arch = "loongarch64")]
+            {
+                trap_cx.r[2] = tls;
+            }
+        }
+    }
+
+    if flags & CLONE_PARENT_SETTID != 0 {
+        if ptid == 0 || !try_translated_write(token, ptid as *mut usize, new_tid) {
+            return EFAULT.as_isize();
+        }
+    }
+
+    if flags & CLONE_CHILD_SETTID != 0 {
+        if ctid == 0 || !try_translated_write(token, ctid as *mut usize, new_tid) {
+            return EFAULT.as_isize();
+        }
+    }
+
+    add_task(new_task);
+    new_tid as isize
 }
 pub fn sys_pthread_create(thread: *mut usize, attr: *const usize, start_routine: usize, arg: usize) -> isize {
     warn!("sys_pthread_create: thread={:#x}, attr={:#x}, start_routine={:#x}, arg={:#x}", thread as usize, attr as usize, start_routine, arg);
