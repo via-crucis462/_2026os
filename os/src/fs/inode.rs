@@ -152,7 +152,6 @@ impl File for OSInode {
     fn read_at(&self, offset: usize, mut buf: UserBuffer) -> usize {
         // 注册到全局页缓存管理器，以便周期性回写能找到此文件
         crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
-            .lock()
             .register_vfs_inode(self.inode.ino(), &self.inode);
 
         let mut total_read = 0;
@@ -170,7 +169,6 @@ impl File for OSInode {
     fn write_at(&self, offset: usize, buf: UserBuffer) -> usize {
         // 注册到全局页缓存管理器，以便周期性回写能找到此文件
         crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
-            .lock()
             .register_vfs_inode(self.inode.ino(), &self.inode);
 
         let mut total_write = 0;
