@@ -64,6 +64,7 @@ impl TaskControlBlock {
         inner.signals = SignalFlags::empty();
         inner.signal_mask_backup.clear();
         inner.trap_ctx_backup.clear();
+        inner.signal_user_context_backup.clear();
         inner.killed = false;
         inner.term_signal = None;
         inner.frozen = false;
@@ -98,6 +99,9 @@ pub struct TaskControlBlockInner {
     pub frozen: bool,
     /// 信号嵌套处理时的上下文栈（当前未完全验证行为是否正确，初步测试没问题）
     pub trap_ctx_backup: Vec<TrapContext>,
+
+    /// 用户态 signal frame 中 ucontext 的地址，用于 sigreturn 读取用户修改后的上下文。
+    pub signal_user_context_backup: Vec<usize>,
 
     pub clear_child_tid: usize,// 线程清理指针
 }

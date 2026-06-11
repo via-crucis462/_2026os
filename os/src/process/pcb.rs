@@ -229,6 +229,7 @@ impl ProcessControlBlock {
                 signal_mask_backup: Vec::new(),
                 frozen: false,
                 trap_ctx_backup: Vec::new(),
+                signal_user_context_backup: Vec::new(),
                 exit_code: 0,
                 errno: 0,
                 signals: SignalFlags::empty(),
@@ -577,6 +578,7 @@ impl ProcessControlBlock {
                 term_signal: None,
                 frozen: false,
                 trap_ctx_backup: Vec::new(),
+                signal_user_context_backup: Vec::new(),
                 exit_code: 0,
                 errno: 0,
                 signals: SignalFlags::empty(),
@@ -680,6 +682,7 @@ impl ProcessControlBlock {
                 term_signal: None,
                 frozen: false,
                 trap_ctx_backup: Vec::new(),
+                signal_user_context_backup: Vec::new(),
                 clear_child_tid: 0,
             }),
         });

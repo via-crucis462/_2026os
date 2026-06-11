@@ -19,7 +19,7 @@ pub use id::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle};
 use spin::{Mutex, MutexGuard};
 pub use task::*;
 pub use pcb::*;
-use crate::mm::translated_write;
+use crate::mm::{translated_write, try_translated_read, try_translated_write};
 use crate::{arch::trap, console::print, mm::translated_byte_buffer};
 use crate::process::trap::TrapContext;
 use manager::*;
@@ -52,6 +52,128 @@ pub use processor::{
     current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task, current_tid
 };
 pub use signal::{SignalFlags, MAX_SIG};
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct SignalAltStack {
+    ss_sp: usize,
+    ss_flags: i32,
+    _pad: i32,
+    ss_size: usize,
+}
+
+#[cfg(target_arch = "riscv64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SignalUserContext {
+    uc_flags: usize,
+    uc_link: usize,
+    uc_stack: SignalAltStack,
+    uc_sigmask: usize,
+    uc_mcontext_gregs: [usize; 32],
+}
+
+#[cfg(target_arch = "loongarch64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SignalUserContext {
+    uc_flags: usize,
+    uc_link: usize,
+    uc_stack: SignalAltStack,
+    uc_sigmask: usize,
+    __uc_pad: isize,
+    uc_mcontext_pc: usize,
+    uc_mcontext_gregs: [usize; 32],
+    uc_mcontext_flags: u32,
+}
+
+#[cfg(target_arch = "riscv64")]
+impl SignalUserContext {
+    fn from_trap_ctx(trap_ctx: &TrapContext, sigmask: usize) -> Self {
+        let mut gregs = [0usize; 32];
+        gregs.copy_from_slice(&trap_ctx.x);
+        gregs[0] = trap_ctx.get_rt();
+        Self {
+            uc_flags: 0,
+            uc_link: 0,
+            uc_stack: SignalAltStack::default(),
+            uc_sigmask: sigmask,
+            uc_mcontext_gregs: gregs,
+        }
+    }
+
+    fn program_counter(&self) -> usize {
+        self.uc_mcontext_gregs[0]
+    }
+}
+
+#[cfg(target_arch = "loongarch64")]
+impl SignalUserContext {
+    fn from_trap_ctx(trap_ctx: &TrapContext, sigmask: usize) -> Self {
+        Self {
+            uc_flags: 0,
+            uc_link: 0,
+            uc_stack: SignalAltStack::default(),
+            uc_sigmask: sigmask,
+            __uc_pad: 0,
+            uc_mcontext_pc: trap_ctx.get_rt(),
+            uc_mcontext_gregs: trap_ctx.r,
+            uc_mcontext_flags: 0,
+        }
+    }
+
+    fn program_counter(&self) -> usize {
+        self.uc_mcontext_pc
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SignalFrame {
+    info: crate::syscall::process::SigInfo,
+    ucontext: SignalUserContext,
+}
+
+fn push_signal_frame(task_inner: &mut TaskControlBlockInner, sig: usize) -> Option<(usize, usize)> {
+    let trap_ctx = task_inner.get_trap_cx();
+    let frame_size = core::mem::size_of::<SignalFrame>();
+    let frame_sp = (trap_ctx.get_sp().checked_sub(frame_size)? & !0xfusize) as usize;
+    let frame = SignalFrame {
+        info: crate::syscall::process::SigInfo {
+            si_signo: sig as i32 + 1,
+            si_errno: 0,
+            si_code: 0,
+            _pad0: 0,
+            si_pid: 0,
+            si_uid: 0,
+            si_status: 0,
+            _pad1: 0,
+            _pad: [0; 12],
+        },
+        ucontext: SignalUserContext::from_trap_ctx(trap_ctx, task_inner.signal_mask.bits() as usize),
+    };
+
+    if !try_translated_write(current_user_token(), frame_sp as *mut SignalFrame, frame) {
+        return None;
+    }
+
+    let info_ptr = frame_sp;
+    let ucontext_ptr = frame_sp + core::mem::size_of::<crate::syscall::process::SigInfo>();
+    task_inner.signal_user_context_backup.push(ucontext_ptr);
+    Some((info_ptr, ucontext_ptr))
+}
+
+pub(crate) fn restore_signal_context(task_inner: &mut TaskControlBlockInner) -> Option<isize> {
+    let ucontext_ptr = task_inner.signal_user_context_backup.pop()?;
+    let saved_mask = task_inner.signal_mask_backup.pop()?;
+    let mut trap_ctx = task_inner.trap_ctx_backup.pop()?;
+    let user_ctx: SignalUserContext = try_translated_read(current_user_token(), ucontext_ptr as *const SignalUserContext)?;
+    trap_ctx.set_rt(user_ctx.program_counter());
+    task_inner.signal_mask = SignalFlags::from_bits_truncate(user_ctx.uc_sigmask as u64);
+    *task_inner.get_trap_cx() = trap_ctx;
+    let _ = saved_mask;
+    Some(task_inner.get_trap_cx().get_a0() as isize)
+}
 
 
 
@@ -472,9 +594,17 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
 
         let trap_ctx = task_inner.get_trap_cx();
         task_inner.trap_ctx_backup.push(*trap_ctx);
+        let Some((info_ptr, ucontext_ptr)) = push_signal_frame(&mut task_inner, sig) else {
+            task_inner.killed = true;
+            task_inner.term_signal = Some(sig as i32 + 1);
+            return;
+        };
         
         trap_ctx.set_rt(handler);
         trap_ctx.set_a0(sig + 1 /* 内核编号->用户编号 */);
+        trap_ctx.set_a1(info_ptr);
+        trap_ctx.set_a2(ucontext_ptr);
+        trap_ctx.set_sp(info_ptr);
         // 保证信号处理完恢复
         set_sig_ret(trap_ctx);
     } else { 

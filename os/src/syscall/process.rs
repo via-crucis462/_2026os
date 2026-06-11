@@ -2935,14 +2935,9 @@ pub fn sys_sigreturn() -> isize {
     let mut inner = task.inner_exclusive_access();
     // 验证长度一致
     assert_eq!(inner.trap_ctx_backup.len(), inner.signal_mask_backup.len(), "Trap context backup and signal mask backup should be in sync");
-    // 从trap_ctx备份栈取出上一层备份来恢复
-    if let Some(backup) = inner.trap_ctx_backup.pop() {
-        let trap_ctx = inner.get_trap_cx();
-        *trap_ctx = backup;
-        if let Some(mask_backup) = inner.signal_mask_backup.pop() {
-            inner.signal_mask = mask_backup;
-        }
-        trap_ctx.get_a0() as isize
+    assert_eq!(inner.trap_ctx_backup.len(), inner.signal_user_context_backup.len(), "Trap context backup and user signal context backup should be in sync");
+    if let Some(ret) = crate::process::restore_signal_context(&mut inner) {
+        ret
     } else {
         // 不应没有备份
         error!("sys_sigreturn: No trap context backup found!");
