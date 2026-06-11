@@ -164,12 +164,18 @@ pub fn exit_current_and_run_next(exit_code: i32){
     };
     
     // 线程级资源由 TCB 回收接口统一处理。
+    let process = task.process();
+    let (token, clear_child_tid) = {
+        let inner = task.inner_exclusive_access();
+        let proc = process.inner_exclusive_access();
+        (proc.memory_set.token(), inner.clear_child_tid)
+    };
+    crate::syscall::process::clear_child_tid_and_wake(token, clear_child_tid);
+
     task.recycle_on_exit(exit_code);
     
     //若线程是最后一个存活线程，则将其线程码写入进程退出码,并回收进程资源
     //同时将子进程移交给initproc
-    let process = task.process();
-
     // 运行完自动退出内核
     if process.getpid() == IDLE_PID {
         println!("[kernel] Idle process exit with exit_code {} ...", exit_code);

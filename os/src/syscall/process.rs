@@ -42,6 +42,27 @@ fn get_futex_wait_queue(uaddr: usize) -> Arc<Mutex<WaitQueue>> {
         .or_insert_with(|| Arc::new(Mutex::new(WaitQueue::new())))
         .clone()
 }
+
+pub(crate) fn clear_child_tid_and_wake(token: usize, clear_child_tid: usize) {
+    if clear_child_tid == 0 {
+        return;
+    }
+
+    let page_table = PageTable::from_token(token);
+    if let Some(pa) = page_table.translate_va(VirtAddr::from(clear_child_tid)) {
+        let _ = try_translated_write(token, clear_child_tid as *mut u32, 0u32);
+
+        let queue = {
+            let queues = FUTEX_WAIT_QUEUES.lock();
+            queues.get(&pa.0).cloned()
+        };
+
+        if let Some(queue) = queue {
+            let guard = queue.lock();
+            crate::process::wake_up_one(guard);
+        }
+    }
+}
 pub use crate::{
     timer::*,
     fs::*, 
@@ -1135,7 +1156,12 @@ const CLONE_PARENT_SETTID: usize = 0x00100000;
 const CLONE_CHILD_CLEARTID: usize = 0x00200000;
 const CLONE_CHILD_SETTID: usize = 0x01000000;
 
-pub fn sys_clone(flags: usize, stack: usize, ptid: usize, ctid: usize, tls: usize) -> isize {
+pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usize) -> isize {
+    #[cfg(target_arch = "riscv64")]
+    let (tls, ctid) = (arg3, arg4);
+    #[cfg(target_arch = "loongarch64")]
+    let (ctid, tls) = (arg3, arg4);
+
     debug!(
         "sys_clone: flags={:#x}, stack={:#x}, ptid={:#x}, ctid={:#x}, tls={:#x}",
         flags, stack, ptid, ctid, tls
