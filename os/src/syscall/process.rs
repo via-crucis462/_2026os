@@ -195,20 +195,23 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         let task = current_task().unwrap();
         let proc = task.process();
         
-        // --- 🟢 检查信号 (使用当前的临时掩码) ---
+        // --- 检查信号 (使用当前的临时掩码) ---
+        let proc_inner = proc.inner_exclusive_access();
         let mut task_inner = task.inner_exclusive_access();
-        let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
+        let pending = (task_inner.signals | proc_inner.signals).bits() & !task_inner.signal_mask.bits();
         // 特判 SIGKILL(9) 和 SIGSTOP(19) 这两个绝对不可屏蔽的信号
-        let unmaskable = task_inner.signals.bits() & ((1 << (9 - 1)) | (1 << (19 - 1)));
+        let unmaskable = (task_inner.signals | proc_inner.signals).bits() & ((1 << (9 - 1)) | (1 << (19 - 1)));
 
         if (pending | unmaskable) != 0 {
          
             //task_inner.signal_mask = original_mask;
             debug!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
-                     task_inner.signals.bits(), task_inner.signal_mask.bits());
+                     (task_inner.signals | proc_inner.signals).bits(), task_inner.signal_mask.bits());
+            drop(proc_inner);
             drop(task_inner); // 放锁
             return EINTR.as_isize(); // EINTR
         }
+        drop(proc_inner);
         drop(task_inner); 
         // ----------------------------------------
 
@@ -1199,6 +1202,18 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usi
                 trap_cx.r[2] = tls;
             }
         }
+
+        #[cfg(target_arch = "riscv64")]
+        if flags & CLONE_THREAD != 0 && flags & CLONE_SETTLS != 0 {
+            warn!(
+                "[CLONE TP] new_tid={} tls={:#x} trap_tp={:#x} ptid={:#x} ctid={:#x}",
+                new_tid,
+                tls,
+                new_inner.get_trap_cx().x[4],
+                ptid,
+                ctid
+            );
+        }
     }
 
     if flags & CLONE_PARENT_SETTID != 0 {
@@ -1960,31 +1975,24 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
             if signum == 0 { return 0; } // 探测成功
 
             let flag = flag.unwrap();
-            let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
+            let force_group_exit = flag.contains(SignalFlags::SIGKILL);
 
-            //   Phase 1: 持 PCB 锁，做进程级操作并克隆首个线程 Arc
-            let first_task: Option<Arc<TaskControlBlock>> = {
+            // 进程定向信号写入 PCB pending，并唤醒该进程的全部线程；SIGKILL 额外强制整个线程组退出。
+            let target_tasks: Vec<Arc<TaskControlBlock>> = {
                 let mut inner = proc.inner_exclusive_access();
                 inner.signals.insert(flag); // 进程级 pending
-                inner.tasks.first().cloned()
+                inner.tasks.clone()
             }; // PCB 锁在此释放
 
-            //   Phase 2: 无 PCB 锁，只拿 TCB 锁
-            if let Some(task_arc) = first_task {
-                let mut t_inner = task_arc.inner_exclusive_access();
-
-                //   1. 绝对无条件插入信号 (Generation)
-                t_inner.signals.insert(flag);
-
-                //   2. 判断是否被屏蔽 (Delivery check)
-                let is_unblocked = !t_inner.signal_mask.contains(flag);
-
-                if is_unblocked || is_unmaskable {
-                    drop(t_inner); // 放锁
-                    crate::process::wake_up_task(task_arc.clone()); // 真正唤醒！
-                } else {
-                    drop(t_inner); // 被屏蔽了，记录完毕，不打扰睡眠
+            for task_arc in target_tasks {
+                //println!("sys_kill: waking up task T{} in PID {}", task_arc.gettid(), pid);
+                let mut task_inner = task_arc.inner_exclusive_access();
+                if force_group_exit {
+                    task_inner.killed = true;
+                    task_inner.term_signal = Some(flag.bits().trailing_zeros() as i32 + 1);
                 }
+                drop(task_inner);
+                crate::process::wake_up_task(task_arc);
             }
             return 0;
         } else {
@@ -2010,18 +2018,16 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         }
 
         let flag = flag.unwrap();
-        let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
+        let force_group_exit = flag.contains(SignalFlags::SIGKILL);
 
-        // 拿出所有进程的首个线程
+        // kill(0, sig) / kill(-pgid, sig) 面向进程组：信号写入每个目标进程的 PCB pending，并唤醒全部线程。
         let mut matched_tasks: Vec<Arc<TaskControlBlock>> = Vec::new();
         for i in 2..4096 {
             if let Some(proc) = get_process(i) {
                 let mut inner = proc.inner_exclusive_access();
                 if inner.pgid == target_pgid {
                     inner.signals.insert(flag); // 进程级 pending
-                    if let Some(first_task) = inner.tasks.first() {
-                        matched_tasks.push(first_task.clone());
-                    }
+                    matched_tasks.extend(inner.tasks.iter().cloned());
                 }
             }
         }
@@ -2031,19 +2037,14 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         }
 
         // 给进程组发信号
-        for task_arc in matched_tasks.iter() {
-            let mut t_inner = task_arc.inner_exclusive_access();
-            // 插入信号
-            t_inner.signals.insert(flag);
-            // 是否被屏蔽
-            let is_unblocked = !t_inner.signal_mask.contains(flag);
-
-            if is_unblocked || is_unmaskable {
-                drop(t_inner);
-                crate::process::wake_up_task(task_arc.clone());
-            } else {
-                drop(t_inner);
+        for task_arc in matched_tasks {
+            let mut task_inner = task_arc.inner_exclusive_access();
+            if force_group_exit {
+                task_inner.killed = true;
+                task_inner.term_signal = Some(flag.bits().trailing_zeros() as i32 + 1);
             }
+            drop(task_inner);
+            crate::process::wake_up_task(task_arc);
         }
         return 0;
     }
@@ -2348,9 +2349,12 @@ fn nanosleep_impl(req: &TimeSpec, rem: *mut TimeSpec) -> isize {
     while get_time_ms() < start.saturating_add(duration_ms) {
         //   1. 检查是否有未屏蔽的信号到来
         let task = current_task().unwrap();
+        let process = task.process();
+        let proc_inner = process.inner_exclusive_access();
         let inner = task.inner_exclusive_access();
-        let pending = inner.signals.bits() & !inner.signal_mask.bits();
+        let pending = (inner.signals | proc_inner.signals).bits() & !inner.signal_mask.bits();
         // 放开锁，避免死锁
+        drop(proc_inner);
         drop(inner);
         drop(task);
 
@@ -2933,6 +2937,16 @@ pub fn sys_sigreturn() -> isize {
     
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
+    #[cfg(target_arch = "riscv64")]
+    {
+        let trap_cx = inner.get_trap_cx();
+        warn!(
+            "[SIG_RET TP] tid={} tp={:#x} pc={:#x}",
+            task.gettid(),
+            trap_cx.x[4],
+            trap_cx.get_rt()
+        );
+    }
     // 验证长度一致
     assert_eq!(inner.trap_ctx_backup.len(), inner.signal_mask_backup.len(), "Trap context backup and signal mask backup should be in sync");
     assert_eq!(inner.trap_ctx_backup.len(), inner.signal_user_context_backup.len(), "Trap context backup and user signal context backup should be in sync");
@@ -3544,8 +3558,10 @@ pub fn sys_rt_sigtimedwait(
 
         // --- 第一阶段：消费信号 ---
         {
-            let mut inner = task.inner_exclusive_access();
-            let pending = inner.signals;
+                let process = task.process();
+                let mut proc_inner = process.inner_exclusive_access();
+                let mut inner = task.inner_exclusive_access();
+                let pending = inner.signals | proc_inner.signals;
             let intersection = pending & target_set;
 
             if !intersection.is_empty() {
@@ -3556,6 +3572,7 @@ pub fn sys_rt_sigtimedwait(
 
                 // 同步拿走，避免进入异步 handler
                 inner.signals.remove(sig_flag);
+                proc_inner.signals.remove(sig_flag);
 
                 // 写回 info
                 if !info_ptr.is_null() {
@@ -3732,7 +3749,29 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32) -> isize {
             let queue = get_futex_wait_queue(pa.0);
             let guard = queue.lock();
             current_task_to_sleep(guard);
-            0
+            warn!("task {} sleep on futex {:x}", current_task().unwrap().getpid(), pa.0);
+            let current = current_task().unwrap();
+            let current_tid = current.gettid();
+            {
+                let mut guard = queue.lock();
+                guard.remove_task(current_tid);
+            }
+
+            let process = current.process();
+            let proc_inner = process.inner_exclusive_access();
+            let inner = current.inner_exclusive_access();
+            let pending_signals = inner.signals | proc_inner.signals;
+            let pending = pending_signals.bits() & !inner.signal_mask.bits();
+            let unmaskable = pending_signals.bits()
+                & (SignalFlags::SIGKILL | SignalFlags::SIGSTOP).bits();
+            drop(proc_inner);
+            drop(inner);
+
+            if (pending | unmaskable) != 0 {
+                EINTR.as_isize()
+            } else {
+                0
+            }
         }
         FUTEX_WAKE => {
             if val <= 0 {
@@ -3803,7 +3842,7 @@ pub fn sys_rt_sigpending(sigset_ptr: *mut SigSet, sigsetsize: usize) -> isize {
     let inner = process.inner_exclusive_access();
     let token = inner.memory_set.token();
 
-    let pending = inner.signals.bits() as usize;
+    let pending = (inner.signals | process.inner_exclusive_access().signals).bits() as usize;
     if !try_translated_write(token, sigset_ptr, pending) {
         return EFAULT.as_isize();
     }

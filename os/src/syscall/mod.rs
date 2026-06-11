@@ -290,6 +290,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         inner.info_map_areas();
     }*/
     //println!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, current_task().unwrap().tid.0, syscall_id);
+    //println!("[K] syscall args: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}", args[0], args[1], args[2], args[3], args[4], args[5]);
     info!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, current_task().unwrap().tid.0, syscall_id);
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
@@ -311,10 +312,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_EXIT_GROUP =>sys_exit_group(args[0] as i32),
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_KILL => sys_kill(args[0] as isize, args[1] as i32),
-        SYSCALL_SIGACTION => sys_sigaction(
+        SYSCALL_SIGACTION => sys_rt_sigaction(
             args[0] as i32,
             args[1] as *const SignalAction,
             args[2] as *mut SignalAction,
+            args[3],
         ),
         SYSCALL_CHROOT => sys_chroot(args[0]),
         SYSCALL_CONNECT => sys_connect(args[0], args[1] as *const u8, args[2] as u32),

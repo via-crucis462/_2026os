@@ -59,6 +59,9 @@ impl WaitQueue {
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }
+    pub fn remove_task(&mut self, tid: usize) {
+        self.queue.retain(|task| task.gettid() != tid);
+    }
 }
 
 pub struct SemaphoreGuard<'a, T> {

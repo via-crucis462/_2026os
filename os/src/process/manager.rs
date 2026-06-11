@@ -188,7 +188,6 @@ pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
             continue;
         }
         task_inner.task_status = TaskStatus::Running;
-        task_inner.owner_hart = Some(hart_id);
         drop(task_inner);
         remove_task_from_all_local_queues_unlocked(task.gettid());
         remove_task_from_global_pool_unlocked(task.gettid());
