@@ -1,9 +1,10 @@
 use crate::process::id::RecycleAllocator;
 use crate::sync::MPSafeCell;
-use crate::mm::{FrameTracker, PageSize, frame_alloc, frame_dealloc};
+use crate::fs::tmpfs::TmpfsFileInode;
+use crate::fs::{OSInode, VfsInode, Dentry};
+
+use alloc::sync::{Arc, Weak};
 use spin::Mutex;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
 use super::IpcPerm;
 
@@ -40,13 +41,13 @@ impl ShmManager {
         self.shms.remove(&id);
         self.id_allocator.dealloc(id as usize);
     }
-    pub fn create_shm(&mut self, size: usize, key: i32, mode: u16, cpid: usize) -> Arc<Shm> {
+    pub fn create_shm(&mut self, size: usize, key: i32, mode: u16, cpid: usize, uid: u32, gid: u32) -> Arc<Shm> {
         let id = self.id_allocator.alloc();
         // 上溢出检查
         if id > u32::MAX as usize {
             panic!("Too many shared memory segments");
         }
-        let shm = Arc::new(Shm::new(id as u32, size, key, mode, cpid));
+        let shm = Arc::new(Shm::new(id as u32, size, key, mode, cpid, uid, gid));
         self.shms.insert(id as u32, shm.clone());
         shm
     }
@@ -70,34 +71,41 @@ pub struct ShmidDs {
 
 pub struct Shm {
     id: u32,
-    // 需要保证顺序
-    frames: Vec<FrameTracker>,
     // 状态信息，注意和inode stat不同
     pub stat: Mutex<ShmidDs>,
+    //
+    inner: Arc<OSInode>,
 }
 
 impl Shm {
-    pub fn new(id: u32, size: usize, key: i32, mode: u16, cpid: usize) -> Self {
-        // 默认用4K页
-        let page_size = PageSize::Page4K;
-        let num_pages = (size + page_size.size() - 1) / page_size.size();
-        let mut frames = Vec::new();
-        for _ in 0..num_pages {
-            // 分配页
-            let frame = frame_alloc(page_size).expect("Failed to allocate frame for SHM");
-            frames.push(frame);
-        }
-        let mut stat = ShmidDs::default();
-        stat.shm_perm.key = key;
-        stat.shm_perm.mode = mode;
-        stat.shm_segsz = size;
-        stat.shm_cpid = cpid;
+    pub fn new(id: u32, size: usize, key: i32, mode: u16, cpid: usize, uid: u32, gid: u32) -> Self {
+        let mut perm = IpcPerm::default();
+        perm.key = key;
+        perm.mode = mode;
+        perm.uid = uid;
+        perm.gid = gid;
 
-        Self { 
-            id, 
-            frames,
-            stat: Mutex::new(stat),
-        }
+        let stat = ShmidDs {
+            shm_perm: perm,
+            shm_segsz: size,
+            shm_atime: 0,
+            shm_dtime: 0,
+            shm_ctime: 0,
+            shm_cpid: cpid,
+            shm_lpid: 0,
+            shm_nattch: 0,
+        };
+        let mut trunc = TmpfsFileInode::new(0o0777);
+        trunc.truncate(size);
+        let tmpfs = Arc::new(trunc);
+        // 孤儿 Dentry：不挂 VFS 树，仅满足 OSInode 的类型要求
+        let dentry = Dentry::new(
+            alloc::format!("shm_{}", id),
+            tmpfs.clone(),
+            Weak::new(),
+        );
+        let os_inode = Arc::new(OSInode::new(true, true, tmpfs.clone(), dentry));
+        Self { id, stat: Mutex::new(stat), inner: os_inode }
     }
     pub fn get_id(&self) -> u32 {
         self.id
@@ -107,9 +115,6 @@ impl Shm {
     }
     pub fn get_key(&self) -> i32 {
         self.stat.lock().shm_perm.key
-    }
-    pub fn get_frames(&self) -> &Vec<FrameTracker> {
-        &self.frames
     }
     pub fn inc_nattch(&self) {
         self.stat.lock().shm_nattch += 1;
@@ -126,10 +131,13 @@ impl Shm {
     pub fn get_stat(&self) -> ShmidDs {
         *self.stat.lock()
     }
+    pub fn inner(&self) -> Arc<OSInode> {
+        self.inner.clone()
+    }
 }
 
-pub fn get_new_shm(size: usize, key: i32, mode: u16, cpid: usize) -> Arc<Shm> {
-    SHM_MANAGER.exclusive_access().create_shm(size, key, mode, cpid)
+pub fn get_new_shm(size: usize, key: i32, mode: u16, cpid: usize, uid: u32, gid: u32) -> Arc<Shm> {
+    SHM_MANAGER.exclusive_access().create_shm(size, key, mode, cpid, uid, gid)
 }
 
 pub fn get_shm_by_id(id: u32) -> Option<Arc<Shm>> {

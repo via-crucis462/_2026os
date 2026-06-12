@@ -23,15 +23,25 @@ pub struct BlockCache {
 impl BlockCache {
     /// Load a new BlockCache from disk.
     pub fn new(block_id: usize, block_device: Arc<dyn BlockDevice>) -> Self {
-        // for alignment and move effciency
-        let mut cache = vec![0u8; BLOCK_SZ];
-        block_device.raw_read_block(block_id, &mut cache);
+        let mut this = Self::new_empty(block_id, block_device);
+        this.fill_from_disk();
+        this
+    }
+
+    /// 创建空缓存（不读磁盘），用于防惊群：先插入 map 再在锁外 I/O
+    pub fn new_empty(block_id: usize, block_device: Arc<dyn BlockDevice>) -> Self {
         Self {
-            cache,
+            cache: vec![0u8; BLOCK_SZ],
             block_id,
             block_device,
             modified: false,
         }
+    }
+
+    /// 从磁盘填充缓存数据
+    /// 调用者必须保证获取对应block的锁
+    pub fn fill_from_disk(&mut self) {
+        self.block_device.raw_read_block(self.block_id, &mut self.cache);
     }
 
     fn addr_of_offset(&self, offset: usize) -> usize {
@@ -85,98 +95,133 @@ impl Drop for BlockCache {
 // 1MB 块缓存
 const BLOCK_CACHE_SIZE: usize = 256;
 
-/// 块设备缓存管理器，目前是LRU
+/// 块设备缓存管理器，目前是 LRU
 /// 用于块设备的底层 read_block 和 write_block
 /// 先前的实现只用于元数据，现在改为所有块设备访问都经过
 /// 主要用于加速 extent 树的遍历&修改 
 /// 上层文件的文件缓存则使用 mmap 的缓存管理器
+/// 
+/// 锁序：map → queue
+/// 需要磁盘 I/O 在这两把锁外完成
+/// 但需要保证对于同一块的访问需要在在 block_cache 锁内完成
+/// 类似页缓存的思路
 pub struct BlockCacheManager {
-    // block_id 队列
-    queue: VecDeque<usize>,
-    // block_id -> BlockCache
-    map: BTreeMap<usize, Arc<Mutex<BlockCache>>>,
+    /// LRU 驱逐队列（最近使用的在队尾）
+    queue: Mutex<VecDeque<usize>>,
+    /// block_id → BlockCache
+    map: Mutex<BTreeMap<usize, Arc<Mutex<BlockCache>>>>,
 }
 
 impl BlockCacheManager {
     pub fn new() -> Self {
         Self {
-            queue: VecDeque::new(),
-            map: BTreeMap::new(),
+            queue: Mutex::new(VecDeque::new()),
+            map: Mutex::new(BTreeMap::new()),
         }
     }
 
+    /// 获取块缓存
     pub fn get_block_cache(
-        &mut self,
+        &self,
         block_id: usize,
         block_device: Arc<dyn BlockDevice>,
     ) -> Arc<Mutex<BlockCache>> {
-        // 命中
-        if let Some(cache) = self.map.get(&block_id) {
-            if let Some(pos) = self.queue.iter().position(|id| *id == block_id) {
-                self.queue.remove(pos);
-                self.queue.push_back(block_id);
+        // 检查缓存是否命中
+        {
+            let map = self.map.lock();
+            if let Some(cache) = map.get(&block_id) {
+                // 更新 LRU：移到队尾
+                let mut queue = self.queue.lock();
+                if let Some(pos) = queue.iter().position(|id| *id == block_id) {
+                    queue.remove(pos);
+                    queue.push_back(block_id);
+                }
+                return Arc::clone(cache);
+            }
+        }
+
+        //不命中
+        let mut map = self.map.lock();
+        // 检查两次持 map 锁期间是否被其他核加载
+        if let Some(cache) = map.get(&block_id) {
+            let mut queue = self.queue.lock();
+            if let Some(pos) = queue.iter().position(|id| *id == block_id) {
+                queue.remove(pos);
+                queue.push_back(block_id);
             }
             return Arc::clone(cache);
         }
-
-        // 未命中
-        if self.queue.len() >= BLOCK_CACHE_SIZE {
-            loop {
+        // 更新 lru
+        {
+            let mut queue = self.queue.lock();
+            if queue.len() >= BLOCK_CACHE_SIZE {
                 let mut evicted = false;
-                for _ in 0..self.queue.len() {
-                    let front_id = self.queue.front().copied().unwrap();
-                    let can_evict = self.map.get(&front_id)
-                    .map_or(false, |cache| {
-                        Arc::strong_count(cache) == 1 // 仅 map 持有
-                    });
+                let orig_len = queue.len();
+                for _ in 0..orig_len {
+                    let front_id = *queue.front().unwrap();
+                    let can_evict = map.get(&front_id)
+                        .map_or(false, |cache| Arc::strong_count(cache) == 1);
                     if can_evict {
-                        self.queue.pop_front();
-                        self.map.remove(&front_id);
+                        queue.pop_front();
+                        map.remove(&front_id);
                         evicted = true;
                         break;
                     } else {
-                        // 仍被外部引用，移到队尾
-                        if let Some(id) = self.queue.pop_front() {
-                            self.queue.push_back(id);
+                        if let Some(id) = queue.pop_front() {
+                            queue.push_back(id);
                         }
                     }
                 }
-                if evicted {
-                    break;
+                if !evicted {
+                    println!(
+                        "Run out of BlockCache! All {} blocks are still referenced.",
+                        BLOCK_CACHE_SIZE
+                    );
                 }
-                println!("Run out of BlockCache! All {} blocks are still referenced.", BLOCK_CACHE_SIZE);
             }
         }
 
-        // 加载新块
-        let block_cache = Arc::new(Mutex::new(BlockCache::new(
+        // 获取块缓存锁
+        let block_cache = Arc::new(Mutex::new(BlockCache::new_empty(
             block_id,
             Arc::clone(&block_device),
         )));
-        self.map.insert(block_id, Arc::clone(&block_cache));
-        self.queue.push_back(block_id);
+        let mut block_guard = block_cache.lock();
+        map.insert(block_id, Arc::clone(&block_cache));
+
+        // 更新 LRU
+        {
+            let mut queue = self.queue.lock();
+            queue.push_back(block_id);
+        }
+
+        // 释放 map 锁
+        drop(map);
+
+        // 在blockcache锁内io
+        block_guard.fill_from_disk();
+        drop(block_guard);
+
         block_cache
     }
 }
 
 lazy_static! {
-    /// 块缓存管理器，主要用于磁盘元数据
-    pub static ref BLOCK_CACHE_MANAGER: Mutex<BlockCacheManager> =
-        Mutex::new(BlockCacheManager::new());
+    /// 块缓存管理器
+    pub static ref BLOCK_CACHE_MANAGER: BlockCacheManager =
+        BlockCacheManager::new();
 }
 
 pub fn get_block_cache(
     block_id: usize,
     block_device: Arc<dyn BlockDevice>,
 ) -> Arc<Mutex<BlockCache>> {
-    BLOCK_CACHE_MANAGER
-        .lock()
-        .get_block_cache(block_id, block_device)
+    BLOCK_CACHE_MANAGER.get_block_cache(block_id, block_device)
 }
 
 pub fn block_cache_sync_all() {
-    let manager = BLOCK_CACHE_MANAGER.lock();
-    for (_, cache) in manager.map.iter() {
+    let map = BLOCK_CACHE_MANAGER.map.lock();
+    for (_, cache) in map.iter() {
         cache.lock().sync();
     }
 }

@@ -313,7 +313,7 @@ pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
         let cpid = current_task().unwrap().process().pid.0;
         let ns = current_ipc_namespace();
         let mut ns_lckd = ns.lock();
-        let shm = ns_lckd.shm_manager().create_shm(size, key, mode, cpid);
+        let shm = ns_lckd.shm_manager().create_shm(size, key, mode, cpid, uid, gid);
         return shm.get_id() as isize
     }
 
@@ -350,7 +350,7 @@ pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
         return EINVAL.as_isize();
     }
     let cpid = current_task().unwrap().process().pid.0;
-    let shm = ns_lckd.shm_manager().create_shm(size, key, mode, cpid);
+    let shm = ns_lckd.shm_manager().create_shm(size, key, mode, cpid, uid, gid);
     shm.get_id() as isize
 }
 
@@ -426,41 +426,14 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: i32) -> isize {
     } else {
         mmap::MMapProt::PROT_READ | mmap::MMapProt::PROT_WRITE
     };
-    let mmap_flags = mmap::MMapFlags::MAP_ANONYMOUS | mmap::MMapFlags::MAP_SHARED;
+    let mmap_flags = mmap::MMapFlags::MAP_SHARED;
 
-    let mapped_addr = match mmap::do_mmap(attach_addr, shm_size, prot, mmap_flags, None, 0) {
+    let tmpfs = shm.inner();
+
+    let mapped_addr = match mmap::do_mmap(attach_addr, shm_size, prot, mmap_flags, Some(tmpfs), 0) {
         Ok(addr) => addr,
         Err(e) => return e,
     };
-
-    // 将共享内存数据拷贝到映射区域
-    let token = current_user_token();
-    let frames = shm.get_frames();
-    let page_size = crate::PAGE_SIZE;
-    let num_pages = (shm_size + page_size - 1) / page_size;
-    
-    for i in 0..num_pages.min(frames.len()) {
-        let va = mapped_addr + i * page_size;
-        let bytes_to_copy = if i == num_pages - 1 && shm_size % page_size != 0 {
-            shm_size % page_size
-        } else {
-            page_size
-        };
-        
-        // 从 Shm 物理帧读取数据
-        let shm_data = &frames[i].get_bytes_array()[..bytes_to_copy];
-        
-        // 写入用户空间映射区域
-        if let Some(user_buf) = try_translated_byte_buffer_mut(
-            token,
-            va as *mut u8,
-            bytes_to_copy,
-        ) {
-            let mut user_buf = UserBuffer::new(user_buf);
-            user_buf.write(shm_data);
-        }
-    }
-
     // 更新附加计数
     shm.inc_nattch();
 
