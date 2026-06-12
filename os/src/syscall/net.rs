@@ -19,15 +19,12 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let process = task.process();
     let inner = process.inner_exclusive_access();
     let token = inner.memory_set.token();
-
-    // 1. 检查 fd 是否合法
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return EBADF.as_isize(); // EBADF
     }
 
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
-    drop(inner); // 提前释放进程锁
-    // 获取用户传进来的最初限制长度
+    drop(inner); 
     let mut user_len = unsafe {
         if let Some(ul) = try_translated_read(token, addrlen) {
             ul
@@ -35,62 +32,59 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
             return EFAULT.as_isize();
         }
     };
-    // 2. 检查这个文件是不是 Socket
-    // 这里利用 Any trait 向下转型
-    if let Some(_udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
-    return 0; 
-    }
-    else if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
-        
-        // 3. 提取地址和端口
-        let local_ep = socket.local_endpoint();
-        let family: u16 = 2; // AF_INET
-        let mut port: u16 = 0;
-        let mut ip: [u8; 4] = [0, 0, 0, 0];
+    let mut is_ip_socket = false;
+    let family: u16 = 2; // AF_INET
+    let mut port: u16 = 0;
+    let mut ip: [u8; 4] = [0, 0, 0, 0];
 
-        if let Some(ep) = local_ep {
+    if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
+        // 1. 处理 TCP Socket
+        if let Some(ep) = socket.local_endpoint() {
             port = ep.port; 
-            let smoltcp::wire::IpAddress::Ipv4(v4) = ep.addr;
+             let smoltcp::wire::IpAddress::Ipv4(v4) = ep.addr ;
+                ip = v4.0;
+            
+        }
+        is_ip_socket = true;
+    } else if let Some(socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
+        // 2. 处理 UDP Socket
+        let sockets = crate::net::SOCKET_SET.exclusive_access();
+        let udp_sock = sockets.get::<smoltcp::socket::udp::Socket>(socket.handle);
+        
+        let ep = udp_sock.endpoint(); 
+        port = ep.port;
+        if let Some(smoltcp::wire::IpAddress::Ipv4(v4)) = ep.addr {
             ip = v4.0;
         }
+        is_ip_socket = true;
+    }
 
-        // 4. 组装 16 字节的 sockaddr_in 结构
+    // 3. 如果是 TCP 或 UDP，统一组装 sockaddr_in 并写入用户态
+    if is_ip_socket {
         let mut sockaddr_bytes = [0u8; 16];
-        // 家族 (AF_INET) - 本机字节序
         sockaddr_bytes[0..2].copy_from_slice(&family.to_ne_bytes());
-        // 端口号 - 必须是网络字节序 (大端序, Big Endian)！
         sockaddr_bytes[2..4].copy_from_slice(&port.to_be_bytes());
-        // IP 地址 - smoltcp 内部已经是正确的网络顺序了
         sockaddr_bytes[4..8].copy_from_slice(&ip);
 
-        // 5. 写入用户空间
         unsafe {
-            // 获取用户传进来的 addrlen 的值
-            let mut user_len = {
-                if let Some(ul) = try_translated_read(token, addrlen) {
-                    ul
-                } else {
+            if let Some(user_len) = try_translated_read(token, addrlen) {
+                let copy_len = (user_len as usize).min(16);
+                let mut current_addr = addr as usize;
+                for i in 0..copy_len {
+                    if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                        return EFAULT.as_isize();
+                    }
+                    current_addr += 1;
+                }
+                
+                // 告诉用户态实际填充了多少字节
+                if !try_translated_write(token, addrlen, 16u32) {
                     return EFAULT.as_isize();
                 }
-            };
-            let copy_len = (user_len as usize).min(16);
-
-            // 把字节拷贝到用户提供的 addr 指针去
-            let mut current_addr = addr as usize;
-            for i in 0..copy_len {
-                if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
-                    return EFAULT.as_isize();
-                }
-                current_addr += 1;
-            }
-
-            // 更新 addrlen 为实际写入的大小
-            user_len = 16;
-            if !try_translated_write(token, addrlen, user_len) {
+            } else {
                 return EFAULT.as_isize();
             }
         }
-
         return 0; // 成功
     }
     else if let Some(_nl_socket) = file.as_any().downcast_ref::<StandardNetlinkSocket>() {
@@ -98,9 +92,7 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         let family: u16 = 16; // AF_NETLINK = 16
         let mut sockaddr_bytes = [0u8; 12];
         sockaddr_bytes[0..2].copy_from_slice(&family.to_ne_bytes());
-        // 绑定的本地端口号通常就是当前进程的 PID（或者0），暂时填 0 即可
         sockaddr_bytes[4..8].copy_from_slice(&0u32.to_ne_bytes()); 
-
         let copy_len = (user_len as usize).min(12);
         let mut current_addr = addr as usize;
         for i in 0..copy_len {
@@ -111,7 +103,6 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
             }
             current_addr += 1;
         }
-
         unsafe {
             if !try_translated_write(token, addrlen, 12u32) {
                 return crate::syscall::errno::Errno::EFAULT.as_isize();
@@ -119,14 +110,11 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         }
         return 0;
     }
-    // 匹配 AF_UNIX 套接字 (根据你实际的结构体名称改名)
+    // 匹配 AF_UNIX 套接字 
     else if let Some(_unix_socket) = file.as_any().downcast_ref::<crate::net::socket::UnixSocket>() {
-        // AF_UNIX 的地址结构是 sockaddr_un，通常包含一个路径
-        let family: u16 = 1; // AF_UNIX = 1
-        let mut sockaddr_bytes = [0u8; 110]; // 标准大小
+        let family: u16 = 1; 
+        let mut sockaddr_bytes = [0u8; 110]; 
         sockaddr_bytes[0..2].copy_from_slice(&family.to_ne_bytes());
-        // 后续是本地绑定的抽象路径名，通常全 0 即可满足应用层安全检查
-
         let copy_len = (user_len as usize).min(110);
         let mut current_addr = addr as usize;
         for i in 0..copy_len {
