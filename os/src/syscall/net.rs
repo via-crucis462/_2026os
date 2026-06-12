@@ -247,39 +247,40 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
     let sa_family = u16::from_ne_bytes(family_bytes);
     const AF_UNSPEC: u16 = 0;
     const AF_INET: u16 = 2;
-   
-
-        if sa_family == AF_UNSPEC {
-            if let Some(tcp_socket) = file.as_any().downcast_ref::<TcpSocket>() {
-                tcp_socket.disconnect(); 
-            }
-            return 0;
-        }
-        if sa_family != AF_INET {
-            return Errno::EAFNOSUPPORT.as_isize(); 
-        }
-        let sockaddr = {
-            if let Some(s) = try_translated_read(token, addr as *const [u8; 16]) {
-                s
-            } else {
-                return EFAULT.as_isize();
-            }
-        };
-        let port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
-        let ip = [sockaddr[4], sockaddr[5], sockaddr[6], sockaddr[7]];
-        let endpoint = smoltcp::wire::IpEndpoint::new(
-            smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address(ip)),
-            port
-        );
+    if sa_family == AF_UNSPEC {
         if let Some(tcp_socket) = file.as_any().downcast_ref::<TcpSocket>() {
-            tcp_socket.connect(endpoint)
-        } 
-        else if let Some(udp_socket) = file.as_any().downcast_ref::<UdpSocket>() {
-            udp_socket.connect(endpoint); 
-            0 
-        } else {
-            Errno::ENOTSOCK.as_isize()
+            tcp_socket.disconnect(); 
         }
+        if let Some(upd_socket) = file.as_any().downcast_ref::<UdpSocket>() {
+            upd_socket.disconnect(); 
+        }
+        return 0;
+    }
+    if sa_family != AF_INET {
+        return Errno::EAFNOSUPPORT.as_isize(); 
+    }
+    let sockaddr = {
+        if let Some(s) = try_translated_read(token, addr as *const [u8; 16]) {
+            s
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
+    let port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
+    let ip = [sockaddr[4], sockaddr[5], sockaddr[6], sockaddr[7]];
+    let endpoint = smoltcp::wire::IpEndpoint::new(
+        smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address(ip)),
+        port
+    );
+    if let Some(tcp_socket) = file.as_any().downcast_ref::<TcpSocket>() {
+        tcp_socket.connect(endpoint)
+    } 
+    else if let Some(udp_socket) = file.as_any().downcast_ref::<UdpSocket>() {
+        udp_socket.connect(endpoint); 
+        0 
+    } else {
+        Errno::ENOTSOCK.as_isize()
+    }
    
 }
 
@@ -805,4 +806,93 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: *mut MsgHdr, _flags: i32) -> isize {
         }
     }
     read_len as isize
+}
+
+// Linux 标准的网络套接字常量定义
+const SOL_SOCKET: i32 = 1;  // 配置层级：通用套接字层
+const SO_SNDBUF: i32 = 7;  // 选项名称：发送缓冲区大小
+const SO_RCVBUF: i32 = 8;  // 选项名称：接收缓冲区大小
+
+///  获取套接字选项参数
+/// - fd: 套接字文件描述符
+/// - level: 协议栈层级 
+/// - optname: 欲查询的选项名 
+/// - optval: 指向用户态缓冲区的指针，用于接收查询结果
+/// - optlen: 指向用户态 u32 的指针，输入时表示 optval 的最大容量，输出时表示实际写入的长度
+pub fn sys_getsockopt(
+    fd: usize, 
+    level: i32, 
+    optname: i32, 
+    optval: *mut u8, 
+    optlen: *mut u32
+) -> isize {
+    let task = crate::task::current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+        return crate::syscall::errno::Errno::EBADF.as_isize();
+    }
+   
+    let _file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    drop(inner);
+
+
+    const SOL_SOCKET: i32 = 1;  // 通用套接字
+    const SO_SNDBUF: i32 = 7;  // 发送缓冲区大小
+    const SO_RCVBUF: i32 = 8;  // 接收缓冲区大小
+    let mut len = crate::mm::translated_read(token, optlen);
+    if level == SOL_SOCKET {
+        match optname {
+            
+            SO_SNDBUF | SO_RCVBUF => {
+                if len < 4 {
+                    return EINVAL.as_isize(); 
+                }
+                // 统一回报 16384 字节 (4 字节 i32 结构)
+                let buffer_size: i32 = 16384; 
+                let bytes = buffer_size.to_ne_bytes();
+                let mut val_bufs = crate::mm::translated_byte_buffer_mut(token, optval, 4);
+                let mut current = 0;
+                for buf in val_bufs.iter_mut() {
+                    let copy_len = buf.len().min(4 - current);
+                    buf[..copy_len].copy_from_slice(&bytes[current..current + copy_len]);
+                    current += copy_len;
+                    if current == 4 { break; }
+                }
+                crate::mm::translated_write(token, optlen, 4u32);
+                return 0; 
+            }
+            _ => {
+                if len >= 4 {
+                    let bytes = 0i32.to_ne_bytes();
+                    let mut val_bufs = crate::mm::translated_byte_buffer_mut(token, optval, 4);
+                    let mut current = 0;
+                    for buf in val_bufs.iter_mut() {
+                        let copy_len = buf.len().min(4 - current);
+                        buf[..copy_len].copy_from_slice(&bytes[current..current + copy_len]);
+                        current += copy_len;
+                        if current == 4 { break; }
+                    }
+                    crate::mm::translated_write(token, optlen, 4u32);
+                }
+                return 0;
+            }
+        }
+    }
+    if len >= 4 {
+        let bytes = 0i32.to_ne_bytes();
+        let mut val_bufs = crate::mm::translated_byte_buffer_mut(token, optval, 4);
+        let mut current = 0;
+        for buf in val_bufs.iter_mut() {
+            let copy_len = buf.len().min(4 - current);
+            buf[..copy_len].copy_from_slice(&bytes[current..current + copy_len]);
+            current += copy_len;
+            if current == 4 { break; }
+        }
+        crate::mm::translated_write(token, optlen, 4u32);
+    }
+    
+    0 
 }

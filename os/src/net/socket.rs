@@ -47,11 +47,6 @@ impl TcpSocket {
         socket.remote_endpoint()
     }
     pub fn connect(&self, remote_ep: smoltcp::wire::IpEndpoint) -> isize {
-        let smoltcp::wire::IpAddress::Ipv4(v4) = remote_ep.addr;
-        if v4.0 == [127, 0, 0, 1] {
-            return 0; // 假装 TCP 三次握手成功
-        }
-        // smoltcp 0.10+ 版本，发起连接需要网卡 context
         let mut iface = crate::net::NET_IFACE.exclusive_access();
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
@@ -59,9 +54,31 @@ impl TcpSocket {
         // 动态分配一个临时的本地端口 (Ephemeral Port, 范围 49152~65535)
         let local_port = (crate::arch::timer::get_time_us() % 16384 + 49152) as u16;
         
-        match socket.connect(iface.context(), remote_ep, local_port) {
-            Ok(_) => 0, // 0 表示发起连接成功 (即使测例是非阻塞模式，0也是合法的)
+        let res = match socket.connect(iface.context(), remote_ep, local_port) {
+            Ok(_) => 0, 
             Err(_) => crate::syscall::errno::Errno::ECONNREFUSED.as_isize(),
+        };
+        drop(sockets);
+        drop(iface);
+       loop {
+            crate::net::net_poll(); 
+
+            let sockets = crate::net::SOCKET_SET.exclusive_access();
+            let socket = sockets.get::<smoltcp::socket::tcp::Socket>(self.handle);
+            
+            use smoltcp::socket::tcp::State;
+            match socket.state() {
+                State::Established => {
+                    return 0; 
+                }
+                State::SynSent | State::SynReceived => {
+                    drop(sockets);
+                    crate::task::suspend_current_and_run_next(); 
+                }
+                _ => {
+                    return crate::syscall::errno::Errno::ECONNREFUSED.as_isize();
+                }
+            }
         }
     }
 }
@@ -119,8 +136,12 @@ impl File for TcpSocket {
             temp_buf[current..current + copy_len].copy_from_slice(buffer);
             current += copy_len;
         }
-
-        socket.send_slice(&temp_buf).unwrap_or(0)
+        let write_len = socket.send_slice(&temp_buf).unwrap_or(0);
+        drop(sockets); 
+        if write_len > 0 {
+             crate::net::net_poll();
+            }
+            write_len
     }
 
     fn get_stat(&self) -> Stat {

@@ -140,6 +140,7 @@ const SYSCALL_GETSOCKNAME: usize = 204;
 const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_SETSOCKOPT: usize = 208;
+const SYSCALL_GETSOCKOPT: usize = 209;
 const SYSCALL_SENDMSG: usize = 211;
 const SYSCALL_RECVMSG: usize = 212;
 const SYSCALL_BRK: usize = 214;
@@ -430,6 +431,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_VMSPLICE => sys_vmsplice(args[0] as usize, args[1] as *const IoVec, args[2] as usize, args[3] as u32),
         SYSCALL_SPLICE => sys_splice(args[0] as usize, args[1] as *mut i64, args[2] as usize, args[3] as *mut i64, args[4] as usize, args[5] as u32),
         SYSCALL_PERSONALITY => sys_personality(args[0] as usize),
+        SYSCALL_GETSOCKOPT => sys_getsockopt(args[0] as usize, args[1] as i32, args[2] as i32, args[3] as *mut u8, args[4] as *mut u32),
         SYSCALL_UNSHARE => sys_unshare(args[0] as i32),
         SYSCALL_USERFAULTFD => sys_userfaultfd(args[0] as i32),
         SYSCALL_MEMBARRIER => sys_membarrier(args[0] as i32, args[1] as u32, args[2] as i32),

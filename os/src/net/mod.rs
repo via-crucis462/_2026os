@@ -155,8 +155,10 @@ lazy_static! {
         let mut iface = Interface::new(config, &mut device, Instant::from_millis(0));
 
         let ip_addr = IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24);
+        let loopback_addr = IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8);
         iface.update_ip_addrs(|ip_addrs| {
             ip_addrs.push(ip_addr).unwrap();
+            ip_addrs.push(loopback_addr).unwrap();
         });
         iface.routes_mut().add_default_ipv4_route(Ipv4Address::new(10, 0, 2, 2)).unwrap();
         MPSafeCell::new(iface)
@@ -168,14 +170,12 @@ fn check_and_handle_loopback(packet: &[u8]) -> bool {
         return false;
     }
 
-    // 1. 拦截 IPv4 报文 (EtherType == 0x0800)
+
     if packet[12] == 0x08 && packet[13] == 0x00 {
         if packet.len() >= 34 {
-            // 提取目的 IP 地址 (IPv4 头偏移 16 字节，整个以太网帧偏移 14 + 16 = 30)
             let dst_ip = [packet[30], packet[31], packet[32], packet[33]];
             if dst_ip == [127, 0, 0, 1] || dst_ip == [10, 0, 2, 15] {
                 let mut loopback_packet = packet.to_vec();
-                // 关键点：强行将目的 MAC 改为发送端自身的 MAC (即以太网帧里的源 MAC 6..12)
                 loopback_packet[0..6].copy_from_slice(&packet[6..12]);
                 LOOPBACK_QUEUE.lock().push_back(loopback_packet);
                 return true;
