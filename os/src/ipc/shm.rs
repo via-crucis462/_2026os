@@ -20,6 +20,8 @@ pub struct ShmManager {
     id_allocator: RecycleAllocator,
     // id->Shm
     shms: BTreeMap<u32, Arc<Shm>>,
+    // addr -> shmid，供 shmdt 查找
+    attachments: BTreeMap<usize, u32>,
 }
 
 impl ShmManager {
@@ -27,6 +29,7 @@ impl ShmManager {
         Self {
             id_allocator: RecycleAllocator::new(),
             shms: BTreeMap::new(),
+            attachments: BTreeMap::new(),
         }
     }
     pub fn get_shm(&self, id: u32) -> Option<Arc<Shm>> {
@@ -50,6 +53,14 @@ impl ShmManager {
         let shm = Arc::new(Shm::new(id as u32, size, key, mode, cpid, uid, gid));
         self.shms.insert(id as u32, shm.clone());
         shm
+    }
+    /// 记录 shmat 的映射关系
+    pub fn record_attach(&mut self, shmid: u32, addr: usize) {
+        self.attachments.insert(addr, shmid);
+    }
+    /// 根据地址查找 shmid，查完后移除记录
+    pub fn take_attach(&mut self, addr: usize) -> Option<u32> {
+        self.attachments.remove(&addr)
     }
 }
 
@@ -130,6 +141,15 @@ impl Shm {
     }
     pub fn get_stat(&self) -> ShmidDs {
         *self.stat.lock()
+    }
+    pub fn set_lpid(&self, pid: usize) {
+        self.stat.lock().shm_lpid = pid;
+    }
+    pub fn set_perm_fields(&self, uid: u32, gid: u32, mode: u16) {
+        let mut s = self.stat.lock();
+        s.shm_perm.uid = uid;
+        s.shm_perm.gid = gid;
+        s.shm_perm.mode = mode;
     }
     pub fn inner(&self) -> Arc<OSInode> {
         self.inner.clone()

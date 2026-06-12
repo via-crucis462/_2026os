@@ -130,8 +130,10 @@ const SYSCALL_MSGRCV: usize = 188;
 const SYSCALL_MSGSND: usize = 189;
 
 const SYSCALL_SHMGET: usize = 194;
+const SYSCALL_SHMDT: usize = 195;
 /// shmat syscall
 const SYSCALL_SHMAT: usize = 196;
+const SYSCALL_SHMCTL: usize = 197;
 
 const SYSCALL_SOCKET: usize = 198;
 const SYSCALL_SOCKETPAIR: usize = 199;
@@ -426,6 +428,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_COPY_FILE_RANGE => sys_copy_file_range(args[0], args[1] as *mut i64, args[2], args[3] as *mut i64, args[4], args[5] as u32),
         SYSCALL_SHMGET => sys_shmget(args[0] as i32, args[1], args[2] as i32),
         SYSCALL_SHMAT => sys_shmat(args[0], args[1], args[2] as i32),
+        SYSCALL_SHMDT => sys_shmdt(args[0] as usize),
+        SYSCALL_SHMCTL => sys_shmctl(args[0] as u32, args[1], args[2]),
         SYSCALL_MSGGET => sys_msgget(args[0] as u32, args[1]),
         SYSCALL_MSGSND => sys_msgsnd(args[0], args[1], args[2], args[3]),
         SYSCALL_MSGRCV => sys_msgrcv(args[0], args[1], args[2], args[3] as isize, args[4]),

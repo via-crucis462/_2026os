@@ -1152,7 +1152,7 @@ impl MemorySet {
                     area.resize(a_start, a_start); // 长度设为0，稍后统一 retain 清理
                     
                 } else if !delete_left && !delete_right {
-                    panic!("munmap: test : split area in the middle");
+                    // panic!("munmap: test : split area in the middle");
                     // 情况2：Split（目标区域在当前块中间，一分为二）
                     // 2.1 清理中间被 unmap 的页表和物理页
                     for vpn in VPNRange::new(start_vpn, end_vpn) {
