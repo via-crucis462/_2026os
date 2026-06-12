@@ -94,7 +94,7 @@ fn _run_a_test(script: &str) -> i32 {
     exit_code
 }
 
-#[no_mangle]
+/*#[no_mangle]
 fn main() -> i32 {
     chdir("/musl\0");
 
@@ -216,4 +216,16 @@ echo \"#### OS COMP TEST GROUP END glibc-musl ####\"
     let mut _status: i32 = 0;
     waitpid((-1isize) as usize, &mut _status);
     0
+}*/
+
+#[no_mangle]
+fn main() -> i32 {
+    chdir("/musl\0");
+    let cmd = "sh /musl/netperf_testcode.sh";
+    run_shell(cmd);
+    loop {
+        let mut _status: i32 = 0;
+        if waitpid((-1isize) as usize, &mut _status) < 0 {
+        }
+    }
 }

@@ -9,6 +9,7 @@ use alloc::vec;
 use crate::net::MsgHdr;
 use crate::net::IoVec;
 use crate::net::netlink::StandardNetlinkSocket;
+use crate::net::socket::UdpSocket;
 
 
 /// 获取指定 Socket 的本地地址和端口信息。
@@ -224,55 +225,39 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
     let process = task.process();
     let inner = process.inner_exclusive_access();
     let token = inner.memory_set.token();
-
-
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return Errno::EBADF.as_isize();
     }
-
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+
     drop(inner); 
-
-    if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
-
-        if addr.is_null() {
-            return Errno::EFAULT.as_isize();
+    if addrlen < 16 {
+        return Errno::EINVAL.as_isize(); 
+    }
+    if addr.is_null() {
+        return Errno::EFAULT.as_isize();
+    }
+    let family_bytes = {
+        if let Some(b) = try_translated_read(token, addr as *const [u8; 2]) {
+            b
+        } else {
+            return EFAULT.as_isize();
         }
+    };
+    let sa_family = u16::from_ne_bytes(family_bytes);
+    const AF_UNSPEC: u16 = 0;
+    const AF_INET: u16 = 2;
+   
 
-     
-        let family_bytes = {
-            if let Some(b) = try_translated_read(token, addr as *const [u8; 2]) {
-                b
-            } else {
-                return EFAULT.as_isize();
-            }
-        };
-        
- 
-        let sa_family = u16::from_ne_bytes(family_bytes);
-
-      
-        const AF_UNSPEC: u16 = 0;
         if sa_family == AF_UNSPEC {
-
-             socket.disconnect(); 
+            if let Some(tcp_socket) = file.as_any().downcast_ref::<TcpSocket>() {
+                tcp_socket.disconnect(); 
+            }
             return 0;
         }
-
-        if addrlen < 16 {
-            return Errno::EINVAL.as_isize(); 
-        }
-        const AF_INET: u16 = 2;
         if sa_family != AF_INET {
             return Errno::EAFNOSUPPORT.as_isize(); 
         }
-
-  
-        if addrlen < 16 {
-            return Errno::EINVAL.as_isize(); 
-        }
-
-
         let sockaddr = {
             if let Some(s) = try_translated_read(token, addr as *const [u8; 16]) {
                 s
@@ -280,22 +265,22 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
                 return EFAULT.as_isize();
             }
         };
-        
-      
         let port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
-        
         let ip = [sockaddr[4], sockaddr[5], sockaddr[6], sockaddr[7]];
-        
         let endpoint = smoltcp::wire::IpEndpoint::new(
             smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address(ip)),
             port
         );
-
-     
-        socket.connect(endpoint)
-    } else {
-        Errno::ENOTSOCK.as_isize()
-    }
+        if let Some(tcp_socket) = file.as_any().downcast_ref::<TcpSocket>() {
+            tcp_socket.connect(endpoint)
+        } 
+        else if let Some(udp_socket) = file.as_any().downcast_ref::<UdpSocket>() {
+            udp_socket.connect(endpoint); 
+            0 
+        } else {
+            Errno::ENOTSOCK.as_isize()
+        }
+   
 }
 
 /// 发送数据到指定地址。

@@ -17,6 +17,7 @@ use smoltcp::socket::raw::{Socket as RawSocketSmol, PacketBuffer as RawPacketBuf
 use smoltcp::wire::{IpVersion, IpProtocol};
 use crate::sync::WaitQueue;
 use crate::process::current_task_to_sleep;
+use smoltcp::socket::udp;
 
 pub struct TcpSocket {
     pub handle: SocketHandle,
@@ -161,109 +162,154 @@ lazy_static! {
     static ref LOCAL_UDP_SOCKETS: Mutex<BTreeMap<u16, Arc<Mutex<VecDeque<(IpEndpoint, Vec<u8>)>>>>> = Mutex::new(BTreeMap::new());
 }
 pub struct UdpSocket {
-    // 该 Socket 绑定的本地端口
-    pub bound_port: Mutex<Option<u16>>,
-    // 该 Socket 专属的接收队列，用 Arc 方便塞入全局表共享
-    pub recv_queue: Arc<Mutex<VecDeque<(IpEndpoint, Vec<u8>)>>>,
+    pub handle: smoltcp::iface::SocketHandle,
+    //远端地址队列
+    pub remote_ep: Mutex<Option<IpEndpoint>>, 
 }
 
 impl UdpSocket {
     pub fn new() -> Self {
-        Self {
-            bound_port: Mutex::new(None),
-            recv_queue: Arc::new(Mutex::new(VecDeque::new())),
+        // 分配 16 个包的元数据空间，和 16KB 的数据缓存空间
+        let rx_buffer = udp::PacketBuffer::new(
+            vec![udp::PacketMetadata::EMPTY; 16],
+            vec![0; 16384]
+        );
+        let tx_buffer = udp::PacketBuffer::new(
+            vec![udp::PacketMetadata::EMPTY; 16],
+            vec![0; 16384]
+        );
+        
+        let socket = udp::Socket::new(rx_buffer, tx_buffer);
+        // 将 socket 加入你内核的全局协议栈 SOCKET_SET
+        let handle = crate::net::SOCKET_SET.exclusive_access().add(socket);
+        
+        Self { 
+            handle,
+            remote_ep: Mutex::new(None),
         }
     }
 
-    /// 绑定本地端口 (供 sys_bind 调用)
+
     pub fn bind(&self, port: u16) -> isize {
-        // 先锁全局映射表，再锁 bound_port —— 与 sendto() 保持一致的锁顺序，避免 AB-BA 死锁
-        let mut map = LOCAL_UDP_SOCKETS.lock();
-        let mut bound = self.bound_port.lock();
-        *bound = Some(port);
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<udp::Socket>(self.handle);
         
-        // 把自己的接收队列注册到全局映射表里！
-        // 这样别人往这个端口发数据，就会直接进 recv_queue 里。
-        map.insert(port, self.recv_queue.clone());
-        0 // 成功
-    }
-
-    /// 发送数据 (供 sys_sendto 调用)
-    pub fn sendto(&self, buf: &[u8], remote_ep: IpEndpoint) -> isize {
-        // 1. 判断是不是发给本地回环 127.0.0.1
-        let is_loopback = match remote_ep.addr {
-            IpAddress::Ipv4(v4) => v4.0 == [127, 0, 0, 1],
-            _ => false,
-        };
-
-        if is_loopback {
-            let map = LOCAL_UDP_SOCKETS.lock();
-            // 2. 检查有没有兄弟 Socket 绑定了这个目标端口
-            if let Some(target_queue) = map.get(&remote_ep.port) {
-                // 生成一个虚假的源端点 (告诉对方是谁发的)
-                let src_port = self.bound_port.lock().unwrap_or(49152); // 没 bind 则用个临时端口
-                let src_ep = IpEndpoint::new(IpAddress::v4(127, 0, 0, 1), src_port);
-                
-                // 把数据塞进目标 Socket 
-                target_queue.lock().push_back((src_ep, buf.to_vec()));
-                return buf.len() as isize;
-            } else {
-                return crate::syscall::errno::Errno::ECONNREFUSED.as_isize(); // 目标端口未监听
-            }
+        match socket.bind(port) {
+            Ok(_) => 0,
+            Err(_) => crate::syscall::errno::Errno::EADDRINUSE.as_isize(),
         }
-        
-        // 如果不是 127.0.0.1，理论上这里应该交给 smoltcp 去发真实的网卡包。
-        // 但为了通过测例，我们先兜底返回一个虚假的成功。
-        buf.len() as isize
     }
 
-    /// 接收数据 (供 sys_recvfrom 调用)
+
+    pub fn connect(&self, remote_ep: IpEndpoint) -> isize {
+        let mut remote = self.remote_ep.lock();
+        *remote = Some(remote_ep);
+        0
+    }
+
+
+    pub fn disconnect(&self) -> isize {
+        let mut remote = self.remote_ep.lock();
+        *remote = None;
+        0
+    }
+
+
+    pub fn sendto(&self, buf: &[u8], remote_ep: IpEndpoint) -> isize {
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<udp::Socket>(self.handle);
+        
+
+        if !socket.can_send() {
+            return crate::syscall::errno::Errno::EAGAIN.as_isize();
+        }
+
+        match socket.send_slice(buf, remote_ep) {
+            Ok(_) => buf.len() as isize,
+            Err(_) => crate::syscall::errno::Errno::ECONNREFUSED.as_isize(),
+        }
+    }
+
+    /// 处理 UdpMetadata，提取真实 Endpoint
     pub fn recvfrom(&self, buf: &mut [u8]) -> Option<(usize, IpEndpoint)> {
-        let mut queue = self.recv_queue.lock();
-        // 尝试从队列里拿出一个包
-        if let Some((src_ep, data)) = queue.pop_front() {
-            let copy_len = data.len().min(buf.len());
-            buf[..copy_len].copy_from_slice(&data[..copy_len]);
-            Some((copy_len, src_ep))
-        } else {
-            None // 暂无数据 (在阻塞模式下，系统调用层需要挂起进程等待)
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<udp::Socket>(self.handle);
+        
+        if !socket.can_recv() {
+            return None; // 暂无数据
+        }
+
+        match socket.recv_slice(buf) {
+            Ok((len, meta)) => {
+                Some((len, meta.endpoint))
+            },
+            Err(_) => None,
         }
     }
 }
-
 // 实现 File trait，使其能放进系统的 fd_table 中
 impl File for UdpSocket {
     fn readable(&self) -> bool {
-        let queue = self.recv_queue.lock();
-        !queue.is_empty()
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
+        socket.can_recv()
     }
-    fn writable(&self) -> bool { true }
+    fn writable(&self) -> bool {
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
+        socket.can_send()
+    }
     
     fn read(&self, mut buf: UserBuffer) -> usize {
-        // 提供一个缺省的 read 实现，供底层的 read() 系统调用兜底
-        let mut queue = self.recv_queue.lock();
-        if let Some((_src_ep, data)) = queue.pop_front() {
-            let mut current = 0;
-            let recv_len = data.len();
-            for buffer in buf.buffers.iter_mut() {
-                let copy_len = buffer.len().min(recv_len.saturating_sub(current));
-                if copy_len == 0 {
-                    break;
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
+        
+        if !socket.can_recv() {
+            return 0; 
+        }
+
+        let mut temp_buf = alloc::vec![0u8; 16384];
+        
+        match socket.recv_slice(&mut temp_buf) {
+            Ok((recv_len, _meta)) => {
+                let mut current = 0;
+                for buffer in buf.buffers.iter_mut() {
+                    let copy_len = buffer.len().min(recv_len.saturating_sub(current));
+                    if copy_len == 0 {
+                        break;
+                    }
+                    buffer[..copy_len].copy_from_slice(&temp_buf[current..current + copy_len]);
+                    current += copy_len;
+                    if current == recv_len { 
+                        break; 
+                    }
                 }
-                buffer[..copy_len].copy_from_slice(&data[current..current + copy_len]);
-                current += copy_len;
-                if current == recv_len { break; }
+                current 
             }
-            current
-        } else {
-            0
+            Err(_) => 0,
         }
     }
-    
+
     fn write(&self, buf: UserBuffer) -> usize {
-        // Udp 默认用 sendto，普通 write 这里做兜底
-        println!("UdpSocket write called with {} bytes, but no destination specified. Ignoring.", buf.len());
-        buf.len()
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
+        
+        if !socket.can_send() {
+            return 0;
+        }
+        let mut temp_buf = alloc::vec![];
+        for buffer in buf.buffers.iter() {
+            temp_buf.extend_from_slice(buffer);
+        }
+        let remote = *self.remote_ep.lock();
+        if let Some(remote_ep) = remote {
+            match socket.send_slice(&temp_buf, remote_ep) {
+                Ok(_) => temp_buf.len(),
+                Err(_) => 0,
+            }
+        } else {
+            0 
+        }
     }
 
     fn get_stat(&self) -> Stat {
