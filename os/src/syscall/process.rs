@@ -2944,6 +2944,7 @@ pub fn sys_pselect6(
     if nfds > PSELECT_MAX_FD {
         return EINVAL.as_isize();
     }*/
+    
     let nfds = nfds.min(64);
 
     let task = current_task().unwrap();
@@ -2960,7 +2961,27 @@ pub fn sys_pselect6(
             }
         };
     }
-    
+    let mut writefds = 0usize;
+    if _writefds_ptr as usize != 0 {
+        writefds = {
+            if let Some(wf) = try_translated_read(token, _writefds_ptr) {
+                wf
+            } else {
+                return crate::syscall::errno::Errno::EFAULT.as_isize();
+            }
+        };
+    }
+
+    let mut exceptfds = 0usize;
+    if _exceptfds_ptr as usize != 0 {
+        exceptfds = {
+            if let Some(ef) = try_translated_read(token, _exceptfds_ptr) {
+                ef
+            } else {
+                return crate::syscall::errno::Errno::EFAULT.as_isize();
+            }
+        };
+    }
     let has_timeout = _timeout as usize != 0;
     let mut deadline_ms: usize = 0;
     let mut timeout_ms: usize = 0;
@@ -2993,25 +3014,25 @@ pub fn sys_pselect6(
         
         let mut ready_count = 0;
         let mut ready_readfds = 0usize;
+        let mut ready_writefds = 0usize;
+        let mut ready_exceptfds = 0usize;
         let mut process_inner = process.inner_exclusive_access();
         let limit = nfds.min(process_inner.fd_table.len());
         for fd in 0..limit {
             if (readfds & (1usize << fd)) != 0 {
                    
                 if let Some(fd_file) = &process_inner.fd_table[fd].file {
-                    /// --- 调试 ---
-                    /* 
-                    if let Some(tcp_socket) = fd_file.as_any().downcast_ref::<TcpSocket>() {
-                        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-                        let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_socket.handle);
-                        println!(
-                            "[DEBUG] pselect6 FD {}: Tx = {}, Rx = {}, can_recv = {}, may_recv = {}", 
-                            fd, smol_socket.send_queue(), smol_socket.recv_queue(), smol_socket.can_recv(), smol_socket.may_recv()
-                        );
-                    }*/
-                    // --- 调试 ---
                     if fd_file.readable() {
                         ready_readfds |= 1usize << fd;
+                        ready_count += 1;
+                    }
+                }
+            }
+            if (writefds & (1usize << fd)) != 0 {
+                   
+                if let Some(fd_file) = &process_inner.fd_table[fd].file {
+                    if fd_file.readable() {
+                        ready_writefds |= 1usize << fd;
                         ready_count += 1;
                     }
                 }
@@ -3026,6 +3047,12 @@ pub fn sys_pselect6(
                 if !try_translated_write(token, readfds_ptr, ready_readfds) {
                     return EFAULT.as_isize();
                 }
+            }
+            if _writefds_ptr as usize != 0 && !try_translated_write(token, _writefds_ptr, ready_writefds) {
+                return EFAULT.as_isize();
+            }
+            if _exceptfds_ptr as usize != 0 && !try_translated_write(token, _exceptfds_ptr, ready_exceptfds) {
+                return EFAULT.as_isize();
             }
             return ready_count as isize;
         }

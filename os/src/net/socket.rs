@@ -47,19 +47,31 @@ impl TcpSocket {
         socket.remote_endpoint()
     }
     pub fn connect(&self, remote_ep: smoltcp::wire::IpEndpoint) -> isize {
-        let mut iface = crate::net::NET_IFACE.exclusive_access();
+       println!("[TCP Connect] Attempting to connect to {}, using handle {:?}", remote_ep, self.handle);
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
-        
+        let is_loopback = match remote_ep.addr {
+            smoltcp::wire::IpAddress::Ipv4(v4) => v4.as_bytes()[0] == 127,
+            _ => false,
+        };
         // 动态分配一个临时的本地端口 (Ephemeral Port, 范围 49152~65535)
         let local_port = (crate::arch::timer::get_time_us() % 16384 + 49152) as u16;
         
-        let res = match socket.connect(iface.context(), remote_ep, local_port) {
-            Ok(_) => 0, 
-            Err(_) => crate::syscall::errno::Errno::ECONNREFUSED.as_isize(),
+        let res = 
+        if is_loopback {
+            let mut lo_iface = crate::net::LO_IFACE.exclusive_access();
+            socket.connect(lo_iface.context(), remote_ep, local_port)
+        } 
+        else {
+            let mut eth_iface = crate::net::NET_IFACE.exclusive_access();
+            socket.connect(eth_iface.context(), remote_ep, local_port)
         };
+        let connect_status = match res {
+        Ok(_) => 0, 
+        Err(_) => crate::syscall::errno::Errno::ECONNREFUSED.as_isize(),
+    };
         drop(sockets);
-        drop(iface);
+
        loop {
             crate::net::net_poll(); 
 
@@ -230,6 +242,7 @@ impl UdpSocket {
 
 
     pub fn connect(&self, remote_ep: IpEndpoint) -> isize {
+        println!("[UDP Connect] Setting remote to {}", remote_ep);
         let mut remote = self.remote_ep.lock();
         *remote = Some(remote_ep);
         0
