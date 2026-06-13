@@ -2939,11 +2939,12 @@ pub fn sys_pselect6(
     _sigmask: *const usize,
 ) -> isize {
 
-    // 大于64会导致超出usize
+    /* 大于64会导致超出usize由于传入是1024，超过最大限制，所以截断用
     const PSELECT_MAX_FD: usize = 64;
     if nfds > PSELECT_MAX_FD {
         return EINVAL.as_isize();
-    }
+    }*/
+    let nfds = nfds.min(64);
 
     let task = current_task().unwrap();
     let process = task.process();
@@ -2988,25 +2989,37 @@ pub fn sys_pselect6(
 
     // debug!("[kernel] pselect6 nfds={} has_timeout={} timeout_ms={}", nfds, has_timeout, timeout_ms);
     loop {
-        let mut process_inner = process.inner_exclusive_access();
-        let fd_table = &process_inner.fd_table.clone();
-        drop(process_inner); // 写回前先释放锁
+        crate::net::net_poll();
+        
         let mut ready_count = 0;
         let mut ready_readfds = 0usize;
-        
-        // 遍历轮询用户关心的 FD
-        for fd in 0..nfds {
+        let mut process_inner = process.inner_exclusive_access();
+        let limit = nfds.min(process_inner.fd_table.len());
+        for fd in 0..limit {
             if (readfds & (1usize << fd)) != 0 {
-                if fd < fd_table.len() {
-                    if let Some(file) = &fd_table[fd].file {
-                        if file.readable() {
-                            ready_readfds |= 1usize << fd;
-                            ready_count += 1;
-                        }
+                   
+                if let Some(fd_file) = &process_inner.fd_table[fd].file {
+                    /// --- 调试 ---
+                    /* 
+                    if let Some(tcp_socket) = fd_file.as_any().downcast_ref::<TcpSocket>() {
+                        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+                        let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_socket.handle);
+                        println!(
+                            "[DEBUG] pselect6 FD {}: Tx = {}, Rx = {}, can_recv = {}, may_recv = {}", 
+                            fd, smol_socket.send_queue(), smol_socket.recv_queue(), smol_socket.can_recv(), smol_socket.may_recv()
+                        );
+                    }*/
+                    // --- 调试 ---
+                    if fd_file.readable() {
+                        ready_readfds |= 1usize << fd;
+                        ready_count += 1;
                     }
                 }
             }
         }
+        drop(process_inner); // 写回前先释放锁
+
+
         
         if ready_count > 0 {
             if readfds_ptr as usize != 0 {

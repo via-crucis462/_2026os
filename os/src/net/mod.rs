@@ -207,7 +207,7 @@ fn check_and_handle_loopback(packet: &[u8]) -> bool {
 }
 pub fn net_poll() {
     // 通过大循环直至环回队列彻底清空
-    // 保证在同一个 poll 调度周期内完成完整的环回包对流（如 TCP 握手的 SYN -> SYN-ACK 交互）
+    // 保证在同一个 poll 调度周期内完成完整的环回包对流
     loop {
         let mut iface = NET_IFACE.exclusive_access();
         let mut sockets = SOCKET_SET.exclusive_access();
@@ -227,7 +227,13 @@ pub fn net_poll() {
                     }
                     smoltcp::socket::Socket::Tcp(tcp_sock) => {
                         if tcp_sock.can_recv() { has_data = true; }
-                    }
+                        else if tcp_sock.is_active() && tcp_sock.state() != smoltcp::socket::tcp::State::Listen {
+                        has_data = true;
+                        }
+                        else if !tcp_sock.may_recv() && tcp_sock.state() != smoltcp::socket::tcp::State::Listen {
+                            has_data = true;
+                        }
+                        }
                     smoltcp::socket::Socket::Udp(udp_sock) => {
                         if udp_sock.can_recv() { has_data = true; }
                     }

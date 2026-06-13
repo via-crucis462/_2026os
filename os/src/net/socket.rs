@@ -96,30 +96,34 @@ impl File for TcpSocket {
     }
 
     fn read(&self, mut buf: UserBuffer) -> usize {
-        let mut sockets = SOCKET_SET.exclusive_access();
-        let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
-
-        if !socket.may_recv() {
-            return 0; 
-        }
-
-        let mut temp_buf = vec![0u8; buf.len()];
-        let recv_len = socket.recv_slice(&mut temp_buf).unwrap_or(0);
-
-        let mut current = 0;
-        for buffer in buf.buffers.iter_mut() {
-            let copy_len = buffer.len().min(recv_len.saturating_sub(current));
-            if copy_len == 0 {
-                break;
+        loop {
+            crate::net::net_poll();
+            let mut sockets = SOCKET_SET.exclusive_access();
+            let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
+            if !socket.may_recv() && !socket.can_recv() {
+                return 0; 
             }
-            buffer[..copy_len].copy_from_slice(&temp_buf[current..current + copy_len]);
-            current += copy_len;
-            if current == recv_len { break; }
+            if socket.can_recv() {
+                let mut temp_buf = vec![0u8; buf.len()];
+                if let Ok(recv_len) = socket.recv_slice(&mut temp_buf) {
+                    if recv_len > 0 {
+                        println!("TcpSocket read SUCCESS: got {} bytes", recv_len);
+                        let mut current = 0;
+                        for buffer in buf.buffers.iter_mut() {
+                            let copy_len = buffer.len().min(recv_len.saturating_sub(current));
+                            if copy_len == 0 { break; }
+                            buffer[..copy_len].copy_from_slice(&temp_buf[current..current + copy_len]);
+                            current += copy_len;
+                            if current == recv_len { break; }
+                        }
+                        return current; 
+                    }
+                }
+            }
+            drop(sockets); 
+            crate::task::suspend_current_and_run_next();
         }
-        
-        current
     }
-
     fn write(&self, buf: UserBuffer) -> usize {
         println!("TcpSocket write called with {} bytes", buf.len());
         let mut sockets = SOCKET_SET.exclusive_access();
@@ -214,8 +218,11 @@ impl UdpSocket {
     pub fn bind(&self, port: u16) -> isize {
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<udp::Socket>(self.handle);
-        
-        match socket.bind(port) {
+        let mut actual_port = port;
+        if actual_port == 0 {
+            actual_port = (crate::arch::timer::get_time_us() % 16384 + 49152) as u16;
+        }
+        match socket.bind(actual_port) {
             Ok(_) => 0,
             Err(_) => crate::syscall::errno::Errno::EADDRINUSE.as_isize(),
         }
@@ -282,32 +289,34 @@ impl File for UdpSocket {
     }
     
     fn read(&self, mut buf: UserBuffer) -> usize {
-        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-        let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
-        
-        if !socket.can_recv() {
-            return 0; 
-        }
-
-        let mut temp_buf = alloc::vec![0u8; 16384];
-        
-        match socket.recv_slice(&mut temp_buf) {
-            Ok((recv_len, _meta)) => {
-                let mut current = 0;
-                for buffer in buf.buffers.iter_mut() {
-                    let copy_len = buffer.len().min(recv_len.saturating_sub(current));
-                    if copy_len == 0 {
-                        break;
+        loop {
+            crate::net::net_poll();
+            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+            let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
+            if socket.can_recv() {
+                let mut temp_buf = alloc::vec![0u8; 16384];
+                match socket.recv_slice(&mut temp_buf) {
+                    Ok((recv_len, _meta)) => {
+                        let mut current = 0;
+                        for buffer in buf.buffers.iter_mut() {
+                            let copy_len = buffer.len().min(recv_len.saturating_sub(current));
+                            if copy_len == 0 {
+                                break;
+                            }
+                            buffer[..copy_len].copy_from_slice(&temp_buf[current..current + copy_len]);
+                            current += copy_len;
+                            if current == recv_len { 
+                                break; 
+                            }
+                        }
+                        return current; 
                     }
-                    buffer[..copy_len].copy_from_slice(&temp_buf[current..current + copy_len]);
-                    current += copy_len;
-                    if current == recv_len { 
-                        break; 
+                    Err(_) => {
                     }
                 }
-                current 
             }
-            Err(_) => 0,
+            drop(sockets);
+            crate::task::suspend_current_and_run_next();
         }
     }
 

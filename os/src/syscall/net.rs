@@ -10,6 +10,9 @@ use crate::net::MsgHdr;
 use crate::net::IoVec;
 use crate::net::netlink::StandardNetlinkSocket;
 use crate::net::socket::UdpSocket;
+use crate::process::FileDescriptor;
+use crate::process::FdFlags;
+use crate::net::net_poll;
 
 
 /// 获取指定 Socket 的本地地址和端口信息。
@@ -333,7 +336,9 @@ pub fn sys_sendto(
     }
     // 对于已连接的 TCP Socket，sendto 会忽略 dest_addr，等价于普通写操作
     let user_buf = UserBuffer::new(translated_byte_buffer(token, buf, len));
-    file.write(user_buf) as isize
+    let ret = file.write(user_buf) as isize;
+    net_poll();
+    return ret;
 }
 
 /// 接收网络数据并获取来源地址。
@@ -645,48 +650,99 @@ pub fn sys_listen(fd: usize, _backlog: i32) -> isize {
 pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
-    let mut inner = process.inner_exclusive_access();
+    let token = process.inner_exclusive_access().memory_set.token(); 
+    let file = {
+        let inner = process.inner_exclusive_access();
+        const O_PATH: usize = 0o10000000; 
+        if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+            return crate::syscall::errno::Errno::EBADF.as_isize();
+        }
+        if (inner.fd_table[fd].status & O_PATH) != 0 {
+            return crate::syscall::errno::Errno::EBADF.as_isize();
+        }
+        inner.fd_table[fd].file.as_ref().unwrap().clone()
+    };
+    if let Some(orig_socket) = file.as_any().downcast_ref::<TcpSocket>() {
+        let mut local_port = 0;
+        let mut remote_ep = None;
+        loop {
+            crate::net::net_poll(); // 驱动网卡收发包
+            let mut is_established = false;
+            {
+                let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+                let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(orig_socket.handle);
+                use smoltcp::socket::tcp::State;
+                let state = smol_socket.state();
+                if state == State::Established || state == State::SynReceived {
+                    is_established = true;
+                    if let Some(ep) = smol_socket.local_endpoint() {
+                        local_port = ep.port;
+                    }
+                    remote_ep = smol_socket.remote_endpoint();
+                }
+            }
 
-    const O_PATH: usize = 0o10000000; 
+            if is_established {
+                break; 
+            }
+            crate::task::suspend_current_and_run_next();
+        }
 
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
-        return Errno::EBADF.as_isize();
-    }
-
-    if (inner.fd_table[fd].status & O_PATH) != 0 {
-        return Errno::EBADF.as_isize();
-    }
-
-
-    if addr as usize == 0xffffffffffffffff || addrlen as usize == 0xffffffffffffffff {
-        return Errno::EFAULT.as_isize();
-    }
-
-
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
-    
-    if let Some(_socket) = file.as_any().downcast_ref::<TcpSocket>() {
-        
-
+        // 重新获取进程锁，准备分配新的文件描述符
+        let mut inner = process.inner_exclusive_access();
         let new_fd = match inner.alloc_fd() {
             Some(idx) => idx,
-            None => return Errno::EMFILE.as_isize(), 
+            None => return crate::syscall::errno::Errno::EMFILE.as_isize(), 
         };
-
-
-        let new_socket = Arc::new(TcpSocket::new());
-
+        //创建一个全新的 Socket 
+        let new_listener = Arc::new(TcpSocket::new());
+        {
+            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+            let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(new_listener.handle);
+            if local_port != 0 {
+                let _ = smol_socket.listen(local_port); // 让新 Socket 监听原端口
+            }
+        }
+        //  替换 FD 表
+        inner.fd_table[fd].file = Some(new_listener); 
         inner.fd_table[new_fd] = FileDescriptor {
-            file: Some(new_socket),
+            file: Some(file.clone()), 
             flags: FdFlags::empty(),
             status: 0,
         };
+        drop(inner); 
 
-        new_fd as isize
+        //  把客户端的 IP 和端口写回给 addr 指针
+        if addr as usize != 0 && addrlen as usize != 0 {
+            if let Some(ep) = remote_ep {
+                let family: u16 = 2; // AF_INET
+                let port = ep.port;
+                let mut ip = [0u8; 4];
+                let smoltcp::wire::IpAddress::Ipv4(v4) = ep.addr ;
+                ip = v4.0;
+                
+                let mut sockaddr_bytes = [0u8; 16];
+                sockaddr_bytes[0..2].copy_from_slice(&family.to_ne_bytes());
+                sockaddr_bytes[2..4].copy_from_slice(&port.to_be_bytes());
+                sockaddr_bytes[4..8].copy_from_slice(&ip);
 
-        
+                unsafe {
+                    if let Some(user_len) = crate::mm::try_translated_read(token, addrlen) {
+                        let copy_len = (user_len as usize).min(16);
+                        let mut current_addr = addr as usize;
+                        for i in 0..copy_len {
+                            let _ = crate::mm::try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]);
+                            current_addr += 1;
+                        }
+                        let _ = crate::mm::try_translated_write(token, addrlen, 16u32);
+                    }
+                }
+            }
+        }
+
+        return new_fd as isize;
     } else {
-        Errno::ENOTSOCK.as_isize()
+        return crate::syscall::errno::Errno::ENOTSOCK.as_isize();
     }
 }
 /// 发送复杂消息 (Scatter IO)
