@@ -210,6 +210,7 @@ pub struct UdpSocket {
     pub handle: smoltcp::iface::SocketHandle,
     //远端地址队列
     pub remote_ep: Mutex<Option<IpEndpoint>>, 
+    pub local_port: Mutex<Option<u16>>,
 }
 
 impl UdpSocket {
@@ -223,18 +224,16 @@ impl UdpSocket {
             vec![udp::PacketMetadata::EMPTY; 16],
             vec![0; 16384]
         );
-        
         let socket = udp::Socket::new(rx_buffer, tx_buffer);
-        // 将 socket 加入你内核的全局协议栈 SOCKET_SET
+        // 将 socket 加入全局协议栈 SOCKET_SET
         let handle = crate::net::SOCKET_SET.exclusive_access().add(socket);
         
         Self { 
             handle,
             remote_ep: Mutex::new(None),
+            local_port: Mutex::new(None),
         }
     }
-
-
     pub fn bind(&self, port: u16) -> isize {
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<udp::Socket>(self.handle);
@@ -243,51 +242,52 @@ impl UdpSocket {
             actual_port = (crate::arch::timer::get_time_us() % 16384 + 49152) as u16;
         }
         match socket.bind(actual_port) {
-            Ok(_) => 0,
+            Ok(_) =>{
+                *self.local_port.lock() = Some(actual_port);
+                0
+            },
             Err(_) => crate::syscall::errno::Errno::EADDRINUSE.as_isize(),
         }
     }
-
-
     pub fn connect(&self, remote_ep: IpEndpoint) -> isize {
         println!("[UDP Connect] Setting remote to {}", remote_ep);
         let mut remote = self.remote_ep.lock();
         *remote = Some(remote_ep);
+        let mut port_lock = self.local_port.lock();
+        if port_lock.is_none() {
+            // 分配临时端口 
+            let ephemeral_port = (crate::arch::timer::get_time_us() % 16384 + 49152) as u16;
+            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+            let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
+            if socket.bind(ephemeral_port).is_ok() {
+                *port_lock = Some(ephemeral_port);
+            }
+        }
         0
     }
-
-
     pub fn disconnect(&self) -> isize {
         let mut remote = self.remote_ep.lock();
         *remote = None;
         0
     }
-
-
     pub fn sendto(&self, buf: &[u8], remote_ep: IpEndpoint) -> isize {
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<udp::Socket>(self.handle);
-        
-
         if !socket.can_send() {
             return crate::syscall::errno::Errno::EAGAIN.as_isize();
         }
-
         match socket.send_slice(buf, remote_ep) {
             Ok(_) => buf.len() as isize,
             Err(_) => crate::syscall::errno::Errno::ECONNREFUSED.as_isize(),
         }
     }
-
     /// 处理 UdpMetadata，提取真实 Endpoint
     pub fn recvfrom(&self, buf: &mut [u8]) -> Option<(usize, IpEndpoint)> {
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<udp::Socket>(self.handle);
-        
         if !socket.can_recv() {
             return None; // 暂无数据
         }
-
         match socket.recv_slice(buf) {
             Ok((len, meta)) => {
                 Some((len, meta.endpoint))

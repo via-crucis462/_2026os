@@ -206,23 +206,25 @@ pub fn net_poll() {
     if state_changed {
         let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
         for (handle, socket) in sockets.iter_mut() {
-            if let smoltcp::socket::Socket::Tcp(tcp) = socket {
-                if tcp.state() == smoltcp::socket::tcp::State::Listen {
-                    println!("[Debug] Server listening on: {:?}", tcp.local_endpoint());
-                }
-            }
-            let mut has_data = false;
+            let mut is_ready = false; 
             match socket {
-                smoltcp::socket::Socket::Raw(raw_sock) => { if raw_sock.can_recv() { has_data = true; } }
-                smoltcp::socket::Socket::Tcp(tcp_sock) => {
-                    if tcp_sock.can_recv() { has_data = true; }
-                    else if tcp_sock.is_active() && tcp_sock.state() != smoltcp::socket::tcp::State::Listen { has_data = true; }
-                    else if !tcp_sock.may_recv() && tcp_sock.state() != smoltcp::socket::tcp::State::Listen { has_data = true; }
+                smoltcp::socket::Socket::Raw(raw_sock) => { 
+                    // 同时检测可读和可写
+                    if raw_sock.can_recv() || raw_sock.can_send() { is_ready = true; } 
                 }
-                smoltcp::socket::Socket::Udp(udp_sock) => { if udp_sock.can_recv() { has_data = true; } }
+                smoltcp::socket::Socket::Tcp(tcp_sock) => {
+                    // TCP 同时检测可读和可写
+                    if tcp_sock.can_recv() || tcp_sock.can_send() { is_ready = true; }
+                    else if tcp_sock.is_active() && tcp_sock.state() != smoltcp::socket::tcp::State::Listen { is_ready = true; }
+                    else if !tcp_sock.may_recv() && tcp_sock.state() != smoltcp::socket::tcp::State::Listen { is_ready = true; }
+                }
+                smoltcp::socket::Socket::Udp(udp_sock) => { 
+                    // UDP 同时检测可读和可写
+                    if udp_sock.can_recv() || udp_sock.can_send() { is_ready = true; } 
+                }
                 _ => {}
             }
-            if has_data {
+            if is_ready {
                 if let Some(queue_arc) = queues.get(&handle) {
                     let queue_guard = queue_arc.lock();
                     if !queue_guard.is_empty() {

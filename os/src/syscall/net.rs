@@ -25,7 +25,7 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return EBADF.as_isize(); // EBADF
     }
-
+    println!("[DEBUG sys_getsockname START] FD: {}", fd);
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     drop(inner); 
     let mut user_len = unsafe {
@@ -42,23 +42,33 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
 
     if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
         // 1. 处理 TCP Socket
-        if let Some(ep) = socket.local_endpoint() {
+       let port_lock = socket.local_port.lock();
+        if let Some(p) = *port_lock {
+            port = p;
+        } 
+        else if let Some(ep) = socket.local_endpoint() {
             port = ep.port; 
-             let smoltcp::wire::IpAddress::Ipv4(v4) = ep.addr ;
+             let smoltcp::wire::IpAddress::Ipv4(v4) = ep.addr;
                 ip = v4.0;
-            
         }
+        println!("[DEBUG sys_getsockname TCP] Cached Port: {:?}", *port_lock);
         is_ip_socket = true;
     } else if let Some(socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         // 2. 处理 UDP Socket
-        let sockets = crate::net::SOCKET_SET.exclusive_access();
-        let udp_sock = sockets.get::<smoltcp::socket::udp::Socket>(socket.handle);
-        
-        let ep = udp_sock.endpoint(); 
-        port = ep.port;
-        if let Some(smoltcp::wire::IpAddress::Ipv4(v4)) = ep.addr {
-            ip = v4.0;
+        let port_lock = socket.local_port.lock();
+        println!("[DEBUG sys_getsockname UDP] Cached Port: {:?}", *port_lock);
+        if let Some(p) = *port_lock {
+            port = p;
+        } else {
+            let sockets = crate::net::SOCKET_SET.exclusive_access();
+            let udp_sock = sockets.get::<smoltcp::socket::udp::Socket>(socket.handle);
+            let ep = udp_sock.endpoint(); 
+            port = ep.port;
+            if let Some(smoltcp::wire::IpAddress::Ipv4(v4)) = ep.addr {
+                ip = v4.0;
+            }
         }
+        drop(port_lock);
         is_ip_socket = true;
     }
 
@@ -75,19 +85,23 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
                 let mut current_addr = addr as usize;
                 for i in 0..copy_len {
                     if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                        println!("[DEBUG sys_getsockname ERROR] try_translated_write failed at byte {}", i);
                         return EFAULT.as_isize();
                     }
                     current_addr += 1;
-                }
-                
-                // 告诉用户态实际填充了多少字节
+                }   
                 if !try_translated_write(token, addrlen, 16u32) {
+                    println!("[DEBUG sys_getsockname ERROR] try_translated_write addrlen failed");
                     return EFAULT.as_isize();
                 }
             } else {
                 return EFAULT.as_isize();
             }
         }
+        println!(
+            "[DEBUG sys_getsockname SUCCESS IP] Returning Port: {}, IP: {:?}, Bytes: {:?}", 
+            port, ip, sockaddr_bytes
+        );
         return 0; // 成功
     }
     else if let Some(_nl_socket) = file.as_any().downcast_ref::<StandardNetlinkSocket>() {
@@ -289,17 +303,11 @@ pub fn sys_sendto(
     let process = task.process();
     let inner = process.inner_exclusive_access();
     let token = inner.memory_set.token();
-
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return Errno::EBADF.as_isize();
     }
-
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     drop(inner);
-
-    if !file.writable() {
-        return Errno::EACCES.as_isize();
-    }
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         // 1. 从用户空间拷贝出发送数据
         let mut data = vec![0u8; len];
@@ -310,8 +318,6 @@ pub fn sys_sendto(
             data[current..current + copy_len].copy_from_slice(buffer);
             current += copy_len;
         }
-
-        // 2. 解析 dest_addr (C 语言的 sockaddr 结构体)
         if dest_addr as usize != 0 {
             let sockaddr_bytes = {
                 if let Some(s) = try_translated_read(token, dest_addr as *const [u8; 16]) {
@@ -320,25 +326,42 @@ pub fn sys_sendto(
                     return EFAULT.as_isize();
                 }
             };
-            // 解析出端口 (大端序转主机序)
             let port = u16::from_be_bytes([sockaddr_bytes[2], sockaddr_bytes[3]]);
-            // 解析出 IPv4 地址
             let ip = smoltcp::wire::IpAddress::v4(
                 sockaddr_bytes[4], sockaddr_bytes[5], sockaddr_bytes[6], sockaddr_bytes[7]
             );
             let remote_ep = smoltcp::wire::IpEndpoint::new(ip, port);
 
-            // 3. 调用实现的 udp.sendto
-            return udp_socket.sendto(&data, remote_ep);
+           loop {
+            let ret = udp_socket.sendto(&data, remote_ep);
+            // 如果底层的 smoltcp 缓冲区满了，
+            if ret == EAGAIN.as_isize() {
+                // 驱动网卡收发，把缓冲区里的包发出去
+                net_poll(); 
+                // 挂起当前任务，切换到其他任务
+                suspend_current_and_run_next(); 
+                continue;
+            }
+            return ret;
+        }
         } else {
             return Errno::EDESTADDRREQ.as_isize(); // 需要目标地址
         }
     }
-    // 对于已连接的 TCP Socket，sendto 会忽略 dest_addr，等价于普通写操作
-    let user_buf = UserBuffer::new(translated_byte_buffer(token, buf, len));
-    let ret = file.write(user_buf) as isize;
-    net_poll();
-    return ret;
+
+    loop {
+         let user_buf = UserBuffer::new(translated_byte_buffer(token, buf, len));
+        let ret = file.write(user_buf) as isize;
+        
+        if ret == -11 {
+            net_poll();
+            suspend_current_and_run_next();
+            continue;
+        }
+        
+        net_poll(); // 发送成功后顺手驱动一下
+        return ret;
+    }
 }
 
 /// 接收网络数据并获取来源地址。
@@ -355,74 +378,65 @@ pub fn sys_recvfrom(
     let process = task.process();
     let inner = process.inner_exclusive_access();
     let token = inner.memory_set.token();
-
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return Errno::EBADF.as_isize();
     }
-
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     drop(inner);
-
-    if !file.readable() {
-        return Errno::EACCES.as_isize();
-    }
+    
     // 判断是不是 UdpSocket
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         let mut data = vec![0u8; len];
-        // 调用 udp.recvfrom
-        if let Some((read_len, src_ep)) = udp_socket.recvfrom(&mut data) {
-            // 1. 把数据拷贝回用户的 buf
-            let mut user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, len));
-            let mut current = 0;
-            for buffer in user_buf.buffers.iter_mut() {
-                let copy_len = buffer.len().min(read_len - current);
-                buffer[..copy_len].copy_from_slice(&data[current..current + copy_len]);
-                current += copy_len;
-                if current == read_len { break; }
-            }
+        loop {
+            if let Some((read_len, src_ep)) = udp_socket.recvfrom(&mut data) {
+                // 1. 把数据拷贝回用户的 buf
+                let mut user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, len));
+                let mut current = 0;
+                for buffer in user_buf.buffers.iter_mut() {
+                    let copy_len = buffer.len().min(read_len - current);
+                    buffer[..copy_len].copy_from_slice(&data[current..current + copy_len]);
+                    current += copy_len;
+                    if current == read_len { break; }
+                }
 
-            // 2. 把发送方地址填回 src_addr
-            if src_addr as usize != 0 && addrlen as usize != 0 {
-                let mut sockaddr_bytes = [0u8; 16];
-                sockaddr_bytes[0..2].copy_from_slice(&2u16.to_ne_bytes()); // AF_INET
-                sockaddr_bytes[2..4].copy_from_slice(&src_ep.port.to_be_bytes()); // 大端序端口
-                let smoltcp::wire::IpAddress::Ipv4(v4) = src_ep.addr;
+                // 2. 把发送方地址填回 src_addr
+                if src_addr as usize != 0 && addrlen as usize != 0 {
+                    let mut sockaddr_bytes = [0u8; 16];
+                    sockaddr_bytes[0..2].copy_from_slice(&2u16.to_ne_bytes()); // AF_INET
+                    sockaddr_bytes[2..4].copy_from_slice(&src_ep.port.to_be_bytes()); // 大端序端口
+                    let smoltcp::wire::IpAddress::Ipv4(v4) = src_ep.addr;
                     sockaddr_bytes[4..8].copy_from_slice(&v4.0);
-                
 
-                unsafe {
-                    let mut user_len = {
-                        if let Some(ul) = try_translated_read(token, addrlen) {
-                            ul
-                        } else {
-                            return EFAULT.as_isize();
+                    unsafe {
+                        let mut user_len = {
+                            if let Some(ul) = crate::mm::try_translated_read(token, addrlen) { ul } 
+                            else { return Errno::EFAULT.as_isize(); }
+                        };
+                        let copy_len = (user_len as usize).min(16);
+                        let mut current_addr = src_addr as usize;
+                        for i in 0..copy_len {
+                            if !crate::mm::try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                                return Errno::EFAULT.as_isize();
+                            }
+                            current_addr += 1;
                         }
-                    };
-                    let copy_len = (user_len as usize).min(16);
-                    let mut current_addr = src_addr as usize;
-                    for i in 0..copy_len {
-                        if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
-                            return EFAULT.as_isize();
+                        user_len = 16;
+                        if !crate::mm::try_translated_write(token, addrlen, user_len) {
+                            return Errno::EFAULT.as_isize();
                         }
-                        current_addr += 1;
-                    }
-                    user_len = 16;
-                    if !try_translated_write(token, addrlen, user_len) {
-                        return EFAULT.as_isize();
                     }
                 }
+                return read_len as isize;
+            } else {
+                net_poll(); 
+                suspend_current_and_run_next();
+                continue;
             }
-            return read_len as isize;
-        } else {
-            // 在阻塞模式下，这里应该挂起进程；非阻塞则返回 EAGAIN
-            // 为简单通过当前测例，暂时返回一个假的长度或错误
-            return Errno::EAGAIN.as_isize(); 
         }
     }
     // 1. 读取网络数据
     let user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, len));
     let read_len = file.read(user_buf);
-
     // 2. 如果用户提供了 src_addr 和 addrlen，则填入对端的 IP 和端口信息
     if src_addr as usize != 0 && addrlen as usize != 0 {
         if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
@@ -432,8 +446,6 @@ pub fn sys_recvfrom(
                 sockaddr_bytes[2..4].copy_from_slice(&ep.port.to_be_bytes()); // 大端序端口
                let smoltcp::wire::IpAddress::Ipv4(v4) = ep.addr;
                     sockaddr_bytes[4..8].copy_from_slice(&v4.0); // IPv4
-                
-
                 unsafe {
                     let mut user_len = {
                         if let Some(ul) = try_translated_read(token, addrlen) {
@@ -629,17 +641,14 @@ pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
                 return EFAULT.as_isize();
             }
         };
-        
         // 2. 解析大端序的端口号
         let mut port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
         if port == 0 {
             port = alloc_ephemeral_port();
         }
-        
+        println!("[DEBUG sys_bind TCP] FD: {}, Assigned Port: {}", fd, port);
        *socket.local_port.lock() = Some(port);
-        
         return 0;
-        
         0
     } else {
         Errno::ENOTSOCK.as_isize()
