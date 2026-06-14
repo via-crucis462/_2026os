@@ -21,6 +21,8 @@ use smoltcp::socket::udp;
 
 pub struct TcpSocket {
     pub handle: SocketHandle,
+    // 暂存 bind 分配或指定的本地端口
+    pub local_port: Mutex<Option<u16>>,
 }
 
 impl TcpSocket {
@@ -29,7 +31,7 @@ impl TcpSocket {
         let tx_buffer = SocketBuffer::new(vec![0; 8192]);
         let socket = TcpSocketSmol::new(rx_buffer, tx_buffer);
         let handle = SOCKET_SET.exclusive_access().add(socket);
-        Self { handle }
+        Self { handle ,local_port: Mutex::new(None)}
     }
     pub fn disconnect(&self) {
         let mut sockets = SOCKET_SET.exclusive_access();
@@ -54,8 +56,14 @@ impl TcpSocket {
             smoltcp::wire::IpAddress::Ipv4(v4) => v4.as_bytes()[0] == 127,
             _ => false,
         };
-        // 动态分配一个临时的本地端口 (Ephemeral Port, 范围 49152~65535)
-        let local_port = (crate::arch::timer::get_time_us() % 16384 + 49152) as u16;
+        let mut port_lock = self.local_port.lock();
+        let local_port = if let Some(p) = *port_lock {
+            p
+        } else {
+            let new_port = (crate::arch::timer::get_time_us() % 16384 + 49152) as u16;
+            *port_lock = Some(new_port);
+            new_port
+        };
         
         let res = 
         if is_loopback {

@@ -13,7 +13,7 @@ use crate::net::socket::UdpSocket;
 use crate::process::FileDescriptor;
 use crate::process::FdFlags;
 use crate::net::net_poll;
-
+use core::sync::atomic::{AtomicU16, Ordering};
 
 /// 获取指定 Socket 的本地地址和端口信息。
 /// 将内核中 Socket 的 local_endpoint 信息格式化为 sockaddr_in 结构并拷贝回用户空间。 asd
@@ -575,37 +575,47 @@ pub fn sys_socketpair(domain: usize, socket_type: usize, protocol: usize, sv: *m
     }
     0
 }
+//端口分配器 POSIX 标准的临时端口范围通常是 49152 ~ 65535
+static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(49152);
 
+fn alloc_ephemeral_port() -> u16 {
+    let mut port = NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed);
+    if  port < 49152 {
+        NEXT_EPHEMERAL_PORT.store(49152, Ordering::Relaxed);
+        port = 49152;
+    }
+    port
+}
 pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
     let token = inner.memory_set.token();
-
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return Errno::EBADF.as_isize();
     }
-
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     drop(inner); // 提早释放锁
     if let Some(_netlink_sock) = file.as_any().downcast_ref::<StandardNetlinkSocket>() {
         // 对于简化的 Netlink 实现，不需要真实的端口绑定逻辑，返回成功即可
         return 0;
     }
-
     //  Raw Socket，防止等会儿 ping 的时候报同样的错
     if let Some(_raw_sock) = file.as_any().downcast_ref::<crate::net::socket::RawSocket>() {
         return 0;
     }
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         // 从 addr 中安全读取端口信息
-        let port = {
+        let mut port = {
             if let Some(p) = try_translated_read(token, (addr as usize + 2) as *const u16) {
                 u16::from_be(p)
             } else {
                 return EFAULT.as_isize();
             }
         };
+        if port == 0 {
+            port = alloc_ephemeral_port();
+        }
         
         // 绑定端口
         return udp_socket.bind(port);
@@ -621,12 +631,14 @@ pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
         };
         
         // 2. 解析大端序的端口号
-        let port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
+        let mut port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
+        if port == 0 {
+            port = alloc_ephemeral_port();
+        }
         
-        // 3. 借用 smoltcp 的能力，直接在 bind 阶段占有并监听端口
-        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-        let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(socket.handle);
-        let _ = smol_socket.listen(port); // 进入 Listen 状态
+       *socket.local_port.lock() = Some(port);
+        
+        return 0;
         
         0
     } else {
@@ -638,13 +650,41 @@ pub fn sys_listen(fd: usize, _backlog: i32) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
-
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
-        return Errno::EBADF.as_isize();
+        return crate::syscall::errno::Errno::EBADF.as_isize();
     }
-
-
-    0
+    //  提取 file 
+    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    drop(inner);
+    // 检查是否是 TCP Socket
+    if let Some(socket) = file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
+        // 暂存的本地端口
+        let mut port_lock = socket.local_port.lock();
+        let port = if let Some(p) = *port_lock {
+            p
+        } else {
+            // POSIX 标准允许未 bind 直接 listen，此时 OS 需隐式分配端口
+            let new_port = alloc_ephemeral_port();
+            *port_lock = Some(new_port);
+            new_port
+        };
+        drop(port_lock);
+        // 获取 smoltcp 内部的 socket，并真正listen 
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(socket.handle);
+        // smoltcp 会在此刻将状态机切换为 Listen
+        match smol_socket.listen(port) {
+            Ok(_) => 0,
+            Err(_) => crate::syscall::errno::Errno::EINVAL.as_isize(), // 可能是因为 socket 已经连接或关闭
+        }
+    } 
+    // 拦截 UDP Socket 
+    else if file.as_any().downcast_ref::<crate::net::socket::UdpSocket>().is_some() {
+        crate::syscall::errno::Errno::EOPNOTSUPP.as_isize()
+    } 
+    else {
+        crate::syscall::errno::Errno::ENOTSOCK.as_isize()
+    }
 }
 
 pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
