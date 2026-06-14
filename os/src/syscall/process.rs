@@ -3006,12 +3006,17 @@ pub fn sys_pselect6(
         };
         timeout_ms = sec.saturating_mul(1000).saturating_add(timespec.tv_nsec / 1_000_000);
         deadline_ms = get_time_ms().saturating_add(timeout_ms);
-    }
 
+    }
+    /*println!(
+        "[DEBUG pselect6] PID Enter: nfds={}, readfds={:#b}, writefds={:#b}, has_timeout={}", 
+        nfds, readfds, writefds, has_timeout
+    );*/
     // debug!("[kernel] pselect6 nfds={} has_timeout={} timeout_ms={}", nfds, has_timeout, timeout_ms);
+    let mut loop_count = 0; // 循环计数器，用来限流打印
     loop {
+        loop_count += 1;
         crate::net::net_poll();
-        
         let mut ready_count = 0;
         let mut ready_readfds = 0usize;
         let mut ready_writefds = 0usize;
@@ -3019,19 +3024,24 @@ pub fn sys_pselect6(
         let mut process_inner = process.inner_exclusive_access();
         let limit = nfds.min(process_inner.fd_table.len());
         for fd in 0..limit {
-            if (readfds & (1usize << fd)) != 0 {
-                   
+            
+            let in_read = (readfds & (1usize << fd)) != 0;
+            let in_write = (writefds & (1usize << fd)) != 0;
+            if in_read || in_write {
                 if let Some(fd_file) = &process_inner.fd_table[fd].file {
-                    if fd_file.readable() {
+                    let r_status = fd_file.readable();
+                    let w_status = fd_file.writable();
+
+                    
+                    if loop_count <= 3 || loop_count % 5000 == 0 {
+                        println!("[DEBUG pselect6] Loop {}, FD {}, Listen:[read={}, write={}], Status:[readable={}, writable={}]",loop_count, fd, in_read, in_write, r_status, w_status);
+                    }
+
+                    if in_read && r_status {
                         ready_readfds |= 1usize << fd;
                         ready_count += 1;
                     }
-                }
-            }
-            if (writefds & (1usize << fd)) != 0 {
-                   
-                if let Some(fd_file) = &process_inner.fd_table[fd].file {
-                    if fd_file.readable() {
+                    if in_write && w_status {
                         ready_writefds |= 1usize << fd;
                         ready_count += 1;
                     }
@@ -3039,9 +3049,6 @@ pub fn sys_pselect6(
             }
         }
         drop(process_inner); // 写回前先释放锁
-
-
-        
         if ready_count > 0 {
             if readfds_ptr as usize != 0 {
                 if !try_translated_write(token, readfds_ptr, ready_readfds) {
@@ -3058,9 +3065,13 @@ pub fn sys_pselect6(
         }
         
         if has_timeout && get_time_ms() >= deadline_ms {
-            return 0;
+            if readfds_ptr as usize != 0 { try_translated_write(token, readfds_ptr, 0); }
+            if _writefds_ptr as usize != 0 { try_translated_write(token, _writefds_ptr, 0); }
+            if _exceptfds_ptr as usize != 0 { try_translated_write(token, _exceptfds_ptr, 0); }
         }
-        suspend_current_and_run_next();
+        if ready_count == 0 {
+            crate::task::suspend_current_and_run_next();
+        }
     }
 }
 

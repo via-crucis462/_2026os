@@ -49,7 +49,7 @@ impl TcpSocket {
         socket.remote_endpoint()
     }
     pub fn connect(&self, remote_ep: smoltcp::wire::IpEndpoint) -> isize {
-       println!("[TCP Connect] Attempting to connect to {}, using handle {:?}", remote_ep, self.handle);
+       //println!("[TCP Connect] Attempting to connect to {}, using handle {:?}", remote_ep, self.handle);
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
         let is_loopback = match remote_ep.addr {
@@ -102,7 +102,41 @@ impl TcpSocket {
         }
     }
 }
-
+impl Drop for TcpSocket {
+    fn drop(&mut self) {
+        {
+            let mut sockets = SOCKET_SET.exclusive_access();
+            let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
+                socket.close();
+            
+        }
+        // 轮询驱动网络栈，直到四次挥手完毕，状态变为 Closed
+        // 增加一个计数器上限（比如 200 次），防止内核无限死循环
+        let mut retry_limit = 200; 
+        loop {
+            // 驱动网络栈：把发送缓冲区的 FIN 推出去，并接收对端回应的 ACK
+            crate::net::net_poll();
+            let mut sockets = SOCKET_SET.exclusive_access();
+            let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
+                if socket.state() == smoltcp::socket::tcp::State::Closed {
+                    break;
+                }
+                else {
+                    break;
+                 }
+            drop(sockets); 
+            
+            retry_limit -= 1;
+            if retry_limit == 0 {
+                // 强制退出，防止内核挂起
+                break; 
+            }
+            crate::task::suspend_current_and_run_next();
+        }
+        let mut sockets = SOCKET_SET.exclusive_access();
+        sockets.remove(self.handle);
+    }
+}
 impl File for TcpSocket {
     fn readable(&self) -> bool {
         let mut sockets = SOCKET_SET.exclusive_access();
@@ -123,11 +157,12 @@ impl File for TcpSocket {
             if !socket.may_recv() && !socket.can_recv() {
                 return 0; 
             }
+            //println!("[DEBUG TcpSocket::read] State: {:?}, can_recv: {}, may_recv: {}", socket.state(), socket.can_recv(), socket.may_recv());
             if socket.can_recv() {
                 let mut temp_buf = vec![0u8; buf.len()];
                 if let Ok(recv_len) = socket.recv_slice(&mut temp_buf) {
                     if recv_len > 0 {
-                        println!("TcpSocket read SUCCESS: got {} bytes", recv_len);
+                        //println!("TcpSocket read SUCCESS: got {} bytes", recv_len);
                         let mut current = 0;
                         for buffer in buf.buffers.iter_mut() {
                             let copy_len = buffer.len().min(recv_len.saturating_sub(current));
@@ -140,12 +175,16 @@ impl File for TcpSocket {
                     }
                 }
             }
+            else if !socket.may_recv() {
+                //println!("[DEBUG TcpSocket::read] Detected EOF (!may_recv), returning 0");
+                return 0; 
+            }
             drop(sockets); 
             crate::task::suspend_current_and_run_next();
         }
     }
     fn write(&self, buf: UserBuffer) -> usize {
-        println!("TcpSocket write called with {} bytes", buf.len());
+        //println!("TcpSocket write called with {} bytes", buf.len());
         let mut sockets = SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
 
@@ -202,6 +241,7 @@ impl File for TcpSocket {
 
     fn as_any(&self) -> &dyn Any { self }
 }
+
 lazy_static! {
 
     static ref LOCAL_UDP_SOCKETS: Mutex<BTreeMap<u16, Arc<Mutex<VecDeque<(IpEndpoint, Vec<u8>)>>>>> = Mutex::new(BTreeMap::new());

@@ -646,7 +646,7 @@ pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
         if port == 0 {
             port = alloc_ephemeral_port();
         }
-        println!("[DEBUG sys_bind TCP] FD: {}, Assigned Port: {}", fd, port);
+        //println!("[DEBUG sys_bind TCP] FD: {}, Assigned Port: {}", fd, port);
        *socket.local_port.lock() = Some(port);
         return 0;
         0
@@ -988,4 +988,39 @@ pub fn sys_getsockopt(
     }
     
     0 
+}
+
+pub fn sys_shutdown(fd: usize, how: i32) -> isize {
+    println!("[DEBUG sys_shutdown] FD: {}, how: {}", fd, how);
+    
+    let task = crate::task::current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+        return EBADF.as_isize(); // 返回错误
+    }
+    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    drop(inner); 
+
+    if let Some(tcp_wrapper) = file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
+
+        if how == 1 || how == 2 {
+            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+            let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_wrapper.handle);
+            socket.close(); 
+            drop(sockets); 
+            net_poll();
+            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+            let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_wrapper.handle);
+            println!("[DEBUG shutdown_after] Client TCP State: {:?}, may_recv: {}, may_send: {}", 
+                socket.state(), socket.may_recv(), socket.may_send());
+            drop(sockets);
+        }
+    } else if let Some(_udp_wrapper) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
+
+    } else {
+        return ENOTSOCK.as_isize(); // ENOTSOCK
+    }
+
+    0
 }

@@ -141,6 +141,7 @@ const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_SETSOCKOPT: usize = 208;
 const SYSCALL_GETSOCKOPT: usize = 209;
+const SYSCALL_SHUTDOWN: usize = 210;
 const SYSCALL_SENDMSG: usize = 211;
 const SYSCALL_RECVMSG: usize = 212;
 const SYSCALL_BRK: usize = 214;
@@ -420,6 +421,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MSGSND => sys_msgsnd(args[0], args[1], args[2], args[3]),
         SYSCALL_MSGRCV => sys_msgrcv(args[0], args[1], args[2], args[3] as isize, args[4]),
         SYSCALL_MSGCTL => sys_msgctl(args[0] as u32, args[1], args[2]),
+        SYSCALL_SHUTDOWN => sys_shutdown(args[0], args[1] as i32),
         SYSCALL_CLOCK_ADJTIME => sys_clock_adjtime(args[0] as i32, args[1] as *mut Timex),
         SYSCALL_CLOCK_SETTIME => sys_clock_settime(args[0] as i32, args[1] as *const TimeSpec),
         SYSCALL_WAITID => sys_waitid(args[0] as i32, args[1] as i32, args[2] as *mut SigInfo, args[3] as i32),

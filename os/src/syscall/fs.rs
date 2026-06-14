@@ -401,7 +401,9 @@ pub fn sys_close(fd: usize) -> isize {
     if inner.fd_table[fd].file.is_none() {
         return EBADF.as_isize();
     }
+    let file_to_close = inner.fd_table[fd].file.take();
     inner.clear_fd(fd);
+    drop(file_to_close);
     0
 }
 
