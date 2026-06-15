@@ -54,7 +54,7 @@ pub use processor::{
 pub use signal::{SignalFlags, MAX_SIG};
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 struct SignalAltStack {
     ss_sp: usize,
     ss_flags: i32,
@@ -62,22 +62,42 @@ struct SignalAltStack {
     ss_size: usize,
 }
 
+// musl's sigset_t stores 128 bytes, i.e. 16 unsigned long words on riscv64.
 const USER_SIGSET_WORDS: usize = 128 / core::mem::size_of::<usize>();
 
 #[cfg(target_arch = "riscv64")]
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy)]
+struct RiscvMContext {
+    gregs: [usize; 32],
+    fpregs: [u8; 528],
+}
+
+#[cfg(target_arch = "riscv64")]
+impl RiscvMContext {
+    fn program_counter(&self) -> usize {
+        self.gregs[0]
+    }
+
+    fn set_program_counter(&mut self, pc: usize) {
+        self.gregs[0] = pc;
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct SignalUserContext {
     uc_flags: usize,
     uc_link: usize,
     uc_stack: SignalAltStack,
     uc_sigmask: [usize; USER_SIGSET_WORDS],
-    uc_mcontext_gregs: [usize; 32],
+    uc_mcontext: RiscvMContext,
 }
 
 #[cfg(target_arch = "loongarch64")]
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct SignalUserContext {
     uc_flags: usize,
     uc_link: usize,
@@ -92,22 +112,31 @@ struct SignalUserContext {
 #[cfg(target_arch = "riscv64")]
 impl SignalUserContext {
     fn from_trap_ctx(trap_ctx: &TrapContext, sigmask: usize) -> Self {
-        let mut gregs = [0usize; 32];
         let mut uc_sigmask = [0usize; USER_SIGSET_WORDS];
-        gregs.copy_from_slice(&trap_ctx.x);
-        gregs[0] = trap_ctx.get_rt();
+        let mut uc_mcontext = RiscvMContext {
+            gregs: [0usize; 32],
+            fpregs: [0; 528],
+        };
+        uc_mcontext.gregs.copy_from_slice(&trap_ctx.x);
+        uc_mcontext.set_program_counter(trap_ctx.get_rt());
         uc_sigmask[0] = sigmask;
         Self {
             uc_flags: 0,
             uc_link: 0,
             uc_stack: SignalAltStack::default(),
             uc_sigmask,
-            uc_mcontext_gregs: gregs,
+            uc_mcontext,
         }
     }
 
     fn program_counter(&self) -> usize {
-        self.uc_mcontext_gregs[0]
+        self.uc_mcontext.program_counter()
+    }
+
+    fn apply_to_trap_ctx(&self, trap_ctx: &mut TrapContext) {
+        trap_ctx.x.copy_from_slice(&self.uc_mcontext.gregs);
+        trap_ctx.x[0] = 0;
+        trap_ctx.set_rt(self.program_counter());
     }
 }
 
@@ -130,6 +159,11 @@ impl SignalUserContext {
 
     fn program_counter(&self) -> usize {
         self.uc_mcontext_pc
+    }
+
+    fn apply_to_trap_ctx(&self, trap_ctx: &mut TrapContext) {
+        trap_ctx.r.copy_from_slice(&self.uc_mcontext_gregs);
+        trap_ctx.set_rt(self.program_counter());
     }
 }
 
@@ -176,16 +210,33 @@ pub(crate) fn restore_signal_context(task_inner: &mut TaskControlBlockInner) -> 
     let user_ctx: SignalUserContext = try_translated_read(current_user_token(), ucontext_ptr as *const SignalUserContext)?;
     #[cfg(target_arch = "riscv64")]
     warn!(
-        "[SIG_RESTORE TP] tid={} saved_tp={:#x} user_tp={:#x} user_pc={:#x}",
+        "[SIG_RESTORE TP] tid={} saved_pc={:#x} saved_sp={:#x} saved_ra={:#x} saved_tp={:#x} saved_a0={:#x} user_pc={:#x} user_sp={:#x} user_ra={:#x} user_tp={:#x} user_a0={:#x}",
         current_task().unwrap().gettid(),
+        trap_ctx.get_rt(),
+        trap_ctx.get_sp(),
+        trap_ctx.x[1],
         trap_ctx.x[4],
-        user_ctx.uc_mcontext_gregs[4],
-        user_ctx.program_counter()
+        trap_ctx.get_a0(),
+        user_ctx.program_counter(),
+        user_ctx.uc_mcontext.gregs[2],
+        user_ctx.uc_mcontext.gregs[1],
+        user_ctx.uc_mcontext.gregs[4],
+        user_ctx.uc_mcontext.gregs[10]
     );
-    trap_ctx.set_rt(user_ctx.program_counter());
+    user_ctx.apply_to_trap_ctx(&mut trap_ctx);
     task_inner.signal_mask = SignalFlags::from_bits_truncate(user_ctx.uc_sigmask[0] as u64);
     *task_inner.get_trap_cx() = trap_ctx;
     let _ = saved_mask;
+    #[cfg(target_arch = "riscv64")]
+    warn!(
+        "[SIG_RESTORE RET] tid={} restored_pc={:#x} restored_sp={:#x} restored_ra={:#x} restored_tp={:#x} restored_a0={:#x}",
+        current_task().unwrap().gettid(),
+        task_inner.get_trap_cx().get_rt(),
+        task_inner.get_trap_cx().get_sp(),
+        task_inner.get_trap_cx().x[1],
+        task_inner.get_trap_cx().x[4],
+        task_inner.get_trap_cx().get_a0()
+    );
     Some(task_inner.get_trap_cx().get_a0() as isize)
 }
 
@@ -544,6 +595,19 @@ pub fn current_add_signal(signal: SignalFlags) {
     // );
 }
 
+pub fn mark_signal_interrupted(task: &Arc<TaskControlBlock>) {
+    let mut task_inner = task.inner_exclusive_access();
+    task_inner.signal_interrupted = true;
+}
+
+pub fn take_current_signal_interrupted() -> bool {
+    let task = current_task().unwrap();
+    let mut task_inner = task.inner_exclusive_access();
+    let interrupted = task_inner.signal_interrupted;
+    task_inner.signal_interrupted = false;
+    interrupted
+}
+
 /// 处理信号
 /// bug：目前的实现一次只处理一个信号，效率可能较低
 pub fn handle_signals() {
@@ -565,7 +629,7 @@ pub fn handle_signals() {
         copy.remove(mask);
         copy
     };
-    
+
     let pending_bits = pending.bits();
 
     if pending_bits != 0 {
@@ -592,7 +656,7 @@ pub fn handle_signals() {
 /// call user signal handler
 /// 跳到用户态的信号处理函数
 fn  call_signal_handler(sig: usize, signal: SignalFlags) {
-    info!("[SIG PROBE] Calling handler for sig: {}", sig);
+    println!("[SIG PROBE] Calling handler for sig: {}", sig);
     let task = current_task().unwrap();
     let proc = task.process();
     let mut task_inner = task.inner_exclusive_access();
@@ -639,11 +703,13 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
         #[cfg(target_arch = "riscv64")]
         if sig + 1 == 33 {
             warn!(
-                "[SIGCANCEL TP] tid={} handler={:#x} tp={:#x} pc={:#x} info={:#x} uctx={:#x}",
+                "[SIGCANCEL TP] tid={} handler={:#x} pc={:#x} sp={:#x} ra={:#x} tp={:#x} info={:#x} uctx={:#x}",
                 task.gettid(),
                 handler,
-                trap_ctx.x[4],
                 trap_ctx.get_rt(),
+                trap_ctx.get_sp(),
+                trap_ctx.x[1],
+                trap_ctx.x[4],
                 info_ptr,
                 ucontext_ptr
             );

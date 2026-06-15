@@ -2053,6 +2053,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
 }
 
 pub fn sys_tkill(tid: usize, signum: i32) -> isize {
+    //warn!("sys_tkill called with tid={}, signum={}", tid, signum);
     if signum < 0 || signum as usize > MAX_SIG {
         return EINVAL.as_isize();
     }
@@ -2070,15 +2071,14 @@ pub fn sys_tkill(tid: usize, signum: i32) -> isize {
     };
     let is_unmaskable = flag.contains(SignalFlags::SIGKILL) || flag.contains(SignalFlags::SIGSTOP);
 
-    {
-        let process = task.process();
-        let mut proc_inner = process.inner_exclusive_access();
-        proc_inner.signals.insert(flag);
-    }
-
     let mut task_inner = task.inner_exclusive_access();
     task_inner.signals.insert(flag);
     let is_unblocked = !task_inner.signal_mask.contains(flag);
+    if (is_unblocked || is_unmaskable)
+        && matches!(task_inner.task_status, crate::task::TaskStatus::Blocked)
+    {
+        task_inner.signal_interrupted = true;
+    }
     drop(task_inner);
 
     if is_unblocked || is_unmaskable {
@@ -2941,10 +2941,13 @@ pub fn sys_sigreturn() -> isize {
     {
         let trap_cx = inner.get_trap_cx();
         warn!(
-            "[SIG_RET TP] tid={} tp={:#x} pc={:#x}",
+            "[SIG_RET TP] tid={} tp={:#x} pc={:#x} sp={:#x} ra={:#x} a0={:#x}",
             task.gettid(),
             trap_cx.x[4],
-            trap_cx.get_rt()
+            trap_cx.get_rt(),
+            trap_cx.get_sp(),
+            trap_cx.x[1],
+            trap_cx.get_a0()
         );
     }
     // 验证长度一致
@@ -3737,8 +3740,38 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32) -> isize {
                 return EFAULT.as_isize();
             };
 
+            warn!(
+                "[FUTEX WAIT IN] tid={} uaddr={:#x} expect={} current={}",
+                current_task().unwrap().gettid(),
+                uaddr as usize,
+                val,
+                current_val
+            );
+
             if current_val != val {
+                warn!(
+                    "[FUTEX WAIT EAGAIN] tid={} uaddr={:#x} expect={} current={}",
+                    current_task().unwrap().gettid(),
+                    uaddr as usize,
+                    val,
+                    current_val
+                );
                 return EAGAIN.as_isize();
+            }
+
+            let current = current_task().unwrap();
+            let current_tid = current.gettid();
+            if crate::process::check_pending_signal() {
+                warn!(
+                    "[FUTEX PRE-SIGNAL] tid={} uaddr={:#x} return=EINTR",
+                    current_tid,
+                    uaddr as usize
+                );
+                return EINTR.as_isize();
+            }
+            {
+                let mut inner = current.inner_exclusive_access();
+                inner.signal_interrupted = false;
             }
             //获取地址对应的等待队列，放入当前任务并睡眠
             let token = current_user_token();
@@ -3757,6 +3790,15 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32) -> isize {
                 guard.remove_task(current_tid);
             }
 
+            if crate::process::take_current_signal_interrupted() {
+                warn!(
+                    "[FUTEX SIGWAKE] tid={} uaddr={:#x} return=EINTR",
+                    current_tid,
+                    uaddr as usize
+                );
+                return EINTR.as_isize();
+            }
+
             let process = current.process();
             let proc_inner = process.inner_exclusive_access();
             let inner = current.inner_exclusive_access();
@@ -3764,12 +3806,32 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32) -> isize {
             let pending = pending_signals.bits() & !inner.signal_mask.bits();
             let unmaskable = pending_signals.bits()
                 & (SignalFlags::SIGKILL | SignalFlags::SIGSTOP).bits();
+            warn!(
+                "[FUTEX WAIT OUT] tid={} uaddr={:#x} pending_all={:#x} mask={:#x} pending={:#x} unmaskable={:#x}",
+                current_tid,
+                uaddr as usize,
+                pending_signals.bits(),
+                inner.signal_mask.bits(),
+                pending,
+                unmaskable
+            );
             drop(proc_inner);
             drop(inner);
 
             if (pending | unmaskable) != 0 {
+                warn!(
+                    "[FUTEX EINTR] tid={} pending={:#x} unmaskable={:#x}",
+                    current_tid,
+                    pending,
+                    unmaskable
+                );
                 EINTR.as_isize()
             } else {
+                warn!(
+                    "[FUTEX OK] tid={} uaddr={:#x} return=0",
+                    current_tid,
+                    uaddr as usize
+                );
                 0
             }
         }

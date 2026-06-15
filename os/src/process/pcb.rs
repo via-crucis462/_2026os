@@ -233,6 +233,7 @@ impl ProcessControlBlock {
                 exit_code: 0,
                 errno: 0,
                 signals: SignalFlags::empty(),
+                signal_interrupted: false,
                 clear_child_tid: 0,
 
             })
@@ -582,6 +583,7 @@ impl ProcessControlBlock {
                 exit_code: 0,
                 errno: 0,
                 signals: SignalFlags::empty(),
+                signal_interrupted: false,
                 clear_child_tid: 0,
             }),
         });
@@ -676,6 +678,7 @@ impl ProcessControlBlock {
                 exit_code: 0,
                 errno: 0,
                 signals: SignalFlags::empty(),
+                signal_interrupted: false,
                 signal_mask: caller_inner.signal_mask,
                 signal_mask_backup: Vec::new(),
                 killed: false,

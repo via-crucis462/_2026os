@@ -62,6 +62,7 @@ impl TaskControlBlock {
         inner.errno = 0;
         inner.task_status = TaskStatus::Zombie;
         inner.signals = SignalFlags::empty();
+        inner.signal_interrupted = false;
         inner.signal_mask_backup.clear();
         inner.trap_ctx_backup.clear();
         inner.signal_user_context_backup.clear();
@@ -89,6 +90,7 @@ pub struct TaskControlBlockInner {
     pub exit_code: i32,
     pub errno: i32,
     pub signals: SignalFlags,
+    pub signal_interrupted: bool,
     pub signal_mask: SignalFlags,
     /// 信号嵌套处理时的掩码栈（当前未完全验证行为是否正确，初步测试没问题）
     pub signal_mask_backup: Vec<SignalFlags>,
