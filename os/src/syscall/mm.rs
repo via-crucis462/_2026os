@@ -147,6 +147,7 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
 }
 
 // 回写内存映射区域到文件
+// 目前的实现回写的包括非共享页缓存
 pub fn sys_msync(_addr: usize, _len: usize, _flags: u32) -> isize {
     crate::mm::mmap::sync_shared_page_cache();
     0

@@ -281,12 +281,6 @@ bitflags! {
         const SHM_WR = 0o200;
     
     }
-    struct ShmCtlCmd: i32 {
-        const IPC_RMID = 0;
-        const IPC_SET = 1;
-        const IPC_STAT = 2;
-        const IPC_INFO = 3;
-    }
 }
 
 const SHM_SIZE_LIMIT: usize = 16 * 1024 * 1024; // 16MB
@@ -313,7 +307,7 @@ pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
         let cpid = current_task().unwrap().process().pid.0;
         let ns = current_ipc_namespace();
         let mut ns_lckd = ns.lock();
-        let shm = ns_lckd.shm_manager().create_shm(size, key, mode, cpid);
+        let shm = ns_lckd.shm_manager().create_shm(size, key, mode, cpid, uid, gid);
         return shm.get_id() as isize
     }
 
@@ -350,13 +344,91 @@ pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
         return EINVAL.as_isize();
     }
     let cpid = current_task().unwrap().process().pid.0;
-    let shm = ns_lckd.shm_manager().create_shm(size, key, mode, cpid);
+    let shm = ns_lckd.shm_manager().create_shm(size, key, mode, cpid, uid, gid);
     shm.get_id() as isize
 }
 
-pub fn sys_shmctl(shmid: u32, cmd: i32, flags: i32) -> isize {
-    let cmd = ShmCtlCmd::from_bits_truncate(cmd);
-    ENOSYS.as_isize()
+pub fn sys_shmctl(shmid: u32, cmd: usize, buf: usize) -> isize {
+    use crate::ipc::shm::ShmidDs;
+    let token = current_user_token();
+    let (uid, gid) = {
+        let proc = current_task().unwrap().process.upgrade().unwrap();
+        let inner = proc.inner_exclusive_access();
+        (inner.euid, inner.egid)
+    };
+    let ns = current_ipc_namespace();
+    let mut ns_lckd = ns.lock();
+
+    let shm = match ns_lckd.shm_manager().get_shm(shmid) {
+        Some(s) => s,
+        None => return EINVAL.as_isize(),
+    };
+
+    match cmd {
+        IPC_STAT => {
+            if !ipc_read_check(&shm.get_perm(), uid, gid) {
+                return EACCES.as_isize();
+            }
+            let ds = shm.get_stat();
+            if !try_translated_write(token, buf as *mut ShmidDs, ds) {
+                return EFAULT.as_isize();
+            }
+            0
+        }
+        IPC_SET => {
+            let ds: ShmidDs = match try_translated_read(token, buf as *const ShmidDs) {
+                Some(d) => d,
+                None => return EFAULT.as_isize(),
+            };
+            if !ipc_owner_check(&shm.get_perm(), uid)
+                && !ipc_write_check(&shm.get_perm(), uid, gid)
+            {
+                return EACCES.as_isize();
+            }
+            shm.set_perm_fields(ds.shm_perm.uid, ds.shm_perm.gid, ds.shm_perm.mode);
+            shm.set_lpid(current_task().unwrap().process().pid.0);
+            0
+        }
+        IPC_RMID => {
+            if !ipc_owner_check(&shm.get_perm(), uid) {
+                return EPERM.as_isize();
+            }
+            ns_lckd.shm_manager().remove_shm(shmid);
+            0
+        }
+        _ => EINVAL.as_isize(),
+    }
+}
+
+/// 分离共享内存段
+pub fn sys_shmdt(shmaddr: usize) -> isize {
+    let pid = current_task().unwrap().process().pid.0;
+    info!("kernel:pid[{}] sys_shmdt: addr={:#x}", pid, shmaddr);
+
+    if shmaddr == 0 || shmaddr % crate::PAGE_SIZE != 0 {
+        return EINVAL.as_isize();
+    }
+
+    // 查找该地址对应的 shmid
+    let ns = current_ipc_namespace();
+    let mut ns_lckd = ns.lock();
+    let shmid = match ns_lckd.shm_manager().take_attach(shmaddr) {
+        Some(id) => id,
+        None => return EINVAL.as_isize(),
+    };
+
+    // 减计数
+    if let Some(shm) = ns_lckd.shm_manager().get_shm(shmid) {
+        shm.dec_nattch();
+    }
+
+    // 释放锁后再 unmap（避免死锁）
+    drop(ns_lckd);
+
+    match mmap::do_munmap(shmaddr, crate::PAGE_SIZE) {
+        Ok(()) => 0,
+        Err(_) => EINVAL.as_isize(),
+    }
 }
 
 /// 附加共享内存段
@@ -426,43 +498,20 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: i32) -> isize {
     } else {
         mmap::MMapProt::PROT_READ | mmap::MMapProt::PROT_WRITE
     };
-    let mmap_flags = mmap::MMapFlags::MAP_ANONYMOUS | mmap::MMapFlags::MAP_SHARED;
+    let mmap_flags = mmap::MMapFlags::MAP_SHARED;
 
-    let mapped_addr = match mmap::do_mmap(attach_addr, shm_size, prot, mmap_flags, None, 0) {
+    let tmpfs = shm.inner();
+
+    let mapped_addr = match mmap::do_mmap(attach_addr, shm_size, prot, mmap_flags, Some(tmpfs), 0) {
         Ok(addr) => addr,
         Err(e) => return e,
     };
 
-    // 将共享内存数据拷贝到映射区域
-    let token = current_user_token();
-    let frames = shm.get_frames();
-    let page_size = crate::PAGE_SIZE;
-    let num_pages = (shm_size + page_size - 1) / page_size;
-    
-    for i in 0..num_pages.min(frames.len()) {
-        let va = mapped_addr + i * page_size;
-        let bytes_to_copy = if i == num_pages - 1 && shm_size % page_size != 0 {
-            shm_size % page_size
-        } else {
-            page_size
-        };
-        
-        // 从 Shm 物理帧读取数据
-        let shm_data = &frames[i].get_bytes_array()[..bytes_to_copy];
-        
-        // 写入用户空间映射区域
-        if let Some(user_buf) = try_translated_byte_buffer_mut(
-            token,
-            va as *mut u8,
-            bytes_to_copy,
-        ) {
-            let mut user_buf = UserBuffer::new(user_buf);
-            user_buf.write(shm_data);
-        }
-    }
-
+    // 记录映射关系，供 shmdt 查找
+    ns_lckd.shm_manager().record_attach(shmid as u32, mapped_addr);
     // 更新附加计数
     shm.inc_nattch();
+    shm.set_lpid(current_task().unwrap().process().pid.0);
 
     mapped_addr as isize
 }

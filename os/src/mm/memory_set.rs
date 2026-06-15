@@ -1045,8 +1045,7 @@ impl MemorySet {
                 }
             }
             // 注册到全局共享页面管理器
-            let man = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
-            man.register_file(file.ino(), file);
+            crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER.register_file(file.ino(), file);
             // 这里是简单插入，映射在前面已经完成了
             self.areas.push(area);
         } else {
@@ -1153,7 +1152,7 @@ impl MemorySet {
                     area.resize(a_start, a_start); // 长度设为0，稍后统一 retain 清理
                     
                 } else if !delete_left && !delete_right {
-                    panic!("munmap: test : split area in the middle");
+                    // panic!("munmap: test : split area in the middle");
                     // 情况2：Split（目标区域在当前块中间，一分为二）
                     // 2.1 清理中间被 unmap 的页表和物理页
                     for vpn in VPNRange::new(start_vpn, end_vpn) {

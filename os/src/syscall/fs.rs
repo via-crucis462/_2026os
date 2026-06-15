@@ -393,7 +393,7 @@ pub fn sys_mknod(dirfd: isize, path: *const u8, mode: u32, _dev: u64) -> isize {
 }
 
 pub fn sys_close(fd: usize) -> isize {
-	warn!("kernel:pid[{}] sys_close, aim fd = {}", current_task().unwrap().process().pid.0, fd);
+	info!("kernel:pid[{}] sys_close, aim fd = {}", current_task().unwrap().process().pid.0, fd);
     let task = current_task().unwrap();
     let proc = task.process();
     let mut inner = proc.inner_exclusive_access();
@@ -1367,6 +1367,28 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isiz
     }
 }
 
+/// 在指定偏移量写入，即 write_at
+pub fn sys_pwrite64(fd: usize, buf: *const u8, count: usize, offset: usize) -> isize {
+    let token = current_user_token();
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return EBADF.as_isize();
+    }
+    if let Some(file) = &inner.fd_table[fd].file {
+        let file = file.clone();
+        drop(inner);
+        if !file.writable() {
+            return EACCES.as_isize();
+        }
+        trace!("kernel:pid[{}] sys_pwrite64: fd={}, count={}, offset={}", task.process().pid.0, fd, count, offset);
+        file.write_at(offset, UserBuffer::new(translated_byte_buffer(token, buf as *mut u8, count))) as isize
+    } else {
+        EBADF.as_isize()
+    }
+}
+
 /// 修改权限模式
 pub fn sys_fchmodat(dirfd: isize, path_ptr: *const u8, mode: u32) -> isize {
     let task = current_task().unwrap();
@@ -2074,7 +2096,8 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
     }
 }
 /// fsync: 将文件描述符关联文件的数据同步到磁盘
-/// 当前实现仅针对内存映射文件
+/// 当前实现刷所有缓存而不是只刷指定文件
+/// 
 /// TODO: 完全实现 fsync 语义
 pub fn sys_fsync(_fd: usize) -> isize {
     info!("kernel:pid[{}] sys_fsync: fd={}", current_task().unwrap().process().pid.0, _fd);
@@ -2083,10 +2106,10 @@ pub fn sys_fsync(_fd: usize) -> isize {
 }
 
 /// sync: 将所有文件系统缓存同步到磁盘
-/// 暂时和msync同语义
 pub fn sys_sync() -> isize {
     info!("kernel:pid[{}] sys_sync called", current_task().unwrap().process().pid.0);
     crate::mm::mmap::sync_shared_page_cache();
+    crate::drivers::block::block_cache::block_cache_sync_all();
     0
 }
 
