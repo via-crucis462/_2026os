@@ -39,6 +39,9 @@ impl TrapContext {
     pub fn set_a1(&mut self, a1: usize) {
         self.r[5] = a1;
     }
+    pub fn set_a2(&mut self, a2: usize) {
+        self.r[6] = a2;
+    }
     /// 获取返回值
     pub fn get_a0(&self) -> usize {
         self.r[4]

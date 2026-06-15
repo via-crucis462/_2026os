@@ -1204,6 +1204,137 @@ impl MemorySet {
 
         Ok(())
     }
+
+    fn split_area_at(&mut self, idx: usize, split_vpn: VirtPageNum) -> Result<Option<usize>, isize> {
+        let area_start = self.areas[idx].vpn_range.get_start();
+        let area_end = self.areas[idx].vpn_range.get_end();
+        if split_vpn <= area_start || split_vpn >= area_end {
+            return Ok(None);
+        }
+
+        let step = self.areas[idx].page_size.num_pages();
+        if split_vpn.0 % step != 0 {
+            return Err(Errno::EINVAL.as_isize());
+        }
+
+        let right_frames = self.areas[idx].data_frames.split_off(&split_vpn);
+        let mut right_area = self.areas[idx].clone_meta_with_new_range(split_vpn, area_end);
+        right_area.data_frames = right_frames;
+        self.areas[idx].resize(area_start, split_vpn);
+        self.areas.insert(idx + 1, right_area);
+        if idx < self.brk_index {
+            self.brk_index += 1;
+        }
+        Ok(Some(idx + 1))
+    }
+
+    pub fn mprotect(&mut self, start: usize, length: usize, prot: mmap::MMapProt) -> Result<(), isize> {
+        if length == 0 {
+            return Ok(());
+        }
+
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| Errno::EINVAL.as_isize())?;
+        let start_vpn = VirtAddr::from(start).std_floor();
+        let end_vpn = VirtAddr::from(end).std_ceil();
+
+        let mut permission = MapPermission::empty();
+        if prot.contains(mmap::MMapProt::PROT_READ) {
+            permission |= MapPermission::R;
+        }
+        if prot.contains(mmap::MMapProt::PROT_WRITE) {
+            permission |= MapPermission::W;
+        }
+        if prot.contains(mmap::MMapProt::PROT_EXEC) {
+            permission |= MapPermission::X;
+        }
+        if prot != mmap::MMapProt::PROT_NONE {
+            permission |= MapPermission::U;
+        }
+
+        let mut covered_until = start_vpn;
+        let mut affected: Vec<usize> = self
+            .areas
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, area)| {
+                if area.vpn_range.get_start() < end_vpn && area.vpn_range.get_end() > start_vpn {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        affected.sort_by_key(|&idx| self.areas[idx].vpn_range.get_start().0);
+
+        if affected.is_empty() {
+            return Err(Errno::ENOMEM.as_isize());
+        }
+
+        for &idx in affected.iter() {
+            let area = &self.areas[idx];
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            if area.map_type == MapType::Guard || area_start > covered_until {
+                return Err(Errno::ENOMEM.as_isize());
+            }
+            if permission.contains(MapPermission::W) && area.is_shared {
+                if let Some((file, _)) = &area.backing_file {
+                    if !file.writable() {
+                        return Err(Errno::EACCES.as_isize());
+                    }
+                }
+            }
+            if area.page_size != Page4K {
+                let step = area.page_size.num_pages();
+                if start_vpn.0 % step != 0 || end_vpn.0 % step != 0 {
+                    return Err(Errno::EINVAL.as_isize());
+                }
+            }
+            if area_end > covered_until {
+                covered_until = area_end;
+            }
+        }
+
+        if covered_until < end_vpn {
+            return Err(Errno::ENOMEM.as_isize());
+        }
+
+        for &idx in affected.iter().rev() {
+            self.split_area_at(idx, end_vpn)?;
+            self.split_area_at(idx, start_vpn)?;
+        }
+
+        let pte_flags = PTEFlags::from_bits(permission.bits).unwrap();
+        for area in self.areas.iter_mut() {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            if area_start >= start_vpn && area_end <= end_vpn {
+                area.map_perm = permission;
+                let step = area.page_size.num_pages();
+                let mut vpn = area_start;
+                while vpn < area_end {
+                    if let Some(pte) = self.page_table.translate(vpn) {
+                        if pte.is_valid() {
+                            self.page_table.set_flags(vpn, pte_flags, area.page_size);
+                        }
+                    }
+                    vpn.step_by(step);
+                }
+            }
+        }
+
+        #[cfg(target_arch = "riscv64")]
+        unsafe {
+            asm!("sfence.vma x0, {asid}", asid = in(reg) self.asid());
+        }
+        #[cfg(target_arch = "loongarch64")]
+        Self::flush_tlb_after_mapping_change();
+
+        Ok(())
+    }
+
     /// 处理缺页异常。如果触发异常的地址在合法区域内，则为其分配物理页；否则返回 false。
     /// 待进一步完善&测试
     #[no_mangle]

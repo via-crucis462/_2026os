@@ -229,9 +229,11 @@ impl ProcessControlBlock {
                 signal_mask_backup: Vec::new(),
                 frozen: false,
                 trap_ctx_backup: Vec::new(),
+                signal_user_context_backup: Vec::new(),
                 exit_code: 0,
                 errno: 0,
                 signals: SignalFlags::empty(),
+                signal_interrupted: false,
                 clear_child_tid: 0,
 
             })
@@ -577,9 +579,11 @@ impl ProcessControlBlock {
                 term_signal: None,
                 frozen: false,
                 trap_ctx_backup: Vec::new(),
+                signal_user_context_backup: Vec::new(),
                 exit_code: 0,
                 errno: 0,
                 signals: SignalFlags::empty(),
+                signal_interrupted: false,
                 clear_child_tid: 0,
             }),
         });
@@ -674,12 +678,14 @@ impl ProcessControlBlock {
                 exit_code: 0,
                 errno: 0,
                 signals: SignalFlags::empty(),
+                signal_interrupted: false,
                 signal_mask: caller_inner.signal_mask,
                 signal_mask_backup: Vec::new(),
                 killed: false,
                 term_signal: None,
                 frozen: false,
                 trap_ctx_backup: Vec::new(),
+                signal_user_context_backup: Vec::new(),
                 clear_child_tid: 0,
             }),
         });
@@ -790,6 +796,11 @@ impl ProcessControlBlock {
     pub fn munmap(&self, addr: usize, length: usize) -> Result<(), isize> {
         let mut inner = self.inner_exclusive_access();
         inner.memory_set.munmap(addr, length)
+    }
+
+    pub fn mprotect(&self, addr: usize, length: usize, prot: mmap::MMapProt) -> Result<(), isize> {
+        let mut inner = self.inner_exclusive_access();
+        inner.memory_set.mprotect(addr, length, prot)
     }
 }
 

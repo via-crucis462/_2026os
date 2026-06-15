@@ -109,6 +109,7 @@ pub fn trap_handler() -> ! {
                         let mut task_inner = task.inner_exclusive_access();
                         task_inner.signals |= crate::task::SignalFlags::SIGALRM;
                         if task_inner.task_status == crate::task::TaskStatus::Blocked {
+                            task_inner.signal_interrupted = true;
                             task_inner.task_status = crate::task::TaskStatus::Ready;
                             crate::task::add_task(Arc::clone(task)); 
                         }

@@ -25,9 +25,18 @@ impl VfsInode for Ext4Inode {
 
             let mut block_offset = 0;
             while block_offset < read_len {
+                // 剩余数据不足以解析最小 ext4 目录项头部
+                if read_len - block_offset < 8 {
+                    break;
+                }
                 if let Some(dirent) = Ext4DirEntry::from_bytes(&buf[block_offset..]) {
+                    let rec_len = dirent.rec_len() as usize;
+                    // 防御：rec_len 不能为 0，也不能超出当前读取范围
+                    if rec_len == 0 || rec_len > read_len - block_offset {
+                        break;
+                    }
                     if dirent.inode() != 0 && dirent.name_len() > 0 {
-                        if dirent.name() == name {
+                        if dirent.safe_name() == name {
                             // 找到了名称匹配的项，去磁盘读它的 Inode
                             let disk_inode = self.fs.get_disk_inode(dirent.inode());
                             return Some(Arc::new(Ext4Inode::new(
@@ -38,8 +47,6 @@ impl VfsInode for Ext4Inode {
                             )));
                         }
                     }
-                    let rec_len = dirent.rec_len() as usize;
-                    if rec_len == 0 { break; }
                     block_offset += rec_len;
                 } else {
                     break;
@@ -279,17 +286,32 @@ impl VfsInode for Ext4Inode {
             let mut buffer_full = false;
   
             while block_offset < read_len && buf_offset < buf_len {
+                // 剩余数据不足以解析最小 ext4 目录项头部
+                if read_len - block_offset < 8 {
+                    block_offset = read_len;
+                    break;
+                }
                 if let Some(ext4_dirent) = Ext4DirEntry::from_bytes(&temp_buf[block_offset..]) {
                     let disk_rec_len = ext4_dirent.rec_len() as usize;
-                    if disk_rec_len == 0 { break; } // 防止死循环
+                    // 防御：rec_len 不能为 0，也不能超出当前读取范围
+                    if disk_rec_len == 0 || disk_rec_len > read_len - block_offset {
+                        block_offset = read_len;
+                        break;
+                    }
 
                     if ext4_dirent.inode() != 0 && ext4_dirent.name_len() > 0 {
-                        let name = ext4_dirent.name();
+                        // 使用 safe_name() 防止从越界位置读取文件名
+                        let name = ext4_dirent.safe_name();
                         last_name = String::from(name);
                         
                         let name_bytes = name.as_bytes();
                         let name_len = name_bytes.len();
                         
+                        // 跳过空文件名（无效目录项）
+                        if name_len == 0 {
+                            block_offset += disk_rec_len;
+                            continue;
+                        }
             
                         let total_len = 19 + name_len + 1;
                         
@@ -331,6 +353,9 @@ impl VfsInode for Ext4Inode {
                     }
                     block_offset += disk_rec_len; 
                 } else {
+                    // from_bytes 失败（rec_len 异常或超出缓冲区）：
+                    // 跳过当前块剩余字节，推进 offset 防止死循环
+                    block_offset = read_len;
                     break;
                 }
             } 

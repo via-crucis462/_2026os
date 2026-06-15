@@ -161,6 +161,7 @@ pub fn wake_up_task(task: Arc<TaskControlBlock>) {
     // (具体枚举名称请根据你项目里的定义替换，如 TaskStatus::Blocking)
     if matches!(inner.task_status, TaskStatus::Blocked) {
         inner.task_status = TaskStatus::Ready;
+        //inner.owner_hart = None;
         drop(inner); 
         
         // 重新塞回你的全局就绪池！
