@@ -656,7 +656,7 @@ pub fn handle_signals() {
 /// call user signal handler
 /// 跳到用户态的信号处理函数
 fn  call_signal_handler(sig: usize, signal: SignalFlags) {
-    println!("[SIG PROBE] Calling handler for sig: {}", sig);
+    warn!("[SIG PROBE] Calling handler for sig: {}", sig);
     let task = current_task().unwrap();
     let proc = task.process();
     let mut task_inner = task.inner_exclusive_access();
