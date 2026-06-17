@@ -874,20 +874,13 @@ impl ProcessControlBlockInner {
     }
     pub fn alloc_fd(&mut self) -> Option<usize> {
         // 1. 先尝试在现有的表中寻找被 close 空出来的坑位
-        if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_available()) {
+        //println!("alloc_fd: current fd_table len={}, fd_rlmt={}", self.fd_table.len(), self.fd_rlmt.cur_lmt);
+        if let Some(fd) = (0..self.fd_rlmt.cur_lmt).find(|fd| self.fd_table[*fd].is_available()) {
             self.fd_table[fd].flags = FdFlags::empty();
             self.fd_table[fd].status = FD_STATUS_RESERVED;
             return Some(fd);
         } 
-        
-        // 2. 如果没有空闲坑位，检查是否已经达到上限
-        if self.fd_table.len() >= self.fd_rlmt.cur_lmt {
-            return None; // 拒绝分配，触发 EMFILE
-        }
-        
-        // 3. 没到上限，扩充 fd_table
-        self.fd_table.push(FileDescriptor::reserved());
-        Some(self.fd_table.len() - 1)
+        None
     }
     pub fn clear_fd(&mut self, fd: usize) {
         self.fd_table[fd] = FileDescriptor::empty();
