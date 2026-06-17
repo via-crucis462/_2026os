@@ -872,15 +872,22 @@ impl ProcessControlBlockInner {
     pub fn get_asid(&self) -> usize {
         self.memory_set.asid()
     }
-    pub fn alloc_fd(&mut self) -> Option<usize> {
+        pub fn alloc_fd(&mut self) -> Option<usize> {
         // 1. 先尝试在现有的表中寻找被 close 空出来的坑位
-        //println!("alloc_fd: current fd_table len={}, fd_rlmt={}", self.fd_table.len(), self.fd_rlmt.cur_lmt);
-        if let Some(fd) = (0..self.fd_rlmt.cur_lmt).find(|fd| self.fd_table[*fd].is_available()) {
+        if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_available()) {
             self.fd_table[fd].flags = FdFlags::empty();
             self.fd_table[fd].status = FD_STATUS_RESERVED;
             return Some(fd);
         } 
-        None
+        
+        // 2. 如果没有空闲坑位，检查是否已经达到上限
+        if self.fd_table.len() >= self.fd_rlmt.cur_lmt {
+            return None; // 拒绝分配，触发 EMFILE
+        }
+        
+        // 3. 没到上限，扩充 fd_table
+        self.fd_table.push(FileDescriptor::reserved());
+        Some(self.fd_table.len() - 1)
     }
     pub fn clear_fd(&mut self, fd: usize) {
         self.fd_table[fd] = FileDescriptor::empty();
@@ -901,8 +908,24 @@ impl ProcessControlBlockInner {
     pub fn get_rlimit64(&self) -> Rlimit64 {
         self.fd_rlmt.clone()
     }
-    pub fn set_rlimit64(&mut self, new_rlmt: Rlimit64) {
+    pub fn set_rlimit64(&mut self, new_rlmt: Rlimit64) -> isize {
+        // cur_lmt 不能超过 max_lmt
+        if self.fd_rlmt.max_lmt < new_rlmt.cur_lmt {
+            return EINVAL.as_isize();
+        }
+        // 当降低软限制时，尝试从尾部裁剪 fd_table 中的空槽位
+        if new_rlmt.cur_lmt < self.fd_table.len() {
+            while self.fd_table.len() > new_rlmt.cur_lmt {
+                if self.fd_table.last().unwrap().file.is_some() {
+                    // 尾部有仍打开的文件，无法收缩
+                    return EBADF.as_isize();
+                } else {
+                    self.fd_table.pop();
+                }
+            }
+        }
         self.fd_rlmt = new_rlmt;
+        0
     }
     //回收进程资源，返回子进程组，用于给initproc回收
     pub fn recycle_on_exit(&mut self, exit_code: i32) -> Vec<Arc<ProcessControlBlock>> {
@@ -917,9 +940,9 @@ impl ProcessControlBlockInner {
         self.alive_task_count == 0
     }
     pub fn info_map_areas(&self) {
-            warn!("mapping asid {}:", self.get_asid());
+            info!("mapped asid {}:", self.get_asid());
         for i in self.memory_set.areas().iter() {
-            warn!("mapping: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
+            info!("mapped: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
         }
     }
 }

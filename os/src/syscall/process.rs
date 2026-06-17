@@ -3667,7 +3667,10 @@ pub fn sys_prlimit64(
             }
             if !new_limit.is_null() {
                 let new = translated_read(token, new_limit);
-                proc_inner.set_rlimit64(new); 
+                let ret = proc_inner.set_rlimit64(new);
+                if ret != 0 {
+                    return ret;
+                }
             }
             0
         }

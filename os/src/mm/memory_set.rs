@@ -1400,6 +1400,8 @@ impl MemorySet {
         }
 
         if let Some((idx, old_start_vpn)) = expand_idx {
+            // 从被扩张的 area 获取 page_size
+            page_size_opt = Some(self.areas[idx].page_size);
             // 执行扩张：将该 Area 的起点向下延伸到 vpn (注意保留原来的终点)
             self.areas[idx].vpn_range = crate::mm::address::VPNRange::new(
                 vpn,
