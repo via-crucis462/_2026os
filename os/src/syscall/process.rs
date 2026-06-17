@@ -3068,6 +3068,7 @@ pub fn sys_pselect6(
             if readfds_ptr as usize != 0 { try_translated_write(token, readfds_ptr, 0); }
             if _writefds_ptr as usize != 0 { try_translated_write(token, _writefds_ptr, 0); }
             if _exceptfds_ptr as usize != 0 { try_translated_write(token, _exceptfds_ptr, 0); }
+            return 0
         }
         if ready_count == 0 {
             crate::task::suspend_current_and_run_next();
