@@ -52,3 +52,7 @@ GPATH
 GRTAGS
 GTAGS
 fs_img
+musl-1.2.4
+musl-1.2.4.tar.gz
+glibc-2.3.5
+glibc-2.3.5.tar.gz

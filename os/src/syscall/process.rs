@@ -3718,6 +3718,7 @@ pub fn sys_prlimit64(
 
 const FUTEX_WAIT: i32 = 0;
 const FUTEX_WAKE: i32 = 1;
+const FUTEX_REQUEUE: i32 = 3;
 const FUTEX_PRIVATE_FLAG: i32 = 128;
 const FUTEX_CLOCK_REALTIME: i32 = 256;
 const FUTEX_CMD_MASK: i32 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
@@ -3726,7 +3727,7 @@ const FUTEX_CMD_MASK: i32 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 ///作用：用户空间会传进去一个地址，内核解引用地址获取值后，如果和用户指定的val相等，则睡眠或唤醒对应等待队列的一个元素。
 /// 实际上，FUTEX就是管理所有信号量以及其等待队列的元素，信号量底层会用这个syscall。
 /// FUTEX的键是物理地址，值是这个信号量对应的等待队列
-pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32) -> isize {
+pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, uaddr2: *mut i32, val3: i32) -> isize {
     if uaddr.is_null() {
         return EFAULT.as_isize();
     }
@@ -3758,7 +3759,40 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32) -> isize {
                 );
                 return EAGAIN.as_isize();
             }
+            //当需要实时阻塞时，先检查是否有信号到来，如果有则返回EINTR，如果没有则进入睡眠等待被唤醒或者超时
+            if !timeout.is_null() {
+                let Some(timeout_val) = try_translated_read(token, timeout) else {
+                    return EFAULT.as_isize();
+                };
+                if timeout_val.tv_nsec >= 1_000_000_000 {
+                    return EINVAL.as_isize();
+                }
 
+                let timeout_us = timeout_val
+                    .tv_sec
+                    .saturating_mul(1_000_000)
+                    .saturating_add((timeout_val.tv_nsec + 999) / 1000);
+                let deadline_us = get_time_us().saturating_add(timeout_us);
+
+                loop {
+                    if crate::process::check_pending_signal() {
+                        return EINTR.as_isize();
+                    }
+                    if get_time_us() >= deadline_us {
+                        return ETIMEDOUT.as_isize();
+                    }
+
+                    suspend_current_and_run_next();
+
+                    let Some(current_val) = try_translated_read(token, uaddr as *const i32) else {
+                        return EFAULT.as_isize();
+                    };
+                    if current_val != val {
+                        return 0;
+                    }
+                }
+            }
+            //否则就是不带超时的等待，直接睡眠等待被唤醒
             let current = current_task().unwrap();
             let current_tid = current.gettid();
             if crate::process::check_pending_signal() {
@@ -3867,6 +3901,80 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32) -> isize {
             }
 
             woken as isize
+        }
+        FUTEX_REQUEUE => {
+            if uaddr2.is_null() {
+                return EFAULT.as_isize();
+            }
+
+            let token = current_user_token();
+            let page_table = PageTable::from_token(token);
+            let Some(src_pa) = page_table.translate_va(VirtAddr::from(uaddr as usize)) else {
+                return EFAULT.as_isize();
+            };
+            let Some(dst_pa) = page_table.translate_va(VirtAddr::from(uaddr2 as usize)) else {
+                return EFAULT.as_isize();
+            };
+
+            let requeue_count = timeout as usize;
+            let dst_queue = if requeue_count > 0 {
+                Some(get_futex_wait_queue(dst_pa.0))
+            } else {
+                None
+            };
+            let src_queue = {
+                let queues = FUTEX_WAIT_QUEUES.lock();
+                queues.get(&src_pa.0).cloned()
+            };
+
+            let Some(src_queue) = src_queue else {
+                return 0;
+            };
+
+            let mut affected = 0;
+            let mut wake_left = if val > 0 { val as usize } else { 0 };
+            let mut requeue_left = requeue_count;
+
+            loop {
+                let task = {
+                    let mut src_guard = src_queue.lock();
+                    if wake_left == 0 && requeue_left == 0 {
+                        None
+                    } else {
+                        src_guard.pop_front()
+                    }
+                };
+
+                let Some(task) = task else {
+                    break;
+                };
+
+                if wake_left > 0 {
+                    wake_left -= 1;
+                    while task.inner_exclusive_access().task_status == crate::task::TaskStatus::WaitSaving {
+                        suspend_current_and_run_next();
+                    }
+                    let mut task_inner = task.inner_exclusive_access();
+                    task_inner.task_status = crate::task::TaskStatus::Ready;
+                    task_inner.owner_hart = None;
+                    drop(task_inner);
+                    add_task(task);
+                    affected += 1;
+                    continue;
+                }
+
+                if requeue_left > 0 {
+                    requeue_left -= 1;
+                    if src_pa.0 == dst_pa.0 {
+                        src_queue.lock().push_back(task);
+                    } else if let Some(dst_queue) = &dst_queue {
+                        dst_queue.lock().push_back(task);
+                    }
+                    affected += 1;
+                }
+            }
+
+            affected as isize
         }
         _ => ENOSYS.as_isize(),
     }
