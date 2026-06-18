@@ -362,6 +362,10 @@ pub fn exit_current_and_run_next(exit_code: i32){
     };
     crate::syscall::process::clear_child_tid_and_wake(token, clear_child_tid);
 
+    let exiting_tid = task.gettid();
+    #[cfg(target_arch = "riscv64")]
+    let exiting_trap_cx_va = crate::arch::trap::trap_cx_va_by_kernel_stack(&task.kernel_stack);
+
     task.recycle_on_exit(exit_code);
     
     //若线程是最后一个存活线程，则将其线程码写入进程退出码,并回收进程资源
@@ -375,9 +379,17 @@ pub fn exit_current_and_run_next(exit_code: i32){
     warn!("[EXIT] PID {} (tid {}) exit_code={}, alive_tasks={}", 
         process.getpid(), task.gettid(), exit_code, 
         process.inner_exclusive_access().alive_task_count);
-    drop(task);
     let mut proc_inner = process.inner_exclusive_access();
+    proc_inner.tasks.retain(|task| task.gettid() != exiting_tid);
+    #[cfg(target_arch = "riscv64")]
+    {
+        proc_inner
+            .memory_set
+            .remove_area_with_start_vpn(crate::mm::VirtAddr::from(exiting_trap_cx_va).into());
+        crate::arch::mm::flush_tlb_for_asid(proc_inner.memory_set.asid());
+    }
     proc_inner.alive_task_count -= 1;
+    drop(task);
 
     if proc_inner.alive_task_count > 0 {
         // 还有其他线程存活，不回收进程资源，直接调度下一个线程
