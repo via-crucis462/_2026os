@@ -1158,6 +1158,160 @@ const CLONE_SETTLS: usize = 0x00080000;
 const CLONE_PARENT_SETTID: usize = 0x00100000;
 const CLONE_CHILD_CLEARTID: usize = 0x00200000;
 const CLONE_CHILD_SETTID: usize = 0x01000000;
+const CLONE_PIDFD: usize = 0x00001000;
+const CLONE_SIGHAND_FLAG: usize = 0x00000800;
+const CLONE_NEWNS: usize = 0x00020000;
+const CSIGNAL: usize = 0xff;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CloneArgs {
+    pub flags: u64,
+    pub pidfd: u64,
+    pub child_tid: u64,
+    pub parent_tid: u64,
+    pub exit_signal: u64,
+    pub stack: u64,
+    pub stack_size: u64,
+    pub tls: u64,
+    pub set_tid: u64,
+    pub set_tid_size: u64,
+    pub cgroup: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CloneArgsV0 {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CloneArgsV1 {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+    set_tid: u64,
+    set_tid_size: u64,
+}
+
+impl From<CloneArgsV0> for CloneArgs {
+    fn from(args: CloneArgsV0) -> Self {
+        Self {
+            flags: args.flags,
+            pidfd: args.pidfd,
+            child_tid: args.child_tid,
+            parent_tid: args.parent_tid,
+            exit_signal: args.exit_signal,
+            stack: args.stack,
+            stack_size: args.stack_size,
+            tls: args.tls,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<CloneArgsV1> for CloneArgs {
+    fn from(args: CloneArgsV1) -> Self {
+        Self {
+            flags: args.flags,
+            pidfd: args.pidfd,
+            child_tid: args.child_tid,
+            parent_tid: args.parent_tid,
+            exit_signal: args.exit_signal,
+            stack: args.stack,
+            stack_size: args.stack_size,
+            tls: args.tls,
+            set_tid: args.set_tid,
+            set_tid_size: args.set_tid_size,
+            cgroup: 0,
+        }
+    }
+}
+
+pub fn sys_clone3(uargs: *const CloneArgs, size: usize) -> isize {
+    const CLONE_ARGS_SIZE_VER0: usize = core::mem::size_of::<CloneArgsV0>();
+    const CLONE_ARGS_SIZE_VER1: usize = core::mem::size_of::<CloneArgsV1>();
+    const CLONE_ARGS_SIZE_VER2: usize = core::mem::size_of::<CloneArgs>();
+
+    if size < CLONE_ARGS_SIZE_VER0 {
+        return EINVAL.as_isize();
+    }
+
+    let token = current_user_token();
+    let args = if size < CLONE_ARGS_SIZE_VER1 {
+        match try_translated_read(token, uargs as *const CloneArgsV0) {
+            Some(args) => CloneArgs::from(args),
+            None => return EFAULT.as_isize(),
+        }
+    } else if size < CLONE_ARGS_SIZE_VER2 {
+        match try_translated_read(token, uargs as *const CloneArgsV1) {
+            Some(args) => CloneArgs::from(args),
+            None => return EFAULT.as_isize(),
+        }
+    } else {
+        match try_translated_read(token, uargs) {
+            Some(args) => args,
+            None => return EFAULT.as_isize(),
+        }
+    };
+
+    let flags = args.flags as usize;
+    let exit_signal = args.exit_signal as usize;
+
+    if exit_signal > MAX_SIG || exit_signal & !CSIGNAL != 0 {
+        return EINVAL.as_isize();
+    }
+    if flags & CLONE_SIGHAND_FLAG != 0 && flags & CLONE_VM == 0 {
+        return EINVAL.as_isize();
+    }
+    if flags & CLONE_THREAD != 0 && flags & CLONE_SIGHAND_FLAG == 0 {
+        return EINVAL.as_isize();
+    }
+    if flags & CLONE_FS != 0 && flags & CLONE_NEWNS != 0 {
+        return EINVAL.as_isize();
+    }
+    if args.stack == 0 && args.stack_size != 0 {
+        return EINVAL.as_isize();
+    }
+    if args.stack != 0 && args.stack_size == 0 {
+        return EINVAL.as_isize();
+    }
+    if flags & CLONE_PIDFD != 0 || args.pidfd != 0 || args.set_tid != 0 || args.set_tid_size != 0 || args.cgroup != 0 {
+        return EINVAL.as_isize();
+    }
+
+    let stack = if args.stack != 0 {
+        match (args.stack as usize).checked_add(args.stack_size as usize) {
+            Some(stack) => stack,
+            None => return EINVAL.as_isize(),
+        }
+    } else {
+        0
+    };
+    let clone_flags = flags | exit_signal;
+
+    #[cfg(target_arch = "riscv64")]
+    {
+        sys_clone(clone_flags, stack, args.parent_tid as usize, args.tls as usize, args.child_tid as usize)
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        sys_clone(clone_flags, stack, args.parent_tid as usize, args.child_tid as usize, args.tls as usize)
+    }
+}
 
 pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usize) -> isize {
     #[cfg(target_arch = "riscv64")]
@@ -3775,6 +3929,8 @@ pub fn sys_prlimit64(
 const FUTEX_WAIT: i32 = 0;
 const FUTEX_WAKE: i32 = 1;
 const FUTEX_REQUEUE: i32 = 3;
+const FUTEX_WAIT_BITSET: i32 = 9;
+const FUTEX_WAKE_BITSET: i32 = 10;
 const FUTEX_PRIVATE_FLAG: i32 = 128;
 const FUTEX_CLOCK_REALTIME: i32 = 256;
 const FUTEX_CMD_MASK: i32 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
@@ -3792,7 +3948,10 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
     let token = current_user_token();
 
     match cmd {
-        FUTEX_WAIT => {
+        FUTEX_WAIT | FUTEX_WAIT_BITSET => {
+            if cmd == FUTEX_WAIT_BITSET && val3 == 0 {
+                return EINVAL.as_isize();
+            }
             let Some(current_val) = try_translated_read(token, uaddr as *const i32) else {
                 return EFAULT.as_isize();
             };
@@ -3925,7 +4084,10 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 0
             }
         }
-        FUTEX_WAKE => {
+        FUTEX_WAKE | FUTEX_WAKE_BITSET => {
+            if cmd == FUTEX_WAKE_BITSET && val3 == 0 {
+                return EINVAL.as_isize();
+            }
             if val <= 0 {
                 return 0;
             }
