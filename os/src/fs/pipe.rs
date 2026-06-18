@@ -4,7 +4,7 @@ use crate::sync::MPSafeCell;
 use alloc::sync::{Arc, Weak};
 use crate::mm::{frame_alloc, FrameTracker}; 
 use crate::auth::{PermStat, FileMode};
-use crate::process::{SignalFlags, wake_up_task};
+use crate::process::{SignalFlags, check_pending_signal, wake_up_task};
 use crate::syscall::errno::Errno;
 use core::any::Any;
 
@@ -215,14 +215,12 @@ impl File for Pipe {
                 }
                //println!("[kernel] Pipe Read Empty: already_read={}, waiting...", already_read);
                 drop(ring_buffer);
-                //新增：检查是否被信号打断 
-                let task = crate::task::current_task().unwrap();
-                let task_inner = task.inner_exclusive_access();
-                let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
-                let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18));
-                drop(task_inner);
-
-                if pending != 0 || unmaskable != 0 {
+                let killed = {
+                    let task = crate::task::current_task().unwrap();
+                    let killed = task.inner_exclusive_access().killed;
+                    killed
+                };
+                if killed || check_pending_signal() {
                     return already_read; 
                 }
                 suspend_current_and_run_next();
@@ -265,6 +263,14 @@ impl File for Pipe {
                 }
               //  println!("[kernel] Pipe Write Full: already_write={}, waiting for consumer...", already_write);
                 drop(ring_buffer);
+                let killed = {
+                    let task = crate::task::current_task().unwrap();
+                    let killed = task.inner_exclusive_access().killed;
+                    killed
+                };
+                if killed || check_pending_signal() {
+                    return already_write;
+                }
                 suspend_current_and_run_next();
                 continue;
             }

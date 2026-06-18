@@ -512,6 +512,18 @@ pub fn trap_return() -> ! {
     //set_user_trap_entry();
     // 直接用物理地址
     handle_signals();
+    let term_signal = {
+        let task = current_task().unwrap();
+        let inner = task.inner_exclusive_access();
+        if inner.killed {
+            inner.term_signal.unwrap_or(1)
+        } else {
+            0
+        }
+    };
+    if term_signal != 0 {
+        exit_current_and_run_next(-term_signal);
+    }
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
     let id = current_user_asid();

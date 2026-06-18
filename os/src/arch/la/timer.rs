@@ -12,6 +12,7 @@ const MSEC_PER_SEC: usize = 1000;
 /// The number of microseconds per second
 const MICRO_PER_SEC: usize = 1_000_000;
 const NSEC_PER_SEC: u64 = 1_000_000_000;
+const DEFAULT_TIMER_FREQUENCY: usize = 100_000_000;
 
 /// QEMU loongarch virt 平台上的 LS7A RTC 物理基地址。
 const LS7A_RTC_REG_BASE_PHYS: usize = 0x100D_0100;
@@ -26,6 +27,15 @@ const RTC_CTRL_EO: u32 = 1 << 8;
 const RTC_CTRL_TOYEN: u32 = 1 << 11;
 // 全局只初始化一次，所以unsafe是安全的
 static mut TIMER_FREQUENCY: usize = 0;
+
+fn timer_frequency() -> usize {
+    let mut freq = unsafe { TIMER_FREQUENCY };
+    if freq == 0 {
+        init_board_freq();
+        freq = unsafe { TIMER_FREQUENCY };
+    }
+    freq
+}
 
 /// Get the current time in ticks
 pub fn get_time() -> usize {
@@ -42,9 +52,13 @@ pub fn get_timer_ticks() -> usize {
 
 /// 读取板载时钟频率，单位Hz
 pub fn init_board_freq() {
-    let freq;
+    let mut freq;
     unsafe {
         asm!("cpucfg {}, {}", out(reg) freq, in(reg) 0x4);
+        if freq == 0 {
+            println!("[timer] cpucfg returned zero frequency, using {} Hz", DEFAULT_TIMER_FREQUENCY);
+            freq = DEFAULT_TIMER_FREQUENCY;
+        }
         TIMER_FREQUENCY = freq;
     }
 }
@@ -52,13 +66,13 @@ pub fn init_board_freq() {
 /// get current time in milliseconds
 pub fn get_time_ms() -> usize {
     let time = get_time();
-    time * MSEC_PER_SEC / unsafe { TIMER_FREQUENCY }
+    time * MSEC_PER_SEC / timer_frequency()
 }
 
 /// get current time in microseconds
 pub fn get_time_us() -> usize {
     let time = get_time();
-    time * MICRO_PER_SEC / unsafe { TIMER_FREQUENCY }
+    time * MICRO_PER_SEC / timer_frequency()
 }
 
 fn rtc_read_u32(offset: usize) -> u32 {
