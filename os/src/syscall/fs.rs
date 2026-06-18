@@ -3,7 +3,7 @@ use crate::PAGE_SIZE;
 use crate::auth::FileMode;
 use crate::process::FdFlags;
 use crate::fs::{create_fifo_in_dentry, create_file_in_dentry, is_fifo_mode, make_pipe, open_fifo_file, Dentry, File, OpenFlags, ROOT_DENTRY, Stat, Statx, file_name, make_dir, open_file, parent_path, S_IFMT, UserPageFaultInfo};
-use crate::mm::{PageSize, UserBuffer, prepare_user_write, translated_byte_buffer, translated_read, try_translated_read, try_translated_str, try_translated_write};
+use crate::mm::{PageSize, UserBuffer, prepare_user_read, prepare_user_write, translated_byte_buffer, translated_read, try_translated_read, try_translated_str, try_translated_write};
 use crate::task::{current_task, current_user_token};
 use alloc::{task, vec};
 use alloc::sync::Arc;
@@ -603,6 +603,7 @@ pub struct IoVec {
 pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     // 参数合法性检查
     const IOV_MAX: usize = 1024;
+    const WRITEV_CHUNK_MAX: usize = 1024 * 1024;
     if iovcnt > IOV_MAX {
         return EINVAL.as_isize();
     }
@@ -626,62 +627,71 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     let nonblock = (status & (O_NONBLOCK | O_NDELAY)) != 0;
     let mut total_written = 0;
     for i in 0..iovcnt {
-        let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
+        let Some(iov_offset) = i.checked_mul(core::mem::size_of::<IoVec>()) else {
+            return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
+        };
+        let Some(iov_addr) = iov_ptr.checked_add(iov_offset) else {
+            return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
+        };
         let iovec: IoVec = {
             if let Some(io) = try_translated_read(token, iov_addr as *const IoVec) {
                 io
             } else {
-                return EFAULT.as_isize();
+                return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
             }
         };
         if iovec.len == 0 {
             continue; 
         }
-        const IOV_BUF_MAX: usize = 1024;
-        if iovec.len > IOV_BUF_MAX {
-            return EINVAL.as_isize();
+        if !prepare_user_read(token, iovec.base, iovec.len) {
+            return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
         }
-        if !prepare_user_write(token, iovec.base, iovec.len) {
-            return EFAULT.as_isize();
-        }
-        if nonblock && !file.ready_to_write() {
-            return if total_written == 0 {
-                EAGAIN.as_isize()
-            } else {
-                total_written as isize
+        let mut written_in_iov = 0usize;
+        while written_in_iov < iovec.len {
+            if nonblock && !file.ready_to_write() {
+                return if total_written == 0 {
+                    EAGAIN.as_isize()
+                } else {
+                    total_written as isize
+                };
+            }
+            let chunk_len = (iovec.len - written_in_iov).min(WRITEV_CHUNK_MAX);
+            let Some(chunk_base) = iovec.base.checked_add(written_in_iov) else {
+                return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
             };
-        }
-        let iovec_len = iovec.len.min(IOV_BUF_MAX);
-        let user_buffer = UserBuffer {
-            buffers: translated_byte_buffer(token, iovec.base as *const u8, iovec_len),
-        };
-        let written = if nonblock {
-            match file.write_nonblock(user_buffer) {
-                Ok(written) => written,
-                Err(err) => {
+            let user_buffer = UserBuffer {
+                buffers: translated_byte_buffer(token, chunk_base as *const u8, chunk_len),
+            };
+            let written = if nonblock {
+                match file.write_nonblock(user_buffer) {
+                    Ok(written) => written,
+                    Err(err) => {
+                        return if total_written == 0 {
+                            err.as_isize()
+                        } else {
+                            total_written as isize
+                        };
+                    }
+                }
+            } else {
+                file.write(user_buffer)
+            };
+            if written == 0 && chunk_len > 0 {
+                if let Some(err) = file.check_write_error() {
                     return if total_written == 0 {
                         err.as_isize()
                     } else {
                         total_written as isize
                     };
                 }
+                warn!("pid[{}] [sys_writev] FATAL: Underlying file returned 0 on write! fd={}", proc.pid.0, fd);
+                return total_written as isize;
             }
-        } else {
-            file.write(user_buffer)
-        };
-        if written == 0 && iovec_len > 0 {
-            if let Some(err) = file.check_write_error() {
-                return if total_written == 0 {
-                    err.as_isize()
-                } else {
-                    total_written as isize
-                };
+            total_written += written;
+            written_in_iov += written;
+            if written < chunk_len {
+                return total_written as isize;
             }
-            warn!("pid[{}] [sys_writev] FATAL: Underlying file returned 0 on write! fd={}", proc.pid.0, fd);
-        }
-        total_written += written;
-        if written < iovec_len {
-            break;
         }
     }
     info!("pid[{}] [sys_writev] LEAVE total_written={}", proc.pid.0, total_written);

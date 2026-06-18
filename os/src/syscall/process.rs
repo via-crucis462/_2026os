@@ -2998,16 +2998,26 @@ pub fn sys_getrusage(who: i32, usage_ptr: *mut Rusage) -> isize {
         return EFAULT.as_isize(); 
     }
     let token = current_user_token();
-    let total_us = get_time_us();
+    let elapsed_us = if who == RUSAGE_CHILDREN {
+        0
+    } else {
+        let task = current_task().unwrap();
+        let proc = task.process();
+        let inner = proc.inner_exclusive_access();
+        get_time_us().saturating_sub(inner.start_time_us)
+    };
     let usage = Rusage {
         ru_utime: TimeVal {
-            sec: total_us / 1_000_000,
-            usec: total_us % 1_000_000,
+            sec: elapsed_us / 1_000_000,
+            usec: elapsed_us % 1_000_000,
         },
         ..Default::default()
     };
-    crate::mm::translated_write(token, usage_ptr, usage);
-    0 
+    if try_translated_write(token, usage_ptr, usage) {
+        0
+    } else {
+        EFAULT.as_isize()
+    }
 }
 
 #[allow(dead_code)]
