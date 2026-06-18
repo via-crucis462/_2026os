@@ -434,8 +434,10 @@ pub fn setup_oscomp_env() {
         if let Some(busybox_node) = musl_dir.find_child("busybox") {
             let bb_inode = busybox_node.inode.clone();
             let applets = [
-                "basename", "dirname", "sh", "grep", "sed", "awk", "cat", 
-                "ls", "rm", "echo", "true", "false", "wc", "mkdir", "rmdir", "touch", "env"
+                "[", "basename", "cat", "chmod", "cp", "cut", "date", "dirname", "echo", "env",
+                "false", "grep", "head", "kill", "ln", "ls", "mkdir", "mv", "printf", "pwd", "rm",
+                "rmdir", "sed", "sh", "sleep", "sort", "tail", "test", "touch", "tr", "true", "uname",
+                "wc", "which", "xargs", "awk",
             ];
             
             for app in applets {
