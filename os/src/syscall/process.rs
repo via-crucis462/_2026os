@@ -3088,7 +3088,7 @@ pub fn sys_pselect6(
     writefds_ptr: *mut usize,
     exceptfds_ptr: *mut usize,
     _timeout: *const usize,
-    _sigmask: *const usize,
+    sigmask_arg: *const usize,
 ) -> isize {
 
     // 大于64会导致超出usize
@@ -3100,6 +3100,21 @@ pub fn sys_pselect6(
     let task = current_task().unwrap();
     let process = task.process();
     let token = process.inner_exclusive_access().get_user_token();
+
+    let original_mask = task.inner_exclusive_access().signal_mask;
+    if sigmask_arg as usize != 0 {
+        let mask_ptr = match try_translated_read(token, sigmask_arg) {
+            Some(mask_ptr) => mask_ptr,
+            None => return EFAULT.as_isize(),
+        };
+        if mask_ptr != 0 {
+            let mask = match try_translated_read(token, mask_ptr as *const usize) {
+                Some(mask) => mask,
+                None => return EFAULT.as_isize(),
+            };
+            task.inner_exclusive_access().signal_mask = SignalFlags::from_bits_truncate(mask as u64);
+        }
+    }
     
     // 从用户空间读取 readfds 位图
     let mut readfds = 0usize;
@@ -3108,6 +3123,7 @@ pub fn sys_pselect6(
             if let Some(rf) = try_translated_read(token, readfds_ptr) {
                 rf
             } else {
+                task.inner_exclusive_access().signal_mask = original_mask;
                 return EFAULT.as_isize();
             }
         };
@@ -3120,6 +3136,7 @@ pub fn sys_pselect6(
             if let Some(wf) = try_translated_read(token, writefds_ptr) {
                 wf
             } else {
+                task.inner_exclusive_access().signal_mask = original_mask;
                 return EFAULT.as_isize();
             }
         };
@@ -3132,6 +3149,7 @@ pub fn sys_pselect6(
             if let Some(ef) = try_translated_read(token, exceptfds_ptr) {
                 ef
             } else {
+                task.inner_exclusive_access().signal_mask = original_mask;
                 return EFAULT.as_isize();
             }
         };
@@ -3145,16 +3163,19 @@ pub fn sys_pselect6(
             if let Some(ts) = try_translated_read(token, _timeout as *const TimeSpec) {
                 ts
             } else {
+                task.inner_exclusive_access().signal_mask = original_mask;
                 return EFAULT.as_isize();
             }
         };
         // nsec 范围检查
         if timespec.tv_nsec >= 1_000_000_000 {
+            task.inner_exclusive_access().signal_mask = original_mask;
             return EINVAL.as_isize();
         }
         // 防溢出&非法值
         const MAX_TIMEOUT_SEC: usize = 86400;
         let sec = if timespec.tv_sec > MAX_TIMEOUT_SEC {
+            task.inner_exclusive_access().signal_mask = original_mask;
             return EINVAL.as_isize();
         } else {
             timespec.tv_sec
@@ -3164,6 +3185,20 @@ pub fn sys_pselect6(
     }
 
     loop {
+        {
+            let proc_inner = process.inner_exclusive_access();
+            let task_inner = task.inner_exclusive_access();
+            let pending = (task_inner.signals | proc_inner.signals).bits() & !task_inner.signal_mask.bits();
+            let unmaskable = (task_inner.signals | proc_inner.signals).bits()
+                & ((1 << (9 - 1)) | (1 << (19 - 1)));
+            if (pending | unmaskable) != 0 {
+                drop(task_inner);
+                drop(proc_inner);
+                task.inner_exclusive_access().signal_mask = original_mask;
+                return EINTR.as_isize();
+            }
+        }
+
         let mut process_inner = process.inner_exclusive_access();
         let fd_table = &process_inner.fd_table.clone();
         drop(process_inner); // 写回前先释放锁
@@ -3207,21 +3242,25 @@ pub fn sys_pselect6(
                 warn!("[PSELECT6] READY: write readfds ptr={:#x} val={:#x} ok={}",
                     readfds_ptr as usize, ready_readfds, write_ok);
                 if !write_ok {
+                    task.inner_exclusive_access().signal_mask = original_mask;
                     return EFAULT.as_isize();
                 }
             }
             // 回写 writefds：只保留就绪的位
             if writefds_ptr as usize != 0 {
                 if !try_translated_write(token, writefds_ptr, ready_writefds) {
+                    task.inner_exclusive_access().signal_mask = original_mask;
                     return EFAULT.as_isize();
                 }
             }
             // 回写 exceptfds：始终清零（无异常条件支持）
             if exceptfds_ptr as usize != 0 {
                 if !try_translated_write(token, exceptfds_ptr, 0usize) {
+                    task.inner_exclusive_access().signal_mask = original_mask;
                     return EFAULT.as_isize();
                 }
             }
+            task.inner_exclusive_access().signal_mask = original_mask;
             return ready_count as isize;
         }
         
@@ -3232,19 +3271,23 @@ pub fn sys_pselect6(
                 warn!("[PSELECT6] TIMEOUT: write readfds ptr={:#x} val=0 ok={}",
                     readfds_ptr as usize, write_ok);
                 if !write_ok {
+                    task.inner_exclusive_access().signal_mask = original_mask;
                     return EFAULT.as_isize();
                 }
             }
             if writefds_ptr as usize != 0 {
                 if !try_translated_write(token, writefds_ptr, 0usize) {
+                    task.inner_exclusive_access().signal_mask = original_mask;
                     return EFAULT.as_isize();
                 }
             }
             if exceptfds_ptr as usize != 0 {
                 if !try_translated_write(token, exceptfds_ptr, 0usize) {
+                    task.inner_exclusive_access().signal_mask = original_mask;
                     return EFAULT.as_isize();
                 }
             }
+            task.inner_exclusive_access().signal_mask = original_mask;
             return 0;
         }
         suspend_current_and_run_next();

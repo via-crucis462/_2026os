@@ -174,7 +174,11 @@ struct SignalFrame {
     ucontext: SignalUserContext,
 }
 
-fn push_signal_frame(task_inner: &mut TaskControlBlockInner, sig: usize) -> Option<(usize, usize)> {
+fn push_signal_frame(
+    task_inner: &mut TaskControlBlockInner,
+    sig: usize,
+    saved_mask: SignalFlags,
+) -> Option<(usize, usize)> {
     let trap_ctx = task_inner.get_trap_cx();
     let frame_size = core::mem::size_of::<SignalFrame>();
     let frame_sp = (trap_ctx.get_sp().checked_sub(frame_size)? & !0xfusize) as usize;
@@ -190,7 +194,7 @@ fn push_signal_frame(task_inner: &mut TaskControlBlockInner, sig: usize) -> Opti
             _pad1: 0,
             _pad: [0; 12],
         },
-        ucontext: SignalUserContext::from_trap_ctx(trap_ctx, task_inner.signal_mask.bits() as usize),
+        ucontext: SignalUserContext::from_trap_ctx(trap_ctx, saved_mask.bits() as usize),
     };
 
     if !try_translated_write(current_user_token(), frame_sp as *mut SignalFrame, frame) {
@@ -205,7 +209,7 @@ fn push_signal_frame(task_inner: &mut TaskControlBlockInner, sig: usize) -> Opti
 
 pub(crate) fn restore_signal_context(task_inner: &mut TaskControlBlockInner) -> Option<isize> {
     let ucontext_ptr = task_inner.signal_user_context_backup.pop()?;
-    let saved_mask = task_inner.signal_mask_backup.pop()?;
+    let _saved_mask = task_inner.signal_mask_backup.pop()?;
     let mut trap_ctx = task_inner.trap_ctx_backup.pop()?;
     let user_ctx: SignalUserContext = try_translated_read(current_user_token(), ucontext_ptr as *const SignalUserContext)?;
     #[cfg(target_arch = "riscv64")]
@@ -226,7 +230,6 @@ pub(crate) fn restore_signal_context(task_inner: &mut TaskControlBlockInner) -> 
     user_ctx.apply_to_trap_ctx(&mut trap_ctx);
     task_inner.signal_mask = SignalFlags::from_bits_truncate(user_ctx.uc_sigmask[0] as u64);
     *task_inner.get_trap_cx() = trap_ctx;
-    let _ = saved_mask;
     #[cfg(target_arch = "riscv64")]
     warn!(
         "[SIG_RESTORE RET] tid={} restored_pc={:#x} restored_sp={:#x} restored_ra={:#x} restored_tp={:#x} restored_a0={:#x}",
@@ -694,7 +697,7 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
 
         let trap_ctx = task_inner.get_trap_cx();
         task_inner.trap_ctx_backup.push(*trap_ctx);
-        let Some((info_ptr, ucontext_ptr)) = push_signal_frame(&mut task_inner, sig) else {
+        let Some((info_ptr, ucontext_ptr)) = push_signal_frame(&mut task_inner, sig, cur_mask) else {
             task_inner.killed = true;
             task_inner.term_signal = Some(sig as i32 + 1);
             return;
