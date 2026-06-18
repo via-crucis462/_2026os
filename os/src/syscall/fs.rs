@@ -235,7 +235,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
     let path_str = normalize_leading_dot_path(
         if let Some(s) = try_translated_str(token, path) { s } else { return EFAULT.as_isize(); }
     );
-    //warn!("kernel:pid[{}] tid[{}] sys_openat, dirfd={}, path={}", task.process().pid.0, task.gettid(), dirfd, path_str);
+    //println!("kernel:pid[{}] tid[{}] sys_openat, dirfd={}, path={}", task.process().pid.0, task.gettid(), dirfd, path_str);
     //debug!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
     const O_TMPFILE: u32 = 0x400000;
     let (readable, writable) = match flags & 0x3 {
@@ -1299,6 +1299,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usiz
         }
     };
     const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+    const AT_EMPTY_PATH: usize = 0x1000;
     let follow_links = (flags & AT_SYMLINK_NOFOLLOW) == 0;
     trace!("kernel:pid[{}] sys_fstatat dirfd={} path={} follow={}", current_task().unwrap().process().pid.0, dirfd, path_str, follow_links);
 
@@ -1307,6 +1308,31 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usiz
     let inner = proc.inner_exclusive_access();
     let cwd = inner.cwd.clone();
     let fd_table_len = inner.fd_table.len();
+    //空路径查找文件描述符
+    if path_str.is_empty() {
+        if (flags & AT_EMPTY_PATH) == 0 {
+            return ENOENT.as_isize();
+        }
+        if dirfd < 0 || (dirfd as usize) >= fd_table_len {
+            return EBADF.as_isize();
+        }
+        let Some(file) = &inner.fd_table[dirfd as usize].file else {
+            return EBADF.as_isize();
+        };
+        let file = file.clone();
+        drop(inner);
+        let mut stat = file.get_stat();
+        if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&stat.ino) {
+            stat.atime_sec = asec;
+            stat.atime_nsec = ansec;
+            stat.mtime_sec = msec;
+            stat.mtime_nsec = mnsec;
+        }
+        if !try_translated_write(token, st, stat) {
+            return EFAULT.as_isize();
+        }
+        return 0;
+    }
     
     if path_str.contains("Zone.Identifier") {
         let mut stat: Stat = unsafe { core::mem::zeroed() };
