@@ -205,6 +205,7 @@ impl ProcessControlBlock {
                 euid: 0,
                 egid: 0,
                 sgid: 0,
+                sched_priority: 0,
                 max_file_size: RLIM_INFINITY, // 默认文件大小限制为无限制
                 umask: 0o022,
                 pgid: pid_handle.0,
@@ -558,6 +559,7 @@ impl ProcessControlBlock {
                 sid:parent_inner.sid,
                 egid: parent_inner.egid,
                 sgid: parent_inner.sgid,
+                sched_priority: parent_inner.sched_priority,
                 pgid: parent_inner.pgid,
                 fd_rlmt: parent_inner.fd_rlmt.clone(),
                 max_file_size: parent_inner.max_file_size,
@@ -853,6 +855,7 @@ pub struct ProcessControlBlockInner {
     pub euid: u32, // 有效用户 ID
     pub egid: u32, // 有效用户组 ID
     pub sgid: u32, // 辅助用户组 ID
+    pub sched_priority: i32, // 调度优先级，普通分时调度默认为 0
     pub umask: u32, // 文件模式创建掩码
 
     pub sid: usize,

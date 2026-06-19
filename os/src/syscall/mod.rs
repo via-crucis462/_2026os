@@ -81,8 +81,12 @@ const SYSCALL_SLEEP:usize =101;
 const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_CLOCK_SETTIME: usize = 112;
 const SYSCALL_SYSLOG: usize = 116;
-/// yield syscall
+
+const SYSCALL_SCHED_SETSCHEDULER: usize = 119;
+const SYSCALL_SCHED_GETSCHEDULER: usize = 120;
+const SYSCALL_SCHED_GETPARAM: usize = 121;
 const SYSCALL_SCHED_GETAFFINITY: usize = 123;
+/// yield syscall
 const SYSCALL_YIELD: usize = 124;
 /// kill syscall
 const SYSCALL_KILL: usize = 129;
@@ -456,6 +460,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MEMBARRIER => sys_membarrier(args[0] as i32, args[1] as u32, args[2] as i32),
         SYSCALL_SYMLINK => sys_symlinkat(args[0] as *const u8, args[1] as isize, args[2] as *const u8),
         SYSCALL_PTHREADCREATE => sys_pthread_create(args[0] as *mut usize, args[1] as *const usize, args[2] as usize, args[3] as usize),
+        SYSCALL_SCHED_SETSCHEDULER => sys_sched_setscheduler(args[0] as isize, args[1] as isize, args[2] as *const SchedParam),
+        SYSCALL_SCHED_GETSCHEDULER => sys_sched_getscheduler(args[0] as isize),
+        SYSCALL_SCHED_GETPARAM => sys_sched_getparam(args[0] as isize, args[1] as *mut SchedParam),
         _ => {
             println!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
