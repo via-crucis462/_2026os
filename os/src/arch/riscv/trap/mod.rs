@@ -210,17 +210,17 @@ pub fn trap_handler() -> ! {
                             .downcast_ref::<crate::fs::UserPageFaultInfo>()
                         {
                             println!("Checking UFFD registered ranges for PID {}...", process.pid.0);
-                            let in_range = uffd.registered_ranges.exclusive_access()
+                            let in_range = uffd.registered_ranges.lock()
                                 .iter().map(|&(start, len)| {
                                     println!("  Comparing fault address {:#x} with registered range {:#x} - {:#x}", stval, start, start + len);
                                     stval >= start && stval < start + len
                                 }).any(|x| x);
                             if in_range {
                                 println!("Page fault address {:#x} is within a registered UFFD range, handling with UFFD", stval);
-                                *uffd.faulting_address.exclusive_access() = stval;
-                                *uffd.faulting_task.exclusive_access() = Some(task.clone());
+                                *uffd.faulting_address.lock() = stval;
+                                *uffd.faulting_task.lock() = Some(task.clone());
                                 // 唤醒一个阻塞在 read(uffd) 上的 handler 线程
-                                let mut guard = uffd.read_waiters.exclusive_access();
+                                let mut guard = uffd.read_waiters.lock();
                                 if let Some(handler) = guard.pop_front() {
                                     drop(guard);
                                     let mut h_inner = handler.inner_exclusive_access();

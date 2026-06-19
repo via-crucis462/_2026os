@@ -1,7 +1,8 @@
 use super::*;
 use crate::process::task::TaskControlBlock;
 use crate::process::{block_current_and_run_next, wake_up_task};
-use crate::sync::{MPSafeCell, WaitQueue};
+use crate::sync::WaitQueue;
+use spin::Mutex;
 use crate::mm::{PageTable, UserBuffer, VirtAddr, translated_byte_buffer, try_translated_write, try_translated_read};
 use alloc::vec::Vec;
 
@@ -48,13 +49,13 @@ fn fill_uffd_msg_pagefault(buf: UserBuffer, fault_addr: usize) -> usize {
 
 pub struct UserPageFaultInfo {
     //发生缺页的线程
-    pub faulting_task: MPSafeCell<Option<Arc<TaskControlBlock>>>,
+    pub faulting_task: Mutex<Option<Arc<TaskControlBlock>>>,
     // 缺页地址
-    pub faulting_address: MPSafeCell<usize>,
+    pub faulting_address: Mutex<usize>,
     // 等待缺页事件的线程们（阻塞在 read(uffd) 上的 handler）
-    pub read_waiters: MPSafeCell<WaitQueue>,
+    pub read_waiters: Mutex<WaitQueue>,
     // 已注册的内存区域
-    pub registered_ranges: MPSafeCell<Vec<(usize, usize)>>,  // (start, len)
+    pub registered_ranges: Mutex<Vec<(usize, usize)>>,  // (start, len)
     // 模式，非阻塞或阻塞
     pub block: bool,
 }
@@ -70,11 +71,11 @@ impl File for UserPageFaultInfo {
     /// read from the file to buf, return the number of bytes read
     fn read(&self, buf: UserBuffer) -> usize {
         // 阻塞直到有缺页事件
-        if !self.faulting_task.exclusive_access().is_some() {
+        if !self.faulting_task.lock().is_some() {
             block_current_and_run_next(&self.read_waiters);
         }
         // 缺页已发生：读取 faulting_address，构造 uffd_msg 写入用户缓冲区
-        let fault_addr = *self.faulting_address.exclusive_access();
+        let fault_addr = *self.faulting_address.lock();
         fill_uffd_msg_pagefault(buf, fault_addr)
     }
     /// write to the file from buf, return the number of bytes written
@@ -133,7 +134,7 @@ impl File for UserPageFaultInfo {
     }
     //顶层read直接处理非阻塞读取
     fn ready_to_read(&self) -> bool {
-        self.faulting_task.exclusive_access().is_some()
+        self.faulting_task.lock().is_some()
     }
     /// Is there space available to write right now?
     fn ready_to_write(&self) -> bool {
@@ -174,7 +175,7 @@ impl File for UserPageFaultInfo {
                 if mode & 1 == 0 {
                     return Errno::EINVAL.as_isize();
                 }
-                self.registered_ranges.exclusive_access()
+                self.registered_ranges.lock()
                     .push((start as usize, len as usize));
                 let ioctls: u64 = (1 << _UFFDIO_COPY_BIT);
                 try_translated_write(token, (argp + 24) as *mut u64, ioctls);
@@ -188,7 +189,7 @@ impl File for UserPageFaultInfo {
 
                 // 先提取 proc 引用，释放锁后再操作，避免死锁
                 let proc = {
-                    let guard = self.faulting_task.exclusive_access();
+                    let guard = self.faulting_task.lock();
                     guard.as_ref().map(|t| t.process())
                 };
                 let proc = match proc {
@@ -223,7 +224,7 @@ impl File for UserPageFaultInfo {
 
                 // 4. 唤醒缺页线程
                 if mode & 1 == 0 {
-                    let mut guard = self.faulting_task.exclusive_access();
+                    let mut guard = self.faulting_task.lock();
                     if let Some(task) = guard.take() {
                         drop(guard);
                         wake_up_task(task);
@@ -242,10 +243,10 @@ const _UFFDIO_COPY_BIT: u8 = 3;
 impl UserPageFaultInfo{
     pub fn new(block: bool) -> Self {
         Self {
-            faulting_task: MPSafeCell::new(None),
-            faulting_address: MPSafeCell::new(0),
-            read_waiters: MPSafeCell::new(WaitQueue::new()),
-            registered_ranges: MPSafeCell::new(Vec::new()),
+            faulting_task: Mutex::new(None),
+            faulting_address: Mutex::new(0),
+            read_waiters: Mutex::new(WaitQueue::new()),
+            registered_ranges: Mutex::new(Vec::new()),
             block,
         }
     }

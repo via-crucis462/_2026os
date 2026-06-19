@@ -138,10 +138,12 @@ pub fn run_tasks() {
                     } else {
                         crate::task::add_task_into_pool_unlocked(prev_task);
                     }
-                } /*else if status == TaskStatus::WaitSaving {
-                    // 调用了wait函数
+                } else if status == TaskStatus::BlockSaving {
+                    // 该任务刚被加入等待队列，现在已经保存了上下文，修改状态允许别的任务唤醒
+                    // println!("SETTING BLOCKED: tid={} of pid={}", prev_task.tid.0, prev_task.getpid());
                     prev_task.inner_exclusive_access().task_status = TaskStatus::Blocked;
-                }*/
+                    // println!("SET BLOCKED: tid={} of pid={} done", prev_task.tid.0, prev_task.getpid());
+                }
                 // 如果 status 是 Zombie 或 Blocked，什么都不做，自然销毁或等别人唤醒
             }
         } else {

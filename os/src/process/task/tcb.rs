@@ -145,6 +145,6 @@ pub enum TaskStatus {
     Blocked,
     /// exited
     Zombie,
-    /// wait函数保存上下文前
-    WaitSaving,
+    /// 加入了等待队列但正在保存上下文
+    BlockSaving,
 }

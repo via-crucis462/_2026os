@@ -64,7 +64,7 @@ fn proc_state_char(pid: usize) -> char {
     match status {
         TaskStatus::Running => 'R',
         TaskStatus::Zombie => 'Z',
-        TaskStatus::Ready | TaskStatus::Blocked | TaskStatus::WaitSaving | TaskStatus::UnInit => 'S',
+        TaskStatus::Ready | TaskStatus::Blocked | TaskStatus::BlockSaving | TaskStatus::UnInit => 'S',
     }
 }
 
