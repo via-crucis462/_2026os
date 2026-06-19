@@ -2952,17 +2952,35 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
         suspend_current_and_run_next();
     }
 }
-pub fn sys_sched_getaffinity(_pid: isize, cpusetsize: usize, mask_ptr: *mut u8) -> isize {
-    if mask_ptr as usize != 0 && cpusetsize > 0 {
-        let task = crate::task::current_task().unwrap();
-        let token = task.process().inner_exclusive_access().get_user_token();
-        
-        // 告诉测试框架：CPU 0 是可用的 (往 mask 第一个字节写 1)
-        if !try_translated_write(token, mask_ptr, 1u8) {
+pub fn sys_sched_getaffinity(pid: isize, cpusetsize: usize, mask_ptr: *mut u8) -> isize {
+    const KERNEL_CPUSET_BYTES: usize = 8;
+
+    if pid < 0 {
+        return EINVAL.as_isize();
+    }
+    if mask_ptr.is_null() {
+        return EFAULT.as_isize();
+    }
+    if cpusetsize < KERNEL_CPUSET_BYTES {
+        return EINVAL.as_isize();
+    }
+
+    let task = crate::task::current_task().unwrap();
+    if pid != 0 && pid as usize != task.process().getpid() && get_process(pid as usize).is_none() {
+        return ESRCH.as_isize();
+    }
+
+    let token = task.process().inner_exclusive_access().get_user_token();
+    for i in 0..KERNEL_CPUSET_BYTES {
+        if !try_translated_write(token, unsafe { mask_ptr.add(i) }, 0u8) {
             return EFAULT.as_isize();
         }
     }
-    0
+    if !try_translated_write(token, mask_ptr, 1u8) {
+        return EFAULT.as_isize();
+    }
+
+    KERNEL_CPUSET_BYTES as isize
 }
 pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize {
  
