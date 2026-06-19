@@ -72,6 +72,14 @@ pub trait File: Send + Sync {
     fn lseek(&self, _offset: isize, _whence: i32) -> isize {
         Errno::ESPIPE.as_isize()
     }
+    /// 获取文件的打开标志（如 O_NONBLOCK 等）
+    fn get_flags(&self) -> OpenFlags {
+        OpenFlags::empty() 
+    }
+    /// 设置文件的打开标志
+    fn set_flags(&self, _flags: OpenFlags) -> bool {
+        false // 默认不支持修改
+    }
     fn ready_to_read(&self) -> bool {
         self.readable()
     }

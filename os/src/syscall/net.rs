@@ -14,6 +14,7 @@ use crate::process::FileDescriptor;
 use crate::process::FdFlags;
 use crate::net::net_poll;
 use core::sync::atomic::{AtomicU16, Ordering};
+use crate::fs::OpenFlags;
 
 /// 获取指定 Socket 的本地地址和端口信息。
 /// 将内核中 Socket 的 local_endpoint 信息格式化为 sockaddr_in 结构并拷贝回用户空间。 asd
@@ -359,7 +360,7 @@ pub fn sys_sendto(
             continue;
         }
         
-        net_poll(); // 发送成功后顺手驱动一下
+        net_poll(); 
         return ret;
     }
 }
@@ -374,6 +375,7 @@ pub fn sys_recvfrom(
     src_addr: *mut u8, 
     addrlen: *mut u32
 ) -> isize {
+    const MSG_DONTWAIT: i32 = 0x40;
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
@@ -383,13 +385,14 @@ pub fn sys_recvfrom(
     }
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     drop(inner);
-    
+    let is_nonblocking = (_flags & MSG_DONTWAIT != 0) 
+        || file.get_flags().contains(crate::fs::OpenFlags::NONBLOCK);
     // 判断是不是 UdpSocket
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         let mut data = vec![0u8; len];
         loop {
             if let Some((read_len, src_ep)) = udp_socket.recvfrom(&mut data) {
-                // 1. 把数据拷贝回用户的 buf
+                // 把数据拷贝回用户的 buf
                 let mut user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, len));
                 let mut current = 0;
                 for buffer in user_buf.buffers.iter_mut() {
@@ -399,7 +402,7 @@ pub fn sys_recvfrom(
                     if current == read_len { break; }
                 }
 
-                // 2. 把发送方地址填回 src_addr
+                // 把发送方地址填回 src_addr
                 if src_addr as usize != 0 && addrlen as usize != 0 {
                     let mut sockaddr_bytes = [0u8; 16];
                     sockaddr_bytes[0..2].copy_from_slice(&2u16.to_ne_bytes()); // AF_INET
@@ -428,16 +431,42 @@ pub fn sys_recvfrom(
                 }
                 return read_len as isize;
             } else {
+                if is_nonblocking {
+                    return Errno::EAGAIN.as_isize(); 
+                }
                 net_poll(); 
-                suspend_current_and_run_next();
+                let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+                let smol_socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(udp_socket.handle);
+                let can_recv = smol_socket.can_recv();
+                drop(sockets);
+                if can_recv {
+                continue; 
+            }
+                let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+                if let Some(socket_wait) = queues.get(&udp_socket.handle) {
+                    let rx_queue = socket_wait.rx_queue.clone();
+                    drop(queues); 
+                    crate::println!(
+                        "[ recvfrom] Handle {:?} rx empty, blocking...", 
+                        udp_socket.handle
+                    );
+                    crate::task::block_current_and_run_next(&rx_queue);
+                    crate::println!(
+                        "[ recvfrom] Handle {:?} woke up! Checking buffer again...", 
+                        udp_socket.handle
+                    );
+                } else {
+                    drop(queues);
+                    crate::task::suspend_current_and_run_next();
+                }
                 continue;
             }
         }
     }
-    // 1. 读取网络数据
+    // 1读取网络数据
     let user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, len));
     let read_len = file.read(user_buf);
-    // 2. 如果用户提供了 src_addr 和 addrlen，则填入对端的 IP 和端口信息
+    //用户提供了 src_addr 和 addrlen填入对端的 IP 和端口信息
     if src_addr as usize != 0 && addrlen as usize != 0 {
         if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
             if let Some(ep) = socket.remote_endpoint() {
@@ -711,18 +740,27 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         }
         inner.fd_table[fd].file.as_ref().unwrap().clone()
     };
+
     if let Some(orig_socket) = file.as_any().downcast_ref::<TcpSocket>() {
         let mut local_port = 0;
         let mut remote_ep = None;
+        
         loop {
-            crate::net::net_poll(); // 驱动网卡收发包
+            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+            let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(orig_socket.handle);
+            use smoltcp::socket::tcp::State;
+            let state = smol_socket.state();
+            drop(sockets);
+            crate::println!("[accept] Handle {:?} woke up! Current state: {:?}", orig_socket.handle, state);
+            crate::net::net_poll(); 
             let mut is_established = false;
             {
                 let mut sockets = crate::net::SOCKET_SET.exclusive_access();
                 let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(orig_socket.handle);
                 use smoltcp::socket::tcp::State;
                 let state = smol_socket.state();
-                if state == State::Established || state == State::SynReceived {
+                
+                if state == State::Established || state == State::SynReceived|| state == State::CloseWait {
                     is_established = true;
                     if let Some(ep) = smol_socket.local_endpoint() {
                         local_port = ep.port;
@@ -730,29 +768,42 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
                     remote_ep = smol_socket.remote_endpoint();
                 }
             }
-
             if is_established {
                 break; 
             }
-            crate::task::suspend_current_and_run_next();
+            let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+            if let Some(socket_wait) = queues.get(&orig_socket.handle) {
+                let rx_queue = socket_wait.rx_queue.clone();
+                drop(queues);
+                crate::println!(
+                        "[accept] Handle {:?} rx empty, blocking...", 
+                        orig_socket.handle
+                    );
+                    crate::task::block_current_and_run_next(&rx_queue);
+                    crate::println!(
+                        "[accept] Handle {:?} woke up! Checking buffer again...", 
+                        orig_socket.handle
+                    );
+            } else {
+                drop(queues);
+                // 防御性：如果没有找到队列，礼让一次，防止死循环
+                crate::task::suspend_current_and_run_next();
+            }
         }
-
-        // 重新获取进程锁，准备分配新的文件描述符
         let mut inner = process.inner_exclusive_access();
         let new_fd = match inner.alloc_fd() {
             Some(idx) => idx,
             None => return crate::syscall::errno::Errno::EMFILE.as_isize(), 
         };
-        //创建一个全新的 Socket 
         let new_listener = Arc::new(TcpSocket::new());
         {
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(new_listener.handle);
             if local_port != 0 {
-                let _ = smol_socket.listen(local_port); // 让新 Socket 监听原端口
+                let _ = smol_socket.listen(local_port); // 让新 Socket 接管并监听原端口
             }
         }
-        //  替换 FD 表
+        println!("[DEBUG] Before Swap: FD {} is original, new_fd is {}", fd, new_fd);
         inner.fd_table[fd].file = Some(new_listener); 
         inner.fd_table[new_fd] = FileDescriptor {
             file: Some(file.clone()), 
@@ -760,16 +811,14 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
             status: 0,
         };
         drop(inner); 
-
-        //  把客户端的 IP 和端口写回给 addr 指针
+        // 把客户端的 IP 和端口写回给 addr 指针
         if addr as usize != 0 && addrlen as usize != 0 {
             if let Some(ep) = remote_ep {
                 let family: u16 = 2; // AF_INET
                 let port = ep.port;
                 let mut ip = [0u8; 4];
-                let smoltcp::wire::IpAddress::Ipv4(v4) = ep.addr ;
+                let smoltcp::wire::IpAddress::Ipv4(v4) = ep.addr;
                 ip = v4.0;
-                
                 let mut sockaddr_bytes = [0u8; 16];
                 sockaddr_bytes[0..2].copy_from_slice(&family.to_ne_bytes());
                 sockaddr_bytes[2..4].copy_from_slice(&port.to_be_bytes());
@@ -788,7 +837,6 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
                 }
             }
         }
-
         return new_fd as isize;
     } else {
         return crate::syscall::errno::Errno::ENOTSOCK.as_isize();
@@ -991,19 +1039,16 @@ pub fn sys_getsockopt(
 }
 
 pub fn sys_shutdown(fd: usize, how: i32) -> isize {
-    println!("[DEBUG sys_shutdown] FD: {}, how: {}", fd, how);
-    
     let task = crate::task::current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
-        return EBADF.as_isize(); // 返回错误
+        return EBADF.as_isize(); 
     }
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     drop(inner); 
 
     if let Some(tcp_wrapper) = file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
-
         if how == 1 || how == 2 {
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_wrapper.handle);
@@ -1012,15 +1057,12 @@ pub fn sys_shutdown(fd: usize, how: i32) -> isize {
             net_poll();
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_wrapper.handle);
-            println!("[DEBUG shutdown_after] Client TCP State: {:?}, may_recv: {}, may_send: {}", 
-                socket.state(), socket.may_recv(), socket.may_send());
             drop(sockets);
         }
     } else if let Some(_udp_wrapper) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
 
     } else {
-        return ENOTSOCK.as_isize(); // ENOTSOCK
+        return ENOTSOCK.as_isize(); 
     }
-
     0
 }

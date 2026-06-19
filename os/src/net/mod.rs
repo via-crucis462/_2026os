@@ -17,6 +17,8 @@ use spin::Mutex;
 use crate::sync::WaitQueue;
 use smoltcp::iface::SocketHandle;
 use alloc::collections::VecDeque;
+use crate::process::TaskStatus;
+use alloc::format;
 
 
 pub struct VirtioNetDevice;
@@ -124,10 +126,22 @@ impl phy::TxToken for TxToken {
         result
     }
 }
-
+pub struct SocketWaitQueue {
+    pub rx_queue: Arc<MPSafeCell<WaitQueue>>, // 读操作阻塞
+    pub tx_queue: Arc<MPSafeCell<WaitQueue>>, // 写操作阻塞
+}
+impl SocketWaitQueue {
+    pub fn new() -> Self {
+        Self {
+            rx_queue: Arc::new(MPSafeCell::new(WaitQueue::new())),
+            tx_queue: Arc::new(MPSafeCell::new(WaitQueue::new())),
+        }
+    }
+}
 lazy_static! {
     pub static ref SOCKET_SET: MPSafeCell<SocketSet<'static>> = MPSafeCell::new(SocketSet::new(vec![]));
-    pub static ref SOCKET_WAIT_QUEUES: Mutex<BTreeMap<SocketHandle, Arc<Mutex<WaitQueue>>>> = Mutex::new(BTreeMap::new());
+    // 原本是 Arc<Mutex<WaitQueue>>，现在统一改为 Arc<MPSafeCell<WaitQueue>>
+    pub static ref SOCKET_WAIT_QUEUES: Mutex<BTreeMap<SocketHandle, SocketWaitQueue>> = Mutex::new(BTreeMap::new());
     pub static ref LOOPBACK_DEVICE: MPSafeCell<smoltcp::phy::Loopback> = {
         MPSafeCell::new(smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ethernet))
     };
@@ -173,65 +187,82 @@ pub fn net_poll() {
     let mut eth_iface = NET_IFACE.exclusive_access();
     let mut lo_iface = LO_IFACE.exclusive_access();
     let mut sockets = SOCKET_SET.exclusive_access();
-    
     let mut eth_device = VirtioNetDevice;
     let mut lo_device = LOOPBACK_DEVICE.exclusive_access();
-    
     let mut state_changed = false;
-
     let mut loop_count = 0;
-    loop {
-        loop_count += 1;
+    let mut budget = 16;
+    while budget > 0 {
+        budget -= 1;
         let timestamp = Instant::from_millis(crate::arch::timer::get_time_ms() as i64);
         
-        // 分别驱动两个网卡，共用同一个 sockets 池
         let lo_active = lo_iface.poll(timestamp, &mut *lo_device, &mut sockets);
         let eth_active = eth_iface.poll(timestamp, &mut eth_device, &mut sockets);
-        //println!("[Debug-Net] Loop {}, eth_active: {}, lo_active: {}", loop_count, eth_active, lo_active);
-        if eth_active || lo_active {
+        
+        if lo_active || eth_active {
             state_changed = true;
         } else {
             break; 
         }
     }
-    /*println!("[Debug-Net] ======= CURRENT SOCKETS DUMP =======");
+    let mut dead_handles = alloc::vec::Vec::new();
+    let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
     for (handle, socket) in sockets.iter_mut() {
-        if let smoltcp::socket::Socket::Tcp(tcp) = socket {
-            println!(
-                "[Debug-Net] Handle: {:?}, State: {:?}, Local: {:?}, Remote: {:?}",handle, tcp.state(), tcp.local_endpoint(), tcp.remote_endpoint()
-            );
-        }
-    }*/
-
-    if state_changed {
-        let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
-        for (handle, socket) in sockets.iter_mut() {
-            let mut is_ready = false; 
-            match socket {
-                smoltcp::socket::Socket::Raw(raw_sock) => { 
-                    // 同时检测可读和可写
-                    if raw_sock.can_recv() || raw_sock.can_send() { is_ready = true; } 
-                }
-                smoltcp::socket::Socket::Tcp(tcp_sock) => {
-                    // TCP 同时检测可读和可写
-                    if tcp_sock.can_recv() || tcp_sock.can_send() { is_ready = true; }
-                    else if tcp_sock.is_active() && tcp_sock.state() != smoltcp::socket::tcp::State::Listen { is_ready = true; }
-                    else if !tcp_sock.may_recv() && tcp_sock.state() != smoltcp::socket::tcp::State::Listen { is_ready = true; }
-                }
-                smoltcp::socket::Socket::Udp(udp_sock) => { 
-                    // UDP 同时检测可读和可写
-                    if udp_sock.can_recv() || udp_sock.can_send() { is_ready = true; } 
-                }
-                _ => {}
+        let mut can_read = false;
+        let mut can_write = false;
+        match socket {
+            /*smoltcp::socket::Socket::Raw(raw_sock) => { 
+                can_read = raw_sock.can_recv();
+                can_write = raw_sock.can_send();
+            }*/
+            smoltcp::socket::Socket::Tcp(tcp_sock) => {
+                let is_listening = tcp_sock.state() == smoltcp::socket::tcp::State::Listen;
+                let is_closed = tcp_sock.state() == smoltcp::socket::tcp::State::Closed;
+                let is_eof = !tcp_sock.may_recv() && !is_listening && !is_closed;
+                // 可读：有数据，或者有EOF，或者（处于监听状态且有新连接）
+                can_read = tcp_sock.can_recv() || is_eof || (is_listening && tcp_sock.state() != smoltcp::socket::tcp::State::Listen);
+                // 可写：发送缓冲区有空余空间
+                can_write = tcp_sock.can_send();
             }
-            if is_ready {
-                if let Some(queue_arc) = queues.get(&handle) {
-                    let queue_guard = queue_arc.lock();
-                    if !queue_guard.is_empty() {
-                        wake_up_one(queue_guard); 
+            smoltcp::socket::Socket::Udp(udp_sock) => { 
+                can_read = udp_sock.can_recv();
+                can_write = udp_sock.can_send();
+            }
+            _ => {}
+        }
+        if let Some(socket_wait) = queues.get(&handle) {
+            if can_read {
+                let mut rx_guard = socket_wait.rx_queue.exclusive_access();
+                if !rx_guard.is_empty() {
+                    crate::println!("[Debug net_poll] Waking up Handle {:?} because can_read is TRUE", handle);
+                    crate::task::wake_up_one(rx_guard);
+                }
+            }
+            if can_write {
+                let tx_guard = socket_wait.tx_queue.exclusive_access();
+                if !tx_guard.is_empty() {
+                   static mut WRITE_COUNT: usize = 0;
+                    unsafe {
+                        WRITE_COUNT += 1;
+                        if WRITE_COUNT % 50 == 0 {
+                            crate::println!("[net_poll] Waking up WRITE task for Handle {:?}", handle);
+                        }
                     }
+                    crate::task::wake_up_one(tx_guard); 
+                }
+            }
+        }
+        if let smoltcp::socket::Socket::Tcp(tcp_socket) = socket {
+            if tcp_socket.state() == smoltcp::socket::tcp::State::Closed {
+                if !queues.contains_key(&handle) {
+                    dead_handles.push(handle);
                 }
             }
         }
     }
+    for handle in dead_handles {
+        sockets.remove(handle);
+        crate::println!("[net_poll GC] Removed dead socket handle: {:?}", handle);
+    }
+    
 }

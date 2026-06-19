@@ -18,11 +18,18 @@ use smoltcp::wire::{IpVersion, IpProtocol};
 use crate::sync::WaitQueue;
 use crate::process::current_task_to_sleep;
 use smoltcp::socket::udp;
+use crate::sync::MPSafeCell;
+use crate::net::SOCKET_WAIT_QUEUES;
+use crate::net::SocketWaitQueue;
+use crate::fs::OpenFlags;
+use smoltcp::socket::tcp::State;
+
 
 pub struct TcpSocket {
     pub handle: SocketHandle,
     // 暂存 bind 分配或指定的本地端口
     pub local_port: Mutex<Option<u16>>,
+    pub read_waiters: Arc<crate::sync::MPSafeCell<WaitQueue>>,
 }
 
 impl TcpSocket {
@@ -31,7 +38,9 @@ impl TcpSocket {
         let tx_buffer = SocketBuffer::new(vec![0; 8192]);
         let socket = TcpSocketSmol::new(rx_buffer, tx_buffer);
         let handle = SOCKET_SET.exclusive_access().add(socket);
-        Self { handle ,local_port: Mutex::new(None)}
+        let waiters = Arc::new(crate::sync::MPSafeCell::new(WaitQueue::new()));
+        SOCKET_WAIT_QUEUES.lock().insert(handle, SocketWaitQueue::new());
+        Self { handle ,local_port: Mutex::new(None),read_waiters: waiters,}
     }
     pub fn disconnect(&self) {
         let mut sockets = SOCKET_SET.exclusive_access();
@@ -105,36 +114,15 @@ impl TcpSocket {
 impl Drop for TcpSocket {
     fn drop(&mut self) {
         {
-            let mut sockets = SOCKET_SET.exclusive_access();
-            let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
+            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+            let exists = sockets.iter().any(|(h, _)| h == self.handle);
+            if exists {
+                let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
                 socket.close();
-            
-        }
-        // 轮询驱动网络栈，直到四次挥手完毕，状态变为 Closed
-        // 增加一个计数器上限（比如 200 次），防止内核无限死循环
-        let mut retry_limit = 200; 
-        loop {
-            // 驱动网络栈：把发送缓冲区的 FIN 推出去，并接收对端回应的 ACK
-            crate::net::net_poll();
-            let mut sockets = SOCKET_SET.exclusive_access();
-            let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
-                if socket.state() == smoltcp::socket::tcp::State::Closed {
-                    break;
-                }
-                else {
-                    break;
-                 }
-            drop(sockets); 
-            
-            retry_limit -= 1;
-            if retry_limit == 0 {
-                // 强制退出，防止内核挂起
-                break; 
             }
-            crate::task::suspend_current_and_run_next();
         }
-        let mut sockets = SOCKET_SET.exclusive_access();
-        sockets.remove(self.handle);
+        crate::net::SOCKET_WAIT_QUEUES.lock().remove(&self.handle);
+        crate::net::net_poll();
     }
 }
 impl File for TcpSocket {
@@ -148,21 +136,25 @@ impl File for TcpSocket {
         let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
         socket.can_send() || !socket.may_send()
     }
-
     fn read(&self, mut buf: UserBuffer) -> usize {
+        if buf.len() == 0 {
+            return 0;
+        }
         loop {
-            crate::net::net_poll();
-            let mut sockets = SOCKET_SET.exclusive_access();
+
+            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
-            if !socket.may_recv() && !socket.can_recv() {
-                return 0; 
+
+            let state = socket.state();
+            if !socket.may_recv() || matches!(state, State::CloseWait | State::Closed | State::TimeWait | State::LastAck | State::Closing) {
+                drop(sockets);
+                crate::println!("[TcpSocket::read] Connection closed (State: {:?}), returning 0 (EOF)", state);
+                return 0; // 返回 0 字节
             }
-            //println!("[DEBUG TcpSocket::read] State: {:?}, can_recv: {}, may_recv: {}", socket.state(), socket.can_recv(), socket.may_recv());
             if socket.can_recv() {
                 let mut temp_buf = vec![0u8; buf.len()];
-                if let Ok(recv_len) = socket.recv_slice(&mut temp_buf) {
-                    if recv_len > 0 {
-                        //println!("TcpSocket read SUCCESS: got {} bytes", recv_len);
+                match socket.recv_slice(&mut temp_buf) {
+                    Ok(recv_len) if recv_len > 0 => {
                         let mut current = 0;
                         for buffer in buf.buffers.iter_mut() {
                             let copy_len = buffer.len().min(recv_len.saturating_sub(current));
@@ -171,27 +163,67 @@ impl File for TcpSocket {
                             current += copy_len;
                             if current == recv_len { break; }
                         }
+                        drop(sockets);
+                        crate::net::net_poll(); 
                         return current; 
                     }
+                    Ok(_) => {
+                        // 读到了 0 字节
+                       /*  crate::println!("[TcpSocket::read] Handle {:?} recv_slice returned Ok(0), waiting for more data...", self.handle);*/
+                        drop(sockets);
+                        return 0;
+                    }
+                    Err(smoltcp::socket::tcp::RecvError::Finished) => {
+                        crate::println!("[TcpSocket::read] Handle {:?} received FIN (Finished). Returning 0 as EOF.", self.handle);
+                        drop(sockets);
+                        return 0;
+                    }
+                    Err(_e) => {
+                        drop(sockets);
+                        return 0; 
+                    }
                 }
-            }
-            else if !socket.may_recv() {
-                //println!("[DEBUG TcpSocket::read] Detected EOF (!may_recv), returning 0");
+            }else if !socket.may_recv() {
+                //crate::println!("[TcpSocket::read] Handle {:?} !may_recv() is true (Connection Closed). Returning 0 as EOF.", self.handle);
+                drop(sockets);
                 return 0; 
             }
             drop(sockets); 
-            crate::task::suspend_current_and_run_next();
+            crate::net::net_poll(); 
+            let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+            if let Some(socket_wait) = queues.get(&self.handle) {
+                let rx_queue = socket_wait.rx_queue.clone();
+                drop(queues);
+                crate::println!("[TcpSocket::read] Handle {:?} rx empty, blocking...", self.handle);
+                crate::task::block_current_and_run_next(&rx_queue);
+                crate::println!("[TcpSocket::read] Handle {:?} woke up!", self.handle);
+                
+                let current_tid = crate::task::current_task().unwrap().gettid();
+                let mut queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+                if let Some(socket_wait) = queues.get(&self.handle) {
+                    let mut rx_guard = socket_wait.rx_queue.exclusive_access();
+                    
+                    let tids_before = rx_guard.get_tids();
+                    rx_guard.remove_by_tid(current_tid);
+                    let tids_after = rx_guard.get_tids();
+                    
+                    crate::println!(
+                        "[TcpSocket::read CLEANUP] TID {} woke up on Handle {:?}. TIDs: {:?} -> {:?}", 
+                        current_tid, self.handle, tids_before, tids_after
+                    );
+                }
+                drop(queues);
+            } else {
+                drop(queues);
+                crate::task::suspend_current_and_run_next();
+            }
         }
     }
+
     fn write(&self, buf: UserBuffer) -> usize {
-        //println!("TcpSocket write called with {} bytes", buf.len());
-        let mut sockets = SOCKET_SET.exclusive_access();
-        let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
-
-        if !socket.may_send() {
-            return 0; 
+        if buf.len() == 0 {
+            return 0;
         }
-
         let mut temp_buf = vec![0u8; buf.len()];
         let mut current = 0;
         for buffer in buf.buffers.iter() {
@@ -199,12 +231,39 @@ impl File for TcpSocket {
             temp_buf[current..current + copy_len].copy_from_slice(buffer);
             current += copy_len;
         }
-        let write_len = socket.send_slice(&temp_buf).unwrap_or(0);
-        drop(sockets); 
-        if write_len > 0 {
-             crate::net::net_poll();
+        loop {
+            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+            let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
+            if !socket.may_send() {
+                drop(sockets);
+                return 0; 
             }
-            write_len
+            if socket.can_send() {
+                let write_len = socket.send_slice(&temp_buf).unwrap_or(0);
+                if write_len > 0 {
+                    drop(sockets); 
+                    crate::net::net_poll();
+                    return write_len; 
+                }
+            }else 
+            {
+                drop(sockets);
+                return 0;
+            }
+            drop(sockets);
+            crate::net::net_poll();
+            let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+            if let Some(socket_wait) = queues.get(&self.handle) {
+                let tx_queue = socket_wait.tx_queue.clone();
+                drop(queues);
+               crate::println!("[TcpSocket::write] Handle {:?} tx full, blocking...", self.handle);
+                crate::task::block_current_and_run_next(&tx_queue);
+                crate::println!("[TcpSocket::write] Handle {:?} woke up!", self.handle);
+            } else {
+                drop(queues);
+                crate::task::suspend_current_and_run_next();
+            }
+        }
     }
 
     fn get_stat(&self) -> Stat {
@@ -251,6 +310,10 @@ pub struct UdpSocket {
     //远端地址队列
     pub remote_ep: Mutex<Option<IpEndpoint>>, 
     pub local_port: Mutex<Option<u16>>,
+    pub read_waiters: Arc<crate::sync::MPSafeCell<crate::sync::WaitQueue>>,
+    pub write_waiters: Arc<crate::sync::MPSafeCell<crate::sync::WaitQueue>>,
+    pub flags: Mutex<OpenFlags>,
+    pub recv_timeout: spin::Mutex<Option<core::time::Duration>>,
 }
 
 impl UdpSocket {
@@ -267,11 +330,18 @@ impl UdpSocket {
         let socket = udp::Socket::new(rx_buffer, tx_buffer);
         // 将 socket 加入全局协议栈 SOCKET_SET
         let handle = crate::net::SOCKET_SET.exclusive_access().add(socket);
-        
+        let wait_queues = crate::net::SocketWaitQueue::new();
+        let rx_waiters = wait_queues.rx_queue.clone();
+        let tx_waiters = wait_queues.tx_queue.clone();
+        crate::net::SOCKET_WAIT_QUEUES.lock().insert(handle, wait_queues);
         Self { 
             handle,
             remote_ep: Mutex::new(None),
             local_port: Mutex::new(None),
+            read_waiters: rx_waiters, 
+            write_waiters: tx_waiters,
+            flags: spin::Mutex::new(crate::fs::OpenFlags::empty()),
+            recv_timeout: spin::Mutex::new(None),
         }
     }
     pub fn bind(&self, port: u16) -> isize {
@@ -324,20 +394,44 @@ impl UdpSocket {
     /// 处理 UdpMetadata，提取真实 Endpoint
     pub fn recvfrom(&self, buf: &mut [u8]) -> Option<(usize, IpEndpoint)> {
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-        let socket = sockets.get_mut::<udp::Socket>(self.handle);
+        let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
         if !socket.can_recv() {
             return None; // 暂无数据
         }
-        match socket.recv_slice(buf) {
-            Ok((len, meta)) => {
-                Some((len, meta.endpoint))
+        match socket.recv() {
+            Ok((data, meta)) => {
+                let copy_len = usize::min(buf.len(), data.len());
+                buf[..copy_len].copy_from_slice(&data[..copy_len]);
+                if data.len() > buf.len() {
+                    crate::println!(
+                        "[UdpSocket] Packet truncated from {} to {}", 
+                        data.len(), 
+                        copy_len
+                    );
+                }
+                Some((copy_len, meta.endpoint))
             },
-            Err(_) => None,
+            Err(e) => {
+                crate::println!("[Debug recvfrom] FATAL: socket.recv() FAILED with error: {:?}", e);
+                let fallback_endpoint = smoltcp::wire::IpEndpoint {
+                    addr: smoltcp::wire::IpAddress::v4(0, 0, 0, 0),
+                    port: 0,
+                };
+                return Some((0, fallback_endpoint));
+            } 
         }
     }
 }
 // 实现 File trait，使其能放进系统的 fd_table 中
 impl File for UdpSocket {
+    fn get_flags(&self) -> OpenFlags {
+        *self.flags.lock()
+    }
+
+    fn set_flags(&self, flags: OpenFlags) -> bool {
+        *self.flags.lock() = flags;
+        true
+    }
     fn readable(&self) -> bool {
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
@@ -348,58 +442,99 @@ impl File for UdpSocket {
         let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
         socket.can_send()
     }
-    
     fn read(&self, mut buf: UserBuffer) -> usize {
         loop {
-            crate::net::net_poll();
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
             if socket.can_recv() {
+                // 注意这里分配的临时缓冲区大小要足够容纳一个 UDP 报文
                 let mut temp_buf = alloc::vec![0u8; 16384];
                 match socket.recv_slice(&mut temp_buf) {
                     Ok((recv_len, _meta)) => {
                         let mut current = 0;
                         for buffer in buf.buffers.iter_mut() {
                             let copy_len = buffer.len().min(recv_len.saturating_sub(current));
-                            if copy_len == 0 {
-                                break;
-                            }
+                            if copy_len == 0 { break; }
                             buffer[..copy_len].copy_from_slice(&temp_buf[current..current + copy_len]);
                             current += copy_len;
-                            if current == recv_len { 
-                                break; 
-                            }
+                            if current == recv_len { break; }
                         }
+                        drop(sockets);
+                        crate::net::net_poll();
                         return current; 
                     }
+                    Err(_) => {} // 如果出现异常，跳过，去下面尝试挂起
+                }
+            }
+            // 没读到数据，准备阻塞
+            drop(sockets);
+            crate::net::net_poll();
+            
+            let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+            if let Some(socket_wait) = queues.get(&self.handle) {
+                let rx_queue = socket_wait.rx_queue.clone();
+                drop(queues);
+                
+                crate::println!("[UdpSocket::read] Handle {:?} rx empty, blocking...", self.handle);
+                crate::task::block_current_and_run_next(&rx_queue);
+                crate::println!("[UdpSocket::read] Handle {:?} woke up!", self.handle);
+                let mut queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+                if let Some(socket_wait) = queues.get(&self.handle) {
+                    let mut rx_guard = socket_wait.rx_queue.exclusive_access();
+                    rx_guard.remove_by_tid(crate::task::current_task().unwrap().gettid());
+                }
+                drop(queues);
+            } else {
+                drop(queues);
+                crate::task::suspend_current_and_run_next();
+            }
+        }
+    }
+    fn write(&self, buf: UserBuffer) -> usize {
+        // 先把用户缓冲区的数据拷贝出来，避免在 loop 里面反复拷贝
+        let mut temp_buf = alloc::vec![0u8; buf.len()];
+        let mut current = 0;
+        for buffer in buf.buffers.iter() {
+            let copy_len = buffer.len();
+            temp_buf[current..current + copy_len].copy_from_slice(buffer);
+            current += copy_len;
+        }
+
+        let remote = *self.remote_ep.lock();
+        if remote.is_none() {
+            return 0; // 或者返回 ENOTCONN 错误码
+        }
+        let remote_ep = remote.unwrap();
+        loop {
+            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+            let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
+            
+            if socket.can_send() {
+                match socket.send_slice(&temp_buf, remote_ep) {
+                    Ok(_) => {
+                        let len = temp_buf.len();
+                        drop(sockets);
+                        crate::net::net_poll();
+                        return len;
+                    }
                     Err(_) => {
+                        // send_slice 失败可能因为包太大，但对于缓冲区满，更可能是 can_send 为 false
                     }
                 }
             }
             drop(sockets);
-            crate::task::suspend_current_and_run_next();
-        }
-    }
-
-    fn write(&self, buf: UserBuffer) -> usize {
-        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-        let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
-        
-        if !socket.can_send() {
-            return 0;
-        }
-        let mut temp_buf = alloc::vec![];
-        for buffer in buf.buffers.iter() {
-            temp_buf.extend_from_slice(buffer);
-        }
-        let remote = *self.remote_ep.lock();
-        if let Some(remote_ep) = remote {
-            match socket.send_slice(&temp_buf, remote_ep) {
-                Ok(_) => temp_buf.len(),
-                Err(_) => 0,
+            crate::net::net_poll();
+            let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+            if let Some(socket_wait) = queues.get(&self.handle) {
+                let tx_queue = socket_wait.tx_queue.clone();
+                drop(queues);
+                crate::println!("[UdpSocket::write] Handle {:?} tx full, blocking...", self.handle);
+                crate::task::block_current_and_run_next(&tx_queue);
+                crate::println!("[UdpSocket::write] Handle {:?} woke up!", self.handle);
+            } else {
+                drop(queues);
+                crate::task::suspend_current_and_run_next();
             }
-        } else {
-            0 
         }
     }
 
@@ -570,6 +705,8 @@ pub struct RawSocket {
     pub handle: SocketHandle,
     pub rx_wait_queue: Arc<Mutex<WaitQueue>>,
     pub local_rx_buffer: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    pub read_waiters: Arc<crate::sync::MPSafeCell<crate::sync::WaitQueue>>,
+    pub write_waiters: Arc<crate::sync::MPSafeCell<crate::sync::WaitQueue>>,
 }
 
 
@@ -597,12 +734,17 @@ impl RawSocket {
         // 加入全局 SocketSet 中进行调度
         let handle = SOCKET_SET.exclusive_access().add(socket);
         let rx_wait_queue = Arc::new(Mutex::new(WaitQueue::new()));
-        crate::net::SOCKET_WAIT_QUEUES.lock().insert(handle, rx_wait_queue.clone());
+        let wait_queues = crate::net::SocketWaitQueue::new();
+        let rx_waiters = wait_queues.rx_queue.clone();
+        let tx_waiters = wait_queues.tx_queue.clone();
+        crate::net::SOCKET_WAIT_QUEUES.lock().insert(handle, wait_queues);
        Self { 
             handle,
             rx_wait_queue, 
             // 初始化环回队列
             local_rx_buffer: Arc::new(Mutex::new(VecDeque::new())),
+            read_waiters: rx_waiters, 
+            write_waiters: tx_waiters,
         }
     }
 }
@@ -621,46 +763,46 @@ impl File for RawSocket {
     }
 
     fn read(&self, mut buf: UserBuffer) -> usize {
-        loop {
-            // 优先检查有没有本地环回的包
-            let mut local_queue = self.local_rx_buffer.lock();
-            if let Some(packet) = local_queue.pop_front() {
-                let len = packet.len();
-                let mut current = 0;
-                for buffer in buf.buffers.iter_mut() {
-                    let copy_len = buffer.len().min(len.saturating_sub(current));
-                    if copy_len == 0 { break; }
-                    buffer[..copy_len].copy_from_slice(&packet[current..current + copy_len]);
-                    current += copy_len;
-                    if current == len { break; }
-                }
-                return current;
-            }
-            drop(local_queue);
-            // 获取全局 sockets 锁去检查数据
-            let mut sockets = SOCKET_SET.exclusive_access();
-            let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
-            
-            if socket.can_recv() {
-                if let Ok(recv_slice) = socket.recv() {
-                    let len = recv_slice.len();
+            loop {
+                // 优先检查有没有本地环回的包
+                let mut local_queue = self.local_rx_buffer.lock();
+                if let Some(packet) = local_queue.pop_front() {
+                    let len = packet.len();
                     let mut current = 0;
-                    // 分散读：将底层的 IP 报文拷贝到用户态的 IoVec 数组中
                     for buffer in buf.buffers.iter_mut() {
                         let copy_len = buffer.len().min(len.saturating_sub(current));
                         if copy_len == 0 { break; }
-                        buffer[..copy_len].copy_from_slice(&recv_slice[current..current + copy_len]);
+                        buffer[..copy_len].copy_from_slice(&packet[current..current + copy_len]);
                         current += copy_len;
                         if current == len { break; }
                     }
-                    return current; 
+                    return current;
                 }
+                drop(local_queue);
+                // 获取全局 sockets 锁去检查数据
+                let mut sockets = SOCKET_SET.exclusive_access();
+                let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
+                
+                if socket.can_recv() {
+                    if let Ok(recv_slice) = socket.recv() {
+                        let len = recv_slice.len();
+                        let mut current = 0;
+                        // 分散读：将底层的 IP 报文拷贝到用户态的 IoVec 数组中
+                        for buffer in buf.buffers.iter_mut() {
+                            let copy_len = buffer.len().min(len.saturating_sub(current));
+                            if copy_len == 0 { break; }
+                            buffer[..copy_len].copy_from_slice(&recv_slice[current..current + copy_len]);
+                            current += copy_len;
+                            if current == len { break; }
+                        }
+                        return current; 
+                    }
+                }
+                drop(sockets); 
+                crate::net::net_poll();
+                crate::task::block_current_and_run_next(&*self.read_waiters);
             }
-            drop(sockets); 
-            let queue_guard = self.rx_wait_queue.lock();     
-            current_task_to_sleep(queue_guard);
         }
-    }
 
     fn write(&self, buf: UserBuffer) -> usize {
         let total_len = buf.len();

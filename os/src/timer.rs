@@ -126,17 +126,14 @@ impl TimerManager {
 
     /// 设置闹钟
     pub fn set_alarm(&mut self, pid: usize, current_ms: usize, delay_ms: usize) -> usize {
-        // 先无脑注销旧闹钟
+        // 先注销
         let old_expire_ms = self.cancel_alarm(pid);
-
-        // 如果传参不是 0，说明要设新闹钟
         if delay_ms > 0 {
             let new_expire = current_ms + delay_ms;
             self.events.entry(new_expire).or_default().push(pid);
             self.pid_map.insert(pid, new_expire);
         }
 
-        // 返回旧闹钟剩余的秒数
         if old_expire_ms > current_ms {
             old_expire_ms - current_ms
         } else {
@@ -161,8 +158,7 @@ impl TimerManager {
                 break;
             }
         }
-        
-        // 返回出去让外层慢慢发信号，彻底解耦全局锁！
+
         expired_pids
     }
 }

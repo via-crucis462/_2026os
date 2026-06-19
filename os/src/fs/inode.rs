@@ -267,8 +267,11 @@ bitflags! {
         const RDWR = 1 << 1;
         /// create new file
         const CREATE = 1 << 6;
+        
         /// truncate file size to 0
         const TRUNC = 1 << 9;
+        /// 非阻塞模式 (O_NONBLOCK)
+        const NONBLOCK = 1 << 11;
         /// 用于mkdir中，open二次确认是否新建的文件是目录类型
         const DIRECTORY = 1 << 16;
         /// 不追踪符号链接
