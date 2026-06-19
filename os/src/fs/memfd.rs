@@ -135,6 +135,23 @@ impl super::VfsInode for MemFdInode {
         *self.file_size.lock()
     }
 
+    fn truncate(&self, len: usize) -> bool {
+        let ps = self.page_size.size();
+        let needed_pages = (len + ps - 1) / ps;
+        let mut phys_pages = self.phys_pages.lock();
+        let mut file_size = self.file_size.lock();
+
+        let old_size = *file_size;
+        *file_size = len;
+
+        if len < old_size {
+            // 收缩：释放超出部分的物理页
+            phys_pages.truncate(needed_pages);
+        }
+        // 扩张：惰性分配，不预分配物理页（后续 write 时会通过 ensure_size 分配）
+        true
+    }
+
     fn ino(&self) -> u64 { self.ino }
 
     fn get_perm(&self) -> PermStat {
