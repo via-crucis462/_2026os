@@ -630,6 +630,21 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
     0
 }
 
+pub fn sys_clock_getres(clock_id: usize, tp: *mut TimeSpec) -> isize {
+    match clock_id {
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => {}
+        _ => return EINVAL.as_isize(),
+    }
+    if tp.is_null() {
+        return 0;
+    }
+    let token = current_user_token();
+    if !try_translated_write(token, tp, TimeSpec { tv_sec: 0, tv_nsec: 1 }) {
+        return EFAULT.as_isize();
+    }
+    0
+}
+
 const TCGETS: u32 = 0x5401;
 const TIOCGPGRP: u32 = 0x540F;   // 获取前台进程组 ID
 const TIOCSPGRP: u32 = 0x5410;   // 设置前台进程组 ID
@@ -2561,6 +2576,26 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> isize {
     }
 }
 
+pub fn sys_mlock(start: usize, len: usize) -> isize {
+    if len == 0 {
+        return 0;
+    }
+    if start.checked_add(len).map_or(true, |end| end >= USER_APP_MAX_SIZE) {
+        return ENOMEM.as_isize();
+    }
+
+    let task = current_task().unwrap();
+    let process = task.process();
+    let mut inner = process.inner_exclusive_access();
+    match inner.memory_set.disable_share_in_range(start, len) {
+        Ok(()) => {
+            inner.locked_bytes = inner.locked_bytes.saturating_add(len);
+            0
+        }
+        Err(errno) => errno,
+    }
+}
+
 /// 修改断点（调整堆空间）
 /// addr如果为0表示查询当前断点
 pub fn sys_brk(addr: usize) -> isize {
@@ -3037,6 +3072,43 @@ pub fn sys_sched_setscheduler(pid: isize, policy: isize, param_ptr: *const Sched
         _ => return EINVAL.as_isize(),
     }
     *SCHED_POLICY.lock() = policy;
+    process.inner_exclusive_access().sched_priority = param.sched_priority;
+    0
+}
+
+pub fn sys_sched_setparam(pid: isize, param_ptr: *const SchedParam) -> isize {
+    if pid < 0 {
+        return EINVAL.as_isize();
+    }
+    if param_ptr.is_null() {
+        return EFAULT.as_isize();
+    }
+    let task = crate::task::current_task().unwrap();
+    let current_process = task.process();
+    let process = if pid == 0 || pid as usize == current_process.getpid() {
+        current_process
+    } else if let Some(process) = get_process(pid as usize) {
+        process
+    } else {
+        return ESRCH.as_isize();
+    };
+    let token = task.process().inner_exclusive_access().get_user_token();
+    let Some(param) = try_translated_read(token, param_ptr) else {
+        return EFAULT.as_isize();
+    };
+    match *SCHED_POLICY.lock() {
+        SCHED_FIFO | SCHED_RR => {
+            if param.sched_priority < 1 || param.sched_priority > 99 {
+                return EINVAL.as_isize();
+            }
+        }
+        SCHED_OTHER | SCHED_BATCH | SCHED_IDLE => {
+            if param.sched_priority != 0 {
+                return EINVAL.as_isize();
+            }
+        }
+        _ => return EINVAL.as_isize(),
+    }
     process.inner_exclusive_access().sched_priority = param.sched_priority;
     0
 }

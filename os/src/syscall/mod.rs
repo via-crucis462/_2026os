@@ -80,11 +80,13 @@ const SYSCALL_TGKILL: usize = 131;
 const SYSCALL_SLEEP:usize =101;
 const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_CLOCK_SETTIME: usize = 112;
+const SYSCALL_CLOCK_GETRES: usize = 114;
 const SYSCALL_SYSLOG: usize = 116;
 
 const SYSCALL_SCHED_SETSCHEDULER: usize = 119;
 const SYSCALL_SCHED_GETSCHEDULER: usize = 120;
 const SYSCALL_SCHED_GETPARAM: usize = 121;
+const SYSCALL_SCHED_SETPARAM: usize = 122;
 const SYSCALL_SCHED_GETAFFINITY: usize = 123;
 /// yield syscall
 const SYSCALL_YIELD: usize = 124;
@@ -167,6 +169,7 @@ const SYSCALL_EXEC: usize = 221;
 /// mmap syscall
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
+const SYSCALL_MLOCK: usize = 228;
 const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_PTHREADCREATE: usize = 236;
 /// madvise syscall
@@ -343,6 +346,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(args[0] as *const SigSet, args[1] as *mut SigInfo, args[2] as *const TimeSpec, args[3]),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1]as *mut _),
+        SYSCALL_CLOCK_GETRES => sys_clock_getres(args[0], args[1] as *mut TimeSpec),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
         SYSCALL_SETUID => sys_setuid(args[0] as u32),
         SYSCALL_SETEUID => sys_seteuid(args[0] as u32),
@@ -463,6 +467,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SCHED_SETSCHEDULER => sys_sched_setscheduler(args[0] as isize, args[1] as isize, args[2] as *const SchedParam),
         SYSCALL_SCHED_GETSCHEDULER => sys_sched_getscheduler(args[0] as isize),
         SYSCALL_SCHED_GETPARAM => sys_sched_getparam(args[0] as isize, args[1] as *mut SchedParam),
+        SYSCALL_SCHED_SETPARAM => sys_sched_setparam(args[0] as isize, args[1] as *const SchedParam),
+        SYSCALL_MLOCK => sys_mlock(args[0], args[1]),
         _ => {
             println!(
                 "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
