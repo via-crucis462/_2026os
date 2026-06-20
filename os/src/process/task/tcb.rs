@@ -17,6 +17,12 @@ use alloc::{
 use crate::arch::config::*;
 use super::*;
 
+pub const SCHED_OTHER: isize = 0;
+pub const SCHED_FIFO: isize = 1;
+pub const SCHED_RR: isize = 2;
+pub const SCHED_BATCH: isize = 3;
+pub const SCHED_IDLE: isize = 5;
+
 
 
 /// Task control block structure
@@ -85,6 +91,9 @@ pub struct TaskControlBlockInner {
 
     /// 当前由哪个 hart 持有运行所有权；None 表示可被调度领取。
     pub owner_hart: Option<usize>,
+
+    pub sched_policy: isize,
+    pub sched_priority: i32,
 
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,

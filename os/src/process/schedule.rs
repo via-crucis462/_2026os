@@ -2,6 +2,7 @@
 use crate::{CPU_CORE_NUM, process, sync::MPSafeCell};
 #[cfg(target_arch = "riscv64")]
 use crate::{arch::sbi::sbi_wakeup_harts};
+use super::task::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
 use super::*;
 use super::manager::*;
 use lazy_static::*;
@@ -62,6 +63,16 @@ pub struct TaskPool {
     inner: VecDeque<Arc<TaskControlBlock>>,
 }
 
+pub(crate) fn task_sched_rank(task: &Arc<TaskControlBlock>) -> (u8, i32) {
+    let inner = task.inner_exclusive_access();
+    match inner.sched_policy {
+        SCHED_FIFO | SCHED_RR if inner.sched_priority > 0 => (2, inner.sched_priority),
+        SCHED_IDLE => (0, 0),
+        SCHED_BATCH => (1, 0),
+        _ => (1, 0),
+    }
+}
+
 impl TaskPool {
     pub fn new() -> Self {
         Self {
@@ -97,14 +108,18 @@ impl TaskPool {
             None
         }
     }
-    // 随机拿出一个线程
+    // 拿出优先级最高的线程；同优先级保持原有 RR 顺序
     pub fn take_a_task(&mut self) -> Option<Arc<TaskControlBlock>> {
-
-        let Some(x) = self.inner.pop_front() else {
-            //println!("[kernel] Scheduler::take_a_task: no task in pool");
-            return None;
-        };
-        Some(x)
+        let mut best_idx: Option<usize> = None;
+        let mut best_rank = (0u8, i32::MIN);
+        for (idx, task) in self.inner.iter().enumerate() {
+            let rank = task_sched_rank(task);
+            if best_idx.is_none() || rank > best_rank {
+                best_idx = Some(idx);
+                best_rank = rank;
+            }
+        }
+        best_idx.and_then(|idx| self.inner.remove(idx))
     }
     // 获取一份列表（注意会使引用计数+1）
     pub fn get_task_list(&self) -> VecDeque<Arc<TaskControlBlock>> {

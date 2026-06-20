@@ -92,12 +92,21 @@ impl TaskManager {
     }
     /// Take a process out of the ready queue
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        while let Some(task) = self.ready_queue.pop_front() {
-            if task.inner_exclusive_access().task_status == TaskStatus::Ready {
-                return Some(task);
+        self.ready_queue
+            .retain(|task| task.inner_exclusive_access().task_status == TaskStatus::Ready);
+
+        let mut best_idx: Option<usize> = None;
+        let mut best_rank = (0u8, i32::MIN);
+        //找最大值调度
+        for (idx, task) in self.ready_queue.iter().enumerate() {
+            let rank = task_sched_rank(task);
+            if best_idx.is_none() || rank > best_rank {
+                best_idx = Some(idx);
+                best_rank = rank;
             }
         }
-        None
+
+        best_idx.and_then(|idx| self.ready_queue.remove(idx))
     }
     pub fn task_count(&self) -> usize {
         self.ready_queue.len()
@@ -125,14 +134,6 @@ pub fn get_current_task_manager() -> &'static MPSafeCell<TaskManager> {
 
 /// 向全局池索取任务并加入当前处理器的就绪队列
 pub fn current_add_tasks() {
-    let need_fetch = {
-        let manager = get_current_task_manager().exclusive_access();
-        manager.task_count() <= 3
-    };
-    if !need_fetch {
-        return;
-    }
-
     let tasks = ask_for_tasks();
     let mut manager = get_current_task_manager().exclusive_access();
     for task in tasks {

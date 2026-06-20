@@ -14,6 +14,7 @@ use alloc::vec;
 use crate::syscall::EPOLL_CTL_DEL;
 use crate::syscall::EPOLL_CTL_ADD;
 use crate::syscall::EPOLL_CTL_MOD;
+use crate::process::task::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_OTHER, SCHED_RR};
 use crate::process::current_task_to_sleep;
 use crate::lazy_static;
 use spin::Mutex;
@@ -3019,26 +3020,13 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
         suspend_current_and_run_next();
     }
 }
-const SCHED_OTHER: isize = 0;
-const SCHED_FIFO: isize = 1;
-const SCHED_RR: isize = 2;
-const SCHED_BATCH: isize = 3;
-const SCHED_IDLE: isize = 5;
-
-lazy_static! {
-    //调度策略（仅供 sys_sched_getscheduler 和 sys_sched_setscheduler 使用，实际调度算法未实现）
-    static ref SCHED_POLICY: Mutex<isize> = Mutex::new(SCHED_OTHER);
-}
-
 pub fn sys_sched_getscheduler(pid: isize) -> isize {
-    if pid < 0 {
-        return EINVAL.as_isize();
-    }
-    let task = crate::task::current_task().unwrap();
-    if pid != 0 && pid as usize != task.process().getpid() && get_process(pid as usize).is_none() {
-        return ESRCH.as_isize();
-    }
-    *SCHED_POLICY.lock()
+    let target_task = match resolve_sched_task(pid) {
+        Ok(task) => task,
+        Err(errno) => return errno,
+    };
+    let sched_policy = target_task.inner_exclusive_access().sched_policy;
+    sched_policy
 }
 
 #[repr(C)]
@@ -3047,23 +3035,36 @@ pub struct SchedParam {
     pub sched_priority: i32,
 }
 
-pub fn sys_sched_getparam(pid: isize, param_ptr: *mut SchedParam) -> isize {
+fn resolve_sched_task(pid: isize) -> Result<Arc<TaskControlBlock>, isize> {
     if pid < 0 {
-        return EINVAL.as_isize();
+        return Err(EINVAL.as_isize());
     }
+    let task = crate::task::current_task().unwrap();
+    if pid == 0 || pid as usize == task.gettid() {
+        return Ok(task);
+    }
+    if let Some(task) = tid2task(pid as usize) {
+        return Ok(task);
+    }
+    if let Some(process) = get_process(pid as usize) {
+        let inner = process.inner_exclusive_access();
+        if let Some(task) = inner.tasks.first() {
+            return Ok(task.clone());
+        }
+    }
+    Err(ESRCH.as_isize())
+}
+
+pub fn sys_sched_getparam(pid: isize, param_ptr: *mut SchedParam) -> isize {
     if param_ptr.is_null() {
         return EFAULT.as_isize();
     }
     let task = crate::task::current_task().unwrap();
-    let current_process = task.process();
-    let process = if pid == 0 || pid as usize == current_process.getpid() {
-        current_process
-    } else if let Some(process) = get_process(pid as usize) {
-        process
-    } else {
-        return ESRCH.as_isize();
+    let target_task = match resolve_sched_task(pid) {
+        Ok(task) => task,
+        Err(errno) => return errno,
     };
-    let sched_priority = process.inner_exclusive_access().sched_priority;
+    let sched_priority = target_task.inner_exclusive_access().sched_priority;
     let token = task.process().inner_exclusive_access().get_user_token();
     if !try_translated_write(token, param_ptr, SchedParam { sched_priority }) {
         return EFAULT.as_isize();
@@ -3071,20 +3072,13 @@ pub fn sys_sched_getparam(pid: isize, param_ptr: *mut SchedParam) -> isize {
     0
 }
 pub fn sys_sched_setscheduler(pid: isize, policy: isize, param_ptr: *const SchedParam) -> isize {
-    if pid < 0 {
-        return EINVAL.as_isize();
-    }
     if param_ptr.is_null() {
         return EFAULT.as_isize();
     }
     let task = crate::task::current_task().unwrap();
-    let current_process = task.process();
-    let process = if pid == 0 || pid as usize == current_process.getpid() {
-        current_process
-    } else if let Some(process) = get_process(pid as usize) {
-        process
-    } else {
-        return ESRCH.as_isize();
+    let target_task = match resolve_sched_task(pid) {
+        Ok(task) => task,
+        Err(errno) => return errno,
     };
     let token = task.process().inner_exclusive_access().get_user_token();
     let Some(param) = try_translated_read(token, param_ptr) else {
@@ -3103,32 +3097,27 @@ pub fn sys_sched_setscheduler(pid: isize, policy: isize, param_ptr: *const Sched
         }
         _ => return EINVAL.as_isize(),
     }
-    *SCHED_POLICY.lock() = policy;
-    process.inner_exclusive_access().sched_priority = param.sched_priority;
+    let mut inner = target_task.inner_exclusive_access();
+    inner.sched_policy = policy;
+    inner.sched_priority = param.sched_priority;
     0
 }
 
 pub fn sys_sched_setparam(pid: isize, param_ptr: *const SchedParam) -> isize {
-    if pid < 0 {
-        return EINVAL.as_isize();
-    }
     if param_ptr.is_null() {
         return EFAULT.as_isize();
     }
     let task = crate::task::current_task().unwrap();
-    let current_process = task.process();
-    let process = if pid == 0 || pid as usize == current_process.getpid() {
-        current_process
-    } else if let Some(process) = get_process(pid as usize) {
-        process
-    } else {
-        return ESRCH.as_isize();
+    let target_task = match resolve_sched_task(pid) {
+        Ok(task) => task,
+        Err(errno) => return errno,
     };
     let token = task.process().inner_exclusive_access().get_user_token();
     let Some(param) = try_translated_read(token, param_ptr) else {
         return EFAULT.as_isize();
     };
-    match *SCHED_POLICY.lock() {
+    let policy = target_task.inner_exclusive_access().sched_policy;
+    match policy {
         SCHED_FIFO | SCHED_RR => {
             if param.sched_priority < 1 || param.sched_priority > 99 {
                 return EINVAL.as_isize();
@@ -3141,7 +3130,7 @@ pub fn sys_sched_setparam(pid: isize, param_ptr: *const SchedParam) -> isize {
         }
         _ => return EINVAL.as_isize(),
     }
-    process.inner_exclusive_access().sched_priority = param.sched_priority;
+    target_task.inner_exclusive_access().sched_priority = param.sched_priority;
     0
 }
 
