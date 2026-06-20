@@ -45,9 +45,6 @@ impl ProcessManager{
 
     pub fn remove_process(&mut self, pid: usize){
         info!("ProcessManager::try to remove_process: pid={}", pid);
-        /*for i in &self.process_pool{
-            println!("pid in pool: {}", i.0);
-        }*/
         if self.process_pool.remove(&pid).is_none(){
             panic!("cannot find pid {} in process pool! hart_id={}", pid , get_hart_id());
         }
@@ -72,14 +69,6 @@ pub fn remove_process(pid: usize){
     PROCESS_MANAGER.exclusive_access().remove_process(pid);
 }
 
-pub fn pop_process(pid: usize) -> Option<Arc<ProcessControlBlock>>{
-    let mut manager = PROCESS_MANAGER.exclusive_access();
-    let process = manager.get_process(pid);
-    if process.is_some(){
-        manager.remove_process(pid);
-    }
-    process
-}
 
 pub struct TaskManager {
     ready_queue: VecDeque<Arc<TaskControlBlock>>,

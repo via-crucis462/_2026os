@@ -23,7 +23,7 @@ use crate::mm::{translated_write, try_translated_read, try_translated_write};
 use crate::{arch::trap, console::print, mm::translated_byte_buffer};
 use crate::process::trap::TrapContext;
 use manager::*;
-pub use manager::{get_process, list_pids, pop_process, remove_process};
+pub use manager::{get_process, list_pids,  remove_process};
 use crate::sync::*;
 
 /// 任务处理器，改为pub供外部调用
@@ -419,7 +419,7 @@ pub fn exit_current_and_run_next(exit_code: i32){
 
         // 如果有子进程，移交给initproc
         if !orphan_children.is_empty() {
-            println!("[kernel] Process {} orphans {} children to initproc", process.getpid(), orphan_children.len());
+            //println!("[kernel] Process {} orphans {} children to initproc", process.getpid(), orphan_children.len());
             let initproc = INITTASK.process();
             for child in orphan_children.iter() {
                 child.inner_exclusive_access().parent = Some(Arc::downgrade(&initproc));

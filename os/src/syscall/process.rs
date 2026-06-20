@@ -1810,6 +1810,7 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
                 }
             }
             drop(proc_inner);
+            
             // 从全局进程表里删除这个子进程
             crate::process::remove_process(child_pid);
             return child_pid as isize;
@@ -2463,25 +2464,24 @@ pub fn sys_clock_nanosleep(
         return EINVAL.as_isize();
     }
 
-    // 处理 TIMER_ABSTIME: 将绝对时间转换为相对时间
-    let effective_req = if flags == TIMER_ABSTIME {
-        let now_ms = get_time_ms();
-        let target_ms = req_val.tv_sec.saturating_mul(1000)
-            .saturating_add(req_val.tv_nsec / 1_000_000);
-        let now_ms_signed = now_ms as isize;
-        let target_ms_signed = target_ms as isize;
-        let diff_ms = target_ms_signed.saturating_sub(now_ms_signed);
-        if diff_ms <= 0 {
+    let request_ns = if let Some(ns) = timespec_to_ns(&req_val) {
+        ns
+    } else {
+        return EINVAL.as_isize();
+    };
+
+    // 处理 TIMER_ABSTIME: request 是目标绝对时间点
+    let (effective_req, effective_remain) = if flags == TIMER_ABSTIME {
+        let now_ns = clock_now_ns(clock_id);
+        if request_ns <= now_ns {
             return 0; // 目标时间已过，立即返回
         }
-        TimeSpec {
-            tv_sec: (diff_ms as usize) / 1000,
-            tv_nsec: ((diff_ms as usize) % 1000) * 1_000_000,
-        }
+        (ns_to_timespec(request_ns - now_ns), core::ptr::null_mut())
     } else if flags != 0 {
         return EINVAL.as_isize(); // 不支持的 flags
     } else {
-        req_val
+        // 相对时间，flags 等于 0 时 request 是睡眠时长
+        (req_val, remain)
     };
 
     // 防止过长睡眠
@@ -2490,18 +2490,50 @@ pub fn sys_clock_nanosleep(
         return EINVAL.as_isize();
     }
 
-    nanosleep_impl(&effective_req, remain)
+    nanosleep_impl(&effective_req, effective_remain)
+}
+
+fn timespec_to_ns(ts: &TimeSpec) -> Option<usize> {
+    ts.tv_sec
+        .checked_mul(1_000_000_000)
+        .and_then(|sec_ns| sec_ns.checked_add(ts.tv_nsec))
+}
+
+fn ns_to_timespec(ns: usize) -> TimeSpec {
+    TimeSpec {
+        tv_sec: ns / 1_000_000_000,
+        tv_nsec: ns % 1_000_000_000,
+    }
+}
+
+fn clock_now_ns(clock_id: usize) -> usize {
+    match clock_id {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => current_wallclock_ns() as usize,
+        CLOCK_MONOTONIC | CLOCK_MONOTONIC_COARSE | _ => monotonic_now_ns(),
+    }
+}
+
+fn monotonic_now_ns() -> usize {
+    let ns = (get_timer_ticks() as u128)
+        .saturating_mul(1_000_000_000)
+        / crate::arch::config::CLOCK_FREQ as u128;
+    ns.min(usize::MAX as u128) as usize
 }
 
 /// nanosleep 核心实现：忙等 + 信号中断检测
 fn nanosleep_impl(req: &TimeSpec, rem: *mut TimeSpec) -> isize {
-    let start = get_time_ms();
+    let start_ns = clock_now_ns(CLOCK_MONOTONIC);
     let token = current_user_token();
 
-    let duration_ms = req.tv_sec.saturating_mul(1000).saturating_add(req.tv_nsec / 1_000_000);
+    let duration_ns = if let Some(ns) = timespec_to_ns(req) {
+        ns
+    } else {
+        return EINVAL.as_isize();
+    };
+    let deadline_ns = start_ns.saturating_add(duration_ns);
 
-    info!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
-    while get_time_ms() < start.saturating_add(duration_ms) {
+    info!("[SLEEP-IN] PID {} start_ns: {}, duration_ns: {}", current_task().unwrap().getpid(), start_ns, duration_ns);
+    while clock_now_ns(CLOCK_MONOTONIC) < deadline_ns {
         //   1. 检查是否有未屏蔽的信号到来
         let task = current_task().unwrap();
         let process = task.process();
@@ -2516,9 +2548,8 @@ fn nanosleep_impl(req: &TimeSpec, rem: *mut TimeSpec) -> isize {
         if pending != 0 {
             //   2. 如果有信号，必须提早醒来 (Interrupted system call)
             // 计算还剩下多少时间没睡完
-            let now = get_time_ms();
-            let elapsed = now - start;
-            let rem_ms = if duration_ms > elapsed { duration_ms - elapsed } else { 0 };
+            let now_ns = clock_now_ns(CLOCK_MONOTONIC);
+            let rem_ns = deadline_ns.saturating_sub(now_ns);
             
             // 如果用户传入了 rem 指针，把剩下的时间写进去
             if rem as usize != 0 {
@@ -2529,8 +2560,9 @@ fn nanosleep_impl(req: &TimeSpec, rem: *mut TimeSpec) -> isize {
                         return EFAULT.as_isize();
                     }
                 };
-                rem_spec.tv_sec = rem_ms / 1000;
-                rem_spec.tv_nsec = (rem_ms % 1000) * 1_000_000;
+                let remaining = ns_to_timespec(rem_ns);
+                rem_spec.tv_sec = remaining.tv_sec;
+                rem_spec.tv_nsec = remaining.tv_nsec;
                 if try_translated_write(token, rem, rem_spec) {
                     ()
                 } else {
@@ -3110,6 +3142,35 @@ pub fn sys_sched_setparam(pid: isize, param_ptr: *const SchedParam) -> isize {
         _ => return EINVAL.as_isize(),
     }
     process.inner_exclusive_access().sched_priority = param.sched_priority;
+    0
+}
+
+pub fn sys_sched_setaffinity(pid: isize, cpusetsize: usize, mask_ptr: *const u8) -> isize {
+    if pid < 0 {
+        return EINVAL.as_isize();
+    }
+    if mask_ptr.is_null() || cpusetsize == 0 {
+        return EFAULT.as_isize();
+    }
+
+    let task = crate::task::current_task().unwrap();
+    let target_exists = pid == 0
+        || pid as usize == task.process().getpid()
+        || pid as usize == task.gettid()
+        || get_process(pid as usize).is_some()
+        || tid2task(pid as usize).is_some();
+    if !target_exists {
+        return ESRCH.as_isize();
+    }
+
+    let token = task.process().inner_exclusive_access().get_user_token();
+    if try_translated_read::<u8>(token, mask_ptr).is_none() {
+        return EFAULT.as_isize();
+    }
+    if cpusetsize > 1 && try_translated_read::<u8>(token, unsafe { mask_ptr.add(cpusetsize - 1) }).is_none() {
+        return EFAULT.as_isize();
+    }
+
     0
 }
 pub fn sys_sched_getaffinity(pid: isize, cpusetsize: usize, mask_ptr: *mut u8) -> isize {
