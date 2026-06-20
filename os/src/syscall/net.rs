@@ -15,6 +15,8 @@ use crate::process::FdFlags;
 use crate::net::net_poll;
 use core::sync::atomic::{AtomicU16, Ordering};
 use crate::fs::OpenFlags;
+use crate::timer::TimeVal;
+use crate::get_time_ms;
 
 /// 获取指定 Socket 的本地地址和端口信息。
 /// 将内核中 Socket 的 local_endpoint 信息格式化为 sockaddr_in 结构并拷贝回用户空间。 asd
@@ -179,6 +181,7 @@ pub fn sys_setsockopt(
 ) -> isize {
     const SOL_SOCKET: usize = 1;
     const SO_ATTACH_BPF: usize = 50;
+    const SO_RCVTIMEO: usize = 20; // 接收超时常量
     let task = crate::task::current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
@@ -192,6 +195,33 @@ pub fn sys_setsockopt(
     // 2. 获取文件对象
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     drop(inner); // 提前释放进程锁
+    if level == SOL_SOCKET && optname == SO_RCVTIMEO {
+        if optlen < core::mem::size_of::<TimeVal>() as u32 || optval.is_null() {
+            return Errno::EINVAL.as_isize();
+        }
+        // 从用户态读取 timeval 结构体
+        let timeval = if let Some(tv) = try_translated_read(token, optval as *const TimeVal) {
+            tv
+        } else {
+            return Errno::EFAULT.as_isize();
+        };
+
+        let timeout = if timeval.sec == 0 && timeval.usec == 0 {
+            None
+        } else {
+            Some(core::time::Duration::from_secs(timeval.sec as u64) 
+                 + core::time::Duration::from_micros(timeval.usec as u64))
+        };
+
+        if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
+            *udp_socket.recv_timeout.lock() = timeout;
+            return 0;
+        }
+        if let Some(tcp_socket) = file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
+            // *tcp_socket.recv_timeout.lock() = timeout; 
+            return 0;
+        }
+    }
     if level == SOL_SOCKET && optname == SO_ATTACH_BPF {
         if optlen < core::mem::size_of::<i32>() as u32 || optval.is_null() {
             return Errno::EINVAL.as_isize();
@@ -387,19 +417,21 @@ pub fn sys_recvfrom(
     drop(inner);
     let is_nonblocking = (_flags & MSG_DONTWAIT != 0) 
         || file.get_flags().contains(crate::fs::OpenFlags::NONBLOCK);
-    // 判断是不是 UdpSocket
+    let file_flags = file.get_flags();
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         let mut data = vec![0u8; len];
         loop {
             if let Some((read_len, src_ep)) = udp_socket.recvfrom(&mut data) {
                 // 把数据拷贝回用户的 buf
-                let mut user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, len));
-                let mut current = 0;
-                for buffer in user_buf.buffers.iter_mut() {
-                    let copy_len = buffer.len().min(read_len - current);
-                    buffer[..copy_len].copy_from_slice(&data[current..current + copy_len]);
-                    current += copy_len;
-                    if current == read_len { break; }
+                if read_len > 0 {
+                    let mut user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, len));
+                    let mut current = 0;
+                    for buffer in user_buf.buffers.iter_mut() {
+                        let copy_len = buffer.len().min(read_len - current);
+                        buffer[..copy_len].copy_from_slice(&data[current..current + copy_len]);
+                        current += copy_len;
+                        if current == read_len { break; }
+                    }
                 }
 
                 // 把发送方地址填回 src_addr
@@ -441,7 +473,7 @@ pub fn sys_recvfrom(
                 drop(sockets);
                 if can_recv {
                 continue; 
-            }
+                }
                 let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
                 if let Some(socket_wait) = queues.get(&udp_socket.handle) {
                     let rx_queue = socket_wait.rx_queue.clone();
@@ -455,6 +487,15 @@ pub fn sys_recvfrom(
                         "[ recvfrom] Handle {:?} woke up! Checking buffer again...", 
                         udp_socket.handle
                     );
+                    let task = crate::task::current_task().unwrap();
+                    let task_inner = task.inner_exclusive_access();
+                    if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
+                        drop(task_inner); 
+                        crate::println!("[recvfrom] Interrupted by SIGALRM! Returning EINTR.");
+                        return crate::syscall::errno::Errno::EINTR.as_isize(); 
+                    }
+                    drop(task_inner);
+                    continue;
                 } else {
                     drop(queues);
                     crate::task::suspend_current_and_run_next();
@@ -1049,6 +1090,7 @@ pub fn sys_shutdown(fd: usize, how: i32) -> isize {
     drop(inner); 
 
     if let Some(tcp_wrapper) = file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
+        crate::println!("[SHUTDOWN TCP] Downcast OK! Handle: {:?}", tcp_wrapper.handle);
         if how == 1 || how == 2 {
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_wrapper.handle);
@@ -1062,6 +1104,7 @@ pub fn sys_shutdown(fd: usize, how: i32) -> isize {
     } else if let Some(_udp_wrapper) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
 
     } else {
+        crate::println!("[SHUTDOWN ERROR] FD {} is NOT a TcpSocket!", fd);
         return ENOTSOCK.as_isize(); 
     }
     0
