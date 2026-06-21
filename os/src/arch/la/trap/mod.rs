@@ -6,6 +6,7 @@ mod context;
 use crate::{KERNEL_STACK_SIZE, PAGE_SIZE, get_hart_id};
 use crate::mm::{PageTable, VirtAddr};
 use crate::syscall::syscall;
+use crate::arch::timer::get_time_ms;
 use crate::arch::mm::flush_tlb_for_asid;
 use crate::task::{
     KernelStack, SignalFlags,
@@ -14,6 +15,7 @@ use crate::task::{
     suspend_current_and_run_next, handle_signals
 };
 use crate::net::net_poll;
+use alloc::sync::Arc;
 use core::arch::{asm, global_asm};
 global_asm!(include_str!("trap.S"));
 
@@ -325,6 +327,23 @@ pub fn trap_handler() -> ! {
         Cause::TimeInterrupt => {
             unsafe {
                 asm!("csrwr {}, 0x44", in(reg) 1);// 清除定时器中断
+            }
+            let current_ms = get_time_ms();
+            let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
+            for pid in expired_pids {
+                if let Some(process) = crate::task::get_process(pid) {
+                    let process_inner = process.inner_exclusive_access();
+
+                    for task in process_inner.tasks.iter() {
+                        let mut task_inner = task.inner_exclusive_access();
+                        task_inner.signals |= crate::task::SignalFlags::SIGALRM;
+                        if task_inner.task_status == crate::task::TaskStatus::Blocked {
+                            task_inner.signal_interrupted = true;
+                            task_inner.task_status = crate::task::TaskStatus::Ready;
+                            crate::task::add_task(Arc::clone(task));
+                        }
+                    }
+                }
             }
             net_poll();
             crate::mm::mmap::tick_sync();

@@ -2603,10 +2603,7 @@ fn clock_now_ns(clock_id: usize) -> usize {
 }
 
 fn monotonic_now_ns() -> usize {
-    let ns = (get_timer_ticks() as u128)
-        .saturating_mul(1_000_000_000)
-        / crate::arch::config::CLOCK_FREQ as u128;
-    ns.min(usize::MAX as u128) as usize
+    get_time_us().saturating_mul(1_000)
 }
 
 /// nanosleep 核心实现：忙等 + 信号中断检测

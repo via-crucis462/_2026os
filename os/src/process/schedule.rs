@@ -1,7 +1,7 @@
 // 全局线程调度器
 use core::cmp::Ordering;
 
-use crate::{CPU_CORE_NUM, arch::config::CLOCK_FREQ, arch::timer::get_timer_ticks, process, sync::MPSafeCell};
+use crate::{CPU_CORE_NUM, arch::timer::get_time_us, process, sync::MPSafeCell};
 #[cfg(target_arch = "riscv64")]
 use crate::{arch::sbi::sbi_wakeup_harts};
 use super::manager::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
@@ -183,10 +183,7 @@ pub(crate) fn task_sched_rank(task: &Arc<TaskControlBlock>) -> (u8, i32) {
 }
 
 fn monotonic_now_ns() -> usize {
-    let ns = (get_timer_ticks() as u128)
-        .saturating_mul(1_000_000_000)
-        / CLOCK_FREQ as u128;
-    ns.min(usize::MAX as u128) as usize
+    get_time_us().saturating_mul(1_000)
 }
 
 pub fn sleep_current_until(deadline_ns: usize) {
