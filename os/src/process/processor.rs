@@ -145,7 +145,8 @@ pub fn run_tasks() {
                 } /*else if status == TaskStatus::WaitSaving {
                     // 调用了wait函数
                     prev_task.inner_exclusive_access().task_status = TaskStatus::Blocked;
-                }*/
+                    // println!("SET BLOCKED: tid={} of pid={} done", prev_task.tid.0, prev_task.getpid());
+                }
                 // 如果 status 是 Zombie 或 Blocked，什么都不做，自然销毁或等别人唤醒
             }
         } else {

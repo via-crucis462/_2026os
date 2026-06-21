@@ -59,8 +59,7 @@ pub(crate) fn clear_child_tid_and_wake(token: usize, clear_child_tid: usize) {
         };
 
         if let Some(queue) = queue {
-            let guard = queue.lock();
-            crate::process::wake_up_one(guard);
+            crate::process::wake_up_one(&queue);
         }
     }
 }
@@ -4329,8 +4328,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 return EFAULT.as_isize();
             };
             let queue = get_futex_wait_queue(pa.0);
-            let guard = queue.lock();
-            current_task_to_sleep(guard);
+            block_current_and_run_next(&queue);
             warn!("task {} sleep on futex {:x}", current_task().unwrap().getpid(), pa.0);
             let current = current_task().unwrap();
             let current_tid = current.gettid();
@@ -4409,12 +4407,9 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
 
             let mut woken = 0;
             while woken < val {
-                let guard = queue.lock();
-                let has_waiter = !guard.is_empty();
-                if !has_waiter {
+                if !crate::process::wake_up_one(&queue) {
                     break;
                 }
-                crate::process::wake_up_one(guard);
                 woken += 1;
             }
 
@@ -4469,7 +4464,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
 
                 if wake_left > 0 {
                     wake_left -= 1;
-                    while task.inner_exclusive_access().task_status == crate::task::TaskStatus::WaitSaving {
+                    while task.inner_exclusive_access().task_status == crate::task::TaskStatus::BlockSaving {
                         suspend_current_and_run_next();
                     }
                     let mut task_inner = task.inner_exclusive_access();

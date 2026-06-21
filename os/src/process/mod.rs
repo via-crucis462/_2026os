@@ -289,54 +289,43 @@ pub fn start_waiting_child() {
     schedule(task_cx_ptr);
 } */
 
-// 让被阻塞的线程睡眠，加入等待队列
-pub fn current_task_to_sleep(mut wait_queue: MutexGuard<WaitQueue>) {
-    error!("DO NOT CALL THIS FUNC, it's wrong");
-    let task = take_current_task().unwrap();
-    let mut task_inner = task.inner_exclusive_access();
-    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
-    task_inner.task_status = TaskStatus::Blocked;
-    drop(task_inner);
-    // push back to wait queue.
-    wait_queue.push_back(task);
-    drop(wait_queue);
-    // 将current_task上下文保存后切换到idle线程
-    schedule(task_cx_ptr);
-}
-
 /// 将当前线程入队并调度，自动管理锁避免死锁。
 /// 先加锁→入队→放锁，再 schedule，确保 schedule 时无锁持有。
-pub fn block_current_and_run_next(cell: &MPSafeCell<WaitQueue>) {
-    let task = take_current_task().unwrap();
+pub fn block_current_and_run_next(queue: &Mutex<WaitQueue>) {
+    // 此处不能take
+    let task = current_task().unwrap();
     let task_cx_ptr = {
         let mut task_inner = task.inner_exclusive_access();
         let ptr = &mut task_inner.task_cx as *mut TaskContext;
-        task_inner.task_status = TaskStatus::Blocked;
+        task_inner.task_status = TaskStatus::BlockSaving;
         drop(task_inner);
-        let mut guard = cell.exclusive_access();
+        let mut guard = queue.lock();
         guard.push_back(task);
         ptr
     };
+    // current_task 将在 idle_task（fn run_tasks) 中被释放并替换为下一个任务（如果有）
     schedule(task_cx_ptr);
 }
 
 // 从等待队列中唤醒一个线程到全局池
-pub fn wake_up_one(mut wait_queue: MutexGuard<WaitQueue>) {
-    if let Some(task) = wait_queue.pop_front() {
-        drop(wait_queue);
-        while task.inner_exclusive_access().task_status == TaskStatus::WaitSaving {
-            // 希望唤醒的任务还没保存好,将执行流保存后让出cpu
-            suspend_current_and_run_next();
+// 返回队列是否非空（即是否真的唤醒了一个线程）
+pub fn wake_up_one(mut queue: &Mutex<WaitQueue>) -> bool {
+    if let Some(task) = queue.lock().pop_front() {
+        while task.inner_exclusive_access().task_status == TaskStatus::BlockSaving {
+            println!("wake_up_one: task is still saving context"); // 调试用
+            // 短暂等待
+            core::hint::spin_loop();
+            println!("wake_up_one: rechecking task status..."); // 调试用
         }
         let mut task_inner = task.inner_exclusive_access();
         task_inner.task_status = TaskStatus::Ready;
         task_inner.owner_hart = None;
         drop(task_inner);
         add_task_into_pool(task);
+        true
     } else {
-        drop(wait_queue);
+        false
     }
-    
 }
 
 /// pid of usertests app in make run TEST=1
