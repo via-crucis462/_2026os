@@ -2972,10 +2972,6 @@ pub fn sys_pselect6(
         timeout_ms = sec.saturating_mul(1000).saturating_add(timespec.tv_nsec / 1_000_000);
         deadline_ms = crate::timer::get_time_ms().saturating_add(timeout_ms);
     }
-    let pid = task.process().pid.0;
-    crate::println!("\n[PSELECT ENTER] PID: {}, nfds: {}, readfds: {:#b}, writefds: {:#b}, timeout: {} ms", 
-        pid, nfds, readfds, writefds, timeout_ms);
-        let mut timer_registered = false;
     loop {
             if readfds_ptr as usize != 0 {
                 readfds = {
@@ -2985,10 +2981,6 @@ pub fn sys_pselect6(
             }
             {
                 let task_inner = task.inner_exclusive_access();
-                crate::println!(
-                    "[PSELECT TRACE] Loop top. PID: {}, Status: {:?}, Signals: {:#b}", 
-                    pid, task_inner.task_status, task_inner.signals.bits()
-                );
                 let fatal_signals = crate::task::SignalFlags::SIGKILL 
                     | crate::task::SignalFlags::SIGTERM 
                     | crate::task::SignalFlags::SIGINT 
@@ -2998,70 +2990,8 @@ pub fn sys_pselect6(
                     return crate::syscall::errno::Errno::EINTR.as_isize();
                 }
             }
-            static mut DEADLOCK_COUNTER: usize = 0;
-            unsafe {
-                DEADLOCK_COUNTER += 1;
-                if DEADLOCK_COUNTER % 80 == 0 {
-                    crate::println!("=================== [DEADLOCK DETECTED: ENHANCED TASK DUMP] ===================");
-                    let map = TID2TCB.exclusive_access();
-                    {
-                        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-                        for (h, s) in sockets.iter() {
-                            if let smoltcp::socket::Socket::Tcp(tcp) = s {
-                                if tcp.state() == smoltcp::socket::tcp::State::Closed {
-                                    continue;
-                                }
-                                crate::println!("Handle {:?} -> State: {:?}", h, tcp.state());
-                            }
-                        }
-                    }
-                    for (tid, iter_task) in map.iter() {
-                        crate::println!("Ready to check TID: {}", tid);
-                        let task_inner = iter_task.inner_exclusive_access();
-                        let status = task_inner.task_status;
-                        
-                        if let Some(iter_process) = iter_task.process.upgrade() {
-                            let iter_pid = iter_process.pid.0;
-                            if iter_pid == pid {
-                                crate::println!(    
-                                    "TID: {}, PID: {}, Process Name: <CURRENT PROCESS>, Status: {:?}", 
-                                    tid, iter_pid, status
-                                );
-                                crate::println!("  [Process lock skipped to avoid self-deadlock]");
-                            } else {
-                                let proc_inner = iter_process.inner_exclusive_access();
-                                crate::println!(    
-                                    "TID: {}, PID: {}, Process Name: '{}', Status: {:?}", 
-                                    tid, iter_pid, proc_inner.pname, status
-                                );
-                                crate::println!(" [FD Table] Total open files: {}", proc_inner.fd_table.len());
-                                for (fd, file_desc) in proc_inner.fd_table.iter().enumerate() {
-                                    if let Some(file_arc) = &file_desc.file {
-                                        if let Some(tcp_wrapper) = file_arc.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
-                                            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-                                            let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_wrapper.handle);
-                                            let tx_queue = socket.send_queue();
-                                            crate::println!(" FD {}: [TCP Socket] Handle: {:?}, TxQueue bytes: {}", fd, tcp_wrapper.handle, tx_queue);
-                                        } else if let Some(_udp_wrapper) = file_arc.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
-                                            crate::println!("  FD {}: [UDP Socket]", fd);
-                                        } else {
-                                            crate::println!("   FD {}: [Standard File/Pipe]", fd);
-                                        }
-                                    }
-                                }
-                                let trap_cx = task_inner.get_trap_cx(); 
-                                let syscall_id = trap_cx.x[17]; 
-                                crate::println!(" [Blocked on Syscall ID]: {}", syscall_id);
-                                drop(proc_inner);
-                            }
-                        } else {
-                            crate::println!("TID: {}, Status: {:?} (Orphaned Task without Process)", tid, status);
-                        }
-                        drop(task_inner);
-                    }
-                    crate::println!("===============================================================================");
-                }
-            }
+            
+            
 
             let limit = {
                 let process_inner = process.inner_exclusive_access();
@@ -3094,7 +3024,6 @@ pub fn sys_pselect6(
             }
             // 2检查所有的 FD 是否有数据就绪
             crate::net::net_poll();
-            crate::net::net_poll();
             let mut ready_count = 0;
             let mut ready_readfds = 0usize;
             let mut ready_writefds = 0usize;
@@ -3109,27 +3038,9 @@ pub fn sys_pselect6(
                             if let Some(tcp_wrapper) = fd_file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
                                 let r_status = fd_file.readable();
                                 let w_status = fd_file.writable();
-                                
-                                // 打印 TCP 调试信息
                                 let mut sockets = crate::net::SOCKET_SET.exclusive_access();
                                 let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_wrapper.handle);
-                                if in_read {
-                                    let tcp_state = socket.state();
-                                    let rx_buf_len = socket.recv_queue(); 
-                                    let rx_buf_cap = socket.recv_capacity();
-                                    let local_window = rx_buf_cap - rx_buf_len; 
-                                    let tx_buf_len = socket.send_queue();
-                                    let tx_buf_cap = socket.send_capacity();
-                                    let tcp_state = socket.state();
-                                    let remote_ep = socket.remote_endpoint();
-                                    crate::println!(
-                                    "[PSELECT CHECK] PID: {}, FD: {}, Handle: {:?}, readable: {}, TCP State: {:?}, Remote: {:?}\n\
-                                    [TCP WIN/BUF] Local Win: {} (RxBuf: {}/{}) | (TxBuf: {}/{})",
-                                    pid, fd, tcp_wrapper.handle, r_status, tcp_state, remote_ep,
-                                    local_window, rx_buf_len, rx_buf_cap,
-                                    tx_buf_len, tx_buf_cap
-                                );
-                                }
+                                
                                 drop(sockets); 
 
                                 if in_read && r_status {
@@ -3145,8 +3056,6 @@ pub fn sys_pselect6(
                     }
                 }
             }
-
-
             // 如果有就绪或者超时，清理队列后直接返回
             let is_timeout = has_timeout && crate::timer::get_time_ms() >= deadline_ms;
             if ready_count > 0 || is_timeout {
@@ -3168,11 +3077,10 @@ pub fn sys_pselect6(
                             if let Some(handle) = handle_opt {
                                 if let Some(socket_wait) = queues.get(&handle) {
                                     if in_read {
-                                        crate::println!("[DEBUG pselect] TID {} is cleaning READ Handle {:?} (Early Return)", tid, handle);
                                         socket_wait.rx_queue.exclusive_access().remove_by_tid(tid);
                                     }
                                     if in_write {
-                                        crate::println!("[DEBUG pselect] TID {} is cleaning WRITE Handle {:?} (Early Return)", tid, handle);
+
                                         socket_wait.tx_queue.exclusive_access().remove_by_tid(tid);
                                     }
                                 }
@@ -3197,39 +3105,15 @@ pub fn sys_pselect6(
                     return ready_count as isize;
                 } else {
                     // 超时返回
-                    crate::println!("[PSELECT] Timeout reached! Returning 0.");
                     if readfds_ptr as usize != 0 { crate::mm::try_translated_write(token, readfds_ptr, 0); }
                     if _writefds_ptr as usize != 0 { crate::mm::try_translated_write(token, _writefds_ptr, 0); }
                     if _exceptfds_ptr as usize != 0 { crate::mm::try_translated_write(token, _exceptfds_ptr, 0); }
                     return 0;
                 }
             }
-
-
             // 被 net_poll 唤醒，让出 CPU 
-
-            {
-                let process_inner = process.inner_exclusive_access();
-                if let Some(fd_file) = &process_inner.fd_table[3].file {
-                    if let Some(tcp) = fd_file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
-                        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-                        let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp.handle);
-                        if let (Some(local), Some(remote)) = (socket.local_endpoint(), socket.remote_endpoint()) {
-                            crate::println!(
-                                "[PSELECT suspand]  Handle: {:?}, TCP State: {:?}, can_recv: {},  Local: {}, Remote: {}", 
-                                tcp.handle,  socket.state(), socket.can_recv(), local.port, remote.port
-                            );
-                        }
-                    }
-                }
-            }
-
-            crate::println!("suspend_current_and_run_next");
             crate::task::suspend_current_and_run_next();
-
-
             // 下一轮循环的起点，清理掉上次入队的记录，防止重复通知和内存泄漏
-
             {
                 let mut queues = crate::net::SOCKET_WAIT_QUEUES.lock();
                 let process_inner = process.inner_exclusive_access();
@@ -3249,11 +3133,9 @@ pub fn sys_pselect6(
                             if let Some(handle) = handle_opt {
                                 if let Some(socket_wait) = queues.get(&handle) {
                                     if in_read {
-                                        crate::println!("[DEBUG pselect] TID {} is cleaning READ Handle {:?}", tid, handle);
                                         socket_wait.rx_queue.exclusive_access().remove_by_tid(tid);
                                     }
                                     if in_write {
-                                        crate::println!("[DEBUG pselect] TID {} is cleaning WRITE Handle {:?}", tid, handle);
                                         socket_wait.tx_queue.exclusive_access().remove_by_tid(tid);
                                     }
                                 }

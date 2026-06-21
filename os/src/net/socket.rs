@@ -62,7 +62,6 @@ impl TcpSocket {
         socket.remote_endpoint()
     }
     pub fn connect(&self, remote_ep: smoltcp::wire::IpEndpoint) -> isize {
-       //println!("[TCP Connect] Attempting to connect to {}, using handle {:?}", remote_ep, self.handle);
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
         let is_loopback = match remote_ep.addr {
@@ -165,7 +164,6 @@ fn readable(&self) -> bool {
             let state = socket.state();
             if !socket.may_recv() || matches!(state, State::CloseWait | State::Closed | State::TimeWait | State::LastAck | State::Closing) {
                 drop(sockets);
-                crate::println!("[TcpSocket::read] Connection closed (State: {:?}), returning 0 (EOF)", state);
                 return 0; // 返回 0 字节
             }
             if socket.can_recv() {
@@ -186,12 +184,11 @@ fn readable(&self) -> bool {
                     }
                     Ok(_) => {
                         // 读到了 0 字节
-                       /*  crate::println!("[TcpSocket::read] Handle {:?} recv_slice returned Ok(0), waiting for more data...", self.handle);*/
+                    
                         drop(sockets);
                         return 0;
                     }
                     Err(smoltcp::socket::tcp::RecvError::Finished) => {
-                        crate::println!("[TcpSocket::read] Handle {:?} received FIN (Finished). Returning 0 as EOF.", self.handle);
                         drop(sockets);
                         return 0;
                     }
@@ -201,7 +198,6 @@ fn readable(&self) -> bool {
                     }
                 }
             }else if !socket.may_recv() {
-                //crate::println!("[TcpSocket::read] Handle {:?} !may_recv() is true (Connection Closed). Returning 0 as EOF.", self.handle);
                 drop(sockets);
                 return 0; 
             }
@@ -211,9 +207,7 @@ fn readable(&self) -> bool {
             if let Some(socket_wait) = queues.get(&self.handle) {
                 let rx_queue = socket_wait.rx_queue.clone();
                 drop(queues);
-                crate::println!("[TcpSocket::read] Handle {:?} rx empty, blocking...", self.handle);
                 crate::task::block_current_and_run_next(&rx_queue);
-                crate::println!("[TcpSocket::read] Handle {:?} woke up!", self.handle);
                 let task = crate::task::current_task().unwrap();
                 let task_inner = task.inner_exclusive_access();
                 if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
@@ -227,10 +221,6 @@ fn readable(&self) -> bool {
                     let tids_before = rx_guard.get_tids();
                     rx_guard.remove_by_tid(current_tid);
                     let tids_after = rx_guard.get_tids();
-                    crate::println!(
-                        "[TcpSocket::read CLEANUP] TID {} woke up on Handle {:?}. TIDs: {:?} -> {:?}", 
-                        current_tid, self.handle, tids_before, tids_after
-                    );
                 }
                 drop(queues);
             } else {
@@ -277,9 +267,7 @@ fn readable(&self) -> bool {
             if let Some(socket_wait) = queues.get(&self.handle) {
                 let tx_queue = socket_wait.tx_queue.clone();
                 drop(queues);
-               crate::println!("[TcpSocket::write] Handle {:?} tx full, blocking...", self.handle);
                 crate::task::block_current_and_run_next(&tx_queue);
-                crate::println!("[TcpSocket::write] Handle {:?} woke up!", self.handle);
             } else {
                 drop(queues);
                 crate::task::suspend_current_and_run_next();
@@ -381,7 +369,6 @@ impl UdpSocket {
         }
     }
     pub fn connect(&self, remote_ep: IpEndpoint) -> isize {
-        println!("[UDP Connect] Setting remote to {}", remote_ep);
         let mut remote = self.remote_ep.lock();
         *remote = Some(remote_ep);
         let mut port_lock = self.local_port.lock();
@@ -423,13 +410,6 @@ impl UdpSocket {
             Ok((data, meta)) => {
                 let copy_len = usize::min(buf.len(), data.len());
                 buf[..copy_len].copy_from_slice(&data[..copy_len]);
-                if data.len() > buf.len() {
-                    crate::println!(
-                        "[UdpSocket] Packet truncated from {} to {}", 
-                        data.len(), 
-                        copy_len
-                    );
-                }
                 Some((copy_len, meta.endpoint))
             },
             Err(e) => {
@@ -494,10 +474,7 @@ impl File for UdpSocket {
             if let Some(socket_wait) = queues.get(&self.handle) {
                 let rx_queue = socket_wait.rx_queue.clone();
                 drop(queues);
-                
-                crate::println!("[UdpSocket::read] Handle {:?} rx empty, blocking...", self.handle);
                 crate::task::block_current_and_run_next(&rx_queue);
-                crate::println!("[UdpSocket::read] Handle {:?} woke up!", self.handle);
                 let mut queues = crate::net::SOCKET_WAIT_QUEUES.lock();
                 if let Some(socket_wait) = queues.get(&self.handle) {
                     let mut rx_guard = socket_wait.rx_queue.exclusive_access();
@@ -548,9 +525,7 @@ impl File for UdpSocket {
             if let Some(socket_wait) = queues.get(&self.handle) {
                 let tx_queue = socket_wait.tx_queue.clone();
                 drop(queues);
-                crate::println!("[UdpSocket::write] Handle {:?} tx full, blocking...", self.handle);
                 crate::task::block_current_and_run_next(&tx_queue);
-                crate::println!("[UdpSocket::write] Handle {:?} woke up!", self.handle);
             } else {
                 drop(queues);
                 crate::task::suspend_current_and_run_next();
@@ -647,7 +622,6 @@ impl File for UnixSocket {
     }
 
     fn write(&self, buf: UserBuffer) -> usize {
-        println!("UnixSocket write called with {} bytes", buf.len());
         let mut payload = vec![0u8; buf.len()];
         let mut payload_len = 0usize;
         for segment in buf.buffers.iter() {
@@ -661,7 +635,6 @@ impl File for UnixSocket {
             inner.peer.as_ref().and_then(Weak::upgrade)
         };
         let Some(peer) = peer else {
-            println!("UnixSocket write failed: no peer connected");
             return 0;
         };
 
@@ -679,7 +652,6 @@ impl File for UnixSocket {
         if let Some(prog_fd) = attached_prog {
             let _ = crate::syscall::bpf::run_socket_filter_program(prog_fd);
         }
-        println!("UnixSocket wrote {} bytes to peer", payload_len);
         payload_len
     }
 

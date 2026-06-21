@@ -28,7 +28,6 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return EBADF.as_isize(); // EBADF
     }
-    println!("[DEBUG sys_getsockname START] FD: {}", fd);
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     drop(inner); 
     let mut user_len = unsafe {
@@ -54,12 +53,10 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
              let smoltcp::wire::IpAddress::Ipv4(v4) = ep.addr;
                 ip = v4.0;
         }
-        println!("[DEBUG sys_getsockname TCP] Cached Port: {:?}", *port_lock);
         is_ip_socket = true;
     } else if let Some(socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         // 2. 处理 UDP Socket
         let port_lock = socket.local_port.lock();
-        println!("[DEBUG sys_getsockname UDP] Cached Port: {:?}", *port_lock);
         if let Some(p) = *port_lock {
             port = p;
         } else {
@@ -88,23 +85,17 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
                 let mut current_addr = addr as usize;
                 for i in 0..copy_len {
                     if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
-                        println!("[DEBUG sys_getsockname ERROR] try_translated_write failed at byte {}", i);
                         return EFAULT.as_isize();
                     }
                     current_addr += 1;
                 }   
                 if !try_translated_write(token, addrlen, 16u32) {
-                    println!("[DEBUG sys_getsockname ERROR] try_translated_write addrlen failed");
                     return EFAULT.as_isize();
                 }
             } else {
                 return EFAULT.as_isize();
             }
         }
-        println!(
-            "[DEBUG sys_getsockname SUCCESS IP] Returning Port: {}, IP: {:?}, Bytes: {:?}", 
-            port, ip, sockaddr_bytes
-        );
         return 0; // 成功
     }
     else if let Some(_nl_socket) = file.as_any().downcast_ref::<StandardNetlinkSocket>() {
@@ -336,7 +327,6 @@ pub fn sys_sendto(
     let inner = process.inner_exclusive_access();
     let token = inner.memory_set.token();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
-        crate::println!("[FD ERROR] PID: {}, tried to use invalid FD: {}", process.pid.0, fd);
         return Errno::EBADF.as_isize();
     }
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
@@ -380,7 +370,6 @@ pub fn sys_sendto(
             return Errno::EDESTADDRREQ.as_isize(); // 需要目标地址
         }
     }
-    crate::println!("[sys_sendto] PID: {}, FD: {}, len: {}", process.pid.0, fd, len);
     loop {
          let user_buf = UserBuffer::new(translated_byte_buffer(token, buf, len));
         let ret = file.write(user_buf) as isize;
@@ -478,20 +467,11 @@ pub fn sys_recvfrom(
                 if let Some(socket_wait) = queues.get(&udp_socket.handle) {
                     let rx_queue = socket_wait.rx_queue.clone();
                     drop(queues); 
-                    crate::println!(
-                        "[ recvfrom] Handle {:?} rx empty, blocking...", 
-                        udp_socket.handle
-                    );
                     crate::task::block_current_and_run_next(&rx_queue);
-                    crate::println!(
-                        "[ recvfrom] Handle {:?} woke up! Checking buffer again...", 
-                        udp_socket.handle
-                    );
                     let task = crate::task::current_task().unwrap();
                     let task_inner = task.inner_exclusive_access();
                     if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
                         drop(task_inner); 
-                        crate::println!("[recvfrom] Interrupted by SIGALRM! Returning EINTR.");
                         return crate::syscall::errno::Errno::EINTR.as_isize(); 
                     }
                     drop(task_inner);
@@ -716,7 +696,6 @@ pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
         if port == 0 {
             port = alloc_ephemeral_port();
         }
-        //println!("[DEBUG sys_bind TCP] FD: {}, Assigned Port: {}", fd, port);
        *socket.local_port.lock() = Some(port);
         return 0;
         0
@@ -786,7 +765,6 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
             }
             (inner.fd_table[fd].file.as_ref().unwrap().clone(), status)
         };
-    crate::println!("[sys_accept ENTRY] PID: {}, listen_fd: {}, fd_status (flags): {:#o}", task.getpid(), fd, status);
     const O_NONBLOCK: usize = 0o4000;
     let fatal_signals = crate::task::SignalFlags::SIGKILL 
                 | crate::task::SignalFlags::SIGTERM 
@@ -796,15 +774,13 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         let mut local_port = 0;
         let mut remote_ep = None;
         let start_time_ms = crate::timer::get_time_ms(); 
-        // 设定一个超时时间，比如 12 秒 (12000 毫秒)
+        // 设定一个超时时间， 12 秒
         let timeout_ms = 12_000;
         loop {
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(orig_socket.handle);
-
             let state = smol_socket.state();
             drop(sockets);
-            crate::println!("[accept] Handle {:?} woke up! Current state: {:?}", orig_socket.handle, state);
             crate::net::net_poll(); 
             let mut is_established = false;
             {
@@ -817,42 +793,23 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
                         local_port = ep.port;
                     }
                     remote_ep = smol_socket.remote_endpoint();
-                }else{
-                    crate::println!("Socket {:?} is not connected. Current State: {:?}", orig_socket.handle, state);
                 }
+                   
             }
             if is_established {
-                crate::println!("is_established");
                 break; 
             }
             let current_time_ms = crate::timer::get_time_ms();
             if current_time_ms - start_time_ms > timeout_ms {
-                crate::println!(
-                    "[accept HACK] PID {} has been waiting for {} ms! Faking SIGALRM and returning EINTR!", 
-                    task.getpid(), timeout_ms
-                );
                 return crate::syscall::errno::Errno::EINTR.as_isize();
             }
-            crate::println!("[sys_accept] fd {} status is {:#o}, O_NONBLOCK is {:#o}", fd, status, O_NONBLOCK);
             if (status & O_NONBLOCK) != 0 {
                 return crate::syscall::errno::Errno::EAGAIN.as_isize();
             }
-            crate::println!("[accept] Handle {:?} waiting for connection...", orig_socket.handle);
             crate::task::suspend_current_and_run_next();
             let task = current_task().unwrap();
             let pending_signals = task.inner_exclusive_access().signals; // 获取当前挂起的信号
-            
-            crate::println!(
-                "[accept debug] PID {} woke up! Pending signals bitmask: {:#b}", 
-                task.getpid(), 
-                pending_signals.bits()
-            );
             if pending_signals.intersects(fatal_signals) {
-                crate::println!(
-                    "[accept debug] PID {} intercepted fatal signal ({:?}), returning EINTR!", 
-                    task.getpid(), 
-                    pending_signals
-                );
                 return Errno::EINTR.as_isize();
             }
         }
@@ -870,7 +827,6 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
             }
         }
         orig_socket.is_listener.store(false, core::sync::atomic::Ordering::SeqCst);
-        println!("[DEBUG] Before Swap: FD {} is original, new_fd is {}", fd, new_fd);
         inner.fd_table[fd].file = Some(new_listener); 
         inner.fd_table[new_fd] = FileDescriptor {
             file: Some(file.clone()), 
@@ -1116,13 +1072,10 @@ pub fn sys_shutdown(fd: usize, how: i32) -> isize {
     drop(inner); 
 
     if let Some(tcp_wrapper) = file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
-        crate::println!("[SHUTDOWN TCP] Downcast OK! Handle: {:?}", tcp_wrapper.handle);
         if how == 1 || how == 2 {
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_wrapper.handle);
-            crate::println!("[sys_close] Calling close on Handle {:?}, Current State: {:?}",  tcp_wrapper.handle, socket.state());
             socket.close();
-            crate::println!("[sys_close] After close, State: {:?}", socket.state()); 
             drop(sockets); 
             net_poll();
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
@@ -1131,7 +1084,6 @@ pub fn sys_shutdown(fd: usize, how: i32) -> isize {
         }
     } else if let Some(_udp_wrapper) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
     } else {
-        crate::println!("[SHUTDOWN ERROR] FD {} is NOT a TcpSocket!", fd);
         return ENOTSOCK.as_isize(); 
     }
     0

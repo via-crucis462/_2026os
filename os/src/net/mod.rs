@@ -158,7 +158,6 @@ lazy_static! {
         iface.update_ip_addrs(|ip_addrs| {
             ip_addrs.push(loopback_addr).unwrap();
         });
-        crate::println!("[Network Init] LO_IFACE Routes: {:?}", iface.routes());
         MPSafeCell::new(iface)
     };
     pub static ref NET_IFACE: MPSafeCell<Interface> = {
@@ -180,7 +179,6 @@ lazy_static! {
             ip_addrs.push(ip_addr).unwrap();
         });
         iface.routes_mut().add_default_ipv4_route(Ipv4Address::new(10, 0, 2, 2)).unwrap();
-        crate::println!("[Network Init] NET_IFACE Routes: {:?}", iface.routes());
         MPSafeCell::new(iface)
     };
 }
@@ -197,11 +195,8 @@ pub fn net_poll() {
     while budget > 0 {
         budget -= 1;
         let timestamp = Instant::from_millis(crate::arch::timer::get_time_ms() as i64);
-        //crate::println!("[NET POLL] Current timestamp: {:?}", timestamp);
         let lo_active = lo_iface.poll(timestamp, &mut *lo_device, &mut sockets);
         let eth_active = eth_iface.poll(timestamp, &mut eth_device, &mut sockets);
-        if lo_active { crate::println!("[net_poll] LO_IFACE processed packets!"); }
-        if eth_active { crate::println!("[net_poll] ETH_IFACE processed packets!"); }
         if lo_active || eth_active {
             state_changed = true;
         } else {
@@ -223,10 +218,6 @@ pub fn net_poll() {
                 let is_listening = tcp_sock.state() == smoltcp::socket::tcp::State::Listen;
                 let is_closed = tcp_sock.state() == smoltcp::socket::tcp::State::Closed;
                 let is_eof = !tcp_sock.may_recv() && !is_listening && !is_closed;
-                /*let state = tcp_sock.state();
-                if state == smoltcp::socket::tcp::State::CloseWait || state == smoltcp::socket::tcp::State::TimeWait {
-                    crate::println!("[TCP FIN DETECT] Handle {:?} state: {:?}, is_eof: {}", handle, state, is_eof);
-                }*/
                 // 处于 Listen 状态，且 is_active 为 true 时，有新连接到来
                 let has_new_connection = is_listening && tcp_sock.is_active();
                 can_read = tcp_sock.can_recv() || is_eof || has_new_connection;
@@ -243,20 +234,12 @@ pub fn net_poll() {
             if can_read {
                 let mut rx_guard = socket_wait.rx_queue.exclusive_access();
                 if !rx_guard.is_empty() {
-                    crate::println!("[Debug net_poll] Waking up Handle {:?} because can_read is TRUE", handle);
                     crate::task::wake_up_one(rx_guard);
                 }
             }
             if can_write {
                 let tx_guard = socket_wait.tx_queue.exclusive_access();
                 if !tx_guard.is_empty() {
-                   static mut WRITE_COUNT: usize = 0;
-                    unsafe {
-                        WRITE_COUNT += 1;
-                        if WRITE_COUNT % 50 == 0 {
-                            crate::println!("[net_poll] Waking up WRITE task for Handle {:?}", handle);
-                        }
-                    }
                     crate::task::wake_up_one(tx_guard); 
                 }
             }
@@ -271,7 +254,6 @@ pub fn net_poll() {
     }
     for handle in dead_handles {
         sockets.remove(handle);
-        crate::println!("[net_poll GC] Removed dead socket handle: {:?}", handle);
     }
     
 }
