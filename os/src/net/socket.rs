@@ -23,6 +23,9 @@ use crate::net::SOCKET_WAIT_QUEUES;
 use crate::net::SocketWaitQueue;
 use crate::fs::OpenFlags;
 use smoltcp::socket::tcp::State;
+use crate::syscall::errno::Errno::*;
+use crate::AtomicBool;
+
 
 
 pub struct TcpSocket {
@@ -30,6 +33,7 @@ pub struct TcpSocket {
     // 暂存 bind 分配或指定的本地端口
     pub local_port: Mutex<Option<u16>>,
     pub read_waiters: Arc<crate::sync::MPSafeCell<WaitQueue>>,
+    pub is_listener: AtomicBool,
 }
 
 impl TcpSocket {
@@ -40,7 +44,7 @@ impl TcpSocket {
         let handle = SOCKET_SET.exclusive_access().add(socket);
         let waiters = Arc::new(crate::sync::MPSafeCell::new(WaitQueue::new()));
         SOCKET_WAIT_QUEUES.lock().insert(handle, SocketWaitQueue::new());
-        Self { handle ,local_port: Mutex::new(None),read_waiters: waiters,}
+        Self { handle ,local_port: Mutex::new(None),read_waiters: waiters,is_listener: AtomicBool::new(false),}
     }
     pub fn disconnect(&self) {
         let mut sockets = SOCKET_SET.exclusive_access();
@@ -121,15 +125,30 @@ impl Drop for TcpSocket {
                 socket.close();
             }
         }
-        crate::net::SOCKET_WAIT_QUEUES.lock().remove(&self.handle);
+        //crate::net::SOCKET_WAIT_QUEUES.lock().remove(&self.handle);
         crate::net::net_poll();
     }
 }
 impl File for TcpSocket {
-    fn readable(&self) -> bool {
-        let mut sockets = SOCKET_SET.exclusive_access();
+fn readable(&self) -> bool {
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
-        socket.can_recv() || !socket.may_recv()
+        let state = socket.state();
+        if state == smoltcp::socket::tcp::State::Listen {
+            return false;
+        }
+        if self.is_listener.load(core::sync::atomic::Ordering::SeqCst) {
+            return true;
+        }
+        let is_eof = !socket.may_recv() || matches!(
+            state,
+            smoltcp::socket::tcp::State::CloseWait | 
+            smoltcp::socket::tcp::State::Closed | 
+            smoltcp::socket::tcp::State::TimeWait | 
+            smoltcp::socket::tcp::State::LastAck | 
+            smoltcp::socket::tcp::State::Closing
+        );
+        socket.can_recv() || is_eof
     }
     fn writable(&self) -> bool {
         let mut sockets = SOCKET_SET.exclusive_access();
@@ -141,10 +160,8 @@ impl File for TcpSocket {
             return 0;
         }
         loop {
-
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
-
             let state = socket.state();
             if !socket.may_recv() || matches!(state, State::CloseWait | State::Closed | State::TimeWait | State::LastAck | State::Closing) {
                 drop(sockets);
@@ -197,16 +214,19 @@ impl File for TcpSocket {
                 crate::println!("[TcpSocket::read] Handle {:?} rx empty, blocking...", self.handle);
                 crate::task::block_current_and_run_next(&rx_queue);
                 crate::println!("[TcpSocket::read] Handle {:?} woke up!", self.handle);
-                
+                let task = crate::task::current_task().unwrap();
+                let task_inner = task.inner_exclusive_access();
+                if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
+                    return EINTR.as_isize() as usize; 
+                }
+                drop(task_inner);
                 let current_tid = crate::task::current_task().unwrap().gettid();
                 let mut queues = crate::net::SOCKET_WAIT_QUEUES.lock();
                 if let Some(socket_wait) = queues.get(&self.handle) {
                     let mut rx_guard = socket_wait.rx_queue.exclusive_access();
-                    
                     let tids_before = rx_guard.get_tids();
                     rx_guard.remove_by_tid(current_tid);
                     let tids_after = rx_guard.get_tids();
-                    
                     crate::println!(
                         "[TcpSocket::read CLEANUP] TID {} woke up on Handle {:?}. TIDs: {:?} -> {:?}", 
                         current_tid, self.handle, tids_before, tids_after
@@ -232,6 +252,7 @@ impl File for TcpSocket {
             current += copy_len;
         }
         loop {
+            crate::net::net_poll();
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
             if !socket.may_send() {
@@ -412,7 +433,6 @@ impl UdpSocket {
                 Some((copy_len, meta.endpoint))
             },
             Err(e) => {
-                crate::println!("[Debug recvfrom] FATAL: socket.recv() FAILED with error: {:?}", e);
                 let fallback_endpoint = smoltcp::wire::IpEndpoint {
                     addr: smoltcp::wire::IpAddress::v4(0, 0, 0, 0),
                     port: 0,

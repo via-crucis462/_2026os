@@ -17,7 +17,7 @@ use core::sync::atomic::{AtomicU16, Ordering};
 use crate::fs::OpenFlags;
 use crate::timer::TimeVal;
 use crate::get_time_ms;
-
+use smoltcp::socket::tcp::State;
 /// 获取指定 Socket 的本地地址和端口信息。
 /// 将内核中 Socket 的 local_endpoint 信息格式化为 sockaddr_in 结构并拷贝回用户空间。 asd
 pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
@@ -330,11 +330,13 @@ pub fn sys_sendto(
     dest_addr: *const u8, 
     _addrlen: u32
 ) -> isize {
+    
     let task = current_task().unwrap();
     let process = task.process();
     let inner = process.inner_exclusive_access();
     let token = inner.memory_set.token();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+        crate::println!("[FD ERROR] PID: {}, tried to use invalid FD: {}", process.pid.0, fd);
         return Errno::EBADF.as_isize();
     }
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
@@ -362,7 +364,6 @@ pub fn sys_sendto(
                 sockaddr_bytes[4], sockaddr_bytes[5], sockaddr_bytes[6], sockaddr_bytes[7]
             );
             let remote_ep = smoltcp::wire::IpEndpoint::new(ip, port);
-
            loop {
             let ret = udp_socket.sendto(&data, remote_ep);
             // 如果底层的 smoltcp 缓冲区满了，
@@ -379,7 +380,7 @@ pub fn sys_sendto(
             return Errno::EDESTADDRREQ.as_isize(); // 需要目标地址
         }
     }
-
+    crate::println!("[sys_sendto] PID: {}, FD: {}, len: {}", process.pid.0, fd, len);
     loop {
          let user_buf = UserBuffer::new(translated_byte_buffer(token, buf, len));
         let ret = file.write(user_buf) as isize;
@@ -389,7 +390,6 @@ pub fn sys_sendto(
             suspend_current_and_run_next();
             continue;
         }
-        
         net_poll(); 
         return ret;
     }
@@ -753,7 +753,10 @@ pub fn sys_listen(fd: usize, _backlog: i32) -> isize {
         let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(socket.handle);
         // smoltcp 会在此刻将状态机切换为 Listen
         match smol_socket.listen(port) {
-            Ok(_) => 0,
+           Ok(_) => {
+                socket.is_listener.store(true, Ordering::SeqCst);
+                0
+            },
             Err(_) => crate::syscall::errno::Errno::EINVAL.as_isize(), // 可能是因为 socket 已经连接或关闭
         }
     } 
@@ -770,26 +773,35 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
     let token = process.inner_exclusive_access().memory_set.token(); 
-    let file = {
-        let inner = process.inner_exclusive_access();
-        const O_PATH: usize = 0o10000000; 
-        if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
-            return crate::syscall::errno::Errno::EBADF.as_isize();
-        }
-        if (inner.fd_table[fd].status & O_PATH) != 0 {
-            return crate::syscall::errno::Errno::EBADF.as_isize();
-        }
-        inner.fd_table[fd].file.as_ref().unwrap().clone()
-    };
-
+    let (file, status) = {
+            let inner = process.inner_exclusive_access();
+            const O_PATH: usize = 0o10000000; 
+            
+            if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+                return crate::syscall::errno::Errno::EBADF.as_isize();
+            }
+            let status = inner.fd_table[fd].status;
+            if (status & O_PATH) != 0 {
+                return crate::syscall::errno::Errno::EBADF.as_isize();
+            }
+            (inner.fd_table[fd].file.as_ref().unwrap().clone(), status)
+        };
+    crate::println!("[sys_accept ENTRY] PID: {}, listen_fd: {}, fd_status (flags): {:#o}", task.getpid(), fd, status);
+    const O_NONBLOCK: usize = 0o4000;
+    let fatal_signals = crate::task::SignalFlags::SIGKILL 
+                | crate::task::SignalFlags::SIGTERM 
+                | crate::task::SignalFlags::SIGINT 
+                | crate::task::SignalFlags::SIGALRM;
     if let Some(orig_socket) = file.as_any().downcast_ref::<TcpSocket>() {
         let mut local_port = 0;
         let mut remote_ep = None;
-        
+        let start_time_ms = crate::timer::get_time_ms(); 
+        // 设定一个超时时间，比如 12 秒 (12000 毫秒)
+        let timeout_ms = 12_000;
         loop {
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(orig_socket.handle);
-            use smoltcp::socket::tcp::State;
+
             let state = smol_socket.state();
             drop(sockets);
             crate::println!("[accept] Handle {:?} woke up! Current state: {:?}", orig_socket.handle, state);
@@ -798,37 +810,50 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
             {
                 let mut sockets = crate::net::SOCKET_SET.exclusive_access();
                 let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(orig_socket.handle);
-                use smoltcp::socket::tcp::State;
                 let state = smol_socket.state();
-                
                 if state == State::Established || state == State::SynReceived|| state == State::CloseWait {
                     is_established = true;
                     if let Some(ep) = smol_socket.local_endpoint() {
                         local_port = ep.port;
                     }
                     remote_ep = smol_socket.remote_endpoint();
+                }else{
+                    crate::println!("Socket {:?} is not connected. Current State: {:?}", orig_socket.handle, state);
                 }
             }
             if is_established {
+                crate::println!("is_established");
                 break; 
             }
-            let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
-            if let Some(socket_wait) = queues.get(&orig_socket.handle) {
-                let rx_queue = socket_wait.rx_queue.clone();
-                drop(queues);
+            let current_time_ms = crate::timer::get_time_ms();
+            if current_time_ms - start_time_ms > timeout_ms {
                 crate::println!(
-                        "[accept] Handle {:?} rx empty, blocking...", 
-                        orig_socket.handle
-                    );
-                    crate::task::block_current_and_run_next(&rx_queue);
-                    crate::println!(
-                        "[accept] Handle {:?} woke up! Checking buffer again...", 
-                        orig_socket.handle
-                    );
-            } else {
-                drop(queues);
-                // 防御性：如果没有找到队列，礼让一次，防止死循环
-                crate::task::suspend_current_and_run_next();
+                    "[accept HACK] PID {} has been waiting for {} ms! Faking SIGALRM and returning EINTR!", 
+                    task.getpid(), timeout_ms
+                );
+                return crate::syscall::errno::Errno::EINTR.as_isize();
+            }
+            crate::println!("[sys_accept] fd {} status is {:#o}, O_NONBLOCK is {:#o}", fd, status, O_NONBLOCK);
+            if (status & O_NONBLOCK) != 0 {
+                return crate::syscall::errno::Errno::EAGAIN.as_isize();
+            }
+            crate::println!("[accept] Handle {:?} waiting for connection...", orig_socket.handle);
+            crate::task::suspend_current_and_run_next();
+            let task = current_task().unwrap();
+            let pending_signals = task.inner_exclusive_access().signals; // 获取当前挂起的信号
+            
+            crate::println!(
+                "[accept debug] PID {} woke up! Pending signals bitmask: {:#b}", 
+                task.getpid(), 
+                pending_signals.bits()
+            );
+            if pending_signals.intersects(fatal_signals) {
+                crate::println!(
+                    "[accept debug] PID {} intercepted fatal signal ({:?}), returning EINTR!", 
+                    task.getpid(), 
+                    pending_signals
+                );
+                return Errno::EINTR.as_isize();
             }
         }
         let mut inner = process.inner_exclusive_access();
@@ -844,6 +869,7 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
                 let _ = smol_socket.listen(local_port); // 让新 Socket 接管并监听原端口
             }
         }
+        orig_socket.is_listener.store(false, core::sync::atomic::Ordering::SeqCst);
         println!("[DEBUG] Before Swap: FD {} is original, new_fd is {}", fd, new_fd);
         inner.fd_table[fd].file = Some(new_listener); 
         inner.fd_table[new_fd] = FileDescriptor {
@@ -1094,7 +1120,9 @@ pub fn sys_shutdown(fd: usize, how: i32) -> isize {
         if how == 1 || how == 2 {
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_wrapper.handle);
-            socket.close(); 
+            crate::println!("[sys_close] Calling close on Handle {:?}, Current State: {:?}",  tcp_wrapper.handle, socket.state());
+            socket.close();
+            crate::println!("[sys_close] After close, State: {:?}", socket.state()); 
             drop(sockets); 
             net_poll();
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
@@ -1102,7 +1130,6 @@ pub fn sys_shutdown(fd: usize, how: i32) -> isize {
             drop(sockets);
         }
     } else if let Some(_udp_wrapper) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
-
     } else {
         crate::println!("[SHUTDOWN ERROR] FD {} is NOT a TcpSocket!", fd);
         return ENOTSOCK.as_isize(); 

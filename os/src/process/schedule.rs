@@ -157,13 +157,12 @@ pub fn wake_up_task(task: Arc<TaskControlBlock>) {
     trace!("[kernel] wake_up_task: pid={}", task.getpid());
     let _dispatch = lock_dispatch();
     let mut inner = task.inner_exclusive_access();
-    // 只有处于阻塞状态的任务才需要被唤醒
-    // (具体枚举名称请根据你项目里的定义替换，如 TaskStatus::Blocking)
+
     if matches!(inner.task_status, TaskStatus::Blocked) {
         inner.task_status = TaskStatus::Ready;
         drop(inner); 
         
-        // 重新塞回你的全局就绪池！
+        // 重新塞回全局就绪池！
         add_task_into_pool_unlocked(task);
     }
 }
