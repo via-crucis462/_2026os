@@ -1,13 +1,15 @@
 // 全局线程调度器
+use core::cmp::Ordering;
+
 use crate::{CPU_CORE_NUM, process, sync::MPSafeCell};
 #[cfg(target_arch = "riscv64")]
 use crate::{arch::sbi::sbi_wakeup_harts};
-use super::task::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
+use super::manager::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
 use super::*;
 use super::manager::*;
 use lazy_static::*;
 use alloc::{
-    collections::vec_deque::VecDeque, sync::Arc, vec::Vec
+    collections::{BinaryHeap, vec_deque::VecDeque}, sync::Arc, vec::Vec
 };
 // 线程调度器
 lazy_static! {
@@ -60,7 +62,47 @@ impl Scheduler {
 
 
 pub struct TaskPool {
-    inner: VecDeque<Arc<TaskControlBlock>>,
+    deadline: BinaryHeap<PoolEntry>,
+    realtime: BinaryHeap<PoolEntry>,
+    fair: BinaryHeap<PoolEntry>,
+    idle: BinaryHeap<PoolEntry>,
+    enqueue_order: usize,
+}
+
+struct PoolEntry {
+    class: u8,
+    priority: i32,
+    order: usize,
+    task: Arc<TaskControlBlock>,
+}
+
+impl PartialEq for PoolEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.class == other.class
+            && self.priority == other.priority
+            && self.order == other.order
+            && Arc::ptr_eq(&self.task, &other.task)
+    }
+}
+
+impl Eq for PoolEntry {}
+
+impl Ord for PoolEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let self_ptr = Arc::as_ptr(&self.task) as usize;
+        let other_ptr = Arc::as_ptr(&other.task) as usize;
+        self.class
+            .cmp(&other.class)
+            .then_with(|| self.priority.cmp(&other.priority))
+            .then_with(|| other.order.cmp(&self.order))
+            .then_with(|| self_ptr.cmp(&other_ptr))
+    }
+}
+
+impl PartialOrd for PoolEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 pub(crate) fn task_sched_rank(task: &Arc<TaskControlBlock>) -> (u8, i32) {
@@ -76,23 +118,42 @@ pub(crate) fn task_sched_rank(task: &Arc<TaskControlBlock>) -> (u8, i32) {
 impl TaskPool {
     pub fn new() -> Self {
         Self {
-            inner: VecDeque::new(),
+            deadline: BinaryHeap::new(),
+            realtime: BinaryHeap::new(),
+            fair: BinaryHeap::new(),
+            idle: BinaryHeap::new(),
+            enqueue_order: 0,
         }
     }
     pub fn count(&self) -> usize {
-        self.inner.len()
+        self.deadline.len() + self.realtime.len() + self.fair.len() + self.idle.len()
     }
 
     pub fn remove_task(&mut self, tid: usize) {
-        self.inner.retain(|task| task.gettid() != tid);
+        self.deadline.retain(|entry| entry.task.gettid() != tid);
+        self.realtime.retain(|entry| entry.task.gettid() != tid);
+        self.fair.retain(|entry| entry.task.gettid() != tid);
+        self.idle.retain(|entry| entry.task.gettid() != tid);
     }
 
     pub fn add_task(&mut self, task: Arc<TaskControlBlock>) {
         let tid = task.gettid();
-        if self.inner.iter().any(|t| t.gettid() == tid) {
+        if self.contains_task(tid) {
             return;
         }
-        self.inner.push_back(task);
+        let (class, priority) = task_sched_rank(&task);
+        let entry = PoolEntry {
+            class,
+            priority,
+            order: self.enqueue_order,
+            task,
+        };
+        self.enqueue_order = self.enqueue_order.wrapping_add(1);
+        match class {
+            2 => self.realtime.push(entry),
+            0 => self.idle.push(entry),
+            _ => self.fair.push(entry),
+        }
     }
     // 获取一个线程的引用
     pub fn get_task(&mut self, tid: usize) -> Option<Arc<TaskControlBlock>> {
@@ -102,28 +163,35 @@ impl TaskPool {
     pub fn take_task(&mut self, tid: usize) -> Option<Arc<TaskControlBlock>> {
         if let Some(task) = tid2task(tid) {
             // 从池中移除
-            self.inner.retain(|t| t.gettid() != tid);
+            self.remove_task(tid);
             Some(task)
         } else {
             None
         }
     }
-    // 拿出优先级最高的线程；同优先级保持原有 RR 顺序
+    // 拿出优先级最高的线程；同优先级保持入队顺序
     pub fn take_a_task(&mut self) -> Option<Arc<TaskControlBlock>> {
-        let mut best_idx: Option<usize> = None;
-        let mut best_rank = (0u8, i32::MIN);
-        for (idx, task) in self.inner.iter().enumerate() {
-            let rank = task_sched_rank(task);
-            if best_idx.is_none() || rank > best_rank {
-                best_idx = Some(idx);
-                best_rank = rank;
-            }
-        }
-        best_idx.and_then(|idx| self.inner.remove(idx))
+        self.deadline.pop().or_else(|| self.realtime.pop())
+            .or_else(|| self.fair.pop())
+            .or_else(|| self.idle.pop())
+            .map(|entry| entry.task)
     }
     // 获取一份列表（注意会使引用计数+1）
     pub fn get_task_list(&self) -> VecDeque<Arc<TaskControlBlock>> {
-        self.inner.clone()
+        self.deadline.iter()
+            .chain(self.realtime.iter())
+            .chain(self.fair.iter())
+            .chain(self.idle.iter())
+            .map(|entry| Arc::clone(&entry.task))
+            .collect()
+    }
+
+    fn contains_task(&self, tid: usize) -> bool {
+        self.deadline.iter()
+            .chain(self.realtime.iter())
+            .chain(self.fair.iter())
+            .chain(self.idle.iter())
+            .any(|entry| entry.task.gettid() == tid)
     }
 }
 
@@ -152,9 +220,16 @@ pub fn remove_task_from_global_pool(tid: usize) {
     remove_task_from_global_pool_unlocked(tid);
 }
 
+pub fn ask_for_task() -> Option<Arc<TaskControlBlock>> {
+    SCHEDULER.exclusive_access().get_pool().take_a_task()
+}
+
 pub fn ask_for_tasks() -> VecDeque<Arc<TaskControlBlock>> {
     //debug!("[kernel] Scheduler::ask_for_tasks");
-    let list = SCHEDULER.exclusive_access().auto_get_task();
+    let mut list = VecDeque::new();
+    if let Some(task) = ask_for_task() {
+        list.push_back(task);
+    }
     //debug!("[kernel] Scheduler::ask_for_tasks: got {} tasks", list.len());
     list
 }

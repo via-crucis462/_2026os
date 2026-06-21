@@ -3,6 +3,9 @@
 //! It is only used to manage processes and schedule process based on ready queue.
 //! Other CPU process monitoring functions are in Processor.
 
+
+use core::cmp::Ordering;
+
 use super::TaskControlBlock;
 use super::TaskStatus;
 use super::schedule::*;
@@ -11,7 +14,7 @@ use crate::MAIN_HART_ID;
 use crate::sync::MPSafeCell;
 use crate::arch::config::CPU_CORE_NUM;
 use crate::get_hart_id;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BinaryHeap, VecDeque};
 use alloc::sync::Arc;
 use lazy_static::*;
 
@@ -68,52 +71,81 @@ pub fn list_pids() -> alloc::vec::Vec<usize> {
 pub fn remove_process(pid: usize){
     PROCESS_MANAGER.exclusive_access().remove_process(pid);
 }
-
-
-pub struct TaskManager {
-    ready_queue: VecDeque<Arc<TaskControlBlock>>,
+// 优先级和tcb引用
+struct HeapInode{
+    priority: usize,
+    order: usize,
+    tcb: Arc<TaskControlBlock>,
 }
+impl PartialEq for HeapInode {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority && self.order == other.order && Arc::ptr_eq(&self.tcb, &other.tcb)
+    }
+}
+
+impl Eq for HeapInode {}
+
+impl Ord for HeapInode {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let self_ptr = Arc::as_ptr(&self.tcb) as usize;
+        let other_ptr = Arc::as_ptr(&other.tcb) as usize;
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| other.order.cmp(&self.order))
+            .then_with(|| self_ptr.cmp(&other_ptr))
+    }
+}
+
+impl PartialOrd for HeapInode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+pub struct TaskManager {
+    ready_queue: BinaryHeap<HeapInode>,
+    enqueue_order: usize,
+}
+
+pub const SCHED_OTHER: isize = 0;
+pub const SCHED_FIFO: isize = 1;
+pub const SCHED_RR: isize = 2;
+pub const SCHED_BATCH: isize = 3;
+pub const SCHED_IDLE: isize = 5;
+
+const LOCAL_QUEUE_LOW_WATERMARK: usize = 2;
+const LOCAL_QUEUE_REFILL_TARGET: usize = 4;
 
 /// A simple FIFO scheduler.
 impl TaskManager {
     ///Creat an empty TaskManager
     pub fn new() -> Self {
         Self {
-            ready_queue: VecDeque::new(),
+            ready_queue: BinaryHeap::new(),
+            enqueue_order: 0,
         }
     }
     /// Add process back to ready queue
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
         let tid = task.gettid();
-        if self.ready_queue.iter().any(|t| t.gettid() == tid) {
+        if self.ready_queue.iter().any(|inode| inode.tcb.gettid() == tid) {
             return;
         }
-        self.ready_queue.push_back(task);
+        let (class, priority) = task_sched_rank(&task);
+        let priority = (class as usize) * 100 + priority.max(0) as usize;
+        let order = self.enqueue_order;
+        self.enqueue_order = self.enqueue_order.wrapping_add(1);
+        self.ready_queue.push(HeapInode { priority, order, tcb: task });
     }
     /// Take a process out of the ready queue
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue
-            .retain(|task| task.inner_exclusive_access().task_status == TaskStatus::Ready);
-
-        let mut best_idx: Option<usize> = None;
-        let mut best_rank = (0u8, i32::MIN);
-        //找最大值调度
-        for (idx, task) in self.ready_queue.iter().enumerate() {
-            let rank = task_sched_rank(task);
-            if best_idx.is_none() || rank > best_rank {
-                best_idx = Some(idx);
-                best_rank = rank;
-            }
-        }
-
-        best_idx.and_then(|idx| self.ready_queue.remove(idx))
+        self.ready_queue.pop().map(|inode| inode.tcb)
     }
     pub fn task_count(&self) -> usize {
         self.ready_queue.len()
     }
 
     pub fn remove(&mut self, tid: usize) {
-        self.ready_queue.retain(|task| task.gettid() != tid);
+        self.ready_queue.retain(|inode| inode.tcb.gettid() != tid);
     }
 }
 
@@ -134,10 +166,16 @@ pub fn get_current_task_manager() -> &'static MPSafeCell<TaskManager> {
 
 /// 向全局池索取任务并加入当前处理器的就绪队列
 pub fn current_add_tasks() {
-    let tasks = ask_for_tasks();
     let mut manager = get_current_task_manager().exclusive_access();
-    for task in tasks {
-        manager.add(task);
+    if manager.task_count() >= LOCAL_QUEUE_LOW_WATERMARK {
+        return;
+    }
+    while manager.task_count() < LOCAL_QUEUE_REFILL_TARGET {
+        if let Some(task) = ask_for_task() {
+            manager.add(task);
+        } else {
+            break;
+        }
     }
 }
 
@@ -173,6 +211,7 @@ pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
         let Some(task) = task else {
             return None;
         };
+        //println!("[kernel] fetch_task: hart_id={}, got task pid={} tid={} priority={}", hart_id, task.getpid(), task.gettid(), task.inner_exclusive_access().sched_priority);
         let mut task_inner = task.inner_exclusive_access();
         if task_inner.task_status != TaskStatus::Ready || task_inner.owner_hart.is_some() {
             continue;

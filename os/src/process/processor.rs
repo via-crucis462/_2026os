@@ -132,12 +132,7 @@ pub fn run_tasks() {
                 drop(prev_inner);
                 if status == TaskStatus::Ready {
                     // 之前已经保存好了
-                    let on_main_hart = prev_task.process().inner_exclusive_access().on_main_hart;
-                    if on_main_hart {
-                        crate::task::manager::add_task_in_current_hart_unlocked(prev_task);
-                    } else {
-                        crate::task::add_task_into_pool_unlocked(prev_task);
-                    }
+                    crate::task::add_task_into_pool_unlocked(prev_task);
                 } /*else if status == TaskStatus::WaitSaving {
                     // 调用了wait函数
                     prev_task.inner_exclusive_access().task_status = TaskStatus::Blocked;

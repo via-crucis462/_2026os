@@ -14,7 +14,7 @@ use alloc::vec;
 use crate::syscall::EPOLL_CTL_DEL;
 use crate::syscall::EPOLL_CTL_ADD;
 use crate::syscall::EPOLL_CTL_MOD;
-use crate::process::task::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_OTHER, SCHED_RR};
+use crate::process::manager::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_OTHER, SCHED_RR};
 use crate::process::current_task_to_sleep;
 use crate::lazy_static;
 use spin::Mutex;
@@ -2672,7 +2672,7 @@ pub fn sys_spawn(_path: *const u8) -> isize {
 pub fn sys_set_priority(_prio: isize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
-    warn!("kernel:pid[{}] sys_set_priority NOT IMPLEMENTED", process.pid.0);
+    println!("kernel:pid[{}] sys_set_priority NOT IMPLEMENTED", process.pid.0);
     ENOSYS.as_isize()
 }
 

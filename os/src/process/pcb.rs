@@ -225,7 +225,7 @@ impl ProcessControlBlock {
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
                 owner_hart: None,
-                sched_policy: SCHED_OTHER,
+                sched_policy: SCHED_IDLE, // initproc默认用SCHED_IDLE策略
                 sched_priority: 0,
                 signal_mask: SignalFlags::empty(),
                 killed: false,

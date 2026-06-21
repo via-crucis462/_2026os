@@ -17,13 +17,6 @@ use alloc::{
 use crate::arch::config::*;
 use super::*;
 
-pub const SCHED_OTHER: isize = 0;
-pub const SCHED_FIFO: isize = 1;
-pub const SCHED_RR: isize = 2;
-pub const SCHED_BATCH: isize = 3;
-pub const SCHED_IDLE: isize = 5;
-
-
 
 /// Task control block structure
 ///
@@ -59,7 +52,10 @@ impl TaskControlBlock {
     pub fn gettid(&self) -> usize {
         self.tid.0
     }
-
+    pub fn get_policy_and_priority(&self) -> (isize, i32) {
+        let inner = self.inner_exclusive_access();
+        (inner.sched_policy, inner.sched_priority)
+     }
     pub fn recycle_on_exit(&self, exit_code: i32) {
         remove_from_tid2task(self.gettid());
 
