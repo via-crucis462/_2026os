@@ -31,6 +31,9 @@ pub struct TaskControlBlock {
     /// 线程id
     pub tid: Arc<TIdHandle>,
 
+    /// Thread group id. Linux getpid() returns this id, while gettid() returns tid.
+    pub tgid: usize,
+
     /// Kernel stack corresponding to PID
     pub kernel_stack: KernelStack,
 
@@ -47,7 +50,10 @@ impl TaskControlBlock {
         self.process.upgrade().unwrap()
     }
     pub fn getpid(&self) -> usize {
-        self.process().pid.0
+        self.tgid
+    }
+    pub fn gettgid(&self) -> usize {
+        self.tgid
     }
     pub fn gettid(&self) -> usize {
         self.tid.0
@@ -152,4 +158,18 @@ pub enum TaskStatus {
     Zombie,
     /// wait函数保存上下文前
     WaitSaving,
+}
+
+impl core::fmt::Display for TaskStatus {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let status = match self {
+            TaskStatus::UnInit => "UnInit",
+            TaskStatus::Ready => "Ready",
+            TaskStatus::Running => "Running",
+            TaskStatus::Blocked => "Blocked",
+            TaskStatus::Zombie => "Zombie",
+            TaskStatus::WaitSaving => "WaitSaving",
+        };
+        f.write_str(status)
+    }
 }

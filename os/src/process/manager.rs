@@ -71,6 +71,48 @@ pub fn list_pids() -> alloc::vec::Vec<usize> {
 pub fn remove_process(pid: usize){
     PROCESS_MANAGER.exclusive_access().remove_process(pid);
 }
+
+pub fn dump_processes(reason: &str) {
+    println!("========== process dump: {} ==========" , reason);
+
+    let tasks = {
+        let map = TID2TCB.exclusive_access();
+        map.values().cloned().collect::<alloc::vec::Vec<_>>()
+    };
+
+    for task in tasks {
+        let process = task.process();
+        let proc_inner = process.inner_exclusive_access();
+        let task_inner = task.inner_exclusive_access();
+        let ppid = proc_inner
+            .parent
+            .as_ref()
+            .and_then(|parent| parent.upgrade())
+            .map_or(0, |parent| parent.getpid());
+
+        println!(
+            "[PROC] pid={} ppid={} pgid={} tgid={} tid={} name={} status={} policy={} prio={} children={} proc_sig={:#x} task_sig={:#x} killed={} term={:?} main_hart={} owner={:?}",
+            process.getpid(),
+            ppid,
+            proc_inner.pgid,
+            task.gettgid(),
+            task.gettid(),
+            proc_inner.pname,
+            task_inner.task_status,
+            task_inner.sched_policy,
+            task_inner.sched_priority,
+            proc_inner.children.len(),
+            proc_inner.signals.bits(),
+            task_inner.signals.bits(),
+            task_inner.killed,
+            task_inner.term_signal,
+            proc_inner.on_main_hart,
+            task_inner.owner_hart,
+        );
+    }
+
+    println!("======================================");
+}
 // 优先级和tcb引用
 struct HeapInode{
     priority: usize,
@@ -185,6 +227,7 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
     TID2TCB
         .exclusive_access()
         .insert(task.gettid(), Arc::clone(&task));
+    //dump_processes("add_task");
     add_task_into_pool(task);
 }
 
@@ -248,6 +291,8 @@ pub fn remove_from_tid2task(tid: usize) {
     if map.remove(&tid).is_none() {
         panic!("cannot find tid {} in tid2task!", tid);
     }
+    drop(map);
+    //dump_processes("remove ta");
 }
 
 pub fn task_count_in_mng() -> usize {

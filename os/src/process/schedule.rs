@@ -1,7 +1,7 @@
 // 全局线程调度器
 use core::cmp::Ordering;
 
-use crate::{CPU_CORE_NUM, process, sync::MPSafeCell};
+use crate::{CPU_CORE_NUM, arch::config::CLOCK_FREQ, arch::timer::get_timer_ticks, process, sync::MPSafeCell};
 #[cfg(target_arch = "riscv64")]
 use crate::{arch::sbi::sbi_wakeup_harts};
 use super::manager::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
@@ -16,6 +16,7 @@ lazy_static! {
     pub static ref SCHEDULER: MPSafeCell<Scheduler> = MPSafeCell::new(Scheduler {
         task_pool: TaskPool::new(),
     });
+    static ref SLEEP_QUEUE: MPSafeCell<SleepQueue> = MPSafeCell::new(SleepQueue::new());
     pub static ref SCHED_DISPATCH_LOCK: MPSafeCell<()> = MPSafeCell::new(());
 }
 
@@ -76,6 +77,72 @@ struct PoolEntry {
     task: Arc<TaskControlBlock>,
 }
 
+struct SleepEntry {
+    deadline_ns: usize,
+    order: usize,
+    task: Arc<TaskControlBlock>,
+}
+
+impl PartialEq for SleepEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.deadline_ns == other.deadline_ns
+            && self.order == other.order
+            && Arc::ptr_eq(&self.task, &other.task)
+    }
+}
+
+impl Eq for SleepEntry {}
+
+impl Ord for SleepEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let self_ptr = Arc::as_ptr(&self.task) as usize;
+        let other_ptr = Arc::as_ptr(&other.task) as usize;
+        other.deadline_ns
+            .cmp(&self.deadline_ns)
+            .then_with(|| other.order.cmp(&self.order))
+            .then_with(|| self_ptr.cmp(&other_ptr))
+    }
+}
+
+impl PartialOrd for SleepEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+struct SleepQueue {
+    inner: BinaryHeap<SleepEntry>,
+    enqueue_order: usize,
+}
+
+impl SleepQueue {
+    fn new() -> Self {
+        Self {
+            inner: BinaryHeap::new(),
+            enqueue_order: 0,
+        }
+    }
+
+    fn push(&mut self, deadline_ns: usize, task: Arc<TaskControlBlock>) {
+        self.inner.retain(|entry| entry.task.gettid() != task.gettid());
+        let entry = SleepEntry {
+            deadline_ns,
+            order: self.enqueue_order,
+            task,
+        };
+        self.enqueue_order = self.enqueue_order.wrapping_add(1);
+        self.inner.push(entry);
+    }
+
+    fn pop_expired(&mut self, now_ns: usize) -> Option<Arc<TaskControlBlock>> {
+        if self.inner.peek().map_or(false, |entry| entry.deadline_ns <= now_ns) {
+            self.inner.pop().map(|entry| entry.task)
+        } else {
+            None
+        }
+    }
+}
+
 impl PartialEq for PoolEntry {
     fn eq(&self, other: &Self) -> bool {
         self.class == other.class
@@ -112,6 +179,44 @@ pub(crate) fn task_sched_rank(task: &Arc<TaskControlBlock>) -> (u8, i32) {
         SCHED_IDLE => (0, 0),
         SCHED_BATCH => (1, 0),
         _ => (1, 0),
+    }
+}
+
+fn monotonic_now_ns() -> usize {
+    let ns = (get_timer_ticks() as u128)
+        .saturating_mul(1_000_000_000)
+        / CLOCK_FREQ as u128;
+    ns.min(usize::MAX as u128) as usize
+}
+
+pub fn sleep_current_until(deadline_ns: usize) {
+    let task = take_current_task().unwrap();
+    let task_cx_ptr = {
+        let mut inner = task.inner_exclusive_access();
+        let ptr = &mut inner.task_cx as *mut TaskContext;
+        inner.task_status = TaskStatus::Blocked;
+        ptr
+    };
+    SLEEP_QUEUE.exclusive_access().push(deadline_ns, task);
+    schedule(task_cx_ptr);
+}
+
+pub fn wake_expired_sleep_tasks() {
+    loop {
+        let task = {
+            let now_ns = monotonic_now_ns();
+            SLEEP_QUEUE.exclusive_access().pop_expired(now_ns)
+        };
+        let Some(task) = task else {
+            break;
+        };
+
+        let mut inner = task.inner_exclusive_access();
+        if matches!(inner.task_status, TaskStatus::Blocked) {
+            inner.task_status = TaskStatus::Ready;
+            drop(inner);
+            SCHEDULER.exclusive_access().get_pool().add_task(task);
+        }
     }
 }
 
@@ -221,6 +326,7 @@ pub fn remove_task_from_global_pool(tid: usize) {
 }
 
 pub fn ask_for_task() -> Option<Arc<TaskControlBlock>> {
+    wake_expired_sleep_tasks();
     SCHEDULER.exclusive_access().get_pool().take_a_task()
 }
 

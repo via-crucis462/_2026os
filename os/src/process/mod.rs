@@ -15,7 +15,7 @@ pub mod id;
 pub mod manager;
 
 pub use schedule::*;
-pub use id::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle};
+pub use id::{kstack_alloc, pid_alloc, tid_alloc, tid_from_pid, KernelStack, PidHandle};
 use spin::{Mutex, MutexGuard};
 pub use task::*;
 pub use pcb::*;
