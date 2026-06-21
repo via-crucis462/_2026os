@@ -1199,8 +1199,27 @@ pub fn sys_fork(stack: usize, _flags: usize) -> isize {
     trap_cx.set_a0(0);
     // add new task to scheduler
     add_process(new_proc);
+    copy_fd_table_between_processes(current_process.pid.0, new_pid);
     add_task(new_task);
     new_pid as isize
+}
+
+fn copy_fd_table_between_processes(src_pid: usize, dst_pid: usize) {
+    let Some(src_proc) = get_process(src_pid) else {
+        return;
+    };
+    let Some(dst_proc) = get_process(dst_pid) else {
+        return;
+    };
+
+    let (fd_table, fd_rlmt) = {
+        let src_inner = src_proc.inner_exclusive_access();
+        (src_inner.fd_table.clone(), src_inner.fd_rlmt)
+    };
+
+    let mut dst_inner = dst_proc.inner_exclusive_access();
+    dst_inner.fd_table = fd_table;
+    dst_inner.fd_rlmt = fd_rlmt;
 }
 
 
@@ -1345,7 +1364,7 @@ pub fn sys_clone3(uargs: *const CloneArgs, size: usize) -> isize {
     if args.stack != 0 && args.stack_size == 0 {
         return EINVAL.as_isize();
     }
-    if flags & CLONE_PIDFD != 0 || args.pidfd != 0 || args.set_tid != 0 || args.set_tid_size != 0 || args.cgroup != 0 {
+    if flags & CLONE_PIDFD != 0 || args.set_tid != 0 || args.set_tid_size != 0 || args.cgroup != 0 {
         return EINVAL.as_isize();
     }
 
@@ -3153,6 +3172,7 @@ pub fn sys_sched_setscheduler(pid: isize, policy: isize, param_ptr: *const Sched
     let Some(param) = try_translated_read(token, param_ptr) else {
         return EFAULT.as_isize();
     };
+    //println!("sys_sched_setscheduler: pid={}, current pid = {} , tid = {}, requested policy={}, priority={}", pid, task.process().getpid(), task.gettid(), policy, param.sched_priority);
     match policy {
         SCHED_FIFO | SCHED_RR => {
             if param.sched_priority < 1 || param.sched_priority > 99 {

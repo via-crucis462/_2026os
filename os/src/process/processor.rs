@@ -6,6 +6,7 @@
 
 use super::__switch;
 use super::{fetch_task, TaskStatus};
+use super::manager::SCHED_OTHER;
 use super::{TaskContext, TaskControlBlock};
 use crate::get_hart_id;
 use crate::MAIN_HART_ID;
@@ -94,12 +95,16 @@ pub fn run_tasks() {
                 info!("[kernel] run_tasks: task pid={} is on main hart, but current hart is {}, put it back into pool", task.getpid(), hart_id);
                 crate::task::add_task_into_pool_unlocked(task);
                 drop(processor);
+                crate::arch::timer::set_next_trigger(SCHED_OTHER);
                 #[cfg(target_arch = "riscv64")]
                 {
-                    crate::arch::timer::set_next_trigger();
                     unsafe {
                         asm!("wfi");
                     }
+                }
+                #[cfg(target_arch = "loongarch64")]
+                unsafe {
+                    asm!("idle 0");
                 }
                 continue;
             } 
@@ -113,6 +118,10 @@ pub fn run_tasks() {
             // release processor manually
             // 释放锁
             drop(processor);
+            let sched_policy = current_task()
+                .map(|task| task.inner_exclusive_access().sched_policy)
+                .unwrap_or(SCHED_OTHER);
+            crate::arch::timer::set_next_trigger(sched_policy);
             //debug!("[kernel] hart {}, run_tasks: switching to tid={} of pid={}, main_hart={}", hart_id, current_task().unwrap().tid.0, current_task().unwrap().getpid(), MAIN_HART_ID.load(Ordering::Acquire));
             unsafe {
                 // 切换到下一个任务执行流
@@ -140,8 +149,7 @@ pub fn run_tasks() {
                 // 如果 status 是 Zombie 或 Blocked，什么都不做，自然销毁或等别人唤醒
             }
         } else {
-            #[cfg(target_arch = "riscv64")]
-            crate::arch::timer::set_next_trigger();
+            crate::arch::timer::set_next_trigger(SCHED_OTHER);
             #[cfg(target_arch = "loongarch64")]
             unsafe {
                 asm!("idle 0");

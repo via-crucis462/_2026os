@@ -13,7 +13,6 @@ use crate::task::{
     current_user_token, exit_current_and_run_next,
     suspend_current_and_run_next, handle_signals
 };
-use crate::arch::timer::set_next_trigger;
 use crate::net::net_poll;
 use core::arch::{asm, global_asm};
 global_asm!(include_str!("trap.S"));
@@ -127,8 +126,6 @@ pub fn enable_timer_interrupt() {
     crate::arch::timer::init_board_freq();
     unsafe {
         asm!("csrwr {}, 0x44", in(reg) 1);// 清除定时器中断
-        let tcfg: usize = 0x100000 | 0b11;// 循环模式并开启中断，周期0x100000
-        asm!("csrwr {}, 0x41", in(reg) tcfg);
         let mut ecfg: usize;
         asm!("csrrd {}, 0x4", out(reg) ecfg);
         asm!("csrwr {}, 0x4", in(reg) ecfg | (1 << 11)); // 使能定时器中断

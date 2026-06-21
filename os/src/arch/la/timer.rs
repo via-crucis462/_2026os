@@ -3,10 +3,13 @@
 pub use crate::timer::*;
 
 use crate::arch::config::UNCHACHED_KERNEL_BASE;
+use crate::process::manager::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
 use core::arch::asm;
 
-/// The number of ticks per second
-const TICKS_PER_SEC: usize = 100;
+const DEFAULT_TIME_SLICE_MS: usize = 10;
+const FIFO_TIME_SLICE_MS: usize = 50;
+const RR_TIME_SLICE_MS: usize = 1;
+const IDLE_TIME_SLICE_MS: usize = 20;
 /// The number of milliseconds per second
 const MSEC_PER_SEC: usize = 1000;
 /// The number of microseconds per second
@@ -119,10 +122,25 @@ pub fn get_real_time_ns() -> u64 {
     let seconds = days as u64 * 86_400 + hour * 3_600 + min * 60 + sec;
     seconds * NSEC_PER_SEC
 }
-/// Set the next timer interrupt
-/// la64计时器中断带循环，无需每次设置，弃用该函数
-#[allow(unused)]
-pub fn set_next_trigger() {
-    // 10ms后触发
-    // set_timer(get_time() + unsafe { TIMER_FREQUENCY } / TICKS_PER_SEC);
+fn time_slice_ms_for_policy(policy: isize) -> usize {
+    match policy {
+        SCHED_FIFO => FIFO_TIME_SLICE_MS,
+        SCHED_RR => RR_TIME_SLICE_MS,
+        SCHED_IDLE => IDLE_TIME_SLICE_MS,
+        SCHED_BATCH => DEFAULT_TIME_SLICE_MS,
+        _ => DEFAULT_TIME_SLICE_MS,
+    }
+}
+
+/// Set the next timer interrupt according to the task scheduling policy.
+pub fn set_next_trigger(policy: isize) {
+    let ticks = timer_frequency()
+        .saturating_mul(time_slice_ms_for_policy(policy))
+        / MSEC_PER_SEC;
+    let ticks = ticks.max(1);
+    let tcfg = (ticks << 2) | 0b01;
+    unsafe {
+        asm!("csrwr {}, 0x44", in(reg) 1usize);
+        asm!("csrwr {}, 0x41", in(reg) tcfg);
+    }
 }

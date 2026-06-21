@@ -25,7 +25,6 @@ use crate::task::{
 use crate::arch::timer::get_time_ms;
 use alloc::sync::Arc;
 
-use crate::arch::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
 use riscv::register::{scause, stval, stvec, sie};
 use scause::{Exception, Interrupt, Trap};
@@ -98,7 +97,6 @@ pub fn trap_handler() -> ! {
             cx.set_a0(result as usize);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
-            set_next_trigger();
             let current_ms = get_time_ms();
             let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
             for pid in expired_pids {

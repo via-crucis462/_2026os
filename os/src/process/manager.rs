@@ -91,7 +91,7 @@ pub fn dump_processes(reason: &str) {
             .map_or(0, |parent| parent.getpid());
 
         println!(
-            "[PROC] pid={} ppid={} pgid={} tgid={} tid={} name={} status={} policy={} prio={} children={} proc_sig={:#x} task_sig={:#x} killed={} term={:?} main_hart={} owner={:?}",
+            "[PROC] pid={} parent_pid={} pgid={} tgid={} tid={} name={} status={} policy={} prio={} children={} proc_sig={:#x} task_sig={:#x} killed={} term={:?} main_hart={} owner={:?}",
             process.getpid(),
             ppid,
             proc_inner.pgid,
@@ -224,6 +224,7 @@ pub fn current_add_tasks() {
 /// Add process to ready queue
 pub fn add_task(task: Arc<TaskControlBlock>) {
     debug!("[kernel] TaskManager::add_task: pid={}", task.getpid());
+    //dump_processes("add_task");
     TID2TCB
         .exclusive_access()
         .insert(task.gettid(), Arc::clone(&task));
@@ -292,7 +293,7 @@ pub fn remove_from_tid2task(tid: usize) {
         panic!("cannot find tid {} in tid2task!", tid);
     }
     drop(map);
-    //dump_processes("remove ta");
+    //dump_processes("remove_task");
 }
 
 pub fn task_count_in_mng() -> usize {
