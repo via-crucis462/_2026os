@@ -16,7 +16,6 @@ use crate::auth::{PermStat, FileMode}; // 引入权限相关的类型
 use smoltcp::socket::raw::{Socket as RawSocketSmol, PacketBuffer as RawPacketBuffer, PacketMetadata as RawPacketMetadata};
 use smoltcp::wire::{IpVersion, IpProtocol};
 use crate::sync::WaitQueue;
-use crate::process::current_task_to_sleep;
 use smoltcp::socket::udp;
 use crate::sync::MPSafeCell;
 use crate::net::SOCKET_WAIT_QUEUES;
@@ -27,6 +26,8 @@ use crate::syscall::errno::Errno::*;
 use crate::AtomicBool;
 
 
+use crate::process::check_pending_signal;
+use crate::task::suspend_current_and_run_next;
 
 pub struct TcpSocket {
     pub handle: SocketHandle,
@@ -94,10 +95,8 @@ impl TcpSocket {
 
        loop {
             crate::net::net_poll(); 
-
             let sockets = crate::net::SOCKET_SET.exclusive_access();
             let socket = sockets.get::<smoltcp::socket::tcp::Socket>(self.handle);
-            
             use smoltcp::socket::tcp::State;
             match socket.state() {
                 State::Established => {
@@ -183,8 +182,6 @@ fn readable(&self) -> bool {
                         return current; 
                     }
                     Ok(_) => {
-                        // 读到了 0 字节
-                    
                         drop(sockets);
                         return 0;
                     }
@@ -207,7 +204,7 @@ fn readable(&self) -> bool {
             if let Some(socket_wait) = queues.get(&self.handle) {
                 let rx_queue = socket_wait.rx_queue.clone();
                 drop(queues);
-                crate::task::block_current_and_run_next(&rx_queue);
+                crate::task::block_current_and_run_next(rx_queue.get_mutex());
                 let task = crate::task::current_task().unwrap();
                 let task_inner = task.inner_exclusive_access();
                 if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
@@ -267,7 +264,7 @@ fn readable(&self) -> bool {
             if let Some(socket_wait) = queues.get(&self.handle) {
                 let tx_queue = socket_wait.tx_queue.clone();
                 drop(queues);
-                crate::task::block_current_and_run_next(&tx_queue);
+                crate::task::block_current_and_run_next(tx_queue.get_mutex());
             } else {
                 drop(queues);
                 crate::task::suspend_current_and_run_next();
@@ -295,7 +292,7 @@ fn readable(&self) -> bool {
             mtime_nsec: 0,
             ctime_sec: 0,
             ctime_nsec: 0,
-            __unused: [0; 2], // 如果这里报错说类型不匹配，可能需要改成 [0; 2] 或者其他数组形式
+            __unused: [0; 2], 
         }
     }
 
@@ -474,7 +471,7 @@ impl File for UdpSocket {
             if let Some(socket_wait) = queues.get(&self.handle) {
                 let rx_queue = socket_wait.rx_queue.clone();
                 drop(queues);
-                crate::task::block_current_and_run_next(&rx_queue);
+                crate::task::block_current_and_run_next(rx_queue.get_mutex());
                 let mut queues = crate::net::SOCKET_WAIT_QUEUES.lock();
                 if let Some(socket_wait) = queues.get(&self.handle) {
                     let mut rx_guard = socket_wait.rx_queue.exclusive_access();
@@ -525,7 +522,7 @@ impl File for UdpSocket {
             if let Some(socket_wait) = queues.get(&self.handle) {
                 let tx_queue = socket_wait.tx_queue.clone();
                 drop(queues);
-                crate::task::block_current_and_run_next(&tx_queue);
+                crate::task::block_current_and_run_next(tx_queue.get_mutex());
             } else {
                 drop(queues);
                 crate::task::suspend_current_and_run_next();
@@ -562,8 +559,11 @@ pub enum UnixSocketType {
     Datagram,
 }
 
+const UNIX_SOCKET_RECV_LIMIT: usize = 64 * 1024;
+
 struct UnixSocketInner {
     recv_queue: VecDeque<Vec<u8>>,
+    recv_bytes: usize,
     peer: Option<Weak<Mutex<UnixSocketInner>>>,
     attached_prog: Option<usize>,
     socket_type: UnixSocketType,
@@ -577,12 +577,14 @@ impl UnixSocket {
     pub fn pair(socket_type: UnixSocketType) -> (Self, Self) {
         let left = Arc::new(Mutex::new(UnixSocketInner {
             recv_queue: VecDeque::new(),
+            recv_bytes: 0,
             peer: None,
             attached_prog: None,
             socket_type,
         }));
         let right = Arc::new(Mutex::new(UnixSocketInner {
             recv_queue: VecDeque::new(),
+            recv_bytes: 0,
             peer: None,
             attached_prog: None,
             socket_type,
@@ -605,10 +607,31 @@ impl File for UnixSocket {
     fn writable(&self) -> bool { true }
 
     fn read(&self, mut buf: UserBuffer) -> usize {
-        let mut inner = self.inner.lock();
-        let Some(packet) = inner.recv_queue.pop_front() else {
+        if buf.len() == 0 {
             return 0;
+        }
+        //修改语义为轮询式读取：如果当前没有数据可读，就让出 CPU 给其他进程，等被唤醒后再来尝试读取。
+        let packet = loop {
+            let mut inner = self.inner.lock();
+            if let Some(packet) = inner.recv_queue.pop_front() {
+                inner.recv_bytes = inner.recv_bytes.saturating_sub(packet.len());
+                break packet;
+            }
+            let peer_closed = inner.peer.as_ref().and_then(Weak::upgrade).is_none();
+            drop(inner);
+
+            if peer_closed {
+                return 0;
+            }
+            let killed = crate::task::current_task()
+                .map(|task| task.inner_exclusive_access().killed)
+                .unwrap_or(false);
+            if killed || check_pending_signal() {
+                return 0;
+            }
+            suspend_current_and_run_next();
         };
+
         let mut copied = 0usize;
         for segment in buf.buffers.iter_mut() {
             let copy_len = segment.len().min(packet.len().saturating_sub(copied));
@@ -617,6 +640,14 @@ impl File for UnixSocket {
             }
             segment[..copy_len].copy_from_slice(&packet[copied..copied + copy_len]);
             copied += copy_len;
+        }
+        if copied < packet.len() {
+            let mut inner = self.inner.lock();
+            if inner.socket_type == UnixSocketType::Stream {
+                let remaining = packet[copied..].to_vec();
+                inner.recv_bytes += remaining.len();
+                inner.recv_queue.push_front(remaining);
+            }
         }
         copied
     }
@@ -638,11 +669,45 @@ impl File for UnixSocket {
             return 0;
         };
 
+        let write_len = loop {
+            let peer_inner = peer.lock();
+            let available = UNIX_SOCKET_RECV_LIMIT.saturating_sub(peer_inner.recv_bytes);
+            if available > 0 {
+                break payload_len.min(available);
+            }
+            drop(peer_inner);
+
+            let killed = crate::task::current_task()
+                .map(|task| task.inner_exclusive_access().killed)
+                .unwrap_or(false);
+            if killed || check_pending_signal() {
+                return 0;
+            }
+            suspend_current_and_run_next();
+        };
+
+        let mut payload = vec![0u8; write_len];
+        let mut payload_len = 0usize;
+        for segment in buf.buffers.iter() {
+            let copy_len = segment.len().min(write_len - payload_len);
+            let end = payload_len + copy_len;
+            payload[payload_len..end].copy_from_slice(&segment[..copy_len]);
+            payload_len = end;
+            if payload_len == write_len {
+                break;
+            }
+        }
+
+        if payload_len == 0 {
+            return 0;
+        }
+
         let attached_prog = {
             let mut peer_inner = peer.lock();
             let prog_fd = peer_inner.attached_prog;
             match peer_inner.socket_type {
                 UnixSocketType::Datagram | UnixSocketType::Stream => {
+                    peer_inner.recv_bytes += payload_len;
                     peer_inner.recv_queue.push_back(payload);
                 }
             }
@@ -656,7 +721,21 @@ impl File for UnixSocket {
     }
 
     fn ready_to_read(&self) -> bool {
-        !self.inner.lock().recv_queue.is_empty()
+        let inner = self.inner.lock();
+        !inner.recv_queue.is_empty()
+            || inner.peer.as_ref().and_then(Weak::upgrade).is_none()
+    }
+
+    fn ready_to_write(&self) -> bool {
+        let peer = {
+            let inner = self.inner.lock();
+            inner.peer.as_ref().and_then(Weak::upgrade)
+        };
+        let Some(peer) = peer else {
+            return true;
+        };
+        let peer_inner = peer.lock();
+        peer_inner.recv_bytes < UNIX_SOCKET_RECV_LIMIT
     }
 
     fn get_stat(&self) -> Stat {
@@ -792,7 +871,7 @@ impl File for RawSocket {
                 }
                 drop(sockets); 
                 crate::net::net_poll();
-                crate::task::block_current_and_run_next(&*self.read_waiters);
+                crate::task::block_current_and_run_next(self.read_waiters.get_mutex());
             }
         }
 
@@ -858,9 +937,12 @@ impl File for RawSocket {
                 // 将回环的包塞入本地队列
                 self.local_rx_buffer.lock().push_back(data);
                 // 唤醒可能正在阻塞的进程 (Ping 进程)
-                let queue_guard = self.rx_wait_queue.lock();
-                if !queue_guard.is_empty() {
-                    crate::process::wake_up_one(queue_guard); 
+                let has_waiting_task = {
+                    let queue_guard = self.rx_wait_queue.lock(); 
+                    !queue_guard.is_empty()
+                };
+                if has_waiting_task {
+                    crate::process::wake_up_one(&self.rx_wait_queue); 
                 }
                 // 直接返回成功，不再向外网卡发送
                 return total_len;

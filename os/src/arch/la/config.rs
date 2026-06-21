@@ -28,12 +28,27 @@ pub const CLOCK_FREQ: usize = 12500000;
 /// 为pci设备预留的内存空间大小
 pub const DMA_SIZE: usize = 0x100_0000; // 16MB
 
+/// 实际打印 qemu ram 发现，la 的物理地址 1G 并不从 elf 起点开始连续
+/// 而是从 0x0 - 约0x20_0000 给固件
+/// 0x20_0000 - 0x800_0000 有一段 （254MB）连续的内存
+/// 剩下的从 0x800_0000 开始，连续 768MB 是主要内存空间
+///
+/// 因此暂时：
+/// 让内核只用highram，地址从0x8000_0000开始
+/// 低部分有约254MB，留给内核栈
+
+pub const LOWRAM_BASE: usize = 0x20_0000;
+
+pub const LOWRAM_END: usize = 0x800_0000;
+
+/// 内核和用户帧分配暂时设计为使用 highram 区域
+/// 
 /// qemu主要内存起始地址, 注意linker.ld需要与此同步
 pub const MEMORY_BASE: usize = 0x8000_0000;
-/// qemu memory size
-pub const MEMORY_SIZE: usize = 1<<30; // 1GB,0x4000_0000
+/// 可用主内存大小 (1GB 总物理内存 - 256MB lowram)
+pub const MEMORY_SIZE: usize = 0x3000_0000; // 1GB - 256MB = 768MB
 /// the physical memory end
-pub const MEMORY_END: usize = MEMORY_BASE + MEMORY_SIZE; // 0xc000_0000
+pub const MEMORY_END: usize = MEMORY_BASE + MEMORY_SIZE; // 0xb000_0000
 
 /// 查看qemu的源代码可以知道配置空间的基地址为0x2000_0000，不写成虚拟地址
 pub const PCI_CONFIG_SPACE_BASE: usize = 0x2000_0000;

@@ -186,6 +186,7 @@ dependencies = [
  "virtio-drivers 0.1.0",
  "virtio-drivers 0.12.0",
  "xmas-elf",
+ "zerocopy",
 ]
 
 [[package]]

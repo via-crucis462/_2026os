@@ -28,8 +28,8 @@ impl File for NamedPipeDuplex {
 	fn write_nonblock(&self, buf: UserBuffer) -> Result<usize, crate::syscall::errno::Errno> {
 		self.write_end.write_nonblock(buf)
 	}
-	fn read_at(&self, _offset: usize, buf: UserBuffer) -> usize { self.read_end.read(buf) }
-	fn write_at(&self, _offset: usize, buf: UserBuffer) -> usize { self.write_end.write(buf) }
+	fn raw_read_at(&self, _offset: usize, buf: UserBuffer) -> usize { self.read_end.read(buf) }
+	fn raw_write_at(&self, _offset: usize, buf: UserBuffer) -> usize { self.write_end.write(buf) }
 	fn get_perm(&self) -> PermStat { self.read_end.get_perm() }
 	fn get_stat(&self) -> Stat { self.read_end.get_stat() }
 	fn getdents(&self, _buf: &mut [u8]) -> isize { crate::syscall::errno::Errno::EINVAL.as_isize() }

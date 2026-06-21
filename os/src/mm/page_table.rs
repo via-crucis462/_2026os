@@ -197,7 +197,7 @@ impl PageTable {
         *pte = PageTableEntry::new_defualt(ppn);
         *pte = PageTableEntry { bits: pte.bits | from_riscv_flags(flags).bits() as usize};
         if (flags & PTEFlags::W) != PTEFlags::empty() {
-            pte.set_dirty();
+            // pte.set_dirty(); // 现在改为写入才在handler里设置
         }
     }
     /// remove the map between virtual page number and physical page number

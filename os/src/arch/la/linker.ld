@@ -1,10 +1,8 @@
 # 本文件相比riscv版本仅OUTPUT_ARCH和BASE_ADDRESS不同,其他部分完全一样
 OUTPUT_ARCH(loongarch)
 ENTRY(_start)
-# BASE_ADDRESS = 0x9000000000200000; # 偏移2MB留给启动和硬件等
 
-# 用和rv一样的
-BASE_ADDRESS = 0x80200000;
+BASE_ADDRESS = 0x80000000;
 
 SECTIONS
 {

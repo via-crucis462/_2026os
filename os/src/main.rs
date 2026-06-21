@@ -60,7 +60,7 @@ use crate::arch::la;
 
 pub use arch::timer::*;
 
-use crate::drivers::block::NET_DEVICE;
+use crate::arch::drivers::block::NET_DEVICE;
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::*;
@@ -151,9 +151,12 @@ fn main_init(hart_id: usize) {
     mm::init();
     #[cfg(target_arch = "riscv64")]
     mm::remap_test();
+    #[cfg(target_arch = "loongarch64")]
+    mem_test();
     arch::trap::init();
     #[cfg(target_arch = "loongarch64")]
     {
+        arch::timer::init_board_freq();
         info!("searching pci...");
         // 仅调试用，搜索，实例化并列出设备
         // 和BLOCK是后续才实例化的
@@ -171,7 +174,7 @@ fn main_init(hart_id: usize) {
     fs::list_apps();
     task::add_initproc();
     arch::trap::enable_timer_interrupt();
-    arch::timer::set_next_trigger();
+    arch::timer::set_next_trigger(task::manager::SCHED_OTHER);
     init_other_hart(hart_id);
     println!("main_init done, run tasks...");
     task::run_tasks();
@@ -231,7 +234,7 @@ fn other_init() {
     la::mm::la_kernel_init_mem();// 设置映射窗口
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
-    arch::timer::set_next_trigger();
+    arch::timer::set_next_trigger(task::manager::SCHED_OTHER);
     task::run_tasks();
 }
 
@@ -271,4 +274,27 @@ pub fn debug_csr_info() {
         asm!("csrrd {}, 0x0", out(reg) crmd);
     }
     debug!("pgdl: {:#x}, crmd: {:#b}", pgdl, crmd);
+}
+
+#[cfg(target_arch = "loongarch64")]
+pub fn mem_test() {
+    let aim1 = LOWRAM_BASE;
+    let aim2 = LOWRAM_END;
+    for addr in (aim1..aim2).step_by(8) {
+        unsafe {
+            let ptr = addr as *mut u64;
+            ptr.write_volatile(0x12345678_9abcdeff);
+            let val = ptr.read_volatile();
+            assert_eq!(val, 0x12345678_9abcdeff);
+        }
+    }
+    for addr in (aim1..aim2).step_by(8) {
+        unsafe {
+            let ptr = addr as *mut u64;
+            ptr.write_volatile(0);
+            let val = ptr.read_volatile();
+            assert_eq!(val, 0);
+        }
+    }
+    println!("mem_test passed!");
 }

@@ -3,7 +3,7 @@ use crate::PAGE_SIZE;
 use crate::auth::FileMode;
 use crate::process::FdFlags;
 use crate::fs::{create_fifo_in_dentry, create_file_in_dentry, is_fifo_mode, make_pipe, open_fifo_file, Dentry, File, OpenFlags, ROOT_DENTRY, Stat, Statx, file_name, make_dir, open_file, parent_path, S_IFMT, UserPageFaultInfo};
-use crate::mm::{PageSize, UserBuffer, prepare_user_write, translated_byte_buffer, translated_read, try_translated_read, try_translated_str, try_translated_write};
+use crate::mm::{PageSize, UserBuffer, prepare_user_read, prepare_user_write, translated_byte_buffer, translated_read, try_translated_read, try_translated_str, try_translated_write};
 use crate::task::{current_task, current_user_token};
 use alloc::{task, vec};
 use alloc::sync::Arc;
@@ -118,6 +118,8 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let status = inner.fd_table[fd].status;
         drop(inner);
     if !file.writable() {
+        info!("pid[{}] [sys_write] EACCES fd={} readable={} writable={}",
+            proc.pid.0, fd, file.readable(), file.writable());
         return EACCES.as_isize(); 
     }
     if let Some(err) = file.check_write_error() {
@@ -391,7 +393,7 @@ pub fn sys_mknod(dirfd: isize, path: *const u8, mode: u32, _dev: u64) -> isize {
 }
 
 pub fn sys_close(fd: usize) -> isize {
-	trace!("kernel:pid[{}] sys_close, aim fd = {}", current_task().unwrap().process().pid.0, fd);
+	info!("kernel:pid[{}] sys_close, aim fd = {}", current_task().unwrap().process().pid.0, fd);
     let task = current_task().unwrap();
     let proc = task.process();
     let mut inner = proc.inner_exclusive_access();
@@ -463,7 +465,7 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, mode: u32, _flags: u32) -> is
 }
 
 pub fn sys_pipe(pipe: *mut usize) -> isize {
-	trace!("kernel:pid[{}] sys_pipe", current_task().unwrap().process().pid.0);
+	warn!("kernel:pid[{}] sys_pipe", current_task().unwrap().process().pid.0);
     let task = current_task().unwrap();
     let proc = task.process();
     let token = current_user_token();
@@ -480,12 +482,15 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
+    warn!("kernel:pid[{}] sys_pipe: allocated read_fd={}", task.process().pid.0, read_fd);
     inner.set_fd(read_fd, pipe_read, FdFlags::empty(), 0);
     let write_fd = match inner.alloc_fd() {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
     inner.set_fd(write_fd, pipe_write, FdFlags::empty(), O_WRONLY as usize);
+    // 诊断：打印管道 fd 分配
+    warn!("kernel:pid[{}] sys_pipe: allocated write_fd={}", task.process().pid.0, write_fd);
     // 释放锁，因为下面的write会访问用户锁
     drop(inner);
     // User ABI for pipe is int pipefd[2], i.e. two 32-bit entries.
@@ -496,17 +501,17 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     if !try_translated_write(token, unsafe { pipe_u32.add(1) }, write_fd as u32) {
         return EFAULT.as_isize();
     }
-    //println!("pipe done");
+    //warn!("pipe done");
     0
 }
 
 pub fn sys_dup(fd: usize) -> isize {
 	trace!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().process().pid.0, fd);
-    // println!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().process().pid.0, fd);
+    // warn!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().process().pid.0, fd);
     let task = current_task().unwrap();
     let proc = task.process();
     let mut inner = proc.inner_exclusive_access();
-    // println!("table len = {}", inner.fd_table.len());
+    // warn!("table len = {}", inner.fd_table.len());
     if fd >= inner.fd_table.len() {
         return EBADF.as_isize();
     }
@@ -517,7 +522,7 @@ pub fn sys_dup(fd: usize) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
-    // println!("[kernel] sys_dup: new fd allocated: {}", new_fd);
+    // warn!("[kernel] sys_dup: new fd allocated: {}", new_fd);
     let file = Arc::clone(inner.fd_table[fd].file.as_ref().unwrap());
     let old_status = inner.fd_table[fd].status;
     inner.set_fd(new_fd, file, FdFlags::empty(), old_status);
@@ -525,7 +530,7 @@ pub fn sys_dup(fd: usize) -> isize {
 }
 
 pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> isize {
-    // println!("[DEBUG VFS] sys_lseek: fd={}, offset={}, whence={}", fd, offset, whence);
+    // warn!("[DEBUG VFS] sys_lseek: fd={}, offset={}, whence={}", fd, offset, whence);
     let token = current_user_token();
     let task = current_task().unwrap();
     let proc = task.process();
@@ -600,6 +605,7 @@ pub struct IoVec {
 pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     // 参数合法性检查
     const IOV_MAX: usize = 1024;
+    const WRITEV_CHUNK_MAX: usize = 1024 * 1024;
     if iovcnt > IOV_MAX {
         return EINVAL.as_isize();
     }
@@ -623,62 +629,71 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     let nonblock = (status & (O_NONBLOCK | O_NDELAY)) != 0;
     let mut total_written = 0;
     for i in 0..iovcnt {
-        let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
+        let Some(iov_offset) = i.checked_mul(core::mem::size_of::<IoVec>()) else {
+            return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
+        };
+        let Some(iov_addr) = iov_ptr.checked_add(iov_offset) else {
+            return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
+        };
         let iovec: IoVec = {
             if let Some(io) = try_translated_read(token, iov_addr as *const IoVec) {
                 io
             } else {
-                return EFAULT.as_isize();
+                return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
             }
         };
         if iovec.len == 0 {
             continue; 
         }
-        const IOV_BUF_MAX: usize = 1024;
-        if iovec.len > IOV_BUF_MAX {
-            return EINVAL.as_isize();
+        if !prepare_user_read(token, iovec.base, iovec.len) {
+            return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
         }
-        if !prepare_user_write(token, iovec.base, iovec.len) {
-            return EFAULT.as_isize();
-        }
-        if nonblock && !file.ready_to_write() {
-            return if total_written == 0 {
-                EAGAIN.as_isize()
-            } else {
-                total_written as isize
+        let mut written_in_iov = 0usize;
+        while written_in_iov < iovec.len {
+            if nonblock && !file.ready_to_write() {
+                return if total_written == 0 {
+                    EAGAIN.as_isize()
+                } else {
+                    total_written as isize
+                };
+            }
+            let chunk_len = (iovec.len - written_in_iov).min(WRITEV_CHUNK_MAX);
+            let Some(chunk_base) = iovec.base.checked_add(written_in_iov) else {
+                return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
             };
-        }
-        let iovec_len = iovec.len.min(IOV_BUF_MAX);
-        let user_buffer = UserBuffer {
-            buffers: translated_byte_buffer(token, iovec.base as *const u8, iovec_len),
-        };
-        let written = if nonblock {
-            match file.write_nonblock(user_buffer) {
-                Ok(written) => written,
-                Err(err) => {
+            let user_buffer = UserBuffer {
+                buffers: translated_byte_buffer(token, chunk_base as *const u8, chunk_len),
+            };
+            let written = if nonblock {
+                match file.write_nonblock(user_buffer) {
+                    Ok(written) => written,
+                    Err(err) => {
+                        return if total_written == 0 {
+                            err.as_isize()
+                        } else {
+                            total_written as isize
+                        };
+                    }
+                }
+            } else {
+                file.write(user_buffer)
+            };
+            if written == 0 && chunk_len > 0 {
+                if let Some(err) = file.check_write_error() {
                     return if total_written == 0 {
                         err.as_isize()
                     } else {
                         total_written as isize
                     };
                 }
+                warn!("pid[{}] [sys_writev] FATAL: Underlying file returned 0 on write! fd={}", proc.pid.0, fd);
+                return total_written as isize;
             }
-        } else {
-            file.write(user_buffer)
-        };
-        if written == 0 && iovec_len > 0 {
-            if let Some(err) = file.check_write_error() {
-                return if total_written == 0 {
-                    err.as_isize()
-                } else {
-                    total_written as isize
-                };
+            total_written += written;
+            written_in_iov += written;
+            if written < chunk_len {
+                return total_written as isize;
             }
-            warn!("pid[{}] [sys_writev] FATAL: Underlying file returned 0 on write! fd={}", proc.pid.0, fd);
-        }
-        total_written += written;
-        if written < iovec_len {
-            break;
         }
     }
     info!("pid[{}] [sys_writev] LEAVE total_written={}", proc.pid.0, total_written);
@@ -695,7 +710,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
             return EFAULT.as_isize();
         }
     };
-    trace!("kernel:pid[{}] sys_statx: dirfd={}, path={}, flags={:#x}, mask={:#x}", task.process().pid.0, dirfd, path_str, flags, mask);
+    //println!("kernel:pid[{}] sys_statx: dirfd={}, path={}, flags={:#x}, mask={:#x}", task.process().pid.0, dirfd, path_str, flags, mask);
     const AT_EMPTY_PATH: u32 = 0x1000;
     if path_str.is_empty() {
         if (flags & AT_EMPTY_PATH) == 0 {
@@ -882,7 +897,7 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
 }
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
-    //println!("sys_fcntl fd={}, cmd={}, arg={:#x}", fd, cmd, arg);
+    //warn!("sys_fcntl fd={}, cmd={}, arg={:#x}", fd, cmd, arg);
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
 
@@ -1286,6 +1301,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usiz
         }
     };
     const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+    const AT_EMPTY_PATH: usize = 0x1000;
     let follow_links = (flags & AT_SYMLINK_NOFOLLOW) == 0;
     trace!("kernel:pid[{}] sys_fstatat dirfd={} path={} follow={}", current_task().unwrap().process().pid.0, dirfd, path_str, follow_links);
 
@@ -1294,6 +1310,31 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usiz
     let inner = proc.inner_exclusive_access();
     let cwd = inner.cwd.clone();
     let fd_table_len = inner.fd_table.len();
+    //空路径查找文件描述符
+    if path_str.is_empty() {
+        if (flags & AT_EMPTY_PATH) == 0 {
+            return ENOENT.as_isize();
+        }
+        if dirfd < 0 || (dirfd as usize) >= fd_table_len {
+            return EBADF.as_isize();
+        }
+        let Some(file) = &inner.fd_table[dirfd as usize].file else {
+            return EBADF.as_isize();
+        };
+        let file = file.clone();
+        drop(inner);
+        let mut stat = file.get_stat();
+        if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&stat.ino) {
+            stat.atime_sec = asec;
+            stat.atime_nsec = ansec;
+            stat.mtime_sec = msec;
+            stat.mtime_nsec = mnsec;
+        }
+        if !try_translated_write(token, st, stat) {
+            return EFAULT.as_isize();
+        }
+        return 0;
+    }
     
     if path_str.contains("Zone.Identifier") {
         let mut stat: Stat = unsafe { core::mem::zeroed() };
@@ -1322,7 +1363,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usiz
     match target_dentry {
         Ok(dentry) => {
             let stat = dentry.inode.get_stat();
-            //println!("mtime = {}.{} , atime = {}.{}, inode={}", stat.mtime_sec, stat.mtime_nsec, stat.atime_sec, stat.atime_nsec, dentry.name);
+            //warn!("mtime = {}.{} , atime = {}.{}, inode={}", stat.mtime_sec, stat.mtime_nsec, stat.atime_sec, stat.atime_nsec, dentry.name);
             if !try_translated_write(token, st, stat) {
                 return EFAULT.as_isize();
             }
@@ -1359,6 +1400,28 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isiz
         }
         trace!("kernel:pid[{}] sys_pread64: fd={}, count={}, offset={}", task.process().pid.0, fd, count, offset);
         file.pread(offset, UserBuffer::new(translated_byte_buffer(token, buf, count))) as isize
+    } else {
+        EBADF.as_isize()
+    }
+}
+
+/// 在指定偏移量写入，即 write_at
+pub fn sys_pwrite64(fd: usize, buf: *const u8, count: usize, offset: usize) -> isize {
+    let token = current_user_token();
+    let task = current_task().unwrap();
+    let proc = task.process();
+    let inner = proc.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return EBADF.as_isize();
+    }
+    if let Some(file) = &inner.fd_table[fd].file {
+        let file = file.clone();
+        drop(inner);
+        if !file.writable() {
+            return EACCES.as_isize();
+        }
+        trace!("kernel:pid[{}] sys_pwrite64: fd={}, count={}, offset={}", task.process().pid.0, fd, count, offset);
+        file.write_at(offset, UserBuffer::new(translated_byte_buffer(token, buf as *mut u8, count))) as isize
     } else {
         EBADF.as_isize()
     }
@@ -1654,7 +1717,7 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
 }
 
 pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> isize {
-    //println!("fd={}, iov={:?}, iovcnt={}, flags={:#x}", fd, iov, iovcnt, flags);
+    //warn!("fd={}, iov={:?}, iovcnt={}, flags={:#x}", fd, iov, iovcnt, flags);
     const IOV_MAX: usize = 1024;
     const IOV_BUF_MAX: usize = 1024 * 1024; // 1 MiB per iovec element
     const SPLICE_F_MOVE: u32 = 0x01;
@@ -1681,7 +1744,7 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
 
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
-        println!("vmsplice target fd {} out of range", fd);
+        warn!("vmsplice target fd {} out of range", fd);
         return EBADF.as_isize();
     }
 
@@ -1689,7 +1752,7 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
     let file = match fd_entry.file.as_ref() {
         Some(f) => f.clone(),
         None => {
-            println!("vmsplice target fd {} has no associated file", fd);
+            warn!("vmsplice target fd {} has no associated file", fd);
             return EBADF.as_isize();
         }
     };
@@ -1698,11 +1761,11 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
 
     // vmsplice(..., fd, ...) writes user iov into a pipe.
     if !file.writable() && !file.readable() {
-        println!("vmsplice target fd {} is not writable", fd);
+        warn!("vmsplice target fd {} is not writable", fd);
         return EBADF.as_isize();
     }
     if (file.get_stat().mode & S_IFMT) != crate::fs::S_IFIFO {
-        println!("vmsplice target fd {} is not a pipe", fd);
+        warn!("vmsplice target fd {} is not a pipe", fd);
         return EBADF.as_isize();
     }
     if file.writable(){
@@ -1801,7 +1864,7 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
 }
 
 pub fn sys_splice(fd_in: usize, off_in: *mut i64, fd_out: usize, off_out: *mut i64, len: usize, flags: u32) -> isize {
-    println!("fd_in , off_in , fd_out , off_out , len , flags : {} {} {} {} {} {}", fd_in, off_in as usize, fd_out, off_out as usize, len, flags);
+    warn!("fd_in , off_in , fd_out , off_out , len , flags : {} {} {} {} {} {}", fd_in, off_in as usize, fd_out, off_out as usize, len, flags);
     const SPLICE_F_MOVE: u32 = 0x01;
     const SPLICE_F_NONBLOCK: u32 = 0x02;
     const SPLICE_F_MORE: u32 = 0x04;
@@ -2061,7 +2124,7 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
     };
 
     // 通过父目录的 inode 创建符号链接
-    //println!("parent_path_str={}, name={}, target_str={}", parent_dentry.inode.type_name(), name, target_str);
+    //warn!("parent_path_str={}, name={}, target_str={}", parent_dentry.inode.type_name(), name, target_str);
     if let Some(symlink_inode) = parent_dentry.inode.create_symlink(&name, &target_str) {
         // 将新创建的 Inode 挂到 VFS 树
         parent_dentry.insert(name, symlink_inode);
@@ -2071,11 +2134,20 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
     }
 }
 /// fsync: 将文件描述符关联文件的数据同步到磁盘
-/// 当前实现仅针对内存映射文件
+/// 当前实现刷所有缓存而不是只刷指定文件
+/// 
 /// TODO: 完全实现 fsync 语义
 pub fn sys_fsync(_fd: usize) -> isize {
     info!("kernel:pid[{}] sys_fsync: fd={}", current_task().unwrap().process().pid.0, _fd);
     crate::mm::mmap::sync_shared_page_cache();
+    0
+}
+
+/// sync: 将所有文件系统缓存同步到磁盘
+pub fn sys_sync() -> isize {
+    info!("kernel:pid[{}] sys_sync called", current_task().unwrap().process().pid.0);
+    crate::mm::mmap::sync_shared_page_cache();
+    crate::drivers::block::block_cache::block_cache_sync_all();
     0
 }
 

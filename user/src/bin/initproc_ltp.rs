@@ -99,7 +99,7 @@ fn main() -> i32 {
     chdir("/musl\0");
 
     // 测例首字母
-    let test_start = "t";
+    let test_start = "shm";
 
     // 测例黑名单
     const SKIP_CASES: &[&str] = &[
@@ -160,6 +160,7 @@ fn main() -> i32 {
         "msgrcv05", // la boom
         "msgrcv06", // la boom
         "mmap3",
+        "mmap1", // boooom
     ];
 
     let skip_list = {

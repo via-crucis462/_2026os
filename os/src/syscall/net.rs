@@ -371,7 +371,7 @@ pub fn sys_sendto(
         }
     }
     loop {
-         let user_buf = UserBuffer::new(translated_byte_buffer(token, buf, len));
+        let user_buf = UserBuffer::new(translated_byte_buffer(token, buf, len));
         let ret = file.write(user_buf) as isize;
         
         if ret == -11 {
@@ -467,7 +467,7 @@ pub fn sys_recvfrom(
                 if let Some(socket_wait) = queues.get(&udp_socket.handle) {
                     let rx_queue = socket_wait.rx_queue.clone();
                     drop(queues); 
-                    crate::task::block_current_and_run_next(&rx_queue);
+                    crate::task::block_current_and_run_next(rx_queue.get_mutex());
                     let task = crate::task::current_task().unwrap();
                     let task_inner = task.inner_exclusive_access();
                     if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {

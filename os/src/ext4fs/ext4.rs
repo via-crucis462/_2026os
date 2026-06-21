@@ -16,17 +16,13 @@ impl Ext4FS {
         let group_num = superblock.group_num();
         let mut block_groups = Vec::new();
 
-        let block_cache1 = get_block_cache(1, block_dev.clone());
-        let block_cache1 = block_cache1.lock();
-        
+        let mut buf = [0u8; BLOCK_SZ];
+        block_dev.read_block(1, &mut buf);
         let desc_size = superblock.desc_size as usize;
-        
+
         for i in 0..group_num {
-            // 块组描述符的大小为32 或 64
-            // 从块缓存的第 i * desc_size 字节开始，读取接下来的 32/64 字节 (Ext4GroupDescDisk 大小)
-            let group = block_cache1.read(i as usize * desc_size, |x: &Ext4GroupDescDisk| {
-                Ext4Group::new(x)
-            });
+            let x = unsafe { &*(buf.as_ptr().add(i as usize * desc_size) as *const Ext4GroupDescDisk) };
+            let group = Ext4Group::new(x);
             debug!(
                 "[Ext4] Group {}: block_bitmap={}, inode_bitmap={}, inode_table={}, free_blocks={}",
                 i, group.block_bitmap_id, group.inode_bitmap_id, group.inode_table_id, group.free_blocks_count
@@ -61,11 +57,7 @@ impl Ext4FS {
     }
     pub fn get_disk_inode(&self, inode_id: u32) -> Ext4InodeDisk {
         let (block_id, offset) = self.get_inode_pos(inode_id);
-        let block_cache = get_block_cache(block_id as usize, self.block_dev.clone());
-        let block_cache = block_cache.lock();
-        block_cache.read(offset, |disk_inode: &Ext4InodeDisk| {
-            disk_inode.clone()
-        })
+        block_read(&self.block_dev, block_id as usize, offset)
     }
     pub fn get_inode(self: &Arc<Self>, inode_id: u32) -> Arc<Ext4Inode> {
         let disk_inode = self.get_disk_inode(inode_id);
@@ -73,34 +65,31 @@ impl Ext4FS {
     }
 
     pub fn alloc_inode(&self) -> Option<u32> {
-        // 1. 遍历块组，找到有空闲 Inode 的组
         for (group_id, group_mutex) in self.block_groups.iter().enumerate() {
             let mut group = group_mutex.lock();
             if group.free_inodes_count > 0 {
-                // 读取 Inode 位图块
                 let bitmap_block = group.inode_bitmap_id;
-                let block_cache = get_block_cache(bitmap_block as usize, self.block_dev.clone());
-                let mut bitmap_cache = block_cache.lock();
+                let mut buf = [0u8; BLOCK_SZ];
+                self.block_dev.read_block(bitmap_block as usize, &mut buf);
+                let bitmap: &mut [u8; 4096] = unsafe { &mut *(buf.as_mut_ptr() as *mut [u8; 4096]) };
 
-                // 在位图中查找第一个空闲位 (0)
-                let res = bitmap_cache.modify(0, |bitmap: &mut [u8; 4096]| {
-                    for byte_idx in 0..4096 {
-                        if bitmap[byte_idx] != 0xFF {
-                            for bit_idx in 0..8 {
-                                if (bitmap[byte_idx] & (1 << bit_idx)) == 0 {
-                                    bitmap[byte_idx] |= 1 << bit_idx;
-                                    return Some((byte_idx, bit_idx));
-                                }
+                let mut found = None;
+                for byte_idx in 0..4096 {
+                    if bitmap[byte_idx] != 0xFF {
+                        for bit_idx in 0..8 {
+                            if (bitmap[byte_idx] & (1 << bit_idx)) == 0 {
+                                bitmap[byte_idx] |= 1 << bit_idx;
+                                found = Some((byte_idx, bit_idx));
+                                break;
                             }
                         }
+                        if found.is_some() { break; }
                     }
-                    None
-                });
+                }
 
-                if let Some((byte_idx, bit_idx)) = res {
-                    // 更新组描述符（内存中）
+                if let Some((byte_idx, bit_idx)) = found {
+                    self.block_dev.write_block(bitmap_block as usize, &buf);
                     group.free_inodes_count -= 1;
-                    // 计算全局 Inode ID
                     let inode_per_group = self.superblock.inodes_per_group;
                     let inode_id = (group_id as u32) * inode_per_group + (byte_idx as u32 * 8) + bit_idx as u32 + 1;
                     return Some(inode_id);
@@ -115,24 +104,26 @@ impl Ext4FS {
             let mut group = group_mutex.lock();
             if group.free_blocks_count > 0 {
                 let bitmap_block = group.block_bitmap_id;
-                let block_cache = get_block_cache(bitmap_block as usize, self.block_dev.clone());
-                let mut bitmap_cache = block_cache.lock();
+                let mut buf = [0u8; BLOCK_SZ];
+                self.block_dev.read_block(bitmap_block as usize, &mut buf);
+                let bitmap: &mut [u8; 4096] = unsafe { &mut *(buf.as_mut_ptr() as *mut [u8; 4096]) };
 
-                let res = bitmap_cache.modify(0, |bitmap: &mut [u8; 4096]| {
-                    for byte_idx in 0..4096 {
-                        if bitmap[byte_idx] != 0xFF {
-                            for bit_idx in 0..8 {
-                                if (bitmap[byte_idx] & (1 << bit_idx)) == 0 {
-                                    bitmap[byte_idx] |= 1 << bit_idx;
-                                    return Some((byte_idx, bit_idx));
-                                }
+                let mut found = None;
+                for byte_idx in 0..4096 {
+                    if bitmap[byte_idx] != 0xFF {
+                        for bit_idx in 0..8 {
+                            if (bitmap[byte_idx] & (1 << bit_idx)) == 0 {
+                                bitmap[byte_idx] |= 1 << bit_idx;
+                                found = Some((byte_idx, bit_idx));
+                                break;
                             }
                         }
+                        if found.is_some() { break; }
                     }
-                    None
-                });
+                }
 
-                if let Some((byte_idx, bit_idx)) = res {
+                if let Some((byte_idx, bit_idx)) = found {
+                    self.block_dev.write_block(bitmap_block as usize, &buf);
                     group.free_blocks_count -= 1;
                     let blocks_per_group = self.superblock.blocks_per_group;
                     let first_data_block = self.superblock.first_data_block;
@@ -151,15 +142,14 @@ impl Ext4FS {
 
         let mut group = self.block_groups[group_idx as usize].lock();
         let bitmap_block = group.inode_bitmap_id;
-        let block_cache = get_block_cache(bitmap_block as usize, self.block_dev.clone());
-        let mut bitmap_cache = block_cache.lock();
-        
+        let mut buf = [0u8; BLOCK_SZ];
+        self.block_dev.read_block(bitmap_block as usize, &mut buf);
+        let bitmap: &mut [u8; 4096] = unsafe { &mut *(buf.as_mut_ptr() as *mut [u8; 4096]) };
+
         let byte_idx = (inode_idx / 8) as usize;
         let bit_idx = inode_idx % 8;
-        
-        bitmap_cache.modify(0, |bitmap: &mut [u8; 4096]| {
-            bitmap[byte_idx] &= !(1 << bit_idx);
-        });
+        bitmap[byte_idx] &= !(1 << bit_idx);
+        self.block_dev.write_block(bitmap_block as usize, &buf);
 
         group.free_inodes_count += 1;
     }
@@ -175,28 +165,26 @@ impl Ext4FS {
 
         let mut group = self.block_groups[group_idx as usize].lock();
         let bitmap_block = group.block_bitmap_id;
-        let block_cache = get_block_cache(bitmap_block as usize, self.block_dev.clone());
-        let mut bitmap_cache = block_cache.lock();
+        let mut buf = [0u8; BLOCK_SZ];
+        self.block_dev.read_block(bitmap_block as usize, &mut buf);
+        let bitmap: &mut [u8; 4096] = unsafe { &mut *(buf.as_mut_ptr() as *mut [u8; 4096]) };
 
         let byte_idx = (block_idx / 8) as usize;
         let bit_idx = block_idx % 8;
-
-        bitmap_cache.modify(0, |bitmap: &mut [u8; 4096]| {
-            bitmap[byte_idx] &= !(1 << bit_idx);
-        });
+        bitmap[byte_idx] &= !(1 << bit_idx);
+        self.block_dev.write_block(bitmap_block as usize, &buf);
 
         group.free_blocks_count += 1;
     }
 
     pub fn decrease_link_count(&self, inode_id: u32) -> u16 {
         let (block_id, offset) = self.get_inode_pos(inode_id);
-        let block_cache = get_block_cache(block_id as usize, self.block_dev.clone());
-        let mut cache = block_cache.lock();
-        cache.modify(offset, |disk_inode: &mut Ext4InodeDisk| {
+        block_modify(&self.block_dev, block_id as usize, offset, |disk_inode: &mut Ext4InodeDisk| {
             if disk_inode.i_links_count > 0 {
                 disk_inode.i_links_count -= 1;
             }
-            disk_inode.i_links_count
-        })
+        });
+        // 读取写回后的值
+        block_read::<Ext4InodeDisk>(&self.block_dev, block_id as usize, offset).i_links_count
     }
 }

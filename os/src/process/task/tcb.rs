@@ -18,7 +18,6 @@ use crate::arch::config::*;
 use super::*;
 
 
-
 /// Task control block structure
 ///
 /// Directly save the contents that will not change during running
@@ -31,6 +30,9 @@ pub struct TaskControlBlock {
 
     /// 线程id
     pub tid: Arc<TIdHandle>,
+
+    /// Thread group id. Linux getpid() returns this id, while gettid() returns tid.
+    pub tgid: usize,
 
     /// Kernel stack corresponding to PID
     pub kernel_stack: KernelStack,
@@ -48,12 +50,18 @@ impl TaskControlBlock {
         self.process.upgrade().unwrap()
     }
     pub fn getpid(&self) -> usize {
-        self.process().pid.0
+        self.tgid
+    }
+    pub fn gettgid(&self) -> usize {
+        self.tgid
     }
     pub fn gettid(&self) -> usize {
         self.tid.0
     }
-
+    pub fn get_policy_and_priority(&self) -> (isize, i32) {
+        let inner = self.inner_exclusive_access();
+        (inner.sched_policy, inner.sched_priority)
+     }
     pub fn recycle_on_exit(&self, exit_code: i32) {
         remove_from_tid2task(self.gettid());
 
@@ -62,8 +70,10 @@ impl TaskControlBlock {
         inner.errno = 0;
         inner.task_status = TaskStatus::Zombie;
         inner.signals = SignalFlags::empty();
+        inner.signal_interrupted = false;
         inner.signal_mask_backup.clear();
         inner.trap_ctx_backup.clear();
+        inner.signal_user_context_backup.clear();
         inner.killed = false;
         inner.term_signal = None;
         inner.frozen = false;
@@ -84,10 +94,14 @@ pub struct TaskControlBlockInner {
     /// 当前由哪个 hart 持有运行所有权；None 表示可被调度领取。
     pub owner_hart: Option<usize>,
 
+    pub sched_policy: isize,
+    pub sched_priority: i32,
+
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
     pub errno: i32,
     pub signals: SignalFlags,
+    pub signal_interrupted: bool,
     pub signal_mask: SignalFlags,
     /// 信号嵌套处理时的掩码栈（当前未完全验证行为是否正确，初步测试没问题）
     pub signal_mask_backup: Vec<SignalFlags>,
@@ -98,6 +112,9 @@ pub struct TaskControlBlockInner {
     pub frozen: bool,
     /// 信号嵌套处理时的上下文栈（当前未完全验证行为是否正确，初步测试没问题）
     pub trap_ctx_backup: Vec<TrapContext>,
+
+    /// 用户态 signal frame 中 ucontext 的地址，用于 sigreturn 读取用户修改后的上下文。
+    pub signal_user_context_backup: Vec<usize>,
 
     pub clear_child_tid: usize,// 线程清理指针
 }
@@ -139,6 +156,21 @@ pub enum TaskStatus {
     Blocked,
     /// exited
     Zombie,
-    /// wait函数保存上下文前
-    WaitSaving,
+    /// 加入了等待队列但正在保存上下文
+    BlockSaving,
+
+}
+
+impl core::fmt::Display for TaskStatus {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let status = match self {
+            TaskStatus::UnInit => "UnInit",
+            TaskStatus::Ready => "Ready",
+            TaskStatus::Running => "Running",
+            TaskStatus::Blocked => "Blocked",
+            TaskStatus::Zombie => "Zombie",
+             TaskStatus::BlockSaving => "BlockedSaving",
+        };
+        f.write_str(status)
+    }
 }

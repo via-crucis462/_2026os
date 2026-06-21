@@ -11,51 +11,14 @@ use virtio_drivers::DeviceType;
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000;
 /// VirtIOBlock device driver strcuture for virtio_blk device
-pub struct VirtIOBlock(MPSafeCell<VirtIOBlk<'static, VirtioHal>>);
+pub struct VirtIOBlock{
+    pub inner: MPSafeCell<VirtIOBlk<'static, VirtioHal>>
+}
 
 lazy_static! {
     static ref QUEUE_FRAMES: MPSafeCell<Vec<FrameTracker>> = MPSafeCell::new(Vec::new());
 }
 
-impl BlockDevice for VirtIOBlock {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        let len = buf.len();
-        // 扇区大小
-        const SECTOR_SIZE: usize = 512;
-        // 4096 / 512 = 8
-        let sectors = len / SECTOR_SIZE;
-        
-        let mut driver = self.0.exclusive_access();
-        
-        let start_sector = block_id * sectors;
-        // 滑动窗口说是
-        for i in 0..sectors {
-            let offset = i * SECTOR_SIZE;
-            let sub_buf = &mut buf[offset..offset + SECTOR_SIZE];
-            driver
-                .read_block(start_sector + i, sub_buf)
-                .expect("Error when reading VirtIOBlk");
-        }
-    }
-
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
-        // 与 read_block 类似
-        let len = buf.len();
-        const SECTOR_SIZE: usize = 512;
-        let sectors = len / SECTOR_SIZE;
-        
-        let mut driver = self.0.exclusive_access();
-        let start_sector = block_id * sectors;
-
-        for i in 0..sectors {
-            let offset = i * SECTOR_SIZE;
-            let sub_buf = &buf[offset..offset + SECTOR_SIZE];
-            driver
-                .write_block(start_sector + i, sub_buf)
-                .expect("Error when writing VirtIOBlk");
-        }
-    }
-}
 
 impl VirtIOBlock {
     #[allow(unused)]
@@ -79,9 +42,9 @@ impl VirtIOBlock {
         }
 
         unsafe {
-            Self(MPSafeCell::new(
+            Self { inner: MPSafeCell::new(
                 VirtIOBlk::<VirtioHal>::new(&mut *(blk_addr as *mut VirtIOHeader)).unwrap(),
-            ))
+            ) }
         }
     }
 }

@@ -25,7 +25,6 @@ use crate::task::{
 use crate::arch::timer::get_time_ms;
 use alloc::sync::Arc;
 
-use crate::arch::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
 use riscv::register::{scause, stval, stvec, sie};
 use scause::{Exception, Interrupt, Trap};
@@ -98,7 +97,6 @@ pub fn trap_handler() -> ! {
             cx.set_a0(result as usize);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
-            set_next_trigger();
             let current_ms = get_time_ms();
             let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
             for pid in expired_pids {
@@ -109,6 +107,7 @@ pub fn trap_handler() -> ! {
                         let mut task_inner = task.inner_exclusive_access();
                         task_inner.signals |= crate::task::SignalFlags::SIGALRM;
                         if task_inner.task_status == crate::task::TaskStatus::Blocked {
+                            task_inner.signal_interrupted = true;
                             task_inner.task_status = crate::task::TaskStatus::Ready;
                             crate::task::add_task(Arc::clone(task)); 
                         }
@@ -116,6 +115,7 @@ pub fn trap_handler() -> ! {
                 }
             }
             net_poll();
+            crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
         }
         Trap::Exception(Exception::StorePageFault) |
@@ -208,17 +208,17 @@ pub fn trap_handler() -> ! {
                             .downcast_ref::<crate::fs::UserPageFaultInfo>()
                         {
                             println!("Checking UFFD registered ranges for PID {}...", process.pid.0);
-                            let in_range = uffd.registered_ranges.exclusive_access()
+                            let in_range = uffd.registered_ranges.lock()
                                 .iter().map(|&(start, len)| {
                                     println!("  Comparing fault address {:#x} with registered range {:#x} - {:#x}", stval, start, start + len);
                                     stval >= start && stval < start + len
                                 }).any(|x| x);
                             if in_range {
                                 println!("Page fault address {:#x} is within a registered UFFD range, handling with UFFD", stval);
-                                *uffd.faulting_address.exclusive_access() = stval;
-                                *uffd.faulting_task.exclusive_access() = Some(task.clone());
+                                *uffd.faulting_address.lock() = stval;
+                                *uffd.faulting_task.lock() = Some(task.clone());
                                 // 唤醒一个阻塞在 read(uffd) 上的 handler 线程
-                                let mut guard = uffd.read_waiters.exclusive_access();
+                                let mut guard = uffd.read_waiters.lock();
                                 if let Some(handler) = guard.pop_front() {
                                     drop(guard);
                                     let mut h_inner = handler.inner_exclusive_access();

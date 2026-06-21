@@ -1,13 +1,14 @@
-use super::ext4inode::{Ext4Inode,Ext4InodeDisk, EXT4_EXTENTS_FL};
+use super::ext4inode::{Ext4Inode, Ext4InodeDisk, Ext4ExtentHeader, EXT4_EXTENTS_FL};
 use crate::ext4fs::BLOCK_SZ;
 use super::ext4_dir_entry::Ext4DirEntry;
-use super::block_cache::get_block_cache;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::string::String;
+use core::sync::atomic::Ordering;
 use crate::fs::TimeSpec;
 use crate::fs::VfsInode;
 use crate::syscall::fs::Statfs;
+use super::block_modify_inode;
 
 impl VfsInode for Ext4Inode {
      fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
@@ -15,7 +16,7 @@ impl VfsInode for Ext4Inode {
             return None;
         }
         let mut offset = 0;
-        let file_size_bytes = self.size as usize;
+        let file_size_bytes = self.size.load(Ordering::Relaxed) as usize;
 
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; 4096];
@@ -24,9 +25,18 @@ impl VfsInode for Ext4Inode {
 
             let mut block_offset = 0;
             while block_offset < read_len {
+                // 剩余数据不足以解析最小 ext4 目录项头部
+                if read_len - block_offset < 8 {
+                    break;
+                }
                 if let Some(dirent) = Ext4DirEntry::from_bytes(&buf[block_offset..]) {
+                    let rec_len = dirent.rec_len() as usize;
+                    // 防御：rec_len 不能为 0，也不能超出当前读取范围
+                    if rec_len == 0 || rec_len > read_len - block_offset {
+                        break;
+                    }
                     if dirent.inode() != 0 && dirent.name_len() > 0 {
-                        if dirent.name() == name {
+                        if dirent.safe_name() == name {
                             // 找到了名称匹配的项，去磁盘读它的 Inode
                             let disk_inode = self.fs.get_disk_inode(dirent.inode());
                             return Some(Arc::new(Ext4Inode::new(
@@ -37,8 +47,6 @@ impl VfsInode for Ext4Inode {
                             )));
                         }
                     }
-                    let rec_len = dirent.rec_len() as usize;
-                    if rec_len == 0 { break; }
                     block_offset += rec_len;
                 } else {
                     break;
@@ -49,16 +57,88 @@ impl VfsInode for Ext4Inode {
         None
     }
 
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        self.read_at(offset, buf) // 调用 Ext4Inode 自身的方法
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        self.raw_read_at(offset, buf) // 调用 Ext4Inode 的底层磁盘读取
     }
 
-    fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
-        self.write_at(offset, buf) // 调用 Ext4Inode 自身的方法
+    fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize {
+        let written = self.raw_write_at(offset, buf); // 调用 Ext4Inode 的底层磁盘写入
+        // 底层可能扩展了文件大小，同步更新缓存的 size
+        let new_end = (offset + written) as u64;
+        let old = self.size.load(Ordering::Relaxed);
+        if new_end > old {
+            self.size.store(new_end, Ordering::Relaxed);
+        }
+        written
     }
-    
+
+    /// 带页缓存的读取
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        let page_size = crate::PAGE_SIZE;
+        let file_size = self.get_size();
+        if offset >= file_size { return 0; }
+        let read_end = core::cmp::min(offset + buf.len(), file_size);
+        let start_page = offset / page_size;
+        let end_page = (read_end - 1) / page_size;
+
+        let mut buf_offset = 0;
+        for page_idx in start_page..=end_page {
+            let page_off = if page_idx == start_page { offset % page_size } else { 0 };
+            let copy_len = core::cmp::min(page_size - page_off, read_end - (page_idx * page_size + page_off));
+
+            let cache = self.get_shared_page(page_idx).unwrap();
+            let page = cache.lock();
+            // clone FrameTracker：持有期间物理页不会被释放
+            let _guard = page.frame.clone();
+            let src = &page.frame.get_bytes_array()[page_off..page_off + copy_len];
+            buf[buf_offset..buf_offset + copy_len].copy_from_slice(src);
+            buf_offset += copy_len;
+        }
+        buf_offset
+    }
+
+    /// 带页缓存的写入
+    fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+        let page_size = crate::PAGE_SIZE;
+        let write_end = offset + buf.len();
+        let start_page = offset / page_size;
+        let end_page = (write_end - 1) / page_size;
+
+        let mut buf_offset = 0;
+        for page_idx in start_page..=end_page {
+            let page_off = if page_idx == start_page { offset % page_size } else { 0 };
+            let copy_len = core::cmp::min(page_size - page_off, write_end - (page_idx * page_size + page_off));
+
+            let cache = self.get_shared_page(page_idx).unwrap();
+            let mut page = cache.lock();
+            // clone FrameTracker：持有期间物理页不会被释放
+            let _guard = page.frame.clone();
+            let dst = &mut page.frame.get_bytes_array()[page_off..page_off + copy_len];
+            dst.copy_from_slice(&buf[buf_offset..buf_offset + copy_len]);
+            page.dirty = true;
+            buf_offset += copy_len;
+        }
+        
+
+        // 更新文件大小（如果需要）
+        let old_size = self.get_size();
+        if write_end > old_size {
+            self.size.store(write_end as u64, Ordering::Relaxed);
+            block_modify_inode(&self.fs, self.inode_id, |disk_inode: &mut Ext4InodeDisk| {
+                disk_inode.i_size_lo = write_end as u32;
+                disk_inode.i_size_high = (write_end >> 32) as u32;
+            });
+        }
+
+        buf_offset
+    }
+
     fn get_size(&self) -> usize {
-        self.size as usize
+        self.size.load(Ordering::Relaxed) as usize
+    }
+
+    fn truncate(&self, len: usize) -> bool {
+        self.truncate(len)
     }
 
     fn get_stat(&self) -> crate::fs::Stat {
@@ -95,25 +175,29 @@ impl VfsInode for Ext4Inode {
         let new_inode_id = self.fs.alloc_inode()?;
         
         // 3. 在磁盘上初始化该 Inode 结构
-        let (block_id, offset) = self.fs.get_inode_pos(new_inode_id);
-        let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
-        block_cache.lock().modify(offset, |disk_inode: &mut Ext4InodeDisk| {
-            // 设置基本信息
+        block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
             disk_inode.i_mode = mode as u16; 
             disk_inode.i_size_lo = 0;
             disk_inode.i_size_high = 0;
             disk_inode.i_links_count = 1;
             disk_inode.i_blocks_lo = 0;
-            // 判断是否开启 extents
             if (self.fs.superblock.incompat_features & 0x40) != 0 {
                 disk_inode.i_flags = EXT4_EXTENTS_FL;
-                for i in 0..15 { disk_inode.i_block[i] = 0; }
-                // 初始化空的 extent header: magic=0xF30A, entries=0, max=4, depth=0
-                disk_inode.i_block[0] = 0xF30A; // magic: low 16 bits, entries: high 16 bits (0)
-                disk_inode.i_block[1] = 0x0004; // max: low 16 bits (4), depth: high 16 bits (0)
+                disk_inode.i_block.fill(0);
+                let header = Ext4ExtentHeader {
+                    eh_magic: 0xF30A,
+                    eh_entries: 0,
+                    eh_max: 4,
+                    eh_depth: 0,
+                    eh_generation: 0,
+                };
+                unsafe {
+                    (disk_inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader)
+                        .write_unaligned(header);
+                }
             } else {
                 disk_inode.i_flags = 0;
-                for i in 0..15 { disk_inode.i_block[i] = 0; }
+                disk_inode.i_block.fill(0);
             }
         });
 
@@ -124,9 +208,7 @@ impl VfsInode for Ext4Inode {
         }
 
         // 5. 更新父目录（当前 Inode）的元数据：确保 size 至少占用了1个块
-        let (p_block_id, p_offset) = self.fs.get_inode_pos(self.inode_id);
-        let p_block_cache = get_block_cache(p_block_id as usize, self.fs.block_dev.clone());
-        p_block_cache.lock().modify(p_offset, |p_disk_inode: &mut Ext4InodeDisk| {
+        block_modify_inode(&self.fs, self.inode_id, |p_disk_inode| {
             if p_disk_inode.i_size_lo < 4096 {
                 p_disk_inode.i_size_lo = 4096;
             }
@@ -150,17 +232,14 @@ impl VfsInode for Ext4Inode {
         let new_inode_id = self.fs.alloc_inode()?;
         info!("VFS: Creating directory '{}' with inode id {}", name, new_inode_id);
         // 3. 在磁盘上初始化该 Inode 结构
-        let (block_id, offset) = self.fs.get_inode_pos(new_inode_id);
-        let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
-        block_cache.lock().modify(offset, |disk_inode: &mut Ext4InodeDisk| {
-            // 设置基本信息
+        block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
             disk_inode.i_mode = mode as u16; 
             disk_inode.i_size_lo = 0;
             disk_inode.i_size_high = 0;
-            disk_inode.i_links_count = 2; // 目录初始链接数为2 (self + .)
+            disk_inode.i_links_count = 2;
             disk_inode.i_blocks_lo = 0;
             disk_inode.i_flags = 0;
-            for i in 0..15 { disk_inode.i_block[i] = 0; }
+            disk_inode.i_block.fill(0);
         });
 
         // 4. 在父目录的数据块中写入目录项 (文件类型 2)
@@ -170,11 +249,8 @@ impl VfsInode for Ext4Inode {
         }
 
         // 5. 更新父目录（当前 Inode）的元数据：链接数 +1，且确保 size 至少占用了1个块
-        let (p_block_id, p_offset) = self.fs.get_inode_pos(self.inode_id);
-        let p_block_cache = get_block_cache(p_block_id as usize, self.fs.block_dev.clone());
-        p_block_cache.lock().modify(p_offset, |p_disk_inode: &mut Ext4InodeDisk| {
+        block_modify_inode(&self.fs, self.inode_id, |p_disk_inode| {
             p_disk_inode.i_links_count += 1;
-            // 确保目录大小至少为1个块 (size 这里的单位保持为字节，即 4096)
             if p_disk_inode.i_size_lo < 4096 {
                 p_disk_inode.i_size_lo = 4096;
             }
@@ -197,7 +273,7 @@ impl VfsInode for Ext4Inode {
             return -1;
         }
         let mut buf_offset = 0;
-        let file_size_bytes = self.size as usize;
+        let file_size_bytes = self.size.load(Ordering::Relaxed) as usize;
         let buf_len = buf.len();
         let mut last_name = String::new();
 
@@ -210,17 +286,32 @@ impl VfsInode for Ext4Inode {
             let mut buffer_full = false;
   
             while block_offset < read_len && buf_offset < buf_len {
+                // 剩余数据不足以解析最小 ext4 目录项头部
+                if read_len - block_offset < 8 {
+                    block_offset = read_len;
+                    break;
+                }
                 if let Some(ext4_dirent) = Ext4DirEntry::from_bytes(&temp_buf[block_offset..]) {
                     let disk_rec_len = ext4_dirent.rec_len() as usize;
-                    if disk_rec_len == 0 { break; } // 防止死循环
+                    // 防御：rec_len 不能为 0，也不能超出当前读取范围
+                    if disk_rec_len == 0 || disk_rec_len > read_len - block_offset {
+                        block_offset = read_len;
+                        break;
+                    }
 
                     if ext4_dirent.inode() != 0 && ext4_dirent.name_len() > 0 {
-                        let name = ext4_dirent.name();
+                        // 使用 safe_name() 防止从越界位置读取文件名
+                        let name = ext4_dirent.safe_name();
                         last_name = String::from(name);
                         
                         let name_bytes = name.as_bytes();
                         let name_len = name_bytes.len();
                         
+                        // 跳过空文件名（无效目录项）
+                        if name_len == 0 {
+                            block_offset += disk_rec_len;
+                            continue;
+                        }
             
                         let total_len = 19 + name_len + 1;
                         
@@ -262,6 +353,9 @@ impl VfsInode for Ext4Inode {
                     }
                     block_offset += disk_rec_len; 
                 } else {
+                    // from_bytes 失败（rec_len 异常或超出缓冲区）：
+                    // 跳过当前块剩余字节，推进 offset 防止死循环
+                    block_offset = read_len;
                     break;
                 }
             } 
@@ -328,10 +422,7 @@ impl VfsInode for Ext4Inode {
         }
     }
     fn set_perm(&self, perm: crate::auth::PermStat) -> bool {
-        let (block_id, offset) = self.fs.get_inode_pos(self.inode_id);
-        let block_cache = crate::ext4fs::block_cache::get_block_cache(block_id as usize, self.fs.block_dev.clone());
-        let mut cache = block_cache.lock();
-        cache.modify(offset, |disk_inode: &mut crate::ext4fs::ext4inode::Ext4InodeDisk| {
+        block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
             disk_inode.i_mode = perm.mode.bits() as u16;
             disk_inode.i_uid = perm.uid as u16;
             disk_inode.i_gid = perm.gid as u16;
@@ -339,96 +430,71 @@ impl VfsInode for Ext4Inode {
         true
     }
     fn rename_dir_entry(&self, old_name: &str, new_name: &str) -> bool {
-    if new_name.len() > old_name.len() {
-        return false; 
-    }
+        if new_name.len() > old_name.len() {
+            return false; 
+        }
 
-    let mut offset = 0;
-    let block_size = BLOCK_SZ; 
-    let disk_inode = self.fs.get_disk_inode(self.inode_id);
-    let file_size_bytes = disk_inode.size() as usize;
+        let mut offset = 0;
+        let block_size = BLOCK_SZ; 
+        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        let file_size_bytes = disk_inode.size() as usize;
 
-   
+    
 
-    while offset < file_size_bytes {
-        let logical_block = (offset / block_size) as u32;
-        let physical_block = self.find_physical_block(logical_block);
-        if physical_block == 0 { break; }
+        while offset < file_size_bytes {
+            let logical_block = (offset / block_size) as u32;
+            let physical_block = self.find_physical_block(logical_block);
+            if physical_block == 0 { break; }
 
-        let block_cache = get_block_cache(physical_block as usize, self.fs.block_dev.clone());
-        let mut cache = block_cache.lock();
+            let mut buf = [0u8; BLOCK_SZ];
+            self.fs.block_dev.read_block(physical_block as usize, &mut buf);
+            let block: &mut [u8; 4096] = unsafe { &mut *(buf.as_mut_ptr() as *mut [u8; 4096]) };
 
-        let found = cache.modify(0, |block: &mut [u8; 4096]| {
+            let mut found = false;
             let mut block_offset = 0;
             while block_offset < block_size {
                 let dirent_ptr = block.as_mut_ptr().wrapping_add(block_offset) as *mut Ext4DirEntry;
                 let dirent = unsafe { &mut *dirent_ptr };
 
                 let rec_len = dirent.rec_len as usize;
-                if rec_len == 0 { break; } // 防止死循环
+                if rec_len == 0 { break; }
 
                 if dirent.inode != 0 {
-              
-                    let _tmp_inode = dirent.inode;
-                    let _tmp_name_len = dirent.name_len;
-  
-                
-                   
-                    
                     if dirent.name() == old_name {
-                    
-                     
-                        
                         dirent.name_len = new_name.len() as u8;
                         let name_bytes = new_name.as_bytes();
-                        
                         for i in 0..name_bytes.len() {
                             dirent.name[i] = name_bytes[i];
                         }
-                        
                         for i in name_bytes.len()..old_name.len() {
                             dirent.name[i] = 0; 
                         }
-                        
-                        return true; 
+                        found = true;
+                        break;
                     }
                 }
                 block_offset += rec_len;
             }
-            false
-        });
 
-        if found {
-            cache.sync();
-            return true;
+            if found {
+                self.fs.block_dev.write_block(physical_block as usize, &buf);
+                return true;
+            }
+            offset += block_size;
         }
-        offset += block_size;
+        false
     }
-    false
-}
-fn set_time(&self, atime: &TimeSpec, mtime: &TimeSpec) -> isize {
-        // 1. 获取当前 Inode 在磁盘上的具体位置 (块号和块内偏移)
-        let (block_id, offset) = self.fs.get_inode_pos(self.inode_id);
-        
-        // 2. 获取该块的缓存
-        let block_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
-        
-        // 3. 修改磁盘 Inode 的数据。
-        // 注意：modify 闭包内部的操作会自动把这个块标记为 dirty，之后会被写回磁盘
-        block_cache.lock().modify(offset, |disk_inode: &mut Ext4InodeDisk| {
-            // 先读取到局部变量，避免对 packed 字段取引用
-            let old_atime = disk_inode.i_atime;
-            let old_mtime = disk_inode.i_mtime;
+    fn set_time(&self, atime: &TimeSpec, mtime: &TimeSpec) -> isize {
+        block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
+            let old_atime = { disk_inode.i_atime };
+            let old_mtime = { disk_inode.i_mtime };
             println!("Ext4Inode::set_time: ino={}, old_atime={}, old_mtime={}, new_atime={}, new_mtime={}", 
                 self.inode_id, old_atime, old_mtime, atime.tv_sec, mtime.tv_sec);
-            // 通过指针写入，避免对 packed 字段取可变引用
             unsafe {
                 core::ptr::addr_of_mut!(disk_inode.i_atime).write_unaligned(atime.tv_sec as u32);
                 core::ptr::addr_of_mut!(disk_inode.i_mtime).write_unaligned(mtime.tv_sec as u32);
             }
-
         });
-
         0
     }
     fn type_name(&self) -> &'static str {

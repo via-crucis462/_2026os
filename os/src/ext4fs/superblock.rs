@@ -158,10 +158,8 @@ pub struct Ext4SuperBlockDisk {
 }
 impl Ext4SuperBlockDisk {
     pub fn new(block_device : Arc<dyn BlockDevice>) -> Self {
-        let block_cache_arc = get_block_cache(0, Arc::clone(&block_device));
-        let block_cache = block_cache_arc.lock();
-        block_cache.read(EXT4_SUPERBLOCK_OFFSET, |sb: &Ext4SuperBlockDisk| {
-            unsafe { core::ptr::read_unaligned(sb as *const _) }
-        })
+        let mut buf = [0u8; BLOCK_SZ];
+        block_device.read_block(0, &mut buf);
+        unsafe { core::ptr::read(buf.as_ptr().add(EXT4_SUPERBLOCK_OFFSET % BLOCK_SZ) as *const Ext4SuperBlockDisk) }
     }
 }

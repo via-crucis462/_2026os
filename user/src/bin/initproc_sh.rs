@@ -50,9 +50,9 @@ fn main() -> i32 {
     run_shell("");
     // Init (PID 1) must never exit — otherwise the kernel panics.
     // Loop forever, reaping any zombie children.
-    loop {
-        let mut _status: i32 = 0;
-        // waitpid(-1, ...) = wait for any child; returns -1 if no children
-        waitpid((-1isize) as usize, &mut _status);
-    }
+
+    let mut _status: i32 = 0;
+    // waitpid(-1, ...) = wait for any child; returns -1 if no children
+    waitpid((-1isize) as usize, &mut _status);
+    0
 }

@@ -87,7 +87,7 @@ impl File for Stdin {
     
     }
 
-    fn read_at(&self, _offset: usize, user_buf: UserBuffer) -> usize {
+    fn raw_read_at(&self, _offset: usize, user_buf: UserBuffer) -> usize {
         self.read(user_buf)
     }
 
@@ -96,7 +96,7 @@ impl File for Stdin {
         0
     }
 
-    fn write_at(&self, _offset: usize, _user_buf: UserBuffer) -> usize {
+    fn raw_write_at(&self, _offset: usize, _user_buf: UserBuffer) -> usize {
         warn!("write_at to stdin is not allowed");
         0
     }
@@ -144,10 +144,10 @@ impl File for Stdout {
         //drop(_lock);
         user_buf.len()
     }
-    fn read_at(&self, _offset: usize, buf: UserBuffer) -> usize {
+    fn raw_read_at(&self, _offset: usize, buf: UserBuffer) -> usize {
         self.read(buf)
     }
-    fn write_at(&self, _offset: usize, buf: UserBuffer) -> usize {
+    fn raw_write_at(&self, _offset: usize, buf: UserBuffer) -> usize {
         self.write(buf)
     }
     fn get_stat(&self) -> super::Stat {
@@ -187,10 +187,10 @@ impl File for Stderr {
         }
         user_buf.len()
     }
-    fn read_at(&self, _offset: usize, buf: UserBuffer) -> usize {
+    fn raw_read_at(&self, _offset: usize, buf: UserBuffer) -> usize {
         self.read(buf)
     }
-    fn write_at(&self, _offset: usize, buf: UserBuffer) -> usize {
+    fn raw_write_at(&self, _offset: usize, buf: UserBuffer) -> usize {
         self.write(buf)
     }
     fn get_stat(&self) -> super::Stat {

@@ -232,15 +232,21 @@ pub fn net_poll() {
         }
         if let Some(socket_wait) = queues.get(&handle) {
             if can_read {
-                let mut rx_guard = socket_wait.rx_queue.exclusive_access();
-                if !rx_guard.is_empty() {
-                    crate::task::wake_up_one(rx_guard);
+                    let has_waiting_task = {
+                        let rx_guard = socket_wait.rx_queue.exclusive_access();
+                        !rx_guard.is_empty()
+                    };
+                    if has_waiting_task {
+                        crate::task::wake_up_one(socket_wait.rx_queue.get_mutex());
+                    }
                 }
-            }
             if can_write {
-                let tx_guard = socket_wait.tx_queue.exclusive_access();
-                if !tx_guard.is_empty() {
-                    crate::task::wake_up_one(tx_guard); 
+                let has_waiting_task = {
+                    let tx_guard = socket_wait.tx_queue.exclusive_access();
+                    !tx_guard.is_empty()
+                };
+                if has_waiting_task {
+                    crate::task::wake_up_one(socket_wait.tx_queue.get_mutex());
                 }
             }
         }

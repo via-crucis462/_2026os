@@ -24,7 +24,7 @@ use crate::arch::config::*;
 pub struct VirtIOBlock{
     // 相比rv64的旧版实现，使用了新版库的Transport泛型（PciTransport），
     // 新版库会由此自动完成原驱动到pci的转换
-    inner: MPSafeCell<VirtIOBlk<VirtioHal, PciTransport>>,
+    pub inner: MPSafeCell<VirtIOBlk<VirtioHal, PciTransport>>,
 }
 
 // 维护DMA区域的内存的管理器，不过回收还没完全实现
@@ -62,44 +62,6 @@ impl VirtIOBlock {
     }
 }
 
-impl BlockDevice for VirtIOBlock {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        let len = buf.len();
-        // 扇区大小
-        const SECTOR_SIZE: usize = 512;
-        // 4096 / 512 = 8
-        let sectors = len / SECTOR_SIZE;
-        
-        let mut driver = self.inner.exclusive_access();
-        
-        let start_sector = block_id * sectors;
-        // 滑动窗口说是
-        for i in 0..sectors {
-            let offset = i * SECTOR_SIZE;
-            let sub_buf = &mut buf[offset..offset + SECTOR_SIZE];
-            driver
-                .read_blocks(start_sector + i, sub_buf)
-                .expect("Error when reading VirtIOBlk");
-        }
-    }
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
-        // 与 read_block 类似
-        let len = buf.len();
-        const SECTOR_SIZE: usize = 512;
-        let sectors = len / SECTOR_SIZE;
-        
-        let mut driver = self.inner.exclusive_access();
-        let start_sector = block_id * sectors;
-
-        for i in 0..sectors {
-            let offset = i * SECTOR_SIZE;
-            let sub_buf = &buf[offset..offset + SECTOR_SIZE];
-            driver
-                .write_blocks(start_sector + i, sub_buf)
-                .expect("Error when writing VirtIOBlk");
-        }
-    }
-}
 
 pub struct VirtioHal;
 use crate::mm;

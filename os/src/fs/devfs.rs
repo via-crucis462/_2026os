@@ -35,7 +35,7 @@ impl UrandomInode {
 
 // 实现 /dev/urandom 的 VfsInode trait
 impl VfsInode for UrandomInode {
-    fn read_at(&self, _offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, _offset: usize, buf: &mut [u8]) -> usize {
         let mut seed = self.seed.lock();
         
         for b in buf.iter_mut() {
@@ -46,7 +46,7 @@ impl VfsInode for UrandomInode {
         }
         buf.len()
     }
-    fn write_at(&self, _offset: usize, buf: &[u8]) -> usize {
+    fn raw_write_at(&self, _offset: usize, buf: &[u8]) -> usize {
         // 向 /dev/urandom 写入数据在 Linux 中的语义是“增加系统的熵池”
         // 假装写成功，丢弃数据
         buf.len()
@@ -108,7 +108,7 @@ impl VfsInode for UrandomInode {
 // 实现tty为vfs inode
 impl super::VfsInode for TtyInode {
     // 读取终端输入
-    fn read_at(&self, _offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, _offset: usize, buf: &mut [u8]) -> usize {
         if buf.is_empty() { return 0; }
         let mut c: usize;
         loop {
@@ -127,7 +127,7 @@ impl super::VfsInode for TtyInode {
         1
     }
     // 终端输出
-    fn write_at(&self, _offset: usize, buf: &[u8]) -> usize { 
+    fn raw_write_at(&self, _offset: usize, buf: &[u8]) -> usize { 
         let str = core::str::from_utf8(buf).unwrap_or("<invalid utf-8>");
         print!("{}", str);
         buf.len()
@@ -156,10 +156,10 @@ pub struct NullInode {
 }
 
 impl VfsInode for NullInode {
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize {
         0 // 读返回 0 (EOF)
     }
-    fn write_at(&self, _offset: usize, buf: &[u8]) -> usize {
+    fn raw_write_at(&self, _offset: usize, buf: &[u8]) -> usize {
         // 忽略写操作
         buf.len()
     }
@@ -198,12 +198,12 @@ impl ZeroInode {
 }
 
 impl VfsInode for ZeroInode {
-    fn read_at(&self, _offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, _offset: usize, buf: &mut [u8]) -> usize {
         buf.fill(0); // 缓冲区全填 0
         buf.len()
     }
 
-    fn write_at(&self, _offset: usize, buf: &[u8]) -> usize {
+    fn raw_write_at(&self, _offset: usize, buf: &[u8]) -> usize {
         buf.len() 
     }
     
@@ -239,8 +239,8 @@ impl RtcInode {
 }
 
 impl VfsInode for RtcInode {
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {

@@ -32,6 +32,9 @@ impl<T> MPSafeCell<T> {
     pub fn exclusive_access(&self) -> MutexGuard<'_, T> {
         self.inner.lock()
     }
+    pub fn get_mutex(&self) -> &Mutex<T> {
+        &self.inner
+    }
 }
 
 pub type MPSafeGuard<'a, T> = MutexGuard<'a, T>;

@@ -62,7 +62,7 @@ impl TmpfsFileInode {
 }
 
 impl super::VfsInode for TmpfsFileInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let size = *self.size.lock();
         if offset >= size {
             return 0; 
@@ -93,7 +93,7 @@ impl super::VfsInode for TmpfsFileInode {
     }
 
     // 2. 适配页缓存的文件写入（支持动态自动扩容分配物理页）
-    fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+    fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize {
         let mut size = self.size.lock();
         let mut pages = self.pages.lock();
         let end_offset = offset + buf.len();
@@ -142,7 +142,7 @@ impl super::VfsInode for TmpfsFileInode {
         // 扩张：tmpfs 用惰性分配策略，跳过
         true
     }
-    fn get_shared_page(&self, page_offset: usize) -> Option<PhysPageNum> {
+    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<Mutex<crate::mm::mmap::PageCache>>> {
         let mut frames = self.pages.lock();
         // 如果 mmap 映射的页超出了当前文件大小，Linux 允许直接分配空白页给它
         let frame = frames.entry(page_offset).or_insert_with(|| {
@@ -151,7 +151,8 @@ impl super::VfsInode for TmpfsFileInode {
             unsafe { core::slice::from_raw_parts_mut(page_kvaddr as *mut u8, PAGE_SIZE).fill(0); }
             f
         });
-        Some(frame.ppn)
+        let page_cache = crate::mm::mmap::PageCache::new(frame.clone());
+        Some(Arc::new(Mutex::new(page_cache)))
     }
     fn ino(&self) -> u64 {
         self.stat.lock().ino
@@ -234,9 +235,22 @@ impl TmpfsDirInode {
     }
 }
 
+fn tmpfs_dirent_type_from_mode(mode: u32) -> u8 {
+    match mode & 0o170000 {
+        0o010000 => 1,
+        0o020000 => 2,
+        0o040000 => 4,
+        0o060000 => 6,
+        0o100000 => 8,
+        0o120000 => 10,
+        0o140000 => 12,
+        _ => 0,
+    }
+}
+
 impl super::VfsInode for TmpfsDirInode {
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
     fn ino(&self) -> u64 { self.stat.lock().ino }
     
@@ -302,7 +316,37 @@ impl super::VfsInode for TmpfsDirInode {
         }
     }
 
-    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { 0 }
+    fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
+        let entries = self.entries_snapshot();
+        let mut buf_offset = 0;
+
+        while *offset < entries.len() {
+            let (name, inode) = &entries[*offset];
+            let name_bytes = name.as_bytes();
+            let name_len = name_bytes.len().min(255);
+            let total_len = 8 + 8 + 2 + 1 + name_len + 1;
+            let d_reclen = (total_len + 7) & !7;
+            if buf_offset + d_reclen > buf.len() {
+                break;
+            }
+
+            let stat = inode.get_stat();
+            let d_off = (*offset + 1) as i64;
+            buf[buf_offset..buf_offset + 8].copy_from_slice(&stat.ino.to_ne_bytes());
+            buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&d_off.to_ne_bytes());
+            buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(d_reclen as u16).to_ne_bytes());
+            buf[buf_offset + 18] = tmpfs_dirent_type_from_mode(stat.mode);
+            buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(&name_bytes[..name_len]);
+            for byte in &mut buf[buf_offset + 19 + name_len..buf_offset + d_reclen] {
+                *byte = 0;
+            }
+
+            buf_offset += d_reclen;
+            *offset += 1;
+        }
+
+        buf_offset as isize
+    }
     fn statfs(&self) -> Statfs {
         Statfs {
             f_type: 0x01021994, // Tmpfs 的魔数
@@ -433,8 +477,10 @@ pub fn setup_oscomp_env() {
         if let Some(busybox_node) = musl_dir.find_child("busybox") {
             let bb_inode = busybox_node.inode.clone();
             let applets = [
-                "basename", "dirname", "sh", "grep", "sed", "awk", "cat", 
-                "ls", "rm", "echo", "true", "false", "wc", "mkdir", "rmdir", "touch", "env","cut",
+                "[", "basename", "cat", "chmod", "cp", "cut", "date", "dirname", "echo", "env",
+                "false", "grep", "head", "kill", "ln", "ls", "mkdir", "mv", "printf", "pwd", "rm",
+                "rmdir", "sed", "sh", "sleep", "sort", "tail", "test", "touch", "tr", "true", "uname",
+                "wc", "which", "xargs", "awk","cut",
                 "tr", "head", "tail", "sort", "uniq", "tee", "sleep", "id", "uname", 
                 "which", "find", "xargs", "chmod", "chown", "date", "printf", "clear","ps", "fgrep","mktemp"
             ];
@@ -584,7 +630,7 @@ pub struct TmpfsFsSymbolicLinkInode {
     stat: Mutex<Stat>,
 }
 impl VfsInode for TmpfsFsSymbolicLinkInode {
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize { 
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize { 
         let target_bytes = self.target.as_bytes();
         if offset >= target_bytes.len() {
             return 0;
@@ -593,7 +639,7 @@ impl VfsInode for TmpfsFsSymbolicLinkInode {
         buf[..copy_len].copy_from_slice(&target_bytes[offset..offset + copy_len]);
         copy_len
     }
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { self.target.len() }
     fn get_stat(&self) -> super::Stat {
         let mut stat = *self.stat.lock();

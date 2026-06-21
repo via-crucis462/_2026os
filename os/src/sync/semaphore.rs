@@ -32,9 +32,9 @@ impl<T> Semaphore<T> {
     pub fn lock(&self) -> SemaphoreGuard<'_, T>{
 
         if self.count.fetch_sub(1, Ordering::Acquire)/*返回的是旧值*/ < 1 {
-            let queue = self.wait_queue.lock();
+            let queue = &self.wait_queue;
             // 当前线程进入等待队列
-            current_task_to_sleep(queue);
+            block_current_and_run_next(queue);
         }
         SemaphoreGuard {
             sem: self,
@@ -80,6 +80,9 @@ impl WaitQueue {
     pub fn get_tids(&self) -> Vec<usize> {
         self.queue.iter().map(|task| task.gettid()).collect()
     }
+    pub fn remove_task(&mut self, tid: usize) {
+        self.queue.retain(|task| task.gettid() != tid);
+    }
 }
 
 pub struct SemaphoreGuard<'a, T> {
@@ -91,7 +94,7 @@ impl <T> Drop for SemaphoreGuard<'_, T> {
         // 释放锁
         // 上面的代码必须执行完才能执行这个
         if self.sem.count.fetch_add(1, Ordering::Release)/*返回的是旧值*/ < 0 {
-            let queue = self.sem.wait_queue.lock();
+            let queue = &self.sem.wait_queue;
             // 唤醒等待队列中的一个线程
             wake_up_one(queue);
         }

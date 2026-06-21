@@ -291,17 +291,17 @@ impl MemorySet {
                 ekernel_addr,
             );
             info!("mapping physical memory");
-            // 临时：留下最后0x100_0000给内核栈
+            // 内核栈可用空间
             memory_set.push(
                 MapArea::new(
-                    (ekernel_addr + DMA_SIZE).into(),
-                    (MEMORY_END - 0x100_0000).into(),
+                    (LOWRAM_BASE).into(),
+                    (LOWRAM_END).into(),
                     MapType::Identical,
                     MapPermission::R | MapPermission::W,
                     PageSize::Page4K
                 ),
                 None,
-                ekernel_addr + DMA_SIZE,
+                LOWRAM_BASE,
             );
         }
         // --- 等到大页映射完再映射标准页，避免产生碎片（虽然会被放进回收栈，影响很小） ---
@@ -963,6 +963,7 @@ impl MemorySet {
         let mut start_va = addr;
         if start_va == 0 {
             if let Some(new_addr) = self.find_free_area(length) {
+                //println!("[kernel] mmap: found free area at {:#x} for length {:#x}", new_addr, length);
                 start_va = new_addr;
             } else {
                 error!("mmap failed: no suitable free area found for length {:#x}", length);
@@ -1007,7 +1008,7 @@ impl MemorySet {
         if is_shared && !is_anonymous {
             // 共享文件映射 
             let file = file_inner.as_ref().unwrap();
-            let area = MapArea {
+            let mut area = MapArea {
                 vpn_range: VPNRange::new(
                     VirtAddr::from(start_va).std_floor(), 
                     VirtAddr::from(start_va + length).std_ceil()
@@ -1031,25 +1032,25 @@ impl MemorySet {
                 if file_page_offset >= file_end_page_offset {
                     break;
                 }
-                if let Some(shared_ppn) = file.get_shared_page(file_page_offset) {
-                    /* 前面检查过了
-                    if self.page_table.translate(VirtPageNum::from(vpn)).is_some() {
-                        self.page_table.unmap(VirtPageNum::from(vpn)); 
-                    }
-                    */
+                if let Some(cache) = file.get_shared_page(file_page_offset) {
+                    let page = cache.lock();
+                    let ppn = page.frame.ppn;
+                    // clone FrameTracker: 引用计数 +1
+                    let frame_clone = page.frame.clone();
                     let pte_flags = PTEFlags::from_bits(permission.bits).unwrap();
-                    self.page_table.map(VirtPageNum::from(vpn), shared_ppn, pte_flags,Page4K);
+                    self.page_table.map(VirtPageNum::from(vpn), ppn, pte_flags,Page4K);
+                    area.data_frames.insert(VirtPageNum::from(vpn), frame_clone);
                 } else {
                     return Err(Errno::ENOMEM.as_isize());
                 }
             }
             // 注册到全局共享页面管理器
-            let man = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
-            man.register_file(file.ino(), file);
+            crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER.register_file(file.ino(), file);
             // 这里是简单插入，映射在前面已经完成了
             self.areas.push(area);
         } else {
             // 普通映射
+            //println!("[kernel] mmap: inserting file area at [{:#x}, {:#x}) with permissions {:?} and shared={}", start_va, start_va + length, permission, is_shared);
             self.insert_file_area(
                 VirtAddr::from(start_va),
                 VirtAddr::from(start_va + length),
@@ -1145,16 +1146,17 @@ impl MemorySet {
                     // 情况1：All（当前块被目标区域完全包裹，全部删掉）
                     let mut vpn = a_start;
                     while vpn < a_end {
-                        area.unmap_one_safe(&mut self.page_table, vpn);
+                        area.unmap_one(&mut self.page_table, vpn);
                         vpn.step_by(step);
                     }
                     area.resize(a_start, a_start); // 长度设为0，稍后统一 retain 清理
                     
                 } else if !delete_left && !delete_right {
+                    // panic!("munmap: test : split area in the middle");
                     // 情况2：Split（目标区域在当前块中间，一分为二）
                     // 2.1 清理中间被 unmap 的页表和物理页
                     for vpn in VPNRange::new(start_vpn, end_vpn) {
-                        area.unmap_one_safe(&mut self.page_table, vpn);
+                        area.unmap_one(&mut self.page_table, vpn);
                     }
                     // 2.2 切出右半部分保留的物理帧
                     let right_frames = area.data_frames.split_off(&end_vpn);
@@ -1169,7 +1171,7 @@ impl MemorySet {
                     // 情况3：Inc_Left（删掉左边部分）
                     let mut vpn = a_start;
                     while vpn < end_vpn {
-                        area.unmap_one_safe(&mut self.page_table, vpn);
+                        area.unmap_one(&mut self.page_table, vpn);
                         vpn.step_by(step);
                     }
                     
@@ -1179,7 +1181,7 @@ impl MemorySet {
                     // 情况4：Inc_Right（删掉右边部分）
                     let mut vpn = start_vpn;
                     while vpn < a_end {
-                        area.unmap_one_safe(&mut self.page_table, vpn);
+                        area.unmap_one(&mut self.page_table, vpn);
                         vpn.step_by(step);
                     }
                     area.resize(a_start, start_vpn);
@@ -1201,6 +1203,205 @@ impl MemorySet {
 
         Ok(())
     }
+
+    fn split_area_at(&mut self, idx: usize, split_vpn: VirtPageNum) -> Result<Option<usize>, isize> {
+        let area_start = self.areas[idx].vpn_range.get_start();
+        let area_end = self.areas[idx].vpn_range.get_end();
+        if split_vpn <= area_start || split_vpn >= area_end {
+            return Ok(None);
+        }
+
+        let step = self.areas[idx].page_size.num_pages();
+        if split_vpn.0 % step != 0 {
+            return Err(Errno::EINVAL.as_isize());
+        }
+
+        let right_frames = self.areas[idx].data_frames.split_off(&split_vpn);
+        let mut right_area = self.areas[idx].clone_meta_with_new_range(split_vpn, area_end);
+        right_area.data_frames = right_frames;
+        self.areas[idx].resize(area_start, split_vpn);
+        self.areas.insert(idx + 1, right_area);
+        if idx < self.brk_index {
+            self.brk_index += 1;
+        }
+        Ok(Some(idx + 1))
+    }
+
+    pub fn mprotect(&mut self, start: usize, length: usize, prot: mmap::MMapProt) -> Result<(), isize> {
+        if length == 0 {
+            return Ok(());
+        }
+
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| Errno::EINVAL.as_isize())?;
+        let start_vpn = VirtAddr::from(start).std_floor();
+        let end_vpn = VirtAddr::from(end).std_ceil();
+
+        let mut permission = MapPermission::empty();
+        if prot.contains(mmap::MMapProt::PROT_READ) {
+            permission |= MapPermission::R;
+        }
+        if prot.contains(mmap::MMapProt::PROT_WRITE) {
+            permission |= MapPermission::W;
+        }
+        if prot.contains(mmap::MMapProt::PROT_EXEC) {
+            permission |= MapPermission::X;
+        }
+        if prot != mmap::MMapProt::PROT_NONE {
+            permission |= MapPermission::U;
+        }
+
+        let mut covered_until = start_vpn;
+        let mut affected: Vec<usize> = self
+            .areas
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, area)| {
+                if area.vpn_range.get_start() < end_vpn && area.vpn_range.get_end() > start_vpn {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        affected.sort_by_key(|&idx| self.areas[idx].vpn_range.get_start().0);
+
+        if affected.is_empty() {
+            return Err(Errno::ENOMEM.as_isize());
+        }
+
+        for &idx in affected.iter() {
+            let area = &self.areas[idx];
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            if area.map_type == MapType::Guard || area_start > covered_until {
+                return Err(Errno::ENOMEM.as_isize());
+            }
+            if permission.contains(MapPermission::W) && area.is_shared {
+                if let Some((file, _)) = &area.backing_file {
+                    if !file.writable() {
+                        return Err(Errno::EACCES.as_isize());
+                    }
+                }
+            }
+            if area.page_size != Page4K {
+                let step = area.page_size.num_pages();
+                if start_vpn.0 % step != 0 || end_vpn.0 % step != 0 {
+                    return Err(Errno::EINVAL.as_isize());
+                }
+            }
+            if area_end > covered_until {
+                covered_until = area_end;
+            }
+        }
+
+        if covered_until < end_vpn {
+            return Err(Errno::ENOMEM.as_isize());
+        }
+
+        for &idx in affected.iter().rev() {
+            self.split_area_at(idx, end_vpn)?;
+            self.split_area_at(idx, start_vpn)?;
+        }
+
+        let pte_flags = PTEFlags::from_bits(permission.bits).unwrap();
+        for area in self.areas.iter_mut() {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            if area_start >= start_vpn && area_end <= end_vpn {
+                area.map_perm = permission;
+                let step = area.page_size.num_pages();
+                let mut vpn = area_start;
+                while vpn < area_end {
+                    if let Some(pte) = self.page_table.translate(vpn) {
+                        if pte.is_valid() {
+                            self.page_table.set_flags(vpn, pte_flags, area.page_size);
+                        }
+                    }
+                    vpn.step_by(step);
+                }
+            }
+        }
+
+        #[cfg(target_arch = "riscv64")]
+        unsafe {
+            asm!("sfence.vma x0, {asid}", asid = in(reg) self.asid());
+        }
+        #[cfg(target_arch = "loongarch64")]
+        Self::flush_tlb_after_mapping_change();
+
+        Ok(())
+    }
+
+    pub fn disable_share_in_range(&mut self, start: usize, length: usize) -> Result<(), isize> {
+        if length == 0 {
+            return Ok(());
+        }
+
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| Errno::EINVAL.as_isize())?;
+        let start_vpn = VirtAddr::from(start).std_floor();
+        let end_vpn = VirtAddr::from(end).std_ceil();
+
+        let mut covered_until = start_vpn;
+        let mut affected: Vec<usize> = self
+            .areas
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, area)| {
+                if area.vpn_range.get_start() < end_vpn && area.vpn_range.get_end() > start_vpn {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        affected.sort_by_key(|&idx| self.areas[idx].vpn_range.get_start().0);
+
+        if affected.is_empty() {
+            return Err(Errno::ENOMEM.as_isize());
+        }
+
+        for &idx in affected.iter() {
+            let area = &self.areas[idx];
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            if area.map_type == MapType::Guard || area_start > covered_until {
+                return Err(Errno::ENOMEM.as_isize());
+            }
+            if area.page_size != Page4K {
+                let step = area.page_size.num_pages();
+                if start_vpn.0 % step != 0 || end_vpn.0 % step != 0 {
+                    return Err(Errno::EINVAL.as_isize());
+                }
+            }
+            if area_end > covered_until {
+                covered_until = area_end;
+            }
+        }
+
+        if covered_until < end_vpn {
+            return Err(Errno::ENOMEM.as_isize());
+        }
+
+        for &idx in affected.iter().rev() {
+            self.split_area_at(idx, end_vpn)?;
+            self.split_area_at(idx, start_vpn)?;
+        }
+
+        for area in self.areas.iter_mut() {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            if area_start >= start_vpn && area_end <= end_vpn {
+                area.is_shared = false;
+            }
+        }
+
+        Ok(())
+    }
+
     /// 处理缺页异常。如果触发异常的地址在合法区域内，则为其分配物理页；否则返回 false。
     /// 待进一步完善&测试
     #[no_mangle]
@@ -1267,6 +1468,8 @@ impl MemorySet {
         }
 
         if let Some((idx, old_start_vpn)) = expand_idx {
+            // 从被扩张的 area 获取 page_size
+            page_size_opt = Some(self.areas[idx].page_size);
             // 执行扩张：将该 Area 的起点向下延伸到 vpn (注意保留原来的终点)
             self.areas[idx].vpn_range = crate::mm::address::VPNRange::new(
                 vpn,
@@ -1382,22 +1585,30 @@ impl MapArea {
             page_size: another.page_size,
         }
     }
-    /// 如果是共享映射写回内容，如果是私有匿名映射则释放物理页
-    pub fn unmap_one_safe(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
-        if page_table.translate(vpn).is_some() {
-            page_table.unmap(vpn);
-        }
-        // 如果是私有匿名映射，需要将私有物理帧从 data_frames 里移除释放
-        if !self.is_shared {
-            self.data_frames.remove(&vpn);
-        } else if self.backing_file.is_some() {
-            // 共享文件映射：写回内容，根据相对虚拟页号偏移计算文件页偏移
-            if let Some((file, base_offset)) = &self.backing_file {
-                let file_page_offset = *base_offset + (vpn.0 - self.vpn_range.get_start().0);
-                let ino = file.ino();
-                let man = &super::mmap::SHARED_PAGE_CACHE_MANAGER;
-                man.write_back_shared_page_cache(ino, file_page_offset, file);
+    /// 解除单页映射并释放物理帧
+    pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+        match self.map_type {
+            MapType::Framed | MapType::File => {
+                // 共享文件映射需要先写回内容
+                if self.is_shared {
+                    if let Some((file, base_offset)) = &self.backing_file {
+                        let file_page_offset = *base_offset + (vpn.0 - self.vpn_range.get_start().0);
+                        let man = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
+                        man.write_back_page_cache(file.ino(), file_page_offset, file);
+                    }
+                }
+
+                // 先 drop FrameTracker，主要针对 clone_vm 子进程继承父进程页表的情况
+                // 调了好久才发现这种情况，如果不判断是否有frame就改页表，会炸掉:(
+                if self.data_frames.remove(&vpn).is_some() {
+                    // 解除映射页表
+                    page_table.unmap(vpn);
+                }
             }
+            MapType::Identical => {
+                page_table.unmap(vpn);
+            }
+            MapType::Guard => {}
         }
     }
 
@@ -1443,14 +1654,15 @@ impl MapArea {
         #[cfg(target_arch = "riscv64")]
         page_table.map(vpn, ppn, pte_flags, page_size);
     }
-    pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+    /* pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         match self.map_type {
             MapType::Framed | MapType::File => {
                 if self.data_frames.remove(&vpn).is_some() {
-                    page_table.unmap(vpn);
+                    // 共享映射的 PTE 可能已被 munmap 解除，先检查
+                    if page_table.translate(vpn).is_some() {
+                        page_table.unmap(vpn);
+                    }
                 } else if self.is_shared {
-                    // 共享页在全局管理器中，这里只解除页表的映射即可。
-                    // 至于文件内容，在解除映射前其实已经写回了。
                     if page_table.translate(vpn).is_some() && page_table.translate(vpn).unwrap().is_valid() {
                         page_table.unmap(vpn);
                     }
@@ -1461,7 +1673,7 @@ impl MapArea {
             }
             MapType::Guard => {}
         }
-    }
+    }*/
     pub fn map(&mut self, page_table: &mut PageTable) {
         let step = self.page_size.num_pages();
         let mut vpn = self.vpn_range.get_start();
@@ -1554,13 +1766,13 @@ impl MapArea {
     }
     /// 将段内数据全部写回文件（如果是共享文件映射）
     pub fn sync_back_to_file(&mut self) {
-        let man = &super::mmap::SHARED_PAGE_CACHE_MANAGER;
         if self.is_shared {
             if let Some((file, offset)) = &self.backing_file {
                 let ino = file.ino();
                 for vpn in self.vpn_range.clone() {
                     let file_page_offset = *offset + (vpn.0 - self.vpn_range.get_start().0);
-                    man.write_back_shared_page_cache(ino, file_page_offset, file);
+                    let man = &super::mmap::SHARED_PAGE_CACHE_MANAGER;
+                    man.write_back_page_cache(ino, file_page_offset, file);
                 }
             }
         }

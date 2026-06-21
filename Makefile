@@ -91,8 +91,8 @@ debug-rv: build-user-rv copy-user-rv build-rv copy-rv
 	-rtc base=utc \
 	-semihosting-config enable=on,target=native \
 	-S -gdb tcp::$(RV_GDB_PORT) \
-	
-
+	-monitor tcp::1236,server,nowait \
+	| tee kernel_output.log
 
 debug-la: MODE = debug
 debug-la: build-user-la copy-user-la build-la copy-la
@@ -109,6 +109,7 @@ debug-la: build-user-la copy-user-la build-la copy-la
 	-netdev user,id=net0 \
 	-rtc base=utc \
 	-S -gdb tcp::$(LA_GDB_PORT) \
+	-monitor tcp::1237,server,nowait \
 	| tee kernel_output.log
 
 gdb-rv:

@@ -1,7 +1,7 @@
 //！ TODO：需要仔细核对并修改exec和fork的实现
 
 use super::*;
-use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
+use super::{kstack_alloc, pid_alloc, tid_alloc, tid_from_pid, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
 use schedule::*;
 use core::mem;
 use core::sync::atomic::{AtomicI32, Ordering};
@@ -24,6 +24,7 @@ use alloc::{
     vec::Vec,
 };
 use crate::arch::{config::*, trap};
+use crate::arch::timer::get_time_us;
 use crate::arch::mm::flush_tlb_for_asid;
 use spin::Mutex;
 
@@ -122,7 +123,7 @@ impl ProcessControlBlock {
         //pid ，tid 和内核栈的分配
         let pid_handle = Arc::new(pid_alloc());
         //println!("[kernel] TaskControlBlock::new: allocated PID {}", pid_handle.0);
-        let tid_handle = Arc::new(tid_alloc());
+        let tid_handle = Arc::new(tid_from_pid(pid_handle.0));
         //println!("[kernel] TaskControlBlock::new: allocated TID {}", tid_handle.0);
         let kernel_stack = kstack_alloc();
         
@@ -213,27 +214,34 @@ impl ProcessControlBlock {
                 alive_task_count: 0,
                 tasks: Vec::new(),
                 personality: 0, // 默认 personality 为 0 (通常表示标准 Linux 兼容模式)
+                locked_bytes: 0,
+                start_time_us: get_time_us(),
             })
         });
         // 为pcb创建主线程
         let task_control_block = Arc::new(TaskControlBlock{
             process: Arc::downgrade(&proc_control_block),
             tid: tid_handle.clone(),
+            tgid: pid_handle.0,
             kernel_stack,
             inner: MPSafeCell::new(TaskControlBlockInner {
                 trap_cx_addr,
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
                 owner_hart: None,
+                sched_policy: SCHED_IDLE, // initproc默认用SCHED_IDLE策略
+                sched_priority: 0,
                 signal_mask: SignalFlags::empty(),
                 killed: false,
                 term_signal: None,
                 signal_mask_backup: Vec::new(),
                 frozen: false,
                 trap_ctx_backup: Vec::new(),
+                signal_user_context_backup: Vec::new(),
                 exit_code: 0,
                 errno: 0,
                 signals: SignalFlags::empty(),
+                signal_interrupted: false,
                 clear_child_tid: 0,
 
             })
@@ -424,6 +432,7 @@ impl ProcessControlBlock {
         proc_inner.memory_set.sync_shared_pages();
         proc_inner.memory_set.recycle_data_pages();
         proc_inner.memory_set = memory_set;
+        proc_inner.start_time_us = get_time_us();
 
         // 修改trap上下文
         let mut trap_cx = TrapContext::app_init_context(
@@ -470,7 +479,7 @@ impl ProcessControlBlock {
     /// Fork from parent to child
     /// 已编辑，添加了stack参数 
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
-    pub fn fork(self: &Arc<ProcessControlBlock>, sp: Option<usize>, caller_task: Arc<TaskControlBlock>, _flags: usize)-> (Arc<Self>, Arc<TaskControlBlock>) {
+    pub fn fork(self: &Arc<ProcessControlBlock>, sp: usize, caller_task: Arc<TaskControlBlock>, _flags: usize)-> (Arc<Self>, Arc<TaskControlBlock>) {
         const CLONE_VM: usize = 0x00000100; // 共享内存空间
         const CLONE_THREAD: usize = 0x00010000; // 共享线程组（即父子线程共享 PCB）
         const CLONE_CHILD_CLEARTID: usize = 0x00200000; // 子线程退出时清除父线程中的子线程 ID（即 clear_child_tid）
@@ -491,7 +500,7 @@ impl ProcessControlBlock {
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = Arc::new(pid_alloc());
         //println!("[kernel] TaskControlBlock::fork: allocated PID {}", pid_handle.0);
-        let tid_handle = Arc::new(tid_alloc());
+        let tid_handle = Arc::new(tid_from_pid(pid_handle.0));
         //println!("[kernel] TaskControlBlock::fork: allocated TID {}", tid_handle.0);
         let kernel_stack = kstack_alloc();
         let trap_cx_addr: usize;
@@ -561,6 +570,8 @@ impl ProcessControlBlock {
                 tasks: Vec::new(),
                 alive_task_count: 1, // 初始有一个线程
                 personality: parent_inner.personality,
+                locked_bytes: 0, // fork 时不继承父进程的锁定内存
+                start_time_us: get_time_us(),
                 rlimit_data: parent_inner.rlimit_data.clone(),
                 rlimit_nproc: parent_inner.rlimit_nproc.clone(),
                 rlimit_as: parent_inner.rlimit_as.clone(),
@@ -569,6 +580,7 @@ impl ProcessControlBlock {
         let new_task = Arc::new(TaskControlBlock {
             process: Arc::downgrade(&proc_control_block),
             tid: tid_handle.clone(),
+            tgid: pid_handle.0,
             kernel_stack: kernel_stack,
             inner: MPSafeCell::new(TaskControlBlockInner {
                 trap_cx_addr,
@@ -576,14 +588,18 @@ impl ProcessControlBlock {
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
                 owner_hart: None,
+                sched_policy: caller_inner.sched_policy,
+                sched_priority: caller_inner.sched_priority,
                 signal_mask: caller_inner.signal_mask,
                 killed: false,
                 term_signal: None,
                 frozen: false,
                 trap_ctx_backup: Vec::new(),
+                signal_user_context_backup: Vec::new(),
                 exit_code: 0,
                 errno: 0,
                 signals: SignalFlags::empty(),
+                signal_interrupted: false,
                 clear_child_tid: 0,
             }),
         });
@@ -596,8 +612,21 @@ impl ProcessControlBlock {
         {
             trap_cx.kernel_sp = kernel_stack_top;
         }
-        if let Some(sp) = sp {
+        if sp != 0 {
             trap_cx.set_sp(sp);
+        }
+        else if _flags & CLONE_VM != 0 {
+            // clone 但没传栈：mmap 一块新栈
+            const STACK_SIZE: usize = 0x20000; // 128KB
+            let stack_bottom = proc_control_block.inner_exclusive_access().memory_set.mmap(
+                0, STACK_SIZE,
+                mmap::MMapProt::from_bits_truncate(3),      // PROT_READ | PROT_WRITE
+                mmap::MMapFlags::MAP_PRIVATE | mmap::MMapFlags::MAP_ANONYMOUS,
+                None, 0,
+            ).unwrap_or(0);
+            if stack_bottom != 0 {
+                trap_cx.set_sp(stack_bottom + STACK_SIZE); // 栈顶 = 栈底 + 大小
+            }
         }
         // 把任务加入进程的线程列表
         proc_control_block.inner.exclusive_access().tasks.push(new_task.clone());
@@ -656,21 +685,26 @@ impl ProcessControlBlock {
         let new_task = Arc::new(TaskControlBlock {
             process: Arc::downgrade(self),
             tid: tid_handle,
+            tgid: self.pid.0,
             kernel_stack,
             inner: MPSafeCell::new(TaskControlBlockInner {
                 trap_cx_addr,
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
                 owner_hart: None,
+                sched_policy: caller_inner.sched_policy,
+                sched_priority: caller_inner.sched_priority,
                 exit_code: 0,
                 errno: 0,
                 signals: SignalFlags::empty(),
+                signal_interrupted: false,
                 signal_mask: caller_inner.signal_mask,
                 signal_mask_backup: Vec::new(),
                 killed: false,
                 term_signal: None,
                 frozen: false,
                 trap_ctx_backup: Vec::new(),
+                signal_user_context_backup: Vec::new(),
                 clear_child_tid: 0,
             }),
         });
@@ -782,6 +816,11 @@ impl ProcessControlBlock {
         let mut inner = self.inner_exclusive_access();
         inner.memory_set.munmap(addr, length)
     }
+
+    pub fn mprotect(&self, addr: usize, length: usize, prot: mmap::MMapProt) -> Result<(), isize> {
+        let mut inner = self.inner_exclusive_access();
+        inner.memory_set.mprotect(addr, length, prot)
+    }
 }
 
 pub struct ProcessControlBlockInner {
@@ -849,6 +888,11 @@ pub struct ProcessControlBlockInner {
     
     /// RLIMIT_AS: 限制进程能使用的“虚拟地址空间”总大小 (Address Space)
     pub rlimit_as: Rlimit64,
+    // MAP_LOCKED 锁定的内存字节数（用于 /proc/self/status VmLck 字段）
+    pub locked_bytes: usize,
+
+    /// Approximate process start timestamp in microseconds since boot.
+    pub start_time_us: usize,
 }
 
 impl ProcessControlBlockInner {
@@ -858,7 +902,7 @@ impl ProcessControlBlockInner {
     pub fn get_asid(&self) -> usize {
         self.memory_set.asid()
     }
-    pub fn alloc_fd(&mut self) -> Option<usize> {
+        pub fn alloc_fd(&mut self) -> Option<usize> {
         // 1. 先尝试在现有的表中寻找被 close 空出来的坑位
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_available()) {
             self.fd_table[fd].flags = FdFlags::empty();
@@ -894,8 +938,24 @@ impl ProcessControlBlockInner {
     pub fn get_rlimit64(&self) -> Rlimit64 {
         self.fd_rlmt.clone()
     }
-    pub fn set_rlimit64(&mut self, new_rlmt: Rlimit64) {
+    pub fn set_rlimit64(&mut self, new_rlmt: Rlimit64) -> isize {
+        // cur_lmt 不能超过 max_lmt
+        if self.fd_rlmt.max_lmt < new_rlmt.cur_lmt {
+            return EINVAL.as_isize();
+        }
+        // 当降低软限制时，尝试从尾部裁剪 fd_table 中的空槽位
+        if new_rlmt.cur_lmt < self.fd_table.len() {
+            while self.fd_table.len() > new_rlmt.cur_lmt {
+                if self.fd_table.last().unwrap().file.is_some() {
+                    // 尾部有仍打开的文件，无法收缩
+                    return EBADF.as_isize();
+                } else {
+                    self.fd_table.pop();
+                }
+            }
+        }
         self.fd_rlmt = new_rlmt;
+        0
     }
     //回收进程资源，返回子进程组，用于给initproc回收
     pub fn recycle_on_exit(&mut self, exit_code: i32) -> Vec<Arc<ProcessControlBlock>> {
@@ -910,9 +970,9 @@ impl ProcessControlBlockInner {
         self.alive_task_count == 0
     }
     pub fn info_map_areas(&self) {
-            println!("mapping asid {}:", self.get_asid());
+            info!("mapped asid {}:", self.get_asid());
         for i in self.memory_set.areas().iter() {
-            println!("mapping: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
+            info!("mapped: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
         }
     }
 }

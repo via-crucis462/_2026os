@@ -6,6 +6,7 @@ mod context;
 use crate::{KERNEL_STACK_SIZE, PAGE_SIZE, get_hart_id};
 use crate::mm::{PageTable, VirtAddr};
 use crate::syscall::syscall;
+use crate::arch::timer::get_time_ms;
 use crate::arch::mm::flush_tlb_for_asid;
 use crate::task::{
     KernelStack, SignalFlags,
@@ -13,8 +14,8 @@ use crate::task::{
     current_user_token, exit_current_and_run_next,
     suspend_current_and_run_next, handle_signals
 };
-use crate::arch::timer::set_next_trigger;
 use crate::net::net_poll;
+use alloc::sync::Arc;
 use core::arch::{asm, global_asm};
 global_asm!(include_str!("trap.S"));
 
@@ -127,8 +128,6 @@ pub fn enable_timer_interrupt() {
     crate::arch::timer::init_board_freq();
     unsafe {
         asm!("csrwr {}, 0x44", in(reg) 1);// 清除定时器中断
-        let tcfg: usize = 0x100000 | 0b11;// 循环模式并开启中断，周期0x100000
-        asm!("csrwr {}, 0x41", in(reg) tcfg);
         let mut ecfg: usize;
         asm!("csrrd {}, 0x4", out(reg) ecfg);
         asm!("csrwr {}, 0x4", in(reg) ecfg | (1 << 11)); // 使能定时器中断
@@ -329,7 +328,25 @@ pub fn trap_handler() -> ! {
             unsafe {
                 asm!("csrwr {}, 0x44", in(reg) 1);// 清除定时器中断
             }
+            let current_ms = get_time_ms();
+            let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
+            for pid in expired_pids {
+                if let Some(process) = crate::task::get_process(pid) {
+                    let process_inner = process.inner_exclusive_access();
+
+                    for task in process_inner.tasks.iter() {
+                        let mut task_inner = task.inner_exclusive_access();
+                        task_inner.signals |= crate::task::SignalFlags::SIGALRM;
+                        if task_inner.task_status == crate::task::TaskStatus::Blocked {
+                            task_inner.signal_interrupted = true;
+                            task_inner.task_status = crate::task::TaskStatus::Ready;
+                            crate::task::add_task(Arc::clone(task));
+                        }
+                    }
+                }
+            }
             net_poll();
+            crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
         }
         _ => {
@@ -511,6 +528,18 @@ pub fn trap_return() -> ! {
     //set_user_trap_entry();
     // 直接用物理地址
     handle_signals();
+    let term_signal = {
+        let task = current_task().unwrap();
+        let inner = task.inner_exclusive_access();
+        if inner.killed {
+            inner.term_signal.unwrap_or(1)
+        } else {
+            0
+        }
+    };
+    if term_signal != 0 {
+        exit_current_and_run_next(-term_signal);
+    }
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
     let id = current_user_asid();

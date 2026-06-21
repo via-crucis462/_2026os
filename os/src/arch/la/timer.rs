@@ -3,15 +3,19 @@
 pub use crate::timer::*;
 
 use crate::arch::config::UNCHACHED_KERNEL_BASE;
+use crate::process::manager::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
 use core::arch::asm;
 
-/// The number of ticks per second
-const TICKS_PER_SEC: usize = 100;
+const DEFAULT_TIME_SLICE_MS: usize = 10;
+const FIFO_TIME_SLICE_MS: usize = 50;
+const RR_TIME_SLICE_MS: usize = 1;
+const IDLE_TIME_SLICE_MS: usize = 20;
 /// The number of milliseconds per second
 const MSEC_PER_SEC: usize = 1000;
 /// The number of microseconds per second
 const MICRO_PER_SEC: usize = 1_000_000;
 const NSEC_PER_SEC: u64 = 1_000_000_000;
+const DEFAULT_TIMER_FREQUENCY: usize = 100_000_000;
 
 /// QEMU loongarch virt 平台上的 LS7A RTC 物理基地址。
 const LS7A_RTC_REG_BASE_PHYS: usize = 0x100D_0100;
@@ -26,6 +30,15 @@ const RTC_CTRL_EO: u32 = 1 << 8;
 const RTC_CTRL_TOYEN: u32 = 1 << 11;
 // 全局只初始化一次，所以unsafe是安全的
 static mut TIMER_FREQUENCY: usize = 0;
+
+fn timer_frequency() -> usize {
+    let mut freq = unsafe { TIMER_FREQUENCY };
+    if freq == 0 {
+        init_board_freq();
+        freq = unsafe { TIMER_FREQUENCY };
+    }
+    freq
+}
 
 /// Get the current time in ticks
 pub fn get_time() -> usize {
@@ -42,9 +55,13 @@ pub fn get_timer_ticks() -> usize {
 
 /// 读取板载时钟频率，单位Hz
 pub fn init_board_freq() {
-    let freq;
+    let mut freq;
     unsafe {
         asm!("cpucfg {}, {}", out(reg) freq, in(reg) 0x4);
+        if freq == 0 {
+            println!("[timer] cpucfg returned zero frequency, using {} Hz", DEFAULT_TIMER_FREQUENCY);
+            freq = DEFAULT_TIMER_FREQUENCY;
+        }
         TIMER_FREQUENCY = freq;
     }
 }
@@ -52,13 +69,13 @@ pub fn init_board_freq() {
 /// get current time in milliseconds
 pub fn get_time_ms() -> usize {
     let time = get_time();
-    time * MSEC_PER_SEC / unsafe { TIMER_FREQUENCY }
+    time * MSEC_PER_SEC / timer_frequency()
 }
 
 /// get current time in microseconds
 pub fn get_time_us() -> usize {
     let time = get_time();
-    time * MICRO_PER_SEC / unsafe { TIMER_FREQUENCY }
+    time * MICRO_PER_SEC / timer_frequency()
 }
 
 fn rtc_read_u32(offset: usize) -> u32 {
@@ -105,10 +122,25 @@ pub fn get_real_time_ns() -> u64 {
     let seconds = days as u64 * 86_400 + hour * 3_600 + min * 60 + sec;
     seconds * NSEC_PER_SEC
 }
-/// Set the next timer interrupt
-/// la64计时器中断带循环，无需每次设置，弃用该函数
-#[allow(unused)]
-pub fn set_next_trigger() {
-    // 10ms后触发
-    // set_timer(get_time() + unsafe { TIMER_FREQUENCY } / TICKS_PER_SEC);
+fn time_slice_ms_for_policy(policy: isize) -> usize {
+    match policy {
+        SCHED_FIFO => FIFO_TIME_SLICE_MS,
+        SCHED_RR => RR_TIME_SLICE_MS,
+        SCHED_IDLE => IDLE_TIME_SLICE_MS,
+        SCHED_BATCH => DEFAULT_TIME_SLICE_MS,
+        _ => DEFAULT_TIME_SLICE_MS,
+    }
+}
+
+/// Set the next timer interrupt according to the task scheduling policy.
+pub fn set_next_trigger(policy: isize) {
+    let ticks = timer_frequency()
+        .saturating_mul(time_slice_ms_for_policy(policy))
+        / MSEC_PER_SEC;
+    let ticks = ticks.max(1);
+    let tcfg = (ticks << 2) | 0b01;
+    unsafe {
+        asm!("csrwr {}, 0x44", in(reg) 1usize);
+        asm!("csrwr {}, 0x41", in(reg) tcfg);
+    }
 }

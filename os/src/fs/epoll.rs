@@ -32,8 +32,8 @@ impl File for EpollFile {
     fn read(&self, _buf: UserBuffer) -> usize { 0 }
     fn pread(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
     fn write(&self, _buf: UserBuffer) -> usize { 0 }
-    fn read_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
     fn get_stat(&self) -> Stat {
         // 匿名 Inode 的标准返回
         Stat {
@@ -71,8 +71,8 @@ impl File for EventFile {
     fn read(&self, _buf: UserBuffer) -> usize { 0 }
     fn pread(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
     fn write(&self, _buf: UserBuffer) -> usize { 0 }
-    fn read_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
-    fn write_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
+    fn raw_read_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
+    fn raw_write_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
     fn get_stat(&self) -> Stat {
         Stat {
             dev: 0, ino: 0, mode: 0, nlink: 1, uid: 0, gid: 0, rdev: 0, __pad: 0,
