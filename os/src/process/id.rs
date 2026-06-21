@@ -51,15 +51,13 @@ impl RecycleAllocator {
 lazy_static! {
     static ref PID_ALLOCATOR: MPSafeCell<RecycleAllocator> =
         MPSafeCell::new(RecycleAllocator::new_with_start(1));
-    static ref TID_ALLOCATOR: MPSafeCell<RecycleAllocator> =
-        MPSafeCell::new(RecycleAllocator::new());
     static ref KSTACK_ALLOCATOR: MPSafeCell<RecycleAllocator> =
         MPSafeCell::new(RecycleAllocator::new());    
 }
 
 /// Abstract structure of PID
 pub struct PidHandle(pub usize);
-pub struct TIdHandle(pub usize);
+pub struct TIdHandle(pub usize, bool);
 
 impl Drop for PidHandle {
     fn drop(&mut self) {
@@ -71,7 +69,9 @@ impl Drop for PidHandle {
 impl Drop for TIdHandle {
     fn drop(&mut self) {
         //println!("drop tid {}", self.0);
-        TID_ALLOCATOR.exclusive_access().dealloc(self.0);
+        if self.1 {
+            PID_ALLOCATOR.exclusive_access().dealloc(self.0);
+        }
     }
 }
 
@@ -81,7 +81,11 @@ pub fn pid_alloc() -> PidHandle {
 }
 
 pub fn tid_alloc() -> TIdHandle {
-    TIdHandle(TID_ALLOCATOR.exclusive_access().alloc())
+    TIdHandle(PID_ALLOCATOR.exclusive_access().alloc(), true)
+}
+
+pub fn tid_from_pid(pid: usize) -> TIdHandle {
+    TIdHandle(pid, false)
 }
 
 /// Return (bottom, top) of a kernel stack in kernel space.

@@ -14,7 +14,8 @@ use alloc::vec;
 use crate::syscall::EPOLL_CTL_DEL;
 use crate::syscall::EPOLL_CTL_ADD;
 use crate::syscall::EPOLL_CTL_MOD;
-use crate::process::block_current_and_run_next;
+use crate::process::manager::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_OTHER, SCHED_RR};
+use crate::process::current_task_to_sleep;
 use crate::lazy_static;
 use spin::Mutex;
 use crate::sync::WaitQueue;
@@ -302,22 +303,28 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     let task = current_task().unwrap();
     let proc = task.process();
     let pid = proc.pid.0;
-    let mut proc_inner = proc.inner_exclusive_access();
-    trace!("[EXIT_GROUP] PID {} starts exiting. Total threads to kill: {}", pid, proc_inner.tasks.len());
-    let tasks = proc_inner.tasks.clone();
-    // fix:先释放掉pcb锁
-    drop(proc_inner);
+    let tasks = {
+        let proc_inner = proc.inner_exclusive_access();
+        trace!(
+            "[EXIT_GROUP] TGID {} starts exiting. Total threads to kill: {}",
+            task.gettgid(),
+            proc_inner.tasks.len()
+        );
+        proc_inner.tasks.clone()
+    };
 
     // 遍历当前进程的所有线程（tasks 列表）
     for thread in tasks.iter() {
         if thread.gettid() != task.gettid() {
             let mut t_inner = thread.inner_exclusive_access();
-            // 标记这些线程为 killed，它们下次进入 trap_handler 时会自尽
-            // t_inner.killed = true; 
-            // 发信号杀死这些线程
             t_inner.signals.insert(SignalFlags::SIGKILL);
+            t_inner.killed = true;
+            t_inner.term_signal = Some(9);
+            if matches!(t_inner.task_status, crate::task::TaskStatus::Blocked) {
+                t_inner.signal_interrupted = true;
+            }
             drop(t_inner);
-            // crate::process::wake_up_task(thread.clone());
+            crate::process::wake_up_task(thread.clone());
         }
     }
     
@@ -413,23 +420,58 @@ pub fn sys_getpgid(pid: usize) -> isize {
     }
 }
 
-// 假装设置成功，返回 0
 pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
     let task = current_task().unwrap();
     let current_proc = task.process();
-    
-    // 如果 pid 为 0，表示操作当前进程
     let target_pid = if pid == 0 { current_proc.pid.0 } else { pid };
-    
-    if let Some(proc) = get_process(target_pid) {
-        let mut inner = proc.inner_exclusive_access();
-        
-        // 如果 pgid 为 0，意思是将目标进程的 pgid 设为它的 pid
-        inner.pgid = if pgid == 0 { target_pid } else { pgid };
-        0
-    } else {
-        -3 // ESRCH
+
+    let Some(proc) = get_process(target_pid) else {
+        return ESRCH.as_isize();
+    };
+
+    let current_sid = current_proc.inner_exclusive_access().sid;
+    if target_pid != current_proc.pid.0 {
+        let parent_is_current = proc
+            .inner_exclusive_access()
+            .parent
+            .as_ref()
+            .and_then(|parent| parent.upgrade())
+            .map_or(false, |parent| parent.getpid() == current_proc.pid.0);
+        if !parent_is_current {
+            return ESRCH.as_isize();
+        }
     }
+
+    let target_pgid = if pgid == 0 { target_pid } else { pgid };
+    {
+        let inner = proc.inner_exclusive_access();
+        if inner.sid != current_sid {
+            return EPERM.as_isize();
+        }
+        if inner.sid == target_pid {
+            return EPERM.as_isize();
+        }
+    }
+
+    if target_pgid != target_pid && !process_group_exists_in_session(target_pgid, current_sid) {
+        return EPERM.as_isize();
+    }
+
+    proc.inner_exclusive_access().pgid = target_pgid;
+    0
+}
+
+fn process_group_exists_in_session(pgid: usize, sid: usize) -> bool {
+    for pid in list_pids() {
+        let Some(proc) = get_process(pid) else {
+            continue;
+        };
+        let inner = proc.inner_exclusive_access();
+        if inner.sid == sid && inner.pgid == pgid {
+            return true;
+        }
+    }
+    false
 }
 pub fn sys_getgid() -> isize {
     let task = current_task().unwrap();
@@ -624,6 +666,21 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
     time_spec.tv_sec = sec;
     time_spec.tv_nsec = nsec;
     if !try_translated_write(token, tp, time_spec) {
+        return EFAULT.as_isize();
+    }
+    0
+}
+
+pub fn sys_clock_getres(clock_id: usize, tp: *mut TimeSpec) -> isize {
+    match clock_id {
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => {}
+        _ => return EINVAL.as_isize(),
+    }
+    if tp.is_null() {
+        return 0;
+    }
+    let token = current_user_token();
+    if !try_translated_write(token, tp, TimeSpec { tv_sec: 0, tv_nsec: 1 }) {
         return EFAULT.as_isize();
     }
     0
@@ -995,9 +1052,8 @@ pub fn sys_renameat2(
 }
 pub fn sys_getpid() -> isize {
 	let task = current_task().unwrap();
-    let process = task.process();
-	trace!("kernel: sys_getpid pid:{}", process.pid.0);
-    process.pid.0 as isize
+	trace!("kernel: sys_getpid tgid:{}", task.gettgid());
+    task.gettgid() as isize
 }
 pub fn sys_getppid() -> isize {
     let task = current_task().unwrap();
@@ -1142,8 +1198,27 @@ pub fn sys_fork(stack: usize, _flags: usize) -> isize {
     trap_cx.set_a0(0);
     // add new task to scheduler
     add_process(new_proc);
+    copy_fd_table_between_processes(current_process.pid.0, new_pid);
     add_task(new_task);
     new_pid as isize
+}
+
+fn copy_fd_table_between_processes(src_pid: usize, dst_pid: usize) {
+    let Some(src_proc) = get_process(src_pid) else {
+        return;
+    };
+    let Some(dst_proc) = get_process(dst_pid) else {
+        return;
+    };
+
+    let (fd_table, fd_rlmt) = {
+        let src_inner = src_proc.inner_exclusive_access();
+        (src_inner.fd_table.clone(), src_inner.fd_rlmt)
+    };
+
+    let mut dst_inner = dst_proc.inner_exclusive_access();
+    dst_inner.fd_table = fd_table;
+    dst_inner.fd_rlmt = fd_rlmt;
 }
 
 
@@ -1288,7 +1363,7 @@ pub fn sys_clone3(uargs: *const CloneArgs, size: usize) -> isize {
     if args.stack != 0 && args.stack_size == 0 {
         return EINVAL.as_isize();
     }
-    if flags & CLONE_PIDFD != 0 || args.pidfd != 0 || args.set_tid != 0 || args.set_tid_size != 0 || args.cgroup != 0 {
+    if flags & CLONE_PIDFD != 0 || args.set_tid != 0 || args.set_tid_size != 0 || args.cgroup != 0 {
         return EINVAL.as_isize();
     }
 
@@ -1794,6 +1869,7 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
                 }
             }
             drop(proc_inner);
+            
             // 从全局进程表里删除这个子进程
             crate::process::remove_process(child_pid);
             return child_pid as isize;
@@ -2114,7 +2190,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
             if signum == 0 { return 0; } // 探测成功
 
             let flag = flag.unwrap();
-            let force_group_exit = flag.contains(SignalFlags::SIGKILL);
+            let force_group_exit = should_force_default_signal_exit(&proc, flag);
 
             // 进程定向信号写入 PCB pending，并唤醒该进程的全部线程；SIGKILL 额外强制整个线程组退出。
             let target_tasks: Vec<Arc<TaskControlBlock>> = {
@@ -2157,16 +2233,23 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         }
 
         let flag = flag.unwrap();
-        let force_group_exit = flag.contains(SignalFlags::SIGKILL);
 
         // kill(0, sig) / kill(-pgid, sig) 面向进程组：信号写入每个目标进程的 PCB pending，并唤醒全部线程。
-        let mut matched_tasks: Vec<Arc<TaskControlBlock>> = Vec::new();
+        let mut matched_tasks: Vec<(Arc<TaskControlBlock>, bool)> = Vec::new();
         for i in 2..4096 {
             if let Some(proc) = get_process(i) {
                 let mut inner = proc.inner_exclusive_access();
                 if inner.pgid == target_pgid {
+                    let force_group_exit = if flag.contains(SignalFlags::SIGKILL) {
+                        true
+                    } else if let Some(signum) = flag.number() {
+                        inner.signal_actions.table[signum - 1].handler == 0
+                            && default_signal_terminates(flag)
+                    } else {
+                        false
+                    };
                     inner.signals.insert(flag); // 进程级 pending
-                    matched_tasks.extend(inner.tasks.iter().cloned());
+                    matched_tasks.extend(inner.tasks.iter().cloned().map(|task| (task, force_group_exit)));
                 }
             }
         }
@@ -2176,7 +2259,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
         }
 
         // 给进程组发信号
-        for task_arc in matched_tasks {
+        for (task_arc, force_group_exit) in matched_tasks {
             let mut task_inner = task_arc.inner_exclusive_access();
             if force_group_exit {
                 task_inner.killed = true;
@@ -2189,6 +2272,28 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
     }
 
     panic!("sys_kill: should not reach here, pid={}", pid);
+}
+
+fn default_signal_terminates(signal: SignalFlags) -> bool {
+    !matches!(
+        signal,
+        SignalFlags::SIGCHLD
+            | SignalFlags::SIGURG
+            | SignalFlags::SIGWINCH
+            | SignalFlags::SIGSTOP
+            | SignalFlags::SIGCONT
+    )
+}
+
+fn should_force_default_signal_exit(proc: &Arc<ProcessControlBlock>, signal: SignalFlags) -> bool {
+    if signal.contains(SignalFlags::SIGKILL) {
+        return true;
+    }
+    let Some(signum) = signal.number() else {
+        return false;
+    };
+    let proc_inner = proc.inner_exclusive_access();
+    proc_inner.signal_actions.table[signum - 1].handler == 0 && default_signal_terminates(signal)
 }
 
 pub fn sys_tkill(tid: usize, signum: i32) -> isize {
@@ -2232,7 +2337,7 @@ pub fn sys_tgkill(tgid: usize, tid: usize, signum: i32) -> isize {
         return ESRCH.as_isize();
     };
 
-    if task.process().getpid() != tgid {
+    if task.gettgid() != tgid {
         return ESRCH.as_isize();
     }
 
@@ -2447,25 +2552,24 @@ pub fn sys_clock_nanosleep(
         return EINVAL.as_isize();
     }
 
-    // 处理 TIMER_ABSTIME: 将绝对时间转换为相对时间
-    let effective_req = if flags == TIMER_ABSTIME {
-        let now_ms = get_time_ms();
-        let target_ms = req_val.tv_sec.saturating_mul(1000)
-            .saturating_add(req_val.tv_nsec / 1_000_000);
-        let now_ms_signed = now_ms as isize;
-        let target_ms_signed = target_ms as isize;
-        let diff_ms = target_ms_signed.saturating_sub(now_ms_signed);
-        if diff_ms <= 0 {
+    let request_ns = if let Some(ns) = timespec_to_ns(&req_val) {
+        ns
+    } else {
+        return EINVAL.as_isize();
+    };
+
+    // 处理 TIMER_ABSTIME: request 是目标绝对时间点
+    let (effective_req, effective_remain) = if flags == TIMER_ABSTIME {
+        let now_ns = clock_now_ns(clock_id);
+        if request_ns <= now_ns {
             return 0; // 目标时间已过，立即返回
         }
-        TimeSpec {
-            tv_sec: (diff_ms as usize) / 1000,
-            tv_nsec: ((diff_ms as usize) % 1000) * 1_000_000,
-        }
+        (ns_to_timespec(request_ns - now_ns), core::ptr::null_mut())
     } else if flags != 0 {
         return EINVAL.as_isize(); // 不支持的 flags
     } else {
-        req_val
+        // 相对时间，flags 等于 0 时 request 是睡眠时长
+        (req_val, remain)
     };
 
     // 防止过长睡眠
@@ -2474,18 +2578,47 @@ pub fn sys_clock_nanosleep(
         return EINVAL.as_isize();
     }
 
-    nanosleep_impl(&effective_req, remain)
+    nanosleep_impl(&effective_req, effective_remain)
+}
+
+fn timespec_to_ns(ts: &TimeSpec) -> Option<usize> {
+    ts.tv_sec
+        .checked_mul(1_000_000_000)
+        .and_then(|sec_ns| sec_ns.checked_add(ts.tv_nsec))
+}
+
+fn ns_to_timespec(ns: usize) -> TimeSpec {
+    TimeSpec {
+        tv_sec: ns / 1_000_000_000,
+        tv_nsec: ns % 1_000_000_000,
+    }
+}
+
+fn clock_now_ns(clock_id: usize) -> usize {
+    match clock_id {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => current_wallclock_ns() as usize,
+        CLOCK_MONOTONIC | CLOCK_MONOTONIC_COARSE | _ => monotonic_now_ns(),
+    }
+}
+
+fn monotonic_now_ns() -> usize {
+    get_time_us().saturating_mul(1_000)
 }
 
 /// nanosleep 核心实现：忙等 + 信号中断检测
 fn nanosleep_impl(req: &TimeSpec, rem: *mut TimeSpec) -> isize {
-    let start = get_time_ms();
+    let start_ns = clock_now_ns(CLOCK_MONOTONIC);
     let token = current_user_token();
 
-    let duration_ms = req.tv_sec.saturating_mul(1000).saturating_add(req.tv_nsec / 1_000_000);
+    let duration_ns = if let Some(ns) = timespec_to_ns(req) {
+        ns
+    } else {
+        return EINVAL.as_isize();
+    };
+    let deadline_ns = start_ns.saturating_add(duration_ns);
 
-    info!("[SLEEP-IN] PID {} start: {}, duration: {}ms", current_task().unwrap().getpid(), start, duration_ms);
-    while get_time_ms() < start.saturating_add(duration_ms) {
+    info!("[SLEEP-IN] PID {} start_ns: {}, duration_ns: {}", current_task().unwrap().getpid(), start_ns, duration_ns);
+    while clock_now_ns(CLOCK_MONOTONIC) < deadline_ns {
         //   1. 检查是否有未屏蔽的信号到来
         let task = current_task().unwrap();
         let process = task.process();
@@ -2500,9 +2633,8 @@ fn nanosleep_impl(req: &TimeSpec, rem: *mut TimeSpec) -> isize {
         if pending != 0 {
             //   2. 如果有信号，必须提早醒来 (Interrupted system call)
             // 计算还剩下多少时间没睡完
-            let now = get_time_ms();
-            let elapsed = now - start;
-            let rem_ms = if duration_ms > elapsed { duration_ms - elapsed } else { 0 };
+            let now_ns = clock_now_ns(CLOCK_MONOTONIC);
+            let rem_ns = deadline_ns.saturating_sub(now_ns);
             
             // 如果用户传入了 rem 指针，把剩下的时间写进去
             if rem as usize != 0 {
@@ -2513,8 +2645,9 @@ fn nanosleep_impl(req: &TimeSpec, rem: *mut TimeSpec) -> isize {
                         return EFAULT.as_isize();
                     }
                 };
-                rem_spec.tv_sec = rem_ms / 1000;
-                rem_spec.tv_nsec = (rem_ms % 1000) * 1_000_000;
+                let remaining = ns_to_timespec(rem_ns);
+                rem_spec.tv_sec = remaining.tv_sec;
+                rem_spec.tv_nsec = remaining.tv_nsec;
                 if try_translated_write(token, rem, rem_spec) {
                     ()
                 } else {
@@ -2526,8 +2659,8 @@ fn nanosleep_impl(req: &TimeSpec, rem: *mut TimeSpec) -> isize {
             return EINTR.as_isize(); 
         }
 
-        // 没有信号，继续让出 CPU
-        suspend_current_and_run_next();
+        // 没有信号，阻塞到睡眠队列，等待调度器按时间戳唤醒
+        crate::process::sleep_current_until(deadline_ns);
     }
     
     // 正常睡醒，返回 0
@@ -2554,6 +2687,26 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> isize {
         Ok(()) => {
             #[cfg(target_arch = "loongarch64")]
             unsafe { core::arch::asm!("ibar 0"); }
+            0
+        }
+        Err(errno) => errno,
+    }
+}
+
+pub fn sys_mlock(start: usize, len: usize) -> isize {
+    if len == 0 {
+        return 0;
+    }
+    if start.checked_add(len).map_or(true, |end| end >= USER_APP_MAX_SIZE) {
+        return ENOMEM.as_isize();
+    }
+
+    let task = current_task().unwrap();
+    let process = task.process();
+    let mut inner = process.inner_exclusive_access();
+    match inner.memory_set.disable_share_in_range(start, len) {
+        Ok(()) => {
+            inner.locked_bytes = inner.locked_bytes.saturating_add(len);
             0
         }
         Err(errno) => errno,
@@ -2603,7 +2756,7 @@ pub fn sys_spawn(_path: *const u8) -> isize {
 pub fn sys_set_priority(_prio: isize) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
-    warn!("kernel:pid[{}] sys_set_priority NOT IMPLEMENTED", process.pid.0);
+    println!("kernel:pid[{}] sys_set_priority NOT IMPLEMENTED", process.pid.0);
     ENOSYS.as_isize()
 }
 
@@ -2951,17 +3104,178 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
         suspend_current_and_run_next();
     }
 }
-pub fn sys_sched_getaffinity(_pid: isize, cpusetsize: usize, mask_ptr: *mut u8) -> isize {
-    if mask_ptr as usize != 0 && cpusetsize > 0 {
-        let task = crate::task::current_task().unwrap();
-        let token = task.process().inner_exclusive_access().get_user_token();
-        
-        // 告诉测试框架：CPU 0 是可用的 (往 mask 第一个字节写 1)
-        if !try_translated_write(token, mask_ptr, 1u8) {
+pub fn sys_sched_getscheduler(pid: isize) -> isize {
+    let target_task = match resolve_sched_task(pid) {
+        Ok(task) => task,
+        Err(errno) => return errno,
+    };
+    let sched_policy = target_task.inner_exclusive_access().sched_policy;
+    sched_policy
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SchedParam {
+    pub sched_priority: i32,
+}
+
+fn resolve_sched_task(pid: isize) -> Result<Arc<TaskControlBlock>, isize> {
+    if pid < 0 {
+        return Err(EINVAL.as_isize());
+    }
+    let task = crate::task::current_task().unwrap();
+    if pid == 0 || pid as usize == task.gettid() {
+        return Ok(task);
+    }
+    if let Some(task) = tid2task(pid as usize) {
+        return Ok(task);
+    }
+    if let Some(process) = get_process(pid as usize) {
+        let inner = process.inner_exclusive_access();
+        if let Some(task) = inner.tasks.first() {
+            return Ok(task.clone());
+        }
+    }
+    Err(ESRCH.as_isize())
+}
+
+pub fn sys_sched_getparam(pid: isize, param_ptr: *mut SchedParam) -> isize {
+    if param_ptr.is_null() {
+        return EFAULT.as_isize();
+    }
+    let task = crate::task::current_task().unwrap();
+    let target_task = match resolve_sched_task(pid) {
+        Ok(task) => task,
+        Err(errno) => return errno,
+    };
+    let sched_priority = target_task.inner_exclusive_access().sched_priority;
+    let token = task.process().inner_exclusive_access().get_user_token();
+    if !try_translated_write(token, param_ptr, SchedParam { sched_priority }) {
+        return EFAULT.as_isize();
+    }
+    0
+}
+pub fn sys_sched_setscheduler(pid: isize, policy: isize, param_ptr: *const SchedParam) -> isize {
+    if param_ptr.is_null() {
+        return EFAULT.as_isize();
+    }
+    let task = crate::task::current_task().unwrap();
+    let target_task = match resolve_sched_task(pid) {
+        Ok(task) => task,
+        Err(errno) => return errno,
+    };
+    let token = task.process().inner_exclusive_access().get_user_token();
+    let Some(param) = try_translated_read(token, param_ptr) else {
+        return EFAULT.as_isize();
+    };
+    //println!("sys_sched_setscheduler: pid={}, current pid = {} , tid = {}, requested policy={}, priority={}", pid, task.process().getpid(), task.gettid(), policy, param.sched_priority);
+    match policy {
+        SCHED_FIFO | SCHED_RR => {
+            if param.sched_priority < 1 || param.sched_priority > 99 {
+                return EINVAL.as_isize();
+            }
+        }
+        SCHED_OTHER | SCHED_BATCH | SCHED_IDLE => {
+            if param.sched_priority != 0 {
+                return EINVAL.as_isize();
+            }
+        }
+        _ => return EINVAL.as_isize(),
+    }
+    let mut inner = target_task.inner_exclusive_access();
+    inner.sched_policy = policy;
+    inner.sched_priority = param.sched_priority;
+    0
+}
+
+pub fn sys_sched_setparam(pid: isize, param_ptr: *const SchedParam) -> isize {
+    if param_ptr.is_null() {
+        return EFAULT.as_isize();
+    }
+    let task = crate::task::current_task().unwrap();
+    let target_task = match resolve_sched_task(pid) {
+        Ok(task) => task,
+        Err(errno) => return errno,
+    };
+    let token = task.process().inner_exclusive_access().get_user_token();
+    let Some(param) = try_translated_read(token, param_ptr) else {
+        return EFAULT.as_isize();
+    };
+    let policy = target_task.inner_exclusive_access().sched_policy;
+    match policy {
+        SCHED_FIFO | SCHED_RR => {
+            if param.sched_priority < 1 || param.sched_priority > 99 {
+                return EINVAL.as_isize();
+            }
+        }
+        SCHED_OTHER | SCHED_BATCH | SCHED_IDLE => {
+            if param.sched_priority != 0 {
+                return EINVAL.as_isize();
+            }
+        }
+        _ => return EINVAL.as_isize(),
+    }
+    target_task.inner_exclusive_access().sched_priority = param.sched_priority;
+    0
+}
+
+pub fn sys_sched_setaffinity(pid: isize, cpusetsize: usize, mask_ptr: *const u8) -> isize {
+    if pid < 0 {
+        return EINVAL.as_isize();
+    }
+    if mask_ptr.is_null() || cpusetsize == 0 {
+        return EFAULT.as_isize();
+    }
+
+    let task = crate::task::current_task().unwrap();
+    let target_exists = pid == 0
+        || pid as usize == task.process().getpid()
+        || pid as usize == task.gettid()
+        || get_process(pid as usize).is_some()
+        || tid2task(pid as usize).is_some();
+    if !target_exists {
+        return ESRCH.as_isize();
+    }
+
+    let token = task.process().inner_exclusive_access().get_user_token();
+    if try_translated_read::<u8>(token, mask_ptr).is_none() {
+        return EFAULT.as_isize();
+    }
+    if cpusetsize > 1 && try_translated_read::<u8>(token, unsafe { mask_ptr.add(cpusetsize - 1) }).is_none() {
+        return EFAULT.as_isize();
+    }
+
+    0
+}
+pub fn sys_sched_getaffinity(pid: isize, cpusetsize: usize, mask_ptr: *mut u8) -> isize {
+    const KERNEL_CPUSET_BYTES: usize = 8;
+
+    if pid < 0 {
+        return EINVAL.as_isize();
+    }
+    if mask_ptr.is_null() {
+        return EFAULT.as_isize();
+    }
+    if cpusetsize < KERNEL_CPUSET_BYTES {
+        return EINVAL.as_isize();
+    }
+
+    let task = crate::task::current_task().unwrap();
+    if pid != 0 && pid as usize != task.process().getpid() && get_process(pid as usize).is_none() {
+        return ESRCH.as_isize();
+    }
+
+    let token = task.process().inner_exclusive_access().get_user_token();
+    for i in 0..KERNEL_CPUSET_BYTES {
+        if !try_translated_write(token, unsafe { mask_ptr.add(i) }, 0u8) {
             return EFAULT.as_isize();
         }
     }
-    0
+    if !try_translated_write(token, mask_ptr, 1u8) {
+        return EFAULT.as_isize();
+    }
+
+    KERNEL_CPUSET_BYTES as isize
 }
 pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize {
  

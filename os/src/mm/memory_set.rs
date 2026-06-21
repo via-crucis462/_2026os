@@ -1334,6 +1334,74 @@ impl MemorySet {
         Ok(())
     }
 
+    pub fn disable_share_in_range(&mut self, start: usize, length: usize) -> Result<(), isize> {
+        if length == 0 {
+            return Ok(());
+        }
+
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| Errno::EINVAL.as_isize())?;
+        let start_vpn = VirtAddr::from(start).std_floor();
+        let end_vpn = VirtAddr::from(end).std_ceil();
+
+        let mut covered_until = start_vpn;
+        let mut affected: Vec<usize> = self
+            .areas
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, area)| {
+                if area.vpn_range.get_start() < end_vpn && area.vpn_range.get_end() > start_vpn {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        affected.sort_by_key(|&idx| self.areas[idx].vpn_range.get_start().0);
+
+        if affected.is_empty() {
+            return Err(Errno::ENOMEM.as_isize());
+        }
+
+        for &idx in affected.iter() {
+            let area = &self.areas[idx];
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            if area.map_type == MapType::Guard || area_start > covered_until {
+                return Err(Errno::ENOMEM.as_isize());
+            }
+            if area.page_size != Page4K {
+                let step = area.page_size.num_pages();
+                if start_vpn.0 % step != 0 || end_vpn.0 % step != 0 {
+                    return Err(Errno::EINVAL.as_isize());
+                }
+            }
+            if area_end > covered_until {
+                covered_until = area_end;
+            }
+        }
+
+        if covered_until < end_vpn {
+            return Err(Errno::ENOMEM.as_isize());
+        }
+
+        for &idx in affected.iter().rev() {
+            self.split_area_at(idx, end_vpn)?;
+            self.split_area_at(idx, start_vpn)?;
+        }
+
+        for area in self.areas.iter_mut() {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            if area_start >= start_vpn && area_end <= end_vpn {
+                area.is_shared = false;
+            }
+        }
+
+        Ok(())
+    }
+
     /// 处理缺页异常。如果触发异常的地址在合法区域内，则为其分配物理页；否则返回 false。
     /// 待进一步完善&测试
     #[no_mangle]

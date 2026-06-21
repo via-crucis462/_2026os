@@ -1,7 +1,7 @@
 //！ TODO：需要仔细核对并修改exec和fork的实现
 
 use super::*;
-use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
+use super::{kstack_alloc, pid_alloc, tid_alloc, tid_from_pid, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
 use schedule::*;
 use core::mem;
 use core::sync::atomic::{AtomicI32, Ordering};
@@ -123,7 +123,7 @@ impl ProcessControlBlock {
         //pid ，tid 和内核栈的分配
         let pid_handle = Arc::new(pid_alloc());
         //println!("[kernel] TaskControlBlock::new: allocated PID {}", pid_handle.0);
-        let tid_handle = Arc::new(tid_alloc());
+        let tid_handle = Arc::new(tid_from_pid(pid_handle.0));
         //println!("[kernel] TaskControlBlock::new: allocated TID {}", tid_handle.0);
         let kernel_stack = kstack_alloc();
         
@@ -219,12 +219,15 @@ impl ProcessControlBlock {
         let task_control_block = Arc::new(TaskControlBlock{
             process: Arc::downgrade(&proc_control_block),
             tid: tid_handle.clone(),
+            tgid: pid_handle.0,
             kernel_stack,
             inner: MPSafeCell::new(TaskControlBlockInner {
                 trap_cx_addr,
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
                 owner_hart: None,
+                sched_policy: SCHED_IDLE, // initproc默认用SCHED_IDLE策略
+                sched_priority: 0,
                 signal_mask: SignalFlags::empty(),
                 killed: false,
                 term_signal: None,
@@ -494,7 +497,7 @@ impl ProcessControlBlock {
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = Arc::new(pid_alloc());
         //println!("[kernel] TaskControlBlock::fork: allocated PID {}", pid_handle.0);
-        let tid_handle = Arc::new(tid_alloc());
+        let tid_handle = Arc::new(tid_from_pid(pid_handle.0));
         //println!("[kernel] TaskControlBlock::fork: allocated TID {}", tid_handle.0);
         let kernel_stack = kstack_alloc();
         let trap_cx_addr: usize;
@@ -571,6 +574,7 @@ impl ProcessControlBlock {
         let new_task = Arc::new(TaskControlBlock {
             process: Arc::downgrade(&proc_control_block),
             tid: tid_handle.clone(),
+            tgid: pid_handle.0,
             kernel_stack: kernel_stack,
             inner: MPSafeCell::new(TaskControlBlockInner {
                 trap_cx_addr,
@@ -578,6 +582,8 @@ impl ProcessControlBlock {
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
                 owner_hart: None,
+                sched_policy: caller_inner.sched_policy,
+                sched_priority: caller_inner.sched_priority,
                 signal_mask: caller_inner.signal_mask,
                 killed: false,
                 term_signal: None,
@@ -673,12 +679,15 @@ impl ProcessControlBlock {
         let new_task = Arc::new(TaskControlBlock {
             process: Arc::downgrade(self),
             tid: tid_handle,
+            tgid: self.pid.0,
             kernel_stack,
             inner: MPSafeCell::new(TaskControlBlockInner {
                 trap_cx_addr,
                 task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                 task_status: TaskStatus::Ready,
                 owner_hart: None,
+                sched_policy: caller_inner.sched_policy,
+                sched_priority: caller_inner.sched_priority,
                 exit_code: 0,
                 errno: 0,
                 signals: SignalFlags::empty(),

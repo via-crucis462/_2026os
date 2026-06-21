@@ -174,7 +174,7 @@ fn main_init(hart_id: usize) {
     fs::list_apps();
     task::add_initproc();
     arch::trap::enable_timer_interrupt();
-    arch::timer::set_next_trigger();
+    arch::timer::set_next_trigger(task::manager::SCHED_OTHER);
     init_other_hart(hart_id);
     println!("main_init done, run tasks...");
     task::run_tasks();
@@ -234,7 +234,7 @@ fn other_init() {
     la::mm::la_kernel_init_mem();// 设置映射窗口
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
-    arch::timer::set_next_trigger();
+    arch::timer::set_next_trigger(task::manager::SCHED_OTHER);
     task::run_tasks();
 }
 
