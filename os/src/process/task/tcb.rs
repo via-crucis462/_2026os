@@ -168,7 +168,7 @@ impl core::fmt::Display for TaskStatus {
             TaskStatus::Running => "Running",
             TaskStatus::Blocked => "Blocked",
             TaskStatus::Zombie => "Zombie",
-            TaskStatus::WaitSaving => "WaitSaving",
+            TaskStatus::BlockSaving => "BlockSaving",
         };
         f.write_str(status)
     }

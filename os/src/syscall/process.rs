@@ -15,7 +15,7 @@ use crate::syscall::EPOLL_CTL_DEL;
 use crate::syscall::EPOLL_CTL_ADD;
 use crate::syscall::EPOLL_CTL_MOD;
 use crate::process::manager::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_OTHER, SCHED_RR};
-use crate::process::current_task_to_sleep;
+use crate::process::block_current_and_run_next;
 use crate::lazy_static;
 use spin::Mutex;
 use crate::sync::WaitQueue;

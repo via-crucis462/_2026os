@@ -142,7 +142,7 @@ pub fn run_tasks() {
                 if status == TaskStatus::Ready {
                     // 之前已经保存好了
                     crate::task::add_task_into_pool_unlocked(prev_task);
-                } /*else if status == TaskStatus::WaitSaving {
+                } else if status == TaskStatus::BlockSaving {
                     // 调用了wait函数
                     prev_task.inner_exclusive_access().task_status = TaskStatus::Blocked;
                     // println!("SET BLOCKED: tid={} of pid={} done", prev_task.tid.0, prev_task.getpid());
