@@ -282,7 +282,7 @@ pub fn start_waiting_child() {
     let mut task_inner = task.inner_exclusive_access();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Ready
-    task_inner.task_status = TaskStatus::WaitSaving;
+    task_inner.task_status = TaskStatus::BlockSaving;
     drop(task_inner);
     drop(task);
     // 切换到下一个任务
