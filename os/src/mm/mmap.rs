@@ -96,7 +96,7 @@ lazy_static! {
         page_cache_map: Mutex::new(BTreeMap::new()),
         file_register: Mutex::new(BTreeMap::new()),
         vfs_register: Mutex::new(BTreeMap::new()),
-        lru_queue: Mutex::new(Vec::new()),
+        lru_queue: Mutex::new(PageCacheLRUQueue::new()),
     };
 }
 
@@ -110,6 +110,78 @@ pub struct PageCache {
 impl PageCache {
     pub fn new(frame: FrameTracker) -> Self {
         Self { frame, dirty: false }
+    }
+}
+
+// 页缓存 lru 队列
+struct PageCacheLRUQueue {
+    // 存储存在的页缓存条目
+    exists: BTreeMap<(u64, usize), ()>,
+    // (ino, page_offset) → next (ino, page_offset)
+    nexts: BTreeMap<(u64, usize), Option<(u64, usize)>>,
+    // (ino, page_offset) → prev (ino, page_offset)
+    prevs: BTreeMap<(u64, usize), Option<(u64, usize)>>,
+    head: Option<(u64, usize)>,
+    tail: Option<(u64, usize)>,
+}
+
+impl PageCacheLRUQueue{
+    pub fn new() -> Self {
+        Self {
+            exists: BTreeMap::new(),
+            nexts: BTreeMap::new(),
+            prevs: BTreeMap::new(),
+            head: None,
+            tail: None,
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.head.is_none()
+    }
+    pub fn pop(&mut self) -> Option<(u64, usize)> {
+        if let Some(head) = self.head {
+            let next = self.nexts[&head];
+            if let Some(n) = next {
+                self.prevs.insert(n, None);
+            } else {
+                self.tail = None;
+            }
+            self.head = next;
+            self.exists.remove(&head);
+            Some(head)
+        } else {
+            None
+        }
+    }
+    /// 将页缓存条目移动到队尾（最近使用）
+    pub fn update(&mut self, ino: u64, page_offset: usize) {
+        let key = (ino, page_offset);
+        if !self.exists.contains_key(&key) {
+            return;
+        }
+        // 从当前位置断开
+        let prev = self.prevs[&key];
+        let next = self.nexts[&key];
+        if let Some(p) = prev {
+            self.nexts.insert(p, next);
+        } else {
+            self.head = next;
+        }
+        if let Some(n) = next {
+            self.prevs.insert(n, prev);
+        } else {
+            self.tail = prev;
+        }
+        // 插入到队尾
+        if let Some(t) = self.tail {
+            self.nexts.insert(t, Some(key));
+        } else {
+            // 队列在断开后变空（单元素 update 自身），head 也需恢复
+            self.head = Some(key);
+        }
+        self.prevs.insert(key, self.tail);
+        self.nexts.insert(key, None);
+        self.tail = Some(key);
     }
 }
 
@@ -130,16 +202,15 @@ pub struct SharedPageCacheManager {
     // ino → VfsInode 弱引用（io缓存）
     vfs_register: Mutex<BTreeMap<u64, Weak<dyn VfsInode>>>,
     // 记录访问顺序
-    lru_queue: Mutex<Vec<(u64, usize)>>,
+    lru_queue: Mutex<PageCacheLRUQueue>,
 }
 
 
 impl SharedPageCacheManager {
     // 无锁辅助函数
 
-    fn lru_update_inner(queue: &mut Vec<(u64, usize)>, ino: u64, page_offset: usize) {
-        queue.retain(|&(i, o)| i != ino || o != page_offset);
-        queue.push((ino, page_offset));
+    fn lru_update_inner(queue: &mut PageCacheLRUQueue, ino: u64, page_offset: usize) {
+        queue.update(ino, page_offset);
     }
 
     // ---
