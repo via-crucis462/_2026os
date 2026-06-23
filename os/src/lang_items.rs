@@ -30,6 +30,6 @@ fn panic(info: &PanicInfo) -> ! {
     println!("syncing disks...");
     crate::ext4fs::block_cache_sync_all();
     println!("shutting down...");
-    // shutdown(); // 调试时注释掉这行方便回溯调用栈
+    shutdown(); // 调试时注释掉这行方便回溯调用栈
     loop{}
 }

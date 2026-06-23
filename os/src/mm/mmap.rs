@@ -413,14 +413,14 @@ pub fn tick_sync() {
     if now.wrapping_sub(last_page) >= PAGE_SYNC_INTERVAL_MS {
         warn!("Auto page sync triggered by timer interrupt");
         if LAST_PAGE_SYNC_TIME.compare_exchange(last_page, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
-            sync_shared_page_cache();
+            // sync_shared_page_cache();
             warn!("Auto sync completed");
         }
     }
     if now.wrapping_sub(last_block) >= BLOCK_SYNC_INTERVAL_MS {
         warn!("Auto block sync triggered by timer interrupt");
         if LAST_BLOCK_SYNC_TIME.compare_exchange(last_block, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
-            crate::drivers::block::block_cache::block_cache_sync_all();
+            // crate::drivers::block::block_cache::block_cache_sync_all();
             warn!("Auto block sync completed");
         }
     }
