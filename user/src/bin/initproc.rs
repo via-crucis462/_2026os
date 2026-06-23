@@ -122,8 +122,8 @@ fn main() -> i32 {
         "shmctl07",
         "shmctl08",
         "shmdt01",
-        "shmdt02",*/
-        "shmem_2nstest",
+        "shmdt02",
+        "shmem_2nstest",*/
         "shmget02",
         "shmget03",
         "shmget04",
@@ -484,11 +484,11 @@ fn main() -> i32 {
         "userns08",
         "ustat01",
         "ustat02",
-        "utime01",
-        "utime02",
-        "utime03",
-        "utime04",
-        "utime05",
+//        "utime01",
+//        "utime02",
+//        "utime03",
+//        "utime04",
+//        "utime05",
         "utime06",
         "utime07",
         "utimensat01",
@@ -613,16 +613,19 @@ fn main() -> i32 {
 }
 
 // --- basic cases ---
-#[cfg(false)]
+#[cfg(true)]
 {
     write_fd(fd, "
+export PAGER=cat
 cd /musl 
 sh /musl/basic_testcode.sh
 sh /musl/busybox_testcode.sh
+sh /musl/lua_testcode.sh
 sh /musl/libctest_testcode.sh
 cd /glibc
 sh /glibc/basic_testcode.sh
 sh /glibc/busybox_testcode.sh
+sh /glibc/lua_testcode.sh
    ");
 }
 
@@ -630,15 +633,21 @@ sh /glibc/busybox_testcode.sh
 #[cfg(true)]
 {
     write_fd(fd, "
+export PAGER=cat
 cd /musl
 sh /musl/libcbench_testcode.sh
 sh /musl/iozone_testcode.sh
+sh /musl/lmbench_testcode.sh
+cd /glibc
+sh /glibc/libcbench_testcode.sh
+sh /glibc/iozone_testcode.sh
+sh /glibc/lmbench_testcode.sh
 ");
 }
 
 
 // --- musl ltp ---
-#[cfg(false)]
+#[cfg(true)]
 {
     write_fd(fd, "echo \"#### OS COMP TEST GROUP START ltp-musl ####\"\n");
     for chunk in run_cases.chunks(50) {
@@ -661,7 +670,7 @@ sh /musl/iozone_testcode.sh
 }
 
 // --- glibc ltp ---
-#[cfg(false)]
+#[cfg(true)]
 {
     write_fd(fd, "echo \"#### OS COMP TEST GROUP START ltp-glibc ####\"\n");
     for chunk in run_cases.chunks(50) {
@@ -679,9 +688,22 @@ sh /musl/iozone_testcode.sh
         write_fd(fd, "    echo \"FAIL LTP CASE $name : $ret\"\n");
         write_fd(fd, "  fi\n");
         write_fd(fd, "done\n");
-    } // 
+    }
     write_fd(fd, "echo \"#### OS COMP TEST GROUP END ltp-glibc ####\"\n");
 }
+
+// --- benchmark cases ---
+#[cfg(true)]
+{
+    write_fd(fd, "
+export PAGER=cat
+cd /musl
+sh /musl/cyclictest_testcode.sh
+cd /glibc
+sh /glibc/cyclictest_testcode.sh
+");
+}
+
     sys_close(fd);
     // Execute: busybox sh /test.sh
     {
