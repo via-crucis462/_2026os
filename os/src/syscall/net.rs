@@ -14,9 +14,10 @@ use crate::process::FileDescriptor;
 use crate::process::FdFlags;
 use crate::net::net_poll;
 use core::sync::atomic::{AtomicU16, Ordering};
-use crate::fs::OpenFlags;
+use crate::fs::{OpenFlags, create_fifo_in_dentry};
 use crate::timer::TimeVal;
 use crate::get_time_ms;
+use crate::timer::check_timer_cooperative;
 use smoltcp::socket::tcp::State;
 /// 获取指定 Socket 的本地地址和端口信息。
 /// 将内核中 Socket 的 local_endpoint 信息格式化为 sockaddr_in 结构并拷贝回用户空间。 asd
@@ -463,7 +464,17 @@ pub fn sys_recvfrom(
                 if can_recv {
                 continue; 
                 }
-                let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+                crate::timer::check_timer_cooperative();
+                let task = crate::task::current_task().unwrap();
+                let task_inner = task.inner_exclusive_access();
+                if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
+                    drop(task_inner); 
+                    crate::println!("[Kernel] detected SIGALRM in sys_recvfrom, exiting.");
+                    return crate::syscall::errno::Errno::EINTR.as_isize(); 
+                }
+                drop(task_inner);
+                crate::task::suspend_current_and_run_next();
+                /*let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
                 if let Some(socket_wait) = queues.get(&udp_socket.handle) {
                     let rx_queue = socket_wait.rx_queue.clone();
                     drop(queues); 
@@ -479,7 +490,14 @@ pub fn sys_recvfrom(
                 } else {
                     drop(queues);
                     crate::task::suspend_current_and_run_next();
-                }
+                    let task = crate::task::current_task().unwrap();
+                    let task_inner = task.inner_exclusive_access();
+                    if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
+                        drop(task_inner); 
+                        return crate::syscall::errno::Errno::EINTR.as_isize(); 
+                    }
+                    drop(task_inner);
+                }*/
                 continue;
             }
         }

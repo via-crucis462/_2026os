@@ -309,7 +309,7 @@ pub fn trap_return() -> ! {
             let mut process_inner = process.inner_exclusive_access();
             for task in process_inner.tasks.iter() {
                 let mut task_inner = task.inner_exclusive_access();
-                // 注入 SIGALRM 信号！
+                // 注入 SIGALRM 信号
                 task_inner.signals |= crate::task::SignalFlags::SIGALRM;
 
                 if task_inner.task_status == crate::task::TaskStatus::Blocked {
