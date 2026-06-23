@@ -136,8 +136,6 @@ impl VfsInode for ProcPidDirInode {
             // 当查找 oom_score_adj 时，返回一个绑定了该 PID 的特殊文件
             "oom_score_adj" => Some(Arc::new(OomScoreAdjInode::new(self.pid))),
             "stat" => Some(Arc::new(ProcStatInode::new(self.pid))),
-            
-
             "status" => Some(Arc::new(ProcStatusInode::new(self.pid))),
             "ns" => Some(Arc::new(ProcNsDirInode::new(self.pid))),
             "maps" => Some(Arc::new(ProcMapsInode::new(self.pid))),
