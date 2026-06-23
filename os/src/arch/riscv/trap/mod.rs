@@ -305,7 +305,6 @@ pub fn trap_return() -> ! {
     let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
     
     for pid in expired_pids {
-        println!("[Cooperative Timer]  PID {} tick ", pid);
         if let Some(process) = crate::task::get_process(pid) {
             let mut process_inner = process.inner_exclusive_access();
             for task in process_inner.tasks.iter() {
