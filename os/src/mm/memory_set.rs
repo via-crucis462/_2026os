@@ -559,7 +559,7 @@ impl MemorySet {
         let user_stack_bottom = max_end_vpn.0 * PAGE_SIZE + GUARD_PAGES * PAGE_SIZE;
         memory_set.push_guard_area(max_end_vpn.0 * PAGE_SIZE, GUARD_PAGES);
         let user_stack_top = user_stack_bottom + USER_STACK_SIZE;
-        memory_set.push(
+        memory_set.areas.push(
             MapArea::new(
                 user_stack_bottom.into(),
                 user_stack_top.into(),
@@ -567,8 +567,6 @@ impl MemorySet {
                 MapPermission::R | MapPermission::W | MapPermission::U,
                 PageSize::Page4K
             ),
-            None,
-            user_stack_bottom,
         );
         let heap_bottom = user_stack_top + GUARD_PAGES * PAGE_SIZE;
         memory_set.push_guard_area(user_stack_top, GUARD_PAGES);
