@@ -301,8 +301,11 @@ bitflags! {
         const RDWR = 1 << 1;
         /// create new file
         const CREATE = 1 << 6;
+        
         /// truncate file size to 0
         const TRUNC = 1 << 9;
+        /// 非阻塞模式 (O_NONBLOCK)
+        const NONBLOCK = 1 << 11;
         /// 用于mkdir中，open二次确认是否新建的文件是目录类型
         const DIRECTORY = 1 << 16;
         /// 不追踪符号链接
@@ -332,7 +335,7 @@ impl OpenFlags {
     }
 }
 pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> Option<Arc<OSInode>> {
-    debug!("VFS: open_file - path='{}', flags={:?},cwd={}", path, flags, base.name);
+    warn!("VFS: open_file - path='{}', flags={:?},cwd={}", path, flags, base.name);
     let start_node = if path.starts_with('/') {
         ROOT_DENTRY.clone() // 绝对路径，从根开始
     } else {

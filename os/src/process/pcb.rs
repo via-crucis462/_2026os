@@ -195,6 +195,9 @@ impl ProcessControlBlock {
                     FileDescriptor::new(Arc::new(Stdout), FdFlags::empty(), 0),
                     FileDescriptor::new(Arc::new(Stderr), FdFlags::empty(), 0),
                 ],
+                rlimit_data: Rlimit64 { cur_lmt: usize::MAX, max_lmt: usize::MAX },
+            rlimit_nproc: Rlimit64 { cur_lmt: 4096, max_lmt: 4096 }, // 默认 4096 个进程上限
+            rlimit_as: Rlimit64 { cur_lmt: usize::MAX, max_lmt: usize::MAX },  
                 cwd: ROOT_DENTRY.clone(),
                 signals: SignalFlags::empty(),
                 signal_actions: SignalActions::default(),
@@ -569,6 +572,9 @@ impl ProcessControlBlock {
                 personality: parent_inner.personality,
                 locked_bytes: 0, // fork 时不继承父进程的锁定内存
                 start_time_us: get_time_us(),
+                rlimit_data: parent_inner.rlimit_data.clone(),
+                rlimit_nproc: parent_inner.rlimit_nproc.clone(),
+                rlimit_as: parent_inner.rlimit_as.clone(),
             })
         });
         let new_task = Arc::new(TaskControlBlock {
@@ -874,6 +880,14 @@ pub struct ProcessControlBlockInner {
     pub alive_task_count: isize,
     // 专用于syscall92的personality
     pub personality: usize,
+    /// RLIMIT_DATA: 限制进程的“数据段”最大容量
+    pub rlimit_data: Rlimit64,
+    
+    /// RLIMIT_NPROC: 限制同一个用户能创建的“最大进程数量”
+    pub rlimit_nproc: Rlimit64,
+    
+    /// RLIMIT_AS: 限制进程能使用的“虚拟地址空间”总大小 (Address Space)
+    pub rlimit_as: Rlimit64,
     // MAP_LOCKED 锁定的内存字节数（用于 /proc/self/status VmLck 字段）
     pub locked_bytes: usize,
 

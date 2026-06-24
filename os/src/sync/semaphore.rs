@@ -59,6 +59,27 @@ impl WaitQueue {
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }
+    pub fn remove_by_tid(&mut self, tid: usize) {
+        self.queue.retain(|task| task.gettid() != tid);
+        
+    }
+    pub fn front(&self) -> Option<Arc<TaskControlBlock>> {
+        self.queue.front().cloned()
+    }
+    /// 获取当前队列中等待的任务数量
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// 获取队列中第一个（最先进入）任务的 TID（不弹出任务）
+    pub fn front_tid(&self) -> Option<usize> {
+        self.queue.front().map(|task| task.gettid())
+    }
+
+    /// 获取当前队列中所有任务的 TID 列表
+    pub fn get_tids(&self) -> Vec<usize> {
+        self.queue.iter().map(|task| task.gettid()).collect()
+    }
     pub fn remove_task(&mut self, tid: usize) {
         self.queue.retain(|task| task.gettid() != tid);
     }

@@ -143,7 +143,7 @@ impl TaskControlBlock {
 
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq , Debug)]
 /// task status: UnInit, Ready, Running, Exited
 pub enum TaskStatus {
     /// uninitialized
@@ -158,6 +158,7 @@ pub enum TaskStatus {
     Zombie,
     /// 加入了等待队列但正在保存上下文
     BlockSaving,
+
 }
 
 impl core::fmt::Display for TaskStatus {

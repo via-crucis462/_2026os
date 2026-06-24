@@ -4,6 +4,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use spin::Mutex;
 use lazy_static::lazy_static;
+use alloc::sync::Arc;
 
 /// 当前实现接受的 `Timex.modes` 位定义。
 pub const ADJ_OFFSET: u32 = 0x0001;
@@ -90,7 +91,26 @@ lazy_static! {
     /// 叠加在平台 realtime 时钟之上的软件偏移量，单位为纳秒。
     pub static ref CLOCK_REALTIME_OFFSET_NS: Mutex<i64> = Mutex::new(0);
 }
-
+pub fn check_timer_cooperative() {
+    let current_ms = get_time_ms();
+    let expired_pids = TIMER_MANAGER.lock().tick(current_ms);
+    
+    for pid in expired_pids {
+        crate::println!("[Cooperative Timer] PID {} tick inside syscall", pid);
+        if let Some(process) = crate::task::get_process(pid) {
+            let mut process_inner = process.inner_exclusive_access();
+            for task in process_inner.tasks.iter() {
+                let mut task_inner = task.inner_exclusive_access();
+                task_inner.signals |= crate::task::SignalFlags::SIGALRM;
+                if task_inner.task_status == crate::task::TaskStatus::Blocked {
+                    task_inner.signal_interrupted = true;
+                    task_inner.task_status = crate::task::TaskStatus::Ready;
+                    crate::task::add_task(Arc::clone(task)); 
+                }
+            }
+        }
+    }
+}
 pub struct TimerManager {
     // 正向索引：到期时间(ms) -> 挂在该时间点的进程 PID 列表
     events: BTreeMap<usize, Vec<usize>>,
@@ -126,17 +146,14 @@ impl TimerManager {
 
     /// 设置闹钟
     pub fn set_alarm(&mut self, pid: usize, current_ms: usize, delay_ms: usize) -> usize {
-        // 先无脑注销旧闹钟
+        // 先注销
         let old_expire_ms = self.cancel_alarm(pid);
-
-        // 如果传参不是 0，说明要设新闹钟
         if delay_ms > 0 {
             let new_expire = current_ms + delay_ms;
             self.events.entry(new_expire).or_default().push(pid);
             self.pid_map.insert(pid, new_expire);
         }
 
-        // 返回旧闹钟剩余的秒数
         if old_expire_ms > current_ms {
             old_expire_ms - current_ms
         } else {
@@ -161,8 +178,7 @@ impl TimerManager {
                 break;
             }
         }
-        
-        // 返回出去让外层慢慢发信号，彻底解耦全局锁！
+
         expired_pids
     }
 }

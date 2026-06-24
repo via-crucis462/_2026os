@@ -440,7 +440,7 @@ pub fn setup_oscomp_env() {
     // 1. 挂载 /tmp 
     root.mount_child("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     info!("[VFS] Mounted /tmp");
-
+    
     // 2. 挂载 bin, sbin, usr 等虚拟目录
     let etc_dentry = root.mount_child("etc".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let passwd_content = "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
@@ -480,7 +480,9 @@ pub fn setup_oscomp_env() {
                 "[", "basename", "cat", "chmod", "cp", "cut", "date", "dirname", "echo", "env",
                 "false", "grep", "head", "kill", "ln", "ls", "mkdir", "mv", "printf", "pwd", "rm",
                 "rmdir", "sed", "sh", "sleep", "sort", "tail", "test", "touch", "tr", "true", "uname",
-                "wc", "which", "xargs", "awk",
+                "wc", "which", "xargs", "awk","cut",
+                "tr", "head", "tail", "sort", "uniq", "tee", "sleep", "id", "uname", 
+                "which", "find", "xargs", "chmod", "chown", "date", "printf", "clear","ps", "fgrep","mktemp"
             ];
             
             for app in applets {
@@ -562,7 +564,39 @@ pub fn setup_oscomp_env() {
         error!("DEBUG: /dev/shm path is BROKEN!");
     }
     mount_hugepages();
+    //返回简单的“语言、国家、字符编码”的一套环境变量并挂载
+    let locale_content = "#!/bin/sh\necho \"LANG=C\"\necho \"LC_ALL=C\"\n";
+    bin_dentry.insert( "locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
+    sbin_dentry.insert("locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
+    usr_bin_dentry.insert("locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
+    // rsh远程连接sh
+    let fake_rsh = r#"#!/bin/sh
+    if [ "$1" = "-n" ]; then
+        shift 2
+    elif echo "$1" | grep -E -q '^[0-9\.]+ \d*$'; then
+        shift 1
+    fi
+    exec /musl/busybox sh -c "$*"
+    "#;
+    bin_dentry.insert("rsh".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())));
+    sbin_dentry.insert("rsh".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())));
+    usr_bin_dentry.insert("rsh".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())));
+    //setkey命令
+    let fake_setkey = "#!/bin/sh\nexit 0\n";
+    bin_dentry.insert("setkey".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_setkey.as_bytes())));
+    sbin_dentry.insert("setkey".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_setkey.as_bytes())));
     info!("[VFS] setup_oscomp_env done.");
+    // 伪造并转发 expr 命令给 busybox
+    let fake_expr = "#!/bin/sh\nexec /musl/busybox expr \"$@\"\n";
+    bin_dentry.insert("expr".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())));
+    usr_bin_dentry.insert("expr".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())));
+
+     let fake_ip = "#!/bin/sh\nexec /musl/busybox ip \"$@\"\n";
+    sbin_dentry.insert("ip".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())));
+    bin_dentry.insert("ip".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())));
+    //处理一个绝对路径脚本
+    let symlink_inode: Arc<dyn super::VfsInode> = Arc::new(TmpfsFsSymbolicLinkInode::new("/musl/ltp/testcases".to_string()));
+    root.mount_child("testcases".to_string(), symlink_inode);
 }
 
 // 挂载 /sys/kernel/mm/hugepages

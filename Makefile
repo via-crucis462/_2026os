@@ -89,6 +89,7 @@ debug-rv: build-user-rv copy-user-rv build-rv copy-rv
 	-device virtio-net-device,netdev=net \
 	-netdev user,id=net \
 	-rtc base=utc \
+	-semihosting-config enable=on,target=native \
 	-S -gdb tcp::$(RV_GDB_PORT) \
 	-monitor tcp::1236,server,nowait \
 	| tee kernel_output.log
