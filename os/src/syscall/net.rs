@@ -89,10 +89,45 @@ pub fn sys_getpeername(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
             }
         }
         return 0; // 成功
-    } 
-    // 如果是 UDP/Unix/Netlink 套接字，对端在无连接状态下调用 getpeername 返回 ENOTCONN
-    else if file.as_any().downcast_ref::<crate::net::socket::UdpSocket>().is_some()
-        || file.as_any().downcast_ref::<StandardNetlinkSocket>().is_some()
+    } else if let Some(udp_sock) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
+        // 1. 先加锁，再解开 Option
+        let ep_guard = udp_sock.remote_ep.lock();
+        if let Some(endpoint) = *ep_guard {
+            // 2. 提取端口和 IP
+            let port = endpoint.port;
+            let ip = match endpoint.addr {
+                smoltcp::wire::IpAddress::Ipv4(v4) => v4.0, // 提取 IPv4 的 4 字节数组
+                _ => [0u8; 4], // 暂时兼容其他情况
+            };
+            
+            // 3. 统一组装 sockaddr_in (16字节)
+            let mut sockaddr_bytes = [0u8; 16];
+            let family: u16 = 2; // AF_INET = 2
+            sockaddr_bytes[0..2].copy_from_slice(&family.to_ne_bytes());
+            sockaddr_bytes[2..4].copy_from_slice(&port.to_be_bytes()); 
+            sockaddr_bytes[4..8].copy_from_slice(&ip);                
+            
+            // 4. 写回用户态空间 (仿照 TCP 分支的写法)
+            unsafe {
+                let copy_len = (user_len as usize).min(16);
+                let mut current_addr = addr as usize;
+                for i in 0..copy_len {
+                    if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                        return crate::syscall::errno::Errno::EFAULT.as_isize();
+                    }
+                    current_addr += 1;
+                } 
+                // 回写实际的套接字地址长度
+                if !try_translated_write(token, addrlen, 16u32) {
+                    return crate::syscall::errno::Errno::EFAULT.as_isize();
+                }
+            }
+            return 0; // 成功
+        }else {
+            return crate::syscall::errno::Errno::ENOTCONN.as_isize();
+        }
+    }
+    else if  file.as_any().downcast_ref::<StandardNetlinkSocket>().is_some()
         || file.as_any().downcast_ref::<crate::net::socket::UnixSocket>().is_some() 
     {
         return crate::syscall::errno::Errno::ENOTCONN.as_isize();

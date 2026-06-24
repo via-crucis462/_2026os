@@ -3909,8 +3909,6 @@ pub fn sys_pselect6(
                             }else if let Some(_udp_wrapper) = fd_file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
                                 let r_status = fd_file.readable();
                                 let w_status = fd_file.writable();
-                                println!("pid[{}] [pselect6 UDP] fd={}, r_status={}, w_status={}, in_read={}", 
-                                process.pid.0, fd, r_status, w_status, in_read);
                                 if in_read && r_status {
                                     ready_readfds |= 1usize << fd;
                                     ready_count += 1;
