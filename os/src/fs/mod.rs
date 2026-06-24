@@ -122,6 +122,9 @@ pub trait File: Send + Sync {
     fn ioctl(&self, _request: u32, _argp: usize, _token: usize) -> isize {
         Errno::ENOTTY.as_isize()
     }
+    fn is_socket(&self) -> bool {
+        false 
+    }
 }
 
 /// 文件状态结构体 (musl riscv64 `struct stat` ABI)

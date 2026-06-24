@@ -19,6 +19,88 @@ use crate::timer::TimeVal;
 use crate::get_time_ms;
 use crate::timer::check_timer_cooperative;
 use smoltcp::socket::tcp::State;
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SockAddrIn {
+    pub sin_family: u16, // AF_INET = 2
+    pub sin_port: u16,   // 端口，需使用 .to_be() 转换大端序
+    pub sin_addr: u32,   // IPv4地址，需转换大端序
+    pub sin_zero: [u8; 8],
+}
+pub fn sys_getpeername(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
+    let task = current_task().unwrap();
+    let process = task.process();
+    let inner = process.inner_exclusive_access();
+    let token = inner.memory_set.token();
+    
+
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+        return EBADF.as_isize();
+    }
+    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    drop(inner); 
+
+    // 读取用户态传入的地址长度限制
+    let mut user_len = unsafe {
+        if let Some(ul) = try_translated_read(token, addrlen) {
+            ul
+        } else {
+            return EFAULT.as_isize();
+        }
+    };
+    let family: u16 = 2; // AF_INET
+    let mut port: u16 = 0;
+    let mut ip: [u8; 4] = [0, 0, 0, 0];
+    // 向下转型为 TcpSocket
+    if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
+        // 通过 smoltcp 锁结构，拿到套接字状态
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        let tcp_sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(socket.handle);
+        // 只有在状态是已经建立连接、或是正在关闭（说明曾经连接过）时，才有对端信息
+        if tcp_sock.is_active() || tcp_sock.state() != smoltcp::socket::tcp::State::Closed {
+            // 获取远端（对端）的端点信息
+            let remote_endpoint = tcp_sock.remote_endpoint();
+            // 提取对端的端口号
+            port = remote_endpoint.unwrap().port;
+            // 提取对端的 IPv4 地址
+         let smoltcp::wire::IpAddress::Ipv4(v4) = remote_endpoint.unwrap().addr ;
+
+        } else {
+            // Socket 没处于活跃连接状态，直接返回 ENOTCONN
+            return crate::syscall::errno::Errno::ENOTCONN.as_isize();
+        }
+        // 统一组装 sockaddr_in 并写入用户态
+        let mut sockaddr_bytes = [0u8; 16];
+        sockaddr_bytes[0..2].copy_from_slice(&family.to_ne_bytes());
+        sockaddr_bytes[2..4].copy_from_slice(&port.to_be_bytes()); 
+        sockaddr_bytes[4..8].copy_from_slice(&ip);                 
+        unsafe {
+            let copy_len = (user_len as usize).min(16);
+            let mut current_addr = addr as usize;
+            for i in 0..copy_len {
+                if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                    return EFAULT.as_isize();
+                }
+                current_addr += 1;
+            } 
+            // 按照 POSIX 标准，必须回写实际的套接字地址长度（16 字节）
+            if !try_translated_write(token, addrlen, 16u32) {
+                return EFAULT.as_isize();
+            }
+        }
+        return 0; // 成功
+    } 
+    // 如果是 UDP/Unix/Netlink 套接字，对端在无连接状态下调用 getpeername 返回 ENOTCONN
+    else if file.as_any().downcast_ref::<crate::net::socket::UdpSocket>().is_some()
+        || file.as_any().downcast_ref::<StandardNetlinkSocket>().is_some()
+        || file.as_any().downcast_ref::<crate::net::socket::UnixSocket>().is_some() 
+    {
+        return crate::syscall::errno::Errno::ENOTCONN.as_isize();
+    } 
+    else {
+        return ENOTSOCK.as_isize();
+    }
+}
 /// 获取指定 Socket 的本地地址和端口信息。
 /// 将内核中 Socket 的 local_endpoint 信息格式化为 sockaddr_in 结构并拷贝回用户空间。 asd
 pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
@@ -164,6 +246,7 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
 /// - 对 UDP/TCP socket 的其他选项，当前为了兼容用户态探测逻辑，直接返回成功 `0`。
 /// - 对非 socket 文件对象，返回 `ENOTSOCK`。
 ///
+
 pub fn sys_setsockopt(
     fd: usize,
     level: usize,
@@ -500,35 +583,10 @@ pub fn sys_recvfrom(
                 }
                 drop(task_inner);
                 crate::task::suspend_current_and_run_next();
-                /*let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
-                if let Some(socket_wait) = queues.get(&udp_socket.handle) {
-                    let rx_queue = socket_wait.rx_queue.clone();
-                    drop(queues); 
-                    crate::task::block_current_and_run_next(rx_queue.get_mutex());
-                    let task = crate::task::current_task().unwrap();
-                    let task_inner = task.inner_exclusive_access();
-                    if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
-                        drop(task_inner); 
-                        return crate::syscall::errno::Errno::EINTR.as_isize(); 
-                    }
-                    drop(task_inner);
-                    continue;
-                } else {
-                    drop(queues);
-                    crate::task::suspend_current_and_run_next();
-                    let task = crate::task::current_task().unwrap();
-                    let task_inner = task.inner_exclusive_access();
-                    if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
-                        drop(task_inner); 
-                        return crate::syscall::errno::Errno::EINTR.as_isize(); 
-                    }
-                    drop(task_inner);
-                }*/
                 continue;
             }
         }
     }
-    // 1读取网络数据
     let user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, len));
     let read_len = file.read(user_buf);
     //用户提供了 src_addr 和 addrlen填入对端的 IP 和端口信息
@@ -791,7 +849,7 @@ pub fn sys_listen(fd: usize, _backlog: i32) -> isize {
         crate::syscall::errno::Errno::ENOTSOCK.as_isize()
     }
 }
-
+const O_RDWR: u32 = 0o2;
 pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let task = current_task().unwrap();
     let process = task.process();
@@ -873,9 +931,9 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         orig_socket.is_listener.store(false, core::sync::atomic::Ordering::SeqCst);
         inner.fd_table[fd].file = Some(new_listener); 
         inner.fd_table[new_fd] = FileDescriptor {
-            file: Some(file.clone()), 
+            file: Some(file.clone()),
             flags: FdFlags::empty(),
-            status: 0,
+            status:O_RDWR as usize ,
         };
         drop(inner); 
         // 把客户端的 IP 和端口写回给 addr 指针
@@ -957,9 +1015,7 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: *mut MsgHdr, _flags: i32) -> isize {
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     drop(inner);
 
-    /*if !file.readable() {
-        return crate::syscall::errno::Errno::EACCES.as_isize();
-    }*/
+
 
     // 1. 读出 MsgHdr 控制结构
     let mut msg = crate::mm::translated_read(token, msg_ptr);

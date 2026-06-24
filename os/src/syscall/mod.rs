@@ -151,6 +151,7 @@ const SYSCALL_LISTEN: usize = 201;
 const SYSCALL_ACCEPT: usize = 202;
 const SYSCALL_CONNECT: usize = 203;
 const SYSCALL_GETSOCKNAME: usize = 204;
+const SYSCALL_GETPEERNAME: usize = 205;
 const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_SETSOCKOPT: usize = 208;
@@ -303,7 +304,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         let inner = process.inner_exclusive_access();
         inner.info_map_areas();
     }*/
-    //println!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, current_task().unwrap().tid.0, syscall_id);
+    println!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, current_task().unwrap().tid.0, syscall_id);
     //println!("[K] syscall args: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}", args[0], args[1], args[2], args[3], args[4], args[5]);
     info!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, current_task().unwrap().tid.0, syscall_id);
     let ret =match syscall_id {
@@ -413,6 +414,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         args[2] as *mut u8, 
         args[3]
         ),
+        SYSCALL_GETPEERNAME => sys_getpeername(args[0], args[1] as *mut u8, args[2] as *mut u32),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2] as u32),
         SYSCALL_FSYNC => sys_fsync(args[0]),
         SYSCALL_SYNC => sys_sync(),
@@ -507,7 +509,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], args[3], args[4], ret
         );*/
-//println!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
+println!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
     info!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
     ret
 }

@@ -166,8 +166,14 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
         let file = file.clone();
         let status = inner.fd_table[fd].status;
         drop(inner);
-        if !file.readable() {
-            return EACCES.as_isize(); // 权限不足
+        let is_sock = file.is_socket();
+        if !is_sock && !file.readable() {
+            return EACCES.as_isize(); // 正常文件的权限不足
+        }
+        if is_sock && !file.readable() {
+            if (status & (O_NONBLOCK | O_NDELAY)) != 0 {
+                return EAGAIN.as_isize(); 
+            }
         }
         if (status & (O_NONBLOCK | O_NDELAY)) != 0 && !file.ready_to_read() {
             return EAGAIN.as_isize();

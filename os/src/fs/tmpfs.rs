@@ -18,6 +18,7 @@ use crate::mm::{FrameTracker, PhysPageNum };
 use crate::mm::frame_alloc;
 use crate::mm::PageSize::Page4K;
 use crate::fs::ino::get_next_ino;
+use crate::fs::devfs::UrandomInode;
 
 use crate::PAGE_SIZE;
 
@@ -506,6 +507,8 @@ pub fn setup_oscomp_env() {
         dev_dentry.insert("null".to_string(), Arc::new(NullInode::new())); 
         dev_dentry.insert("zero".to_string(), Arc::new(ZeroInode::new()));
         dev_dentry.insert("rtc".to_string(), Arc::new(RtcInode::new()));
+        dev_dentry.insert("urandom".to_string(), Arc::new(UrandomInode::new()));
+        dev_dentry.insert("random".to_string(), Arc::new(UrandomInode::new()));
         // 终端设备
         dev_dentry.insert("tty".to_string(), Arc::new(TtyInode::new()));
 

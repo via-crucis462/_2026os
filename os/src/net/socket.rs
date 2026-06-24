@@ -128,6 +128,9 @@ impl Drop for TcpSocket {
     }
 }
 impl File for TcpSocket {
+    fn is_socket(&self) -> bool {
+        true
+    }
 fn readable(&self) -> bool {
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
