@@ -123,7 +123,7 @@ impl Drop for TcpSocket {
                 socket.close();
             }
         }
-        //crate::net::SOCKET_WAIT_QUEUES.lock().remove(&self.handle);
+        crate::net::SOCKET_WAIT_QUEUES.lock().remove(&self.handle);
         crate::net::net_poll();
     }
 }
@@ -307,7 +307,15 @@ pub struct UdpSocket {
     pub flags: Mutex<OpenFlags>,
     pub recv_timeout: spin::Mutex<Option<core::time::Duration>>,
 }
-
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        sockets.remove(self.handle);
+        crate::net::SOCKET_WAIT_QUEUES.lock().remove(&self.handle);
+        
+        crate::net::net_poll();
+    }
+}
 impl UdpSocket {
     pub fn new() -> Self {
         // 分配 16 个包的元数据空间，和 16KB 的数据缓存空间
@@ -488,7 +496,6 @@ impl File for UdpSocket {
         loop {
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
-            
             if socket.can_send() {
                 match socket.send_slice(&temp_buf, remote_ep) {
                     Ok(_) => {

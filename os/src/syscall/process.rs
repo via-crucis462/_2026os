@@ -3806,20 +3806,7 @@ pub fn sys_pselect6(
         deadline_ms = crate::timer::get_time_ms().saturating_add(timeout_ms);
     }
     loop {
-            //这一段信号处理可能在别的测试有用，但是在netperf里过不了，先注释了
-                /*{
-                    let proc_inner = process.inner_exclusive_access();
-                    let task_inner = task.inner_exclusive_access();
-                    let pending = (task_inner.signals | proc_inner.signals).bits() & !task_inner.signal_mask.bits();
-                    let unmaskable = (task_inner.signals | proc_inner.signals).bits()
-                        & ((1 << (9 - 1)) | (1 << (19 - 1)));
-                    if (pending | unmaskable) != 0 {
-                        drop(task_inner);
-                        drop(proc_inner);
-                        task.inner_exclusive_access().signal_mask = original_mask;
-                        return EINTR.as_isize();
-                    }
-                }*/
+
             if readfds_ptr as usize != 0 {
                 readfds = {
                     if let Some(rf) = crate::mm::try_translated_read(token, readfds_ptr) { rf } 
@@ -3873,6 +3860,30 @@ pub fn sys_pselect6(
             let mut ready_writefds = 0usize;
             let mut ready_exceptfds = 0usize;
             {
+            /*let sockets = crate::net::SOCKET_SET.exclusive_access();
+            for (handle, socket) in sockets.iter() {
+                    println!("--- In SOCKET_SET: handle={:?} ---", handle);
+                    match socket {
+                        smoltcp::socket::Socket::Tcp(tcp_socket) => {
+                            let state = tcp_socket.state(); // 获取 TCP 状态 (如 Listen, SynSent, Established 等)
+                            let local_endpoint = tcp_socket.local_endpoint();
+                            let remote_endpoint = tcp_socket.remote_endpoint();
+                            println!("  [TCP] State: {:?}", state);
+                            println!("  Local:  {:?}", local_endpoint);
+                            println!("  Remote: {:?}", remote_endpoint);
+                            println!("  Can send: {}, Can recv: {}", tcp_socket.can_send(), tcp_socket.can_recv());
+                        },
+                        smoltcp::socket::Socket::Udp(udp_socket) => {
+                            println!("  [UDP] Local: {:?}", udp_socket.endpoint());
+                            println!("  Can send: {}, Can recv: {}", udp_socket.can_send(), udp_socket.can_recv());
+                        },
+                        // 其他可能存在的 socket 类型（例如 Raw, Icmp）
+                        _ => {
+                            println!("  [Other Socket Type]");
+                        }
+                    }
+                }
+                drop(sockets);*/
                 let process_inner = process.inner_exclusive_access();
                 for fd in 0..limit {
                     let in_read = (readfds & (1usize << fd)) != 0;
@@ -3887,6 +3898,19 @@ pub fn sys_pselect6(
                                 
                                 drop(sockets); 
 
+                                if in_read && r_status {
+                                    ready_readfds |= 1usize << fd;
+                                    ready_count += 1;
+                                }
+                                if in_write && w_status {
+                                    ready_writefds |= 1usize << fd;
+                                    ready_count += 1;
+                                }
+                            }else if let Some(_udp_wrapper) = fd_file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
+                                let r_status = fd_file.readable();
+                                let w_status = fd_file.writable();
+                                println!("pid[{}] [pselect6 UDP] fd={}, r_status={}, w_status={}, in_read={}", 
+                                process.pid.0, fd, r_status, w_status, in_read);
                                 if in_read && r_status {
                                     ready_readfds |= 1usize << fd;
                                     ready_count += 1;
@@ -3924,7 +3948,6 @@ pub fn sys_pselect6(
                                         socket_wait.rx_queue.exclusive_access().remove_by_tid(tid);
                                     }
                                     if in_write {
-
                                         socket_wait.tx_queue.exclusive_access().remove_by_tid(tid);
                                     }
                                 }

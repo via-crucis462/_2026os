@@ -572,7 +572,6 @@ pub fn sys_recvfrom(
                 }
                 if let Some(deadline) = deadline_ms {
                     if crate::timer::get_time_ms() >= deadline {
-                        crate::println!("[DEBUG] PID{} sys_recvfrom: SO_RCVTIMEO triggered, returning EAGAIN", pid);
                         return crate::syscall::errno::Errno::EAGAIN.as_isize(); 
                     }
                 }
