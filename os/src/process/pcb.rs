@@ -320,8 +320,12 @@ impl ProcessControlBlock {
 
         let stack_page_size = PageSize::Page4K; // 默认用标准页映射用户程序
         let memory_top = heap_bottom;
+        
         // 压入具体的字符串内容（高地址），默认用标准页
         let mut argv_ptrs: Vec<usize> = Vec::new();
+        // 先准备页
+        let arg_size: usize = args.iter().map(|arg| arg.len() + 1).sum();
+        memory_set.handle_page_fault(user_sp - arg_size, user_sp);
         for arg in args.iter() {
             user_sp -= arg.len() + 1; // +1 是为了结尾的 '\0'
             let mut p = user_sp;
@@ -332,7 +336,11 @@ impl ProcessControlBlock {
             translated_write(memory_set.token(), p as *mut u8, 0); // 写入结尾 0
             argv_ptrs.push(user_sp);
         }
+
         // 环境变量字符串也放在高地址区域，后续在指针区单独压入 envp[]
+        // 先准备页
+        let env_size: usize = envs.iter().map(|env| env.len() + 1).sum();
+        memory_set.handle_page_fault(user_sp - env_size, user_sp);
         let mut envp_ptrs: Vec<usize> = Vec::new();
         for env in envs.iter() {
             user_sp -= env.len() + 1; // +1 是为了结尾的 '\0'
@@ -360,8 +368,7 @@ impl ProcessControlBlock {
         auxv.push((AT_PAGESZ, 4096));
         auxv.push((AT_ENTRY, main_entry_point));
         auxv.push((AT_RANDOM, random_at));
-         // AT_NULL
-        // 压入 AUXV
+        // AT_NULL
         if has_interp {
             if let Some(interp_base) = interp_base {
                 auxv.push((AT_BASE, interp_base));
@@ -380,13 +387,23 @@ impl ProcessControlBlock {
             );
         }
         auxv.push((0, 0));
+
+        // 压入 AUXV
+        // 先准备页
+        let auxv_size = auxv.len() * 2 * core::mem::size_of::<usize>();
+        memory_set.handle_page_fault(user_sp - auxv_size, user_sp);
         for (id, val) in auxv.iter().rev() {
             user_sp -= core::mem::size_of::<usize>();
             translated_write(memory_set.token(), user_sp as *mut usize, *val);
             user_sp -= core::mem::size_of::<usize>();
             translated_write(memory_set.token(), user_sp as *mut usize, *id);
         }
-        // 压入 envp 数组：压入一个 NULL (0) 作为结尾
+
+        // 压入 envp 数组
+        // 先准备页
+        let envp_size = (envp_ptrs.len() + 1) * core::mem::size_of::<usize>();
+        memory_set.handle_page_fault(user_sp - envp_size, user_sp);
+        // 压入一个 NULL (0) 作为结尾
         user_sp -= core::mem::size_of::<usize>();
         translated_write(memory_set.token(), user_sp as *mut usize, 0usize);
         // 逆序压入 envp 的指针
@@ -394,7 +411,12 @@ impl ProcessControlBlock {
             user_sp -= core::mem::size_of::<usize>();
             translated_write(memory_set.token(), user_sp as *mut usize, *env_ptr);
         }
-        // 压入 argv 数组：先压入一个 NULL (0) 作为结尾
+
+        // 压入 argv 数组
+        // 先准备页
+        let argv_size = (argv_ptrs.len() + 1) * core::mem::size_of::<usize>();
+        memory_set.handle_page_fault(user_sp - argv_size, user_sp);
+        // 压入一个 NULL (0) 作为结尾
         user_sp -= core::mem::size_of::<usize>();
         translated_write(memory_set.token(), user_sp as *mut usize, 0usize);
         // 逆序压入 argv 的指针
@@ -404,7 +426,11 @@ impl ProcessControlBlock {
         }
         // 此时 user_sp 即为 argv[0] 的地址
         let argv_base = user_sp;
+
         // 压入 argc
+        // 准备页
+        let argc_size = core::mem::size_of::<usize>();
+        memory_set.handle_page_fault(user_sp - argc_size, user_sp);
         user_sp -= core::mem::size_of::<usize>();
         translated_write(memory_set.token(), user_sp as *mut usize, args.len());
         // 调整锁序：先拿tcb锁再拿pcb锁，避免死锁
