@@ -520,6 +520,10 @@ pub fn sys_recvfrom(
     let file_flags = file.get_flags();
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         let mut data = vec![0u8; len];
+        let timeout_opt = *udp_socket.recv_timeout.lock();
+        let deadline_ms = timeout_opt.map(|duration| {
+            crate::timer::get_time_ms() + duration.as_millis() as usize
+        });
         loop {
             if let Some((read_len, src_ep)) = udp_socket.recvfrom(&mut data) {
                 // 把数据拷贝回用户的 buf
@@ -565,6 +569,12 @@ pub fn sys_recvfrom(
             } else {
                 if is_nonblocking {
                     return Errno::EAGAIN.as_isize(); 
+                }
+                if let Some(deadline) = deadline_ms {
+                    if crate::timer::get_time_ms() >= deadline {
+                        crate::println!("[DEBUG] PID{} sys_recvfrom: SO_RCVTIMEO triggered, returning EAGAIN", pid);
+                        return crate::syscall::errno::Errno::EAGAIN.as_isize(); 
+                    }
                 }
                 net_poll(); 
                 let mut sockets = crate::net::SOCKET_SET.exclusive_access();
