@@ -200,30 +200,15 @@ fn readable(&self) -> bool {
             }
             drop(sockets); 
             crate::net::net_poll(); 
-            let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
-            if let Some(socket_wait) = queues.get(&self.handle) {
-                let rx_queue = socket_wait.rx_queue.clone();
-                drop(queues);
-                crate::task::block_current_and_run_next(rx_queue.get_mutex());
-                let task = crate::task::current_task().unwrap();
-                let task_inner = task.inner_exclusive_access();
-                if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
-                    return EINTR.as_isize() as usize; 
-                }
+            crate::timer::check_timer_cooperative();
+            let task = crate::task::current_task().unwrap();
+            let task_inner = task.inner_exclusive_access();
+            if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
                 drop(task_inner);
-                let current_tid = crate::task::current_task().unwrap().gettid();
-                let mut queues = crate::net::SOCKET_WAIT_QUEUES.lock();
-                if let Some(socket_wait) = queues.get(&self.handle) {
-                    let mut rx_guard = socket_wait.rx_queue.exclusive_access();
-                    let tids_before = rx_guard.get_tids();
-                    rx_guard.remove_by_tid(current_tid);
-                    let tids_after = rx_guard.get_tids();
-                }
-                drop(queues);
-            } else {
-                drop(queues);
-                crate::task::suspend_current_and_run_next();
+                return EINTR.as_isize() as usize; 
             }
+            drop(task_inner);
+            crate::task::suspend_current_and_run_next();
         }
     }
 
@@ -253,22 +238,20 @@ fn readable(&self) -> bool {
                     crate::net::net_poll();
                     return write_len; 
                 }
-            }else 
-            {
-                drop(sockets);
-                return 0;
             }
             drop(sockets);
             crate::net::net_poll();
-            let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
-            if let Some(socket_wait) = queues.get(&self.handle) {
-                let tx_queue = socket_wait.tx_queue.clone();
-                drop(queues);
-                crate::task::block_current_and_run_next(tx_queue.get_mutex());
-            } else {
-                drop(queues);
-                crate::task::suspend_current_and_run_next();
+            crate::timer::check_timer_cooperative();
+            let task = crate::task::current_task().unwrap();
+            let task_inner = task.inner_exclusive_access();
+            if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
+                drop(task_inner);
+                return EINTR.as_isize() as usize; 
             }
+            drop(task_inner);
+
+            // 让出 CPU，等待下一轮调度回来继续尝试发送
+            crate::task::suspend_current_and_run_next();
         }
     }
 

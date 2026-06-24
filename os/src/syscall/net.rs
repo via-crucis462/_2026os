@@ -301,7 +301,34 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
         port
     );
     if let Some(tcp_socket) = file.as_any().downcast_ref::<TcpSocket>() {
-        tcp_socket.connect(endpoint)
+        let connect_res = tcp_socket.connect(endpoint);
+        if connect_res < 0 {
+            return connect_res;
+        }
+        loop {
+            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+            let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_socket.handle);
+            let state = smol_socket.state();
+            drop(sockets);
+            if state == smoltcp::socket::tcp::State::Established {
+                break; 
+            }
+            if state == smoltcp::socket::tcp::State::Closed {
+                return Errno::ECONNREFUSED.as_isize();
+            }
+            net_poll();
+            crate::timer::check_timer_cooperative();
+            let task = crate::task::current_task().unwrap();
+            let task_inner = task.inner_exclusive_access();
+            if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
+                drop(task_inner);
+                return Errno::EINTR.as_isize();
+            }
+            drop(task_inner);
+            crate::task::suspend_current_and_run_next();
+        }
+        
+        0 // 握手成功，返回 0
     } 
     else if let Some(udp_socket) = file.as_any().downcast_ref::<UdpSocket>() {
         udp_socket.connect(endpoint); 
@@ -469,7 +496,6 @@ pub fn sys_recvfrom(
                 let task_inner = task.inner_exclusive_access();
                 if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
                     drop(task_inner); 
-                    crate::println!("[Kernel] detected SIGALRM in sys_recvfrom, exiting.");
                     return crate::syscall::errno::Errno::EINTR.as_isize(); 
                 }
                 drop(task_inner);
