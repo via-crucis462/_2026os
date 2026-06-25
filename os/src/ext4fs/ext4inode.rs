@@ -353,7 +353,9 @@ impl Ext4Inode {
 
             // 从内核堆上分配一个临时函数调用栈，避免内核栈溢出
             const TEMP_STACK_SIZE: usize = 65536; // 64KB
-            let mut temp_stack: Vec<u8> = vec![0; TEMP_STACK_SIZE];
+            // 不清0，避免初始化开销
+            let mut temp_stack: Vec<u8> = Vec::with_capacity(TEMP_STACK_SIZE);
+            unsafe { temp_stack.set_len(TEMP_STACK_SIZE); }
             let stack_bottom = temp_stack.as_ptr() as usize + TEMP_STACK_SIZE;
 
             // 每次函数调用后调用这个闭包检查栈是否溢出
