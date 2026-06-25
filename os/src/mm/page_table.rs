@@ -567,7 +567,6 @@ pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
 }
 
 /// 将用户空间的T写入给定地址
-
 pub fn try_translated_write<T>(token: usize, ptr: *mut T, value: T) -> bool {
     let len = core::mem::size_of::<T>();
     if !prepare_user_write(token, ptr as usize, len) {
