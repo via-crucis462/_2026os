@@ -360,7 +360,7 @@ pub fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
         return true;
     }
     if token != current_user_token() {
-        return false;
+        warn!("prepare_user_read: token mismatch, token = {:#x}, current_user_token = {:#x}", token, current_user_token());
     }
     let task = current_task().unwrap();
     let process = task.process();
@@ -410,7 +410,7 @@ pub fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
         return true;
     }
     if token != current_user_token() {
-        panic!("prepare_user_write: token mismatch, token = {:#x}, current_user_token = {:#x}", token, current_user_token());
+        warn!("prepare_user_write: token mismatch, token = {:#x}, current_user_token = {:#x}", token, current_user_token());
     }
     let task = current_task().unwrap();
     let process = task.process();
@@ -531,7 +531,7 @@ pub fn try_translated_str(token: usize, ptr: *const u8) -> Option<String> {
 
 /// 从给定地址读取数据并返回T
 pub fn translated_read<T>(token: usize, ptr: *const T) -> T {
-    try_translated_read(token, ptr).unwrap_or_else(|| unsafe { core::mem::zeroed() })
+    try_translated_read(token, ptr).unwrap_or_else(|| panic!("translated_read: failed to read from user space"))
 }
 
 pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
@@ -567,7 +567,6 @@ pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
 }
 
 /// 将用户空间的T写入给定地址
-
 pub fn try_translated_write<T>(token: usize, ptr: *mut T, value: T) -> bool {
     let len = core::mem::size_of::<T>();
     if !prepare_user_write(token, ptr as usize, len) {
@@ -602,5 +601,7 @@ pub fn try_translated_write<T>(token: usize, ptr: *mut T, value: T) -> bool {
 }
 
 pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
-    try_translated_write(token, ptr, value);
+    if !try_translated_write(token, ptr, value) {
+        panic!("translated_write: failed to write to user space");
+    };
 }
