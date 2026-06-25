@@ -117,10 +117,17 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
     let status = inner.fd_table[fd].status;
         drop(inner);
-    if !file.writable() {
-        info!("pid[{}] [sys_write] EACCES fd={} readable={} writable={}",
-            proc.pid.0, fd, file.readable(), file.writable());
+        let is_sock = file.is_socket();
+        let nonblock = (status & (O_NONBLOCK | O_NDELAY)) != 0;
+    if !is_sock && !file.writable() {
+        warn!("pid[{}] [sys_write] EACCES fd={} readable={} writable={}",
+              proc.pid.0, fd, file.readable(), file.writable());
         return EACCES.as_isize(); 
+    }
+    if is_sock && !file.writable() {
+        if nonblock {
+            return EAGAIN.as_isize(); 
+        }
     }
     if let Some(err) = file.check_write_error() {
         return err.as_isize();
@@ -154,7 +161,6 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
 }
 
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
-    trace!("kernel:pid[{}] sys_read", current_task().unwrap().process().pid.0);
     let token = current_user_token();
     let task = current_task().unwrap();
     let proc = task.process();
@@ -166,13 +172,19 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
         let file = file.clone();
         let status = inner.fd_table[fd].status;
         drop(inner);
-        if !file.readable() {
-            return EACCES.as_isize(); // 权限不足
+        let is_sock = file.is_socket();
+        if !is_sock && !file.readable() {
+            println!("EACCES");
+            return EACCES.as_isize(); 
+        }
+        if is_sock && !file.readable() {
+            if (status & (O_NONBLOCK | O_NDELAY)) != 0 {
+                return EAGAIN.as_isize(); 
+            }
         }
         if (status & (O_NONBLOCK | O_NDELAY)) != 0 && !file.ready_to_read() {
             return EAGAIN.as_isize();
         }
-        trace!("kernel:pid[{}] sys_read: fd={}, len={}", task.process().pid.0, fd, len);
         file.read(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
     } else {
         EBADF.as_isize() // 文件描述符无效
@@ -664,6 +676,19 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
             let user_buffer = UserBuffer {
                 buffers: translated_byte_buffer(token, chunk_base as *const u8, chunk_len),
             };
+            /*if fd == 2 {
+                print!("[STDERR PID {}] ", proc.pid.0);
+                for buf in &user_buffer.buffers {
+                    // 尝试将字节数组转为 UTF-8 字符串
+                    if let Ok(s) = core::str::from_utf8(buf) {
+                        print!("{}", s);
+                    } else {
+                        // 如果有无法解析的字符，打印提示
+                        print!("<Non-UTF8-Data>"); 
+                    }
+                }
+                println!(" "); // 换行，方便查看
+            }*/
             let written = if nonblock {
                 match file.write_nonblock(user_buffer) {
                     Ok(written) => written,

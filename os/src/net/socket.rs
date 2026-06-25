@@ -123,11 +123,14 @@ impl Drop for TcpSocket {
                 socket.close();
             }
         }
-        //crate::net::SOCKET_WAIT_QUEUES.lock().remove(&self.handle);
+        crate::net::SOCKET_WAIT_QUEUES.lock().remove(&self.handle);
         crate::net::net_poll();
     }
 }
 impl File for TcpSocket {
+    fn is_socket(&self) -> bool {
+        true
+    }
 fn readable(&self) -> bool {
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
@@ -161,10 +164,7 @@ fn readable(&self) -> bool {
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
             let state = socket.state();
-            if !socket.may_recv() || matches!(state, State::CloseWait | State::Closed | State::TimeWait | State::LastAck | State::Closing) {
-                drop(sockets);
-                return 0; // 返回 0 字节
-            }
+
             if socket.can_recv() {
                 let mut temp_buf = vec![0u8; buf.len()];
                 match socket.recv_slice(&mut temp_buf) {
@@ -194,7 +194,7 @@ fn readable(&self) -> bool {
                         return 0; 
                     }
                 }
-            }else if !socket.may_recv() {
+            }else   if !socket.may_recv() || matches!(state, State::CloseWait | State::Closed | State::TimeWait | State::LastAck | State::Closing) {
                 drop(sockets);
                 return 0; 
             }
@@ -304,7 +304,15 @@ pub struct UdpSocket {
     pub flags: Mutex<OpenFlags>,
     pub recv_timeout: spin::Mutex<Option<core::time::Duration>>,
 }
-
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        sockets.remove(self.handle);
+        crate::net::SOCKET_WAIT_QUEUES.lock().remove(&self.handle);
+        drop(sockets);
+        crate::net::net_poll();
+    }
+}
 impl UdpSocket {
     pub fn new() -> Self {
         // 分配 16 个包的元数据空间，和 16KB 的数据缓存空间
@@ -404,6 +412,7 @@ impl UdpSocket {
 }
 // 实现 File trait，使其能放进系统的 fd_table 中
 impl File for UdpSocket {
+    fn is_socket(&self) -> bool { true }
     fn get_flags(&self) -> OpenFlags {
         *self.flags.lock()
     }
@@ -485,7 +494,6 @@ impl File for UdpSocket {
         loop {
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
-            
             if socket.can_send() {
                 match socket.send_slice(&temp_buf, remote_ep) {
                     Ok(_) => {
@@ -494,8 +502,8 @@ impl File for UdpSocket {
                         crate::net::net_poll();
                         return len;
                     }
-                    Err(_) => {
-                        // send_slice 失败可能因为包太大，但对于缓冲区满，更可能是 can_send 为 false
+                    Err(e) => {
+                        warn!("[Debug Write] Send failed! Error: {:?}", e);
                     }
                 }
             }

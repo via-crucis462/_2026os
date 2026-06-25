@@ -222,7 +222,7 @@ echo \"#### OS COMP TEST GROUP END glibc-musl ####\"
 #[no_mangle]
 fn main() -> i32 {
     chdir("/musl\0");
-    let cmd = "sh /musl/netperf_testcode.sh";
+    let cmd = "sh /musl/iperf_testcode.sh";
     run_shell(cmd);
     loop {
         let mut _status: i32 = 0;
