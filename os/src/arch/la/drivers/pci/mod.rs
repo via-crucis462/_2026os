@@ -9,7 +9,7 @@
  */
 
 /* 
- * Modified by 贝壳OS in 2026 for _2026os.
+ * Modified by 贝壳OS in 2026 for ShellCore.
  * Changes:
  * 1. 重命名模块,将其作为一个mod放入项目中,并引入项目相关模块.
  * 2. 为适配LA64修改部分代码,删除了portio相关代码.
