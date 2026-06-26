@@ -1,292 +1,59 @@
-# (队伍名)os
+# ShellCore
+
+![alt text](docs/ustb-logo.png)
+
 ## 简介
-- 此项目是北京科技大学2026 ShellCore的os项目，基于rCore ch7框架改编而来的。。
 
-# 日志
-## 2026.1.25
-1. 合并了munmap、brk、mmap的已完成部分，添加了相关系统调用定义和有关方法，但其功能尚未完善，目前的改动保证了不影响内核原有功能。
-2. 对部分模块添加了pub属性。
-3. 将syscall参数数量由4个改为6个。
-## 2026.1.27
-1. 修改了brk的实现，已过测。
-2. memory_set添加了brk_index记录堆区索引（并在初始化等过程中维护），便于在mmap等操作中跳过堆区及之前的部分。
-3. 修改了部分注释的表述，使其更清晰。
-4. mmap仍未完成，munmap已基本完成，但未测试。
-5. 准备开始完成其他系统调用的实现。
-## 2026.1.30
-1. 调整了先前munmap等的调用层次，优化代码结构。
-2. 开始实现clone。在不影响原有功能的前提下，将原本不带参数的fork改为了带参数的clone，实现了部分功能。
-3. 对原有框架中的fork进行了修改。
-## 2026.1.31
-1. 初步实现wait4，已过测。但目前的实现十分简陋，仅实现WNOHANG（默认）且不完全符合规范。
-2. 在wait4实现后，clone也成功过测。
-3. ！！！引入bug：按测例修改后的ch7b_initproc会反复报错（不影响测试，只是运行用户程序需要按两次回车），下面给出测试时的部分输出：
-```bash
-[initproc] Released a zombie process, pid=1, exit_code=0
-[initproc] Released a zombie process, pid=1, exit_code=0
-[initproc] Released a zombie process, pid=1, exit_code=0
-[initproc] Released a zombie process, pid=1, exit_code=0
-[initproc] Released a zombie process, pid=1, exit_code=0
-[initproc] Released a zombie process, pid=1, exit_code=0
-[initproc] Released a zombie process, pid=1, exit_code=0
-[initproc] Released a zombie process, pid=1, exit_code=0
-[initproc] Released a zombie process, pid=1, exit_code=0
-[initproc] Released a zombie process, pid=1, exit_code=0
-[initproc] Released a zombie process, pid=1, exit_code=0
-========== START test_wait ==========
-[K] do_clone: func=0x11, stack=0x0, flags=0xc
-wait child success.
-wstatus: 0
-========== END test_wait ==========
+`ShellCore`是由三位队员基于[2025春夏季开源操作系统训练营 rCore-Tutorial-v3 ch7](https://github.com/rcore-os/rCore-Tutorial-v3/tree/ch7)逐步开发而来的操作系统内核。
 
->> >> test_wait passed.
-```
-## 2026.2.1
-合并后wait的bug已解决
+## 参赛文档
 
+初赛阶段的项目介绍可以在[初赛文档](docs/初赛文档.md)查看。
 
-## 2026.2.2
-1. 完成了EXT4文件系统镜像的挂载，读取，执行。
-2. 完成了第一次合并，做完了许多系统调用。
+除commit记录外，[docs](docs/)目录下还有[初赛阶段日志](docs/初赛阶段日志.md)，其记录了本项目2026年1月至5月的开发过程。
 
-## 2026.2.3~未知
-TODO：把现有的内核架构进一步拆分为抽象层和实现层，其中实现层在arch下分架构实现（注：难度较高，正在尝试完成，预计耗时数天），以保证先前工作不需要针对不同架构进行修改。特别的，对于内存，预期目标是maparea和memory_set等结构体不需要针对龙芯进行重新定义、实现。
+## 使用说明
 
-## 2026.2.3_fmx
-！！！注意：目前arch/la/下的代码均为riscv版本的粘贴，完全无法工作，请不要尝试运行。
-1. 初步完成项目架构的调整，将架构强相关代码移到arch/riscv/下，并在arch/la/下创建了对应的文件结构但尚未实现。
-2. 虚拟内存模式由SV39改为了SV48，使其与LA64一致。带来的影响：页表层数由3改为4，但页表项中PPN的位域划分有所不同，相关转换函数均已修改。
-3. 部分结构体的定义被单开文件存储，例如flags.rs等。
-4. 部分不在arch/riscv/下的代码，涉及到riscv特性的部分添加了条件编译。
+通过
 
-## 2026.2.3_tbw
-1. 完成了fstat的系统调用书写
-2. 修改了makefile，完全去除了rCore中对于easy_fs的支持，改为ext4
-3. 完善了open系统调用的书写，支持了未创建文件的创建，修改了Openflag，符合posix标准。
-4. 因为open符合了posix标准，所以close这个测例也过了。
-
-## 2026.2.4_tbw
-1. 完成了mkdir的系统调用书写，但由于创建后没有删除，故第一次会显示success，第二次会段错误（posix标准返回-1，而返回-1报错）
-2. 将Inode中的i_size从逻辑块数改为了字节数
-3. 修改了vfs目录项定义，使其满足posix标准
-4. 修改了主函数中list_app()中的实现逻辑，删除了ls和init调用，改为用getdents()代替
-5. 完成了sys_getdents()
-
-
-## 2026.2.4_fmx
-1. 将riscv的内存模式改回了SV39，la64进行了相应调整。
-2. 基本完成了LA64的接口转换，例如，实现了权限位转换，三级页表定义等，还大幅调整了文件结构。接下来，理论上只需要少量修改即可完成LA64的内存管理功能，因为目前的实现保证了la虚拟地址的结构与riscv几乎完全一致，三级页表遍历的函数可以直接复用，而两者的页表项结构也较为类似。
-3. tlb缺页异常处理函数尚未实现，寄存器初始化函数也只是雏形。
-
-## 2026.2.5
-### tbw
-1. 当ext4的inode指针中数据块号为0时，并不代表该块不参与elf数据块大小的计算，而真实的elf大小应该在读取Inode的size块后才得已知道。所以，更改了原read_at的设计，使其符合标准做法。因此通过了测试用例clone
-2. 修改了ext4inode中对于block_size=4096等写法，使其等于全局变量BLOCK_SZ
-### fmx
-1. 尝试将rust工具链版本调整到nightly-2026-01-01，修改了部分语法以适应新版本编译器，例如删除了一些feature，在部分强制类型转换中间加入as *const()等。尽管经过简单测试发现测例能正常运行，但暂不建议和主分支合并。
-2. 在新版编译器下，链接器报错大幅度减少且更准确，根据报错调整部分符号后通过了编译链接，LA64理论上能运行helloworld了，但由于qemu没装好，还没测。
-3. 暂未调整第三方库的版本，因为如果调整，要做的修改过多。
-
-## 2026.2.6
-### tbw
-1. 实现了getcwd和chdir：在数据结构tcb中，加入了cwd字段用于存储当前目录的缓存，Dentry特性。
-2. 实现了getcwd和chdir，但目前的搜索文件树仍不够健壮，对于.和..的处理不够标准
-3. 实现了mmap和munmap，在memory_set中添加了一个函数名为find_free_area，调用时当传入的虚拟地址有冲突时，调用这个函数似乎可以自动分配内存
-4. 给SuperBlock中添加了字段，用于记录其是否开启了extents扩展。
-5. 增加了alloc_blockid方法给EXT4Inode，用于动态分配文件的块大小内容。
-
-### fmx
-1. 添加目录bl-new-qemu/，其中包含了最新版的rustsbi以提供对qemu8（如果在ubuntu24.04下用apt直接安装，即为这个版本）的支持。之所以希望使用qemu8，是因为希望在涉及la的场景中保持环境较新，且apt安装的qemu8.2.2包含了la版本，无需额外设置。makefile中也做了对应修改，现在，如果你尝试使用qemu8启动riscv版本，请使用make run bl=new。请注意：sbi.rs中的系统调用号需要做相应调整（其实就是改两个数字的事，这里已经提前写好并注释）。考虑到之前的riscv主要使用qemu7，所以这里没有应用修改，使用qemu7并正常使用make run即可。
-2. 发现将riscv版本的linker.ld和entry.asm直接复制到la，按la语法重写entry.asm，再修改基地址，就能直接正常启动。按此思路完成了la的最小化裸机启动配置。
-3. 验证了先前实现的la uart输入输出，成功在龙芯版qemu上打印出helloworld。
-
-## 2026.2.7
-### fmx
-1. 修改la的trap.S，实现了app初始化，完善TC结构体的设计与处理，完善trap模块到理论可用（未测试），封装了对sp和a0a1寄存器的读写为统一接口。
-2. trap应该能实现内存空间的切换了，学习了有关滑动窗口的知识，准备使用映射窗口将内核空间调整至usize:MAX / 2 + 1起的“平移”映射。
-3. todo：跳板暂未完善。
-
-## 2026.2.8
-### fmx
-继续修改la的兼容层，发现跳板几乎无需修改。修改main函数尝试运行，成功打印remap_test passed!但然后死循环。
-
-## 2026.2.9
-### tbw
-1. 伪实现了mount，unmount
-2. 实现了openat，修改了原open系统调用，现在接收第一个参数
-3. 实现了unmae系统调用，在process.rs中，只支持常量输出目前
-
-## 2026.2.11
-### tbw
-1. 完成了busybox的运行环境配置，修改了内存相关，仍需阅读一下
-2. 完成了对于符号链接的识别运行。
-
-## 2026.2.19
-### fmx
-完善了pci扫描和初始化，la版本现在能成功编译运行，但pci有关驱动仍需完善。
-
-## 2026.2.20
-pci驱动能跑了
- 
-## 2026.2.21
-优化la64 pci驱动部分，尝试运行la64 shell程序但失败
-
-## 2026.2.22&23
-经过大量调试修改，现在switch逻辑跑通了，restore时遇到内存问题。ranslate时，没有成功从用户提供的token出找到数据。
-另外，因为硬件会自动处理，取消了龙芯硬件窗口映射时的页表机制。
-
-## 2026.2.24&25
-大量调试后解决了页表相关问题。阅读文档注意到目录项没有权限位，直接存储下一级页表基址。修复后tlb重填能正确获取pt地址。
-```bash
-    [kernel] csr_info: TLBRELO0 = 0x324c191
-    [kernel] csr_info: TLBRELO1 = 0x324f191
+```sh
+INIT=sh make test-rv
 ```
 
-## 2.27~3.2
-终于解决了卡死问题，现在进入用户程序后正常syscall，但任务执行有关实现还存在问题。
+和
 
-## 3.3
-1. 通过刷新tlb解决了先前的问题，不过还能通过更新asid提高性能。
-2. basic基本过测，个别系统调用与riscv不同，例如statx，需要实现。
-
-## 3.5
-### tbw
-1. 完成了newfstat，access，exec的改写，以及pread64和statx
-2. newfstat实际上是fstat的进化，但实际上本身之前定义的Stat已经符合要求，所以直接调用fstat即可
-3. access是用于测试是否能成功打开文件，第一个参数用于指示寻址方式，实际上，只需要看openfile是否能成功就行，成功返回1，失败返回0
-4. pread64更是ez，只是指定位置read但不改变文件本身的读取记录，只需要在read时将OSinode中的inner的偏移删掉即可
-5. exec的改写，目前，经过符号链接转译后，判断结尾是否有.sh。若有，则运行任务时，task的runtask的第一个参数中添加/bin/busybox sh
-6. 对于符号链接的解析：目前find_tree提供选项，判断符号链接是否需要进行转译。
-7. statx的第一个参数类似access指示寻址方式，大概介绍一下
-- 如果传入的路径以/开头，则dirfd没用
-- 如果dirfd 等于-100，则第二个参数，即传入的路径作为相对于当前工作目录的路径
-- 如果dirfd是正数，则作为文件描述符，第二个参数传入的路径是相对于这个文件描述符对应的文件的位置进行寻址
-8. find_tree自动解析符号链接
-### 什么是符号链接？
-1. linux的任何文件都有自己唯一的一个inode号，且inode号也一一对应一个文件，包括符号链接
-2. 符号链接里存的是它指向的文件的路径。例如，符号链接sh里存的就是./busybox。
-3. Windows里叫快捷方式（绷
-
-### fmx
-1. 主要实现了prctl和随机数生成等系统调用，伪实现了几个涉及多线程的系统调用。
-2. 关于多线程：如果同一个任务开了多个tread，他们会使用同一套memory_set，为了实现真正的多线程我们需要对共享内存进行管理（ 锁）。
-3. 关于多用户/权限：目前，我们的内核未对用户程序进行权限限制，也没有多用户的概念，每个用户程序都能call所有系统调用，后续可能需要管理。
-### 关于prctl
-1. 全名process control，进程管理。
-2. 这个系统调用主要用于进程向内核请求：对自己修改一些权限/线程相关的特性；获取某些特性的状态。
-3. 选项过多，具体可见crate::syscall:::prctl。
-4. 针对尚未实现的特性，根据其特点选用不同的返回值来尽可能贴合用户程序的需要。
-
-## 3.6
-### fmx
-1. 实现了la64的asid标识管理，完成了tlb的有关维护。
-2. 改正了了mmap的部分错误，即使先前的实现能跑。
-
-## 3.7
-### gmj
-1. 写了简单的shell和ls指令的实现，为了让文件可以顺次展示改了getdents函数，加入了缓冲区，以及把上面的newfstat改成了新的调用，增加了参数通过相对路径打开文件，让ls指令可以正常实现
-2. 对于sys_fstatat的支持是假支持，以及对于程序结束后报错的结果还未处理
-
-### wbt
-1. 实现了statx，新定义了statx结构体
-2. 修改了pipe内核传入的文件描述符类型，使之从usize变为u32。
-3. 补充261sys，即waitpid，底层是调用wait4额外内容尚未完成
-4. 可以支持.sh文件的运行
-
-## 3.8
-### wbt
-1. 统一文件镜像
-2. 更改了busybox在img里的位置，现在位于根目录下，因此exec中对于脚本文件的替换寻址也相应修改
-3. 新增了exit_group系统调用，底层调用的是exit
-4. makefile添加日志功能，每次运行后可以在os目录下的kernel_output.log查看报错，防止报错刷屏导致无法看到最上方输出
-
-## 3.7-3.14
-### fmx
-1. 为多核支持完成基本的架构修改，锁和信号机制仍待完善
-2. 用mod process替代了原来的mod task
-3. process项目结构如下：
-
-    1）process::manager中有一个全局进程管理器PROCESS_MANAGER，掌握所有存活进程的Arc指针，主要用于遍历和维持生命周期（除了初始化进程）；以及一个PROCESSORS用于管理不同核心的任务处理器（任务执行流）。
-
-    2）process::schedule中有一个全局线程管理器/任务池，当某个任务被创建时需要被放到这个池子中，由各个核心“要走”到各自的线程，其不掌握所有任务，只掌握未分配任务。
-
-    3）new/fork/exec均被修改，内容和返回值均有较大调整，详见代码。
-
-    4）内存方面，trap_context现在不在form_elf时自动分配，改为在fork或new时手动分配（因为不同的任务内核栈位置也不同）。trap_cx_va现在指向各个线程被分配的内核栈栈底（现在的实现暂且假定内核栈只单次存放trapcx且不压栈）。
-
-    5）一个小细节补充：初始化时bl会把当前hartid存到a0，当前的实现中采用一个常用做法：start时将a0的值读进tp（线程指针），需要获取核心id时直接读tp即可。请不要修改tp。
-
-## 3.18
-### fmx
-1. 调整syscall工作目录的几处问题。
-2. 标准化syscall的返回值，将旧实现的-1和magic number统一改成枚举。
-3. 为la的busybox做好了适配。
-
-## 3-4月
-添加和调整syscall，使libctest全部过测
-网络初步实现
-
-## 4.22
-### wbt
-1. 重写了exec中的相关逻辑，重构了石山，并在每个逻辑段除.text和.data段之间插入了10页隔离页，不占物理内存
-2. 目前，用户栈仍在堆底，因为还未修改上下文相关，不过似乎也不需要改，因为带来不了什么性能提升其实
-
-## 5月初
-### fmx
-1. 文件鉴权（mode user group）
-2. loop设备实现
-3. 发现&调试多核场景下的死锁问题
-
-## 5.14
-### fmx
-1. 修复了kill, exit, exit_group的锁获取顺序错误导致的随机死锁。顺便修改exec中的锁获取顺序。
-```rust
-    //! 说明
-    /// 在同时获取进程和线程锁的情况下，一般的系统调用和exit获取锁的顺序为
-    let task_inner = task.inner_exlusive_access();
-    // ...
-    let proc_inner = proc.inner_exlusive_access();
-
-    /// 然而在kill中，给进程组发送信号原逻辑为：
-    for proc in manager {
-        let inner = proc.i_e_a();
-        for task in inner.tasks {
-            // ...
-            // <!!!>
-            t_inner = task.i_e_a();
-            // ...
-        }
-    }
-    // <!!!>:如果此时某个task在另一个cpu核上运行，正在退出或者执行其他系统调用，获取了tinner并即将获取pinner，此时会死锁
-
-    /// exit_group中原逻辑与上面的kill类似，具体见此文档更新前的最后一个commit
-
-    /// --- 更新后 ---
-
-    /// 将锁序改为一致，或者先drop pinner在获取t inner
-    /// exec中的锁序也改为一致
-    
+```sh
+INIT=sh make test-la
 ```
-2. 修复了exit中无用的父进程arc指针获取（并且未释放）导致的内存泄露
-3. 修复了内存空间设置错误的问题
-  
-   修复上述问题后ltp能稳定运行至退出
+分别可编译riscv和loongarch版的用户程序及内核，并通过qemu启动。上述参数下，我们的内核会挂载sdcard-*.img镜像为根目录，初始化程序会启动镜像中位于`/musl/busybox`的busybox的shell。
 
-## 5.21
-### fmx
-1. 实现&完善了riscv的可变页大小机制，并把内核改成了使用2M页，内核态tlb占用理论上大幅降低。
-2. 修复了之前exit逻辑的bug，现在全局进程列表中的僵尸进程将保留至父进程回收。
-3. 新增memfd create系统调用。
-4. 另备注：现在的页大小代码命名和组织有点不清晰，待后续改进，不过至少现在ltp能正常跑完。
+此外，可以通过如下变量调整编译设置：
 
-## 5.22-5.25
-### fmx
-1. 发现getdents有问题，修复后发现原来没有完整跑完ltp全部测例，开始做完整的ltp适配。
-2. 将initproc源码并入仓库，initproc程序调整为可选择性地运行ltp测例。
-3. 借助ltp测例修复了内核中的一些问题。
+```makefile
+# rv核心数
+RV_SMP ?= 1
+# la核心数
+LA_SMP ?= 1
+# 日志等级: ERROR, WARN, INFO, DEBUG, TRACE, OFF
+LOG ?= OFF
+# 初始化程序：default, sh, ltp，分别会运行全量测试，busybox shell，ltp特定测试
+INIT ?= default
+```
 
-## 5.31
-### fmx
-    修复了一个先前的bug:信号处理流程是trap返回时检查信号，如果有信号需要去用户设置的函数处理，就保存好上下文回到用户态，跳到对应位置。但处理好后用户不会主动恢复，所以需要改ra值，让ra指向恢复函数地址，用户处理完ret的时候恢复。之前的处理链路在后半部分这里断掉了。
+通过合适的启动参数与对[初始化程序源码](/home/asta/_2026os/user/src/bin)的修改，可以在运行make-test-*时让初始化程序运行其他程序。
 
-    fix：在跳板页中加入了恢复函数映射到用户空间，并且将备份改为vec来支持嵌套信号处理。
+---
+
+此外可以通过
+
+```sh
+make debug-rv
+
+make debug-la
+
+make gdb-rv
+
+make gdb-la
+```
+
+启动调试。需要先运行`make debug-*`再运行`make gdb-*`。
