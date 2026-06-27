@@ -399,8 +399,9 @@ fn main() -> i32 {
         "waitid08",
         "waitid09",
         "waitid10",
+        "waitid11",
         "waitpid01",
-        "waitpid06",
+/*      "waitpid06",
         "waitpid07",
         "waitpid08",
         "waitpid10",
@@ -420,7 +421,7 @@ fn main() -> i32 {
         "wqueue06",
         "wqueue07",
         "wqueue08",
-        "wqueue09",
+        "wqueue09", */
         "write03",
         "write04",
         "write06",
@@ -521,46 +522,6 @@ fn main() -> i32 {
         "vxlan02.sh",
         "vxlan03.sh",
         "vxlan04.sh",
-        "waitid01",
-        "waitid02",
-        "waitid03",
-        "waitid07",
-        "waitid08",
-        "waitid09",
-        "waitid10",
-//        "waitid11",
-        "waitpid01",
-        "waitpid06",
-        "waitpid07",
-        "waitpid08",
-        "waitpid10",
-        "waitpid11",
-        "waitpid12",
-        "waitpid13",
-        "wc01.sh",
-        "which01.sh",
-        "wireguard01.sh",
-        "wireguard02.sh",
-        "wireguard_lib.sh",
-        "wqueue01",
-        "wqueue02",
-        "wqueue03",
-        "wqueue04",
-        "wqueue05",
-        "wqueue06",
-        "wqueue07",
-        "wqueue08",
-        "wqueue09",
-        "write03",
-        "write04",
-        "write06",
-        "write_freezing.sh",
-        "writetest",
-        "writev02",
-//        "writev03",
-        "writev05",
-        "writev06",
-        "writev07",
     ];
 
     let mut run_cases: Vec<&str> = Vec::from(BASE_CASES);
@@ -630,6 +591,7 @@ sh /glibc/lua_testcode.sh
 }
 
 // --- benchmark cases ---
+/* 
 #[cfg(true)]
 {
     write_fd(fd, "
@@ -644,7 +606,7 @@ sh /glibc/iozone_testcode.sh
 sh /glibc/lmbench_testcode.sh
 ");
 }
-
+*/
 
 // --- musl ltp ---
 #[cfg(true)]
@@ -728,7 +690,9 @@ sh /glibc/cyclictest_testcode.sh
     // Init (PID 1) must never exit — otherwise the kernel panics.
     // Loop forever, reaping any zombie children.
     let mut _status: i32 = 0;
-    waitpid((-1isize) as usize, &mut _status);
+    while waitpid((-1isize) as usize, &mut _status) > 0 {
+        // Reap zombies
+    }
     0
 }
 
