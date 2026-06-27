@@ -353,7 +353,9 @@ impl Ext4Inode {
 
             // 从内核堆上分配一个临时函数调用栈，避免内核栈溢出
             const TEMP_STACK_SIZE: usize = 65536; // 64KB
-            let mut temp_stack: Vec<u8> = vec![0; TEMP_STACK_SIZE];
+            // 不清0，避免初始化开销
+            let mut temp_stack: Vec<u8> = Vec::with_capacity(TEMP_STACK_SIZE);
+            unsafe { temp_stack.set_len(TEMP_STACK_SIZE); }
             let stack_bottom = temp_stack.as_ptr() as usize + TEMP_STACK_SIZE;
 
             // 每次函数调用后调用这个闭包检查栈是否溢出
@@ -877,10 +879,31 @@ impl Ext4Inode {
     }
 
     pub fn add_dir_entry(&self, name: &str, inode_id: u32, file_type: u8) -> bool {
-        let mut offset = 0;
         let disk_inode = self.fs.get_disk_inode(self.inode_id);
         let file_size_bytes = disk_inode.size() as usize;
-        
+        let needed_len = ((8 + name.len() + 3) & !3) as usize;
+
+        // 检查是否有同名目录项
+        let mut offset = 0;
+        while offset < file_size_bytes {
+            let mut buf = alloc::vec![0u8; BLOCK_SZ];
+            self.raw_read_at(offset, &mut buf);
+            let mut block_offset = 0;
+            while block_offset < BLOCK_SZ {
+                let dirent = unsafe { &*(buf[block_offset..].as_ptr() as *const Ext4DirEntry) };
+                let rec_len = dirent.rec_len as usize;
+                if rec_len == 0 { break; }
+                if dirent.inode != 0 && dirent.name() == name {
+                    return false;
+                }
+                block_offset += rec_len;
+                if block_offset >= BLOCK_SZ { break; }
+            }
+            offset += BLOCK_SZ;
+        }
+
+        // 尝试插入
+        offset = 0;
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; BLOCK_SZ];
             self.raw_read_at(offset, &mut buf);
@@ -890,10 +913,9 @@ impl Ext4Inode {
                 let dirent = unsafe { &mut *(buf[block_offset..].as_ptr() as *mut Ext4DirEntry) };
                 let rec_len = dirent.rec_len as usize;
                 
-                if rec_len == 0 { break; } 
+                if rec_len == 0 { break; }
                 
                 let real_len = dirent.real_len() as usize;
-                let needed_len = ((8 + name.len() + 3) & !3) as usize;
                 
                 if rec_len >= real_len + needed_len {
                     let old_rec_len = dirent.rec_len;
@@ -919,7 +941,19 @@ impl Ext4Inode {
             }
             offset += BLOCK_SZ;
         }
-        false
+
+        // 所有现有块都已满，分配新块，扩展目录
+        // 写入一个 rec_len = BLOCK_SZ 的目录项作为新块的哨兵条目
+        let mut new_buf = alloc::vec![0u8; BLOCK_SZ];
+        let new_dirent = Ext4DirEntry::new_disk(inode_id, BLOCK_SZ as u16, name, file_type);
+        let new_dirent_bytes = unsafe {
+            core::slice::from_raw_parts(&new_dirent as *const _ as *const u8, 8 + new_dirent.name_len as usize)
+        };
+        new_buf[..new_dirent_bytes.len()].copy_from_slice(new_dirent_bytes);
+        self.update_dir_block_checksum_if_needed(&mut new_buf);
+        // raw_write_at 会自动分配新块、插入 extent、更新 inode size
+        let written = self.raw_write_at(file_size_bytes, &new_buf);
+        written == BLOCK_SZ
     }
 
     pub fn delete_dir_entry(&self, name: &str) -> Option<u32> {
