@@ -52,7 +52,7 @@ pub struct TxToken;
 impl Device for VirtioNetDevice {
     type RxToken<'a> = RxToken where Self: 'a;
     type TxToken<'a> = TxToken where Self: 'a;
-    #[cfg(target_arch = "riscv64")]
+
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
     let mut driver = NET_DEVICE.0.exclusive_access();
        if driver.can_recv() {
