@@ -153,10 +153,20 @@ impl PageCacheLRUQueue{
             None
         }
     }
-    /// 将页缓存条目移动到队尾（最近使用）
+    /// 将页缓存条目移动到队尾（最近使用）；若不存在则插入
     pub fn update(&mut self, ino: u64, page_offset: usize) {
         let key = (ino, page_offset);
         if !self.exists.contains_key(&key) {
+            // 新条目：直接插入到队尾
+            self.exists.insert(key, ());
+            if let Some(t) = self.tail {
+                self.nexts.insert(t, Some(key));
+            } else {
+                self.head = Some(key);
+            }
+            self.prevs.insert(key, self.tail);
+            self.nexts.insert(key, None);
+            self.tail = Some(key);
             return;
         }
         // 从当前位置断开
@@ -508,5 +518,13 @@ pub fn free_up_mem_space(std_pages: usize) -> usize {
             SharedPageCacheManager::lru_update_inner(&mut queue, *ino, *po);
         }
     }
+
+    if freed < std_pages {
+        println!("free_up_mem_space: only freed {} pages, requested {}", freed, std_pages);
+        println!("remaining page num: {:?}", man.lru_queue.lock().exists.keys().collect::<Vec<_>>().len());
+        println!("remaining page(in map) num: {:?}", man.page_cache_map.lock().len());
+
+    }
+
     freed
 }

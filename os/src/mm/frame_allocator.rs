@@ -251,8 +251,9 @@ pub fn init_frame_allocator() {
 pub fn frame_alloc(page_size: PageSize) -> Option<FrameTracker> {
     let free_space = get_free_frames();
 
-    if free_space <= PageSize::Page2M.num_pages() {
-        free_up_mem_space(PageSize::Page2M.num_pages());
+    if free_space <= PageSize::Page2M.num_pages() * 10 {
+        free_up_mem_space(PageSize::Page2M.num_pages() * 50);
+        warn!("frame_alloc: free space is low, try to free up memory space");
     }
 
     let ppn = {
