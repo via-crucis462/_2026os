@@ -2164,15 +2164,15 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
 /// TODO: 完全实现 fsync 语义
 pub fn sys_fsync(_fd: usize) -> isize {
     info!("kernel:pid[{}] sys_fsync: fd={}", current_task().unwrap().process().pid.0, _fd);
-    // crate::mm::mmap::sync_shared_page_cache();
+    crate::mm::mmap::sync_shared_page_cache();
     0
 }
 
 /// sync: 将所有文件系统缓存同步到磁盘
 pub fn sys_sync() -> isize {
     info!("kernel:pid[{}] sys_sync called", current_task().unwrap().process().pid.0);
-    // crate::mm::mmap::sync_shared_page_cache();
-    // crate::drivers::block::block_cache::block_cache_sync_all();
+    crate::mm::mmap::sync_shared_page_cache();
+    crate::drivers::block::block_cache::block_cache_sync_all();
     0
 }
 
