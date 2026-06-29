@@ -4410,6 +4410,7 @@ pub fn sys_prlimit64(
             return Errno::EPERM.as_isize(); 
         } 
     }
+
     let token = current_user_token();
     match resource {
         RLIMIT_NPROC => {
@@ -4430,7 +4431,9 @@ pub fn sys_prlimit64(
             // 导致用户态持有的 fd 引用失效（如 lmbench 的 pipe 通信）。
             let old = proc_inner.get_rlimit64();
             if !old_limit.is_null() {
-                translated_write(token, old_limit, old);
+                if !try_translated_write(token, old_limit, old) {
+                    return Errno::EFAULT.as_isize();
+                }
             }
             if !new_limit.is_null() {
                 let new = translated_read(token, new_limit);
@@ -4451,7 +4454,9 @@ pub fn sys_prlimit64(
         RLIMIT_CORE => {
             // core dump 文件大小限制，伪实现
             if !old_limit.is_null() {
-                translated_write(token, old_limit, Rlimit64 { cur_lmt: 0, max_lmt: 0 });
+                if !try_translated_write(token, old_limit, Rlimit64 { cur_lmt: 0, max_lmt: 0 }) {
+                    return Errno::EFAULT.as_isize();
+                }
             }
             0
         }
