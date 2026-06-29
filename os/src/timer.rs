@@ -96,7 +96,6 @@ pub fn check_timer_cooperative() {
     let expired_pids = TIMER_MANAGER.lock().tick(current_ms);
     
     for pid in expired_pids {
-        crate::println!("[Cooperative Timer] PID {} tick inside syscall", pid);
         if let Some(process) = crate::task::get_process(pid) {
             let mut process_inner = process.inner_exclusive_access();
             for task in process_inner.tasks.iter() {
