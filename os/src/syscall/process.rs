@@ -745,7 +745,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     }
     let file = fd_table[fd].file.as_ref().unwrap();
     let mut is_tty = false;
-    if fd <= 2 {
+    if fd <= 2 || fd == 255 {
         is_tty = true; 
     } else if let Some(dentry) = file.get_dentry() {
         // 如果 fd > 2，检查它的文件名，只要包含 tty 或 console，是合法的终端 fd
