@@ -81,29 +81,24 @@ impl StandardNetlinkSocket {
     ///  Netlink 属性树（rtattr）解析器
     fn parse_rt_attributes(&self, payload: &[u8], prefix_len: u8) {
         let mut offset = 0;
-
         // 循环迭代解析标准的 TLV (Type-Length-Value) 链表
         while offset + size_of::<RtAttr>() <= payload.len() {
             // 安全读取属性头
             let rta = unsafe { &*(payload.as_ptr().add(offset) as *const RtAttr) };
-            let rta_len = rta.rta_len as usize;
-            
+            let rta_len = rta.rta_len as usize;  
             // 安全边界防守：防止恶意构造的长度导致死循环或内存越界
             if rta_len < size_of::<RtAttr>() || offset + rta_len > payload.len() {
                 break;
             }
-
             // 提取 Value 的数据切片
             let value_start = offset + size_of::<RtAttr>();
             let value_end = offset + rta_len;
             let value_payload = &payload[value_start..value_end];
-
             // 匹配标准类型：IFA_ADDRESS 或 IFA_LOCAL 且长度为 4 字节 (IPv4)
             if (rta.rta_type == IFA_ADDRESS || rta.rta_type == IFA_LOCAL) && value_payload.len() == 4 {
                 let ip = Ipv4Address::new(value_payload[0], value_payload[1], value_payload[2], value_payload[3]);
                 let cidr = IpCidr::new(IpAddress::Ipv4(ip), prefix_len as u8);
-
-                // 调用内核唯一的网络总管更新 IP 池
+                // 调用内核静态网卡驱动更新 IP 池
                 crate::net::NET_IFACE.exclusive_access().update_ip_addrs(|addrs| {
                     if !addrs.iter().any(|a| *a == cidr) {
                         let _ = addrs.push(cidr);
@@ -111,8 +106,6 @@ impl StandardNetlinkSocket {
                 });
                 break;
             }
-
-            // 遵照标准：属性的步进必须强制 4 字节对齐
             offset += nlmsg_align(rta_len);
         }
     }
