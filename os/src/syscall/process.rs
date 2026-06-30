@@ -3901,7 +3901,7 @@ pub fn sys_pselect6(
                     let in_write = (writefds & (1usize << fd)) != 0;
                     if in_read || in_write {
                         if let Some(fd_file) = &process_inner.fd_table[fd].file {
-                            if let Some(tcp_wrapper) = fd_file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
+                            if fd_file.is_socket(){if let Some(tcp_wrapper) = fd_file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
                                 let r_status = fd_file.readable();
                                 let w_status = fd_file.writable();
                                 let mut sockets = crate::net::SOCKET_SET.exclusive_access();
@@ -3920,6 +3920,19 @@ pub fn sys_pselect6(
                             }else if let Some(_udp_wrapper) = fd_file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
                                 let r_status = fd_file.readable();
                                 let w_status = fd_file.writable();
+                                if in_read && r_status {
+                                    ready_readfds |= 1usize << fd;
+                                    ready_count += 1;
+                                }
+                                if in_write && w_status {
+                                    ready_writefds |= 1usize << fd;
+                                    ready_count += 1;
+                                }
+                            }
+                        }else {
+                                let r_status = fd_file.ready_to_read();
+                                let w_status = fd_file.ready_to_write();
+                                
                                 if in_read && r_status {
                                     ready_readfds |= 1usize << fd;
                                     ready_count += 1;
