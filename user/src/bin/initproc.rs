@@ -595,7 +595,6 @@ sh /glibc/lua_testcode.sh
 }
 
 // --- benchmark cases ---
-/* 
 #[cfg(true)]
 {
     write_fd(fd, "
@@ -610,7 +609,6 @@ sh /glibc/iozone_testcode.sh
 sh /glibc/lmbench_testcode.sh
 ");
 }
-*/
 
 // --- musl ltp ---
 #[cfg(true)]
