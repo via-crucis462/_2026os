@@ -28,7 +28,6 @@ fs_img/la64/*
 fs_img/riscv64/*
 testsuits-for-oskernel
 toolchains/
-*.pdf
 syscall_posix_kernel.md
 kernel-*
 *.img*

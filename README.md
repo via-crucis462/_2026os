@@ -10,6 +10,8 @@
 
 现有特性和测评情况详见[参赛文档](#参赛文档)。
 
+PPT位置[PPT](docs/ShellCore初赛文档.pdf)
+
 演示视频见链接
 通过网盘分享的文件：show.mp4
 链接: https://pan.baidu.com/s/1DChOX5w32UVI6LyuJBWWQg?pwd=4xwz 提取码: 4xwz
