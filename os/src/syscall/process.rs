@@ -3804,7 +3804,16 @@ pub fn sys_pselect6(
         } else {
             timespec.tv_sec
         };
-        timeout_ms = sec.saturating_mul(1000).saturating_add(timespec.tv_nsec / 1_000_000);
+        // 1. 计算原始的毫秒数
+        let mut calculated_ms = sec.saturating_mul(1000).saturating_add(timespec.tv_nsec / 1_000_000);
+        
+        // 2. 限制最大超时时间为两分钟 (120,000 毫秒)
+        const TWO_MINUTES_MS: usize = 30_000;
+        if calculated_ms > TWO_MINUTES_MS {
+            calculated_ms = TWO_MINUTES_MS;
+        }
+        
+        timeout_ms = calculated_ms;
         deadline_ms = crate::timer::get_time_ms().saturating_add(timeout_ms);
     }
     loop {
