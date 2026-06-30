@@ -13,8 +13,8 @@
 PPT位置[PPT](docs/ShellCore初赛文档.pdf)
 
 演示视频见链接
-通过网盘分享的文件：show.mp4
-链接: https://pan.baidu.com/s/1DChOX5w32UVI6LyuJBWWQg?pwd=4xwz 提取码: 4xwz
+通过网盘分享的文件：ShellCore
+链接: https://pan.baidu.com/s/1iNLCMZs_vGYIwcj9beZYww 提取码: 25pd
 
 项目成员:
 - 唐博文：3556495919@qq.com
