@@ -10,6 +10,10 @@
 
 现有特性和测评情况详见[参赛文档](#参赛文档)。
 
+演示视频见链接
+通过网盘分享的文件：show.mp4
+链接: https://pan.baidu.com/s/1DChOX5w32UVI6LyuJBWWQg?pwd=4xwz 提取码: 4xwz
+
 项目成员:
 - 唐博文：3556495919@qq.com
 - 冯孟熙：fmxi666@outlook.com

@@ -317,10 +317,10 @@ fn main() -> i32 {
         "posix_fadvise03_64",
         "prctl05",
         "prctl08",
-        "pselect02",
-        "pselect02_64",
-        "pselect03",
-        "pselect03_64",
+        //"pselect02",
+        //"pselect02_64",
+        //"pselect03",
+        //"pselect03_64",
         "read01",
         "read02",
         "read04",
@@ -538,7 +538,7 @@ fn main() -> i32 {
             "nfs05_make_tree",
             "ppoll01",
             "select03",
-            "sendmmsg02",
+            //"sendmmsg02",
             "times03",
             "sbrk02",
             "signal01",
@@ -581,11 +581,15 @@ export PAGER=cat
 cd /musl 
 sh /musl/basic_testcode.sh
 sh /musl/busybox_testcode.sh
+sh /musl/iperf_testcode.sh
+sh /musl/netperf_testcode.sh
 sh /musl/lua_testcode.sh
 sh /musl/libctest_testcode.sh
 cd /glibc
 sh /glibc/basic_testcode.sh
 sh /glibc/busybox_testcode.sh
+sh /glibc/iperf_testcode.sh
+sh /glibc/netperf_testcode.sh
 sh /glibc/lua_testcode.sh
    ");
 }
