@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 use crate::process::block_current_and_run_next;
 
 use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
-use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, get_hart_id};
+use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, USER_STACK_SIZE, get_hart_id};
 use crate::process::FileDescriptor;    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
 use alloc::collections::btree_map::Values;
@@ -4464,6 +4464,15 @@ pub fn sys_prlimit64(
             // core dump 文件大小限制，伪实现
             if !old_limit.is_null() {
                 if !try_translated_write(token, old_limit, Rlimit64 { cur_lmt: 0, max_lmt: 0 }) {
+                    return Errno::EFAULT.as_isize();
+                }
+            }
+            0
+        }
+        RLIMIT_STACK => {
+            // 栈大小限制，返回默认值，最大值 RLIM_INFINITY
+            if !old_limit.is_null() {
+                if !try_translated_write(token, old_limit, Rlimit64 { cur_lmt: USER_STACK_SIZE, max_lmt: usize::MAX }) {
                     return Errno::EFAULT.as_isize();
                 }
             }
