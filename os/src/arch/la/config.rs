@@ -1,7 +1,5 @@
 //! Constants in the kernel
 
-// LA64可能有所不同，暂时复制riscv的配置
-
 #![allow(unused)]
 /// kernel address space
 pub const UNCHACHED_KERNEL_BASE: usize = 0x8000_0000_0000_0000;
@@ -22,11 +20,24 @@ pub const KERNEL_HEAP_SIZE: usize = 0x800_0000; // 128MB
 /// pub const TRAMPOLINE: usize = (1 << 39) - PAGE_SIZE;
 /// the virtual addr of trap context 
 /// pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
-/// clock frequency
-/// la64需要从cpu寄存器中获取计时器频率，这里先不管
+
+#[cfg(board = "virt")]
 pub const CLOCK_FREQ: usize = 12500000;
+#[cfg(board = "2k1000")]
+pub const CLOCK_FREQ: usize = 100000000;
+
+#[cfg(board = "virt")]
+pub const CPU_CORE_NUM: usize = 4;
+#[cfg(board = "2k1000")]
+pub const CPU_CORE_NUM: usize = 2;
+
 /// 为pci设备预留的内存空间大小
 pub const DMA_SIZE: usize = 0x100_0000; // 16MB
+
+#[cfg(board = "virt")]
+pub const UART_PHYS: usize = 0x1fe001e0;
+#[cfg(board = "2k1000")]
+pub const UART_PHYS: usize = 0x1fe20000;
 
 /// 实际打印 qemu ram 发现，la 的物理地址 1G 并不从 elf 起点开始连续
 /// 而是从 0x0 - 约0x20_0000 给固件
@@ -65,8 +76,6 @@ pub const MMIO: &[(usize, usize)] = &[
 pub const OFFSET_FOR_USER_APP: usize = 0;
 pub const USER_APP_BASE: usize = 0x1_2000_0000;
 pub const USER_STACK_TOP: usize = USER_APP_MAX_SIZE;
-
-pub const CPU_CORE_NUM: usize = 4;
 
 /// sv39用户地址空间end
 pub const USER_APP_MAX_SIZE: usize = 1<<38;

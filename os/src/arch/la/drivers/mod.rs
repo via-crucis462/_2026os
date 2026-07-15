@@ -1,8 +1,9 @@
 //! block device driver
 
-pub mod block;
+
+pub mod board;
 pub mod pci;
-pub use block::BLOCK_DEVICE;
+pub use board::*;
 
 use alloc::vec::Vec;
 use lazy_static::lazy_static;

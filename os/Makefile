@@ -100,12 +100,20 @@ ifeq ($(OFFLINE),)
 	rustup component add llvm-tools-preview
 endif
 
+# BOARD: qemu (default) or 2k1000
+BOARD ?= qemu
+
+LA_LINKER := src/arch/la/linker.ld
+ifeq ($(BOARD),2k1000)
+    LA_LINKER := src/arch/la/linker_2k1000.ld
+endif
+
 $(LA_KERNEL_BIN): kernel-la
 	@rust-objcopy --binary-architecture=loongarch64 $(LA_KERNEL_ELF) --strip-all -O binary $@
 
 kernel-la:
-	@echo Building for loongarch64...
-	@LOG=$(LOG) INITPROC=$(INITPROC) cargo build --target loongarch64-unknown-none $(MODE_ARG)
+	@echo Building for loongarch64, BOARD=$(BOARD)...
+	@RUSTFLAGS="-Clink-arg=-T$(LA_LINKER) -Cforce-frame-pointers=yes" LOG=$(LOG) INITPROC=$(INITPROC) BOARD=$(BOARD) cargo build --target loongarch64-unknown-none $(MODE_ARG)
 
 build-la: env-la kernel-la
 

@@ -8,6 +8,8 @@ RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
 # default, sh, ltp
 INIT ?= default
+# virt (qemu) or 2k1000 (real board)
+BOARD ?= virt
 RV_ELF ?= os/target/riscv64gc-unknown-none-elf/$(MODE)/os
 LA_ELF ?= os/target/loongarch64-unknown-none/$(MODE)/os
 
@@ -25,7 +27,7 @@ all: build-user copy-user build copy
 build-rv:
 	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)
 build-la:
-	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)
+	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD)
 
 build-user-rv:
 	cd user && $(MAKE) build ARCH=riscv64
@@ -36,7 +38,11 @@ build-user: build-user-rv build-user-la
 copy-rv:	
 	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv
 copy-la:
-	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la
+	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la-$(BOARD)
+ifeq ($(BOARD),2k1000)
+	@echo "  -> Packing uImage for 2K1000..."
+	python3 boot/build_uimage.py kernel-la-$(BOARD) kernel-la-$(BOARD).uImage
+endif
 
 copy-user-rv:
 	cd user && find target/riscv64gc-unknown-none-elf/release/ -maxdepth 1 -name 'initproc*' ! -name '*.*' -exec cp -f {} ../os/src/arch/riscv/ \;

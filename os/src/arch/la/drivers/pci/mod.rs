@@ -293,7 +293,7 @@ pub fn scan_bus(am: CSpaceAccessMethod) -> BusScan {
 
 
 use crate::drivers::{DeviceType};
-use super::block::VirtioHal;
+use super::VirtioHal;
 use alloc::boxed::Box;
 
 

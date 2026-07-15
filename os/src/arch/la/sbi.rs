@@ -11,8 +11,7 @@ struct UartSbi {
     base_addr: usize,
 }
 
-// qemu la64 uart基址
-const UART_BASE: usize = UNCHACHED_KERNEL_BASE | 0x1fe001e0;
+const UART_BASE: usize = UNCHACHED_KERNEL_BASE | super::config::UART_PHYS;
 // ACPI GED寄存器基址，用于电源管理
 const ACPI_GED_BASE: usize = UNCHACHED_KERNEL_BASE | 0x100e001c;
 
