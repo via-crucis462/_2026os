@@ -19,7 +19,7 @@ impl VirtIONetWrapper {
             
             // 验证设备是否有效，并检查它是不是网卡 (DeviceType::Network)
             if header.verify() && header.device_type() == DeviceType::Network {
-                println!("[kernel] Found virtio-net device at {:#x}", addr);
+                println!("[kernel] Found virtio-net device at 0x{:x}", addr);
                 net_addr = addr;
                 break;
             }

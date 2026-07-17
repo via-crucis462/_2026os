@@ -238,7 +238,7 @@ impl PageTable {
     pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
         self.find_pte(va.clone().std_floor()).map(|(pte, size)| {
             let aligned_pa: PhysAddr = pte.ppn().into();
-            assert!(aligned_pa.actual_aligned(size), "translate_va: pa {:#x} is not aligned to page size {:#x}", aligned_pa.0, size.size());
+            assert!(aligned_pa.actual_aligned(size), "translate_va: pa 0x{:x} is not aligned to page size 0x{:x}", aligned_pa.0, size.size());
             let offset = va.actual_page_offset(size);
             let aligned_pa_usize: usize = aligned_pa.into();
             (aligned_pa_usize + offset).into()
@@ -360,7 +360,7 @@ pub fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
         return true;
     }
     if token != current_user_token() {
-        warn!("prepare_user_read: token mismatch, token = {:#x}, current_user_token = {:#x}", token, current_user_token());
+        warn!("prepare_user_read: token mismatch, token = 0x{:x}, current_user_token = 0x{:x}", token, current_user_token());
     }
     let task = current_task().unwrap();
     let process = task.process();
@@ -410,7 +410,7 @@ pub fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
         return true;
     }
     if token != current_user_token() {
-        warn!("prepare_user_write: token mismatch, token = {:#x}, current_user_token = {:#x}", token, current_user_token());
+        warn!("prepare_user_write: token mismatch, token = 0x{:x}, current_user_token = 0x{:x}", token, current_user_token());
     }
     let task = current_task().unwrap();
     let process = task.process();
@@ -418,7 +418,7 @@ pub fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
     let sp = {
         let trap_cx_va = current_trap_cx_user_va();
         let Some(trap_cx_pa) = page_table.translate_va(VirtAddr::from(trap_cx_va)) else {
-            println!("prepare_user_write: failed to translate trap_cx_va {:#x}", trap_cx_va);
+            println!("prepare_user_write: failed to translate trap_cx_va 0x{:x}", trap_cx_va);
             return false;
         };
         trap_cx_pa.get_ref::<TrapContext>().get_sp()
@@ -521,7 +521,7 @@ pub fn try_translated_str(token: usize, ptr: *const u8) -> Option<String> {
     let pa = page_table
         .translate_va(VirtAddr::from(ptr as usize))
         .unwrap();
-    debug!("translated_ref: start_pa = {:#x}, end_pa = {:#x}, len = {:#x}", pa.0, pa.0 + len - 1, len);
+    debug!("translated_ref: start_pa = 0x{:x}, end_pa = 0x{:x}, len = 0x{:x}", pa.0, pa.0 + len - 1, len);
     if pa.std_floor() == PhysAddr(pa.0 + len - 1).std_floor() {
         pa.get_ref()
     } else {

@@ -15,7 +15,7 @@ use super::*;
 /// 
 /// 参数检查由sys_mmap完成
 pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: usize) -> isize {
-    info!("kernel:pid[{}] sys_mmap called with start={:#x}, len={:#x}, prot={:#x}, flags={:#x}, fd={}, off={:#x}", 
+    info!("kernel:pid[{}] sys_mmap called with start=0x{:x}, len=0x{:x}, prot=0x{:x}, flags=0x{:x}, fd={}, off=0x{:x}", 
         current_task().unwrap().process().pid.0, start, len, port, flags, fd, off);
 
     // MAP_SHARED_VALIDATE (0x03): 等同于 MAP_SHARED 但需要校验所有 flag 位已知
@@ -113,7 +113,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: u
     // 手动刷新指令缓存
     unsafe { core::arch::asm!("ibar 0"); }
     
-    debug!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
+    debug!("[kernel] sys_mmap: mapped addr=0x{:x} for start=0x{:x}, len=0x{:x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
 
     // 处理 MAP_LOCKED：记录锁定的内存量（用于 /proc/self/status VmLck）
     // 目前是伪实现，只单纯记录，实际上没“阻止换出”

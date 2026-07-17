@@ -48,6 +48,8 @@ pub mod auth;
 pub mod timer;
 pub mod ipc;
 
+pub mod init;
+
 pub use arch::config::*;
 pub use process::task;
 
@@ -60,6 +62,7 @@ use crate::arch::la;
 
 pub use arch::timer::*;
 
+#[cfg(board = "virt")]
 use crate::arch::drivers::NET_DEVICE;
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -79,8 +82,9 @@ pub static MAIN_HART_INITED: AtomicBool = AtomicBool::new(false);
 pub static MAIN_HART_ID: AtomicUsize = AtomicUsize::new(0);
 
 
-/// clear BSS segment
-/// 两种架构应该是统一的
+/// clear BSS segment (excluding boot stack)
+/// boot stack must not be part of [sbss, ebss), otherwise we would zero the live stack.
+#[inline(always)]
 fn clear_bss() {
     extern "C" {
         fn sbss();
@@ -97,7 +101,59 @@ extern "C" {
     fn _start();
 }
 
+#[no_mangle]
+pub fn rust_main(hart_id: usize) -> ! {
+    clear_bss();
+    logging::init();
+    println!("[kernel] Hello, world! hart_id={}", hart_id);
 
+    println!("[kernel] test_broke num={:#x}", 42u8);
+    println!("[kernel] test_broke num={:#x}", 42u16);
+    println!("[kernel] test_broke num={:#x}", 42u32);
+    println!("[kernel] test_broke num={:#x}", 42u64);
+
+    /* 
+    let aligned_adr = 0x9000_0000_0000_0000usize;
+    let unaligned_adr = aligned_adr + 1;
+    let aligned_ptr = aligned_adr as *mut u64;
+    let unaligned_ptr = unaligned_adr as *mut u64;
+
+    
+    // 读取crmd
+    unsafe {
+        let mut crmd: usize;
+        asm!("csrrd {}, 0x0", out(reg) crmd);
+        println!("[kernel] crmd=0x{:x}", crmd);
+    }
+
+    // 读取misc
+    unsafe {
+        let mut misc: usize;
+        asm!("csrrd {}, 0x3", out(reg) misc);
+        println!("[kernel] misc=0x{:x}", misc);
+    }
+
+    let test_num = 0x34u8;
+    // test ldx stx
+    unsafe {
+        asm!("stx.d $t0, {aligned}, $zero", aligned = in(reg) aligned_ptr, out("$t1") _);
+        asm!("ldx.d $t0, {aligned}, $zero", aligned = in(reg) aligned_ptr, out("$t0") _);
+     
+    }
+    println!("pass aligned ldx stx test");
+    unsafe {
+        asm!("ldx.d $t0, {unaligned}, $zero", unaligned = in(reg) unaligned_ptr, out("$t0") _);
+        asm!("stx.d $t1, {unaligned}, $zero", unaligned = in(reg) unaligned_ptr, out("$t1") _);     
+    }
+    println!("pass unaligned ldx stx test");
+    */
+
+
+    
+    panic!("main end");
+}
+
+/*
 #[no_mangle]
 /// the rust entry-point of os
 pub fn rust_main(hart_id: usize) -> ! {
@@ -117,6 +173,7 @@ pub fn rust_main(hart_id: usize) -> ! {
         main_init(hart_id);
         panic!("Unreachable in rust_main!");
     } else {
+        loop{}
         info!("[kernel] Hello from hart {}!", hart_id);
         other_init();
         panic!("Unreachable in rust_main!");
@@ -148,22 +205,127 @@ pub fn rust_main() -> ! {
  */ 
 
 fn main_init(hart_id: usize) {
+    println!("[kernel] main_init hart_id={}", hart_id);
+
     mm::init();
     #[cfg(target_arch = "riscv64")]
     mm::remap_test();
     #[cfg(target_arch = "loongarch64")]
-    mem_test();
-    arch::trap::init();
+    // mem_test();
+    // arch::trap::init();
     #[cfg(target_arch = "loongarch64")]
     {
-        arch::timer::init_board_freq();
+        // --- CSR.MISC 诊断：确认 ALCL 是否可写 ---
+        {
+            let before = crate::arch::la::mm::MISC_BEFORE_WRITE.load(core::sync::atomic::Ordering::Relaxed);
+            let after = crate::arch::la::mm::MISC_AFTER_WRITE.load(core::sync::atomic::Ordering::Relaxed);
+            let misc_before = before;
+            let misc_after = after;
+            // 只用 Display ({}) 打印小整数，不走 LowerHex (避免触发 ALE)
+            println!("[MISC diag] ALCL before={}, after={}", misc_before, misc_after);
+            if misc_after != 0 {
+                println!("[MISC diag] ALCL is READ-ONLY! HW does NOT support unaligned access.");
+            } else {
+                println!("[MISC diag] ALCL cleared OK, unaligned access now allowed.");
+            }
+        }
+        // --- LDX/STX vs LD/ST 非对齐访存验证 ---
+        {
+            use core::arch::asm;
+            // 栈上 8 字节对齐 buffer，取 buf[1] 保证：物理可访存 + 非 8 字节对齐
+            #[repr(align(8))]
+            struct Buf([u8; 16]);
+            let buf = Buf([0u8; 16]);
+            let aligned_ptr = buf.0.as_ptr() as usize;
+            let unaligned_ptr = aligned_ptr + 1;
+            let write_val: u64 = 0xDEADBEEF_CAFEBABE;
+            println!(
+                "[LDX/STX] aligned=0x{:x}, unaligned=0x{:x}, write_val=0x{:x}",
+                aligned_ptr, unaligned_ptr, write_val
+            );
+
+            // Step 1: STX.D + LDX.D（带 x，ALCL=0）
+            let readback: u64;
+            unsafe {
+                asm!(
+                    "or $t1, {addr}, $zero",   // t1 = unaligned_ptr
+                    "or $t2, {val}, $zero",    // t2 = write_val
+                    "stx.d $t2, $t1, $zero",   // Mem[t1+0] = t2  (非对齐 store)
+                    "ldx.d $t3, $t1, $zero",   // t3 = Mem[t1+0]  (非对齐 load)
+                    "or {rb}, $t3, $zero",     // readback = t3
+                    addr = in(reg) unaligned_ptr as u64,
+                    val = in(reg) write_val,
+                    rb = out(reg) readback,
+                    out("$t1") _,
+                    out("$t2") _,
+                    out("$t3") _,
+                );
+            }
+            if readback == write_val {
+                println!("[LDX/STX] STX.D+LDX.D OK, readback=0x{:x}", readback);
+            } else {
+                println!("[LDX/STX] STX.D+LDX.D MISMATCH! readback=0x{:x}", readback);
+            }
+
+            // Step 2: ST.D + LD.D（不带 x，非对齐预期 ALE）
+            println!("[LD/ST] Now testing regular ST.D (expect ALE on unaligned addr)...");
+            unsafe {
+                asm!(
+                    "or $t1, {addr}, $zero",
+                    "or $t2, {val}, $zero",
+                    "st.d $t2, $t1, 0",        // ← 非对齐，必报 ALE
+                    "ld.d $t3, $t1, 0",
+                    addr = in(reg) unaligned_ptr as u64,
+                    val = in(reg) write_val,
+                    out("$t1") _,
+                    out("$t2") _,
+                    out("$t3") _,
+                );
+            }
+            println!("[LD/ST] ST.D+LD.D OK (should NOT reach here if ALE fires)");
+        }
+        // --- 堆分配器诊断 ---
+        {
+            use alloc::boxed::Box;
+            use alloc::vec::Vec;
+            println!("[HEAP diag] alloc test start...");
+            let _b = Box::new(42u64);
+            println!("[HEAP diag] Box<u64> OK");
+            let mut v = Vec::<u8>::new();
+            v.push(0xaa);
+            println!("[HEAP diag] Vec<u8> OK, len={}", v.len());
+            let _v2: Vec<u64> = (0..16).collect();
+            println!("[HEAP diag] Vec<u64>[16] OK");
+            // 重点测试小尺寸 layout (接近 fmt 内部可能触发的分配)
+            let _b2 = Box::new(0u8);
+            println!("[HEAP diag] Box<u8> OK");
+            println!("[HEAP diag] all alloc tests passed!");
+        }
+        // --- fmt 诊断：逐步隔离 0x{:x} panic ---
+        // Step 1: 纯文本（已验证 OK）
+        println!("[T0] baseline plain text");
+        // Step 2: {:x} 不带 # —— 应该全过
+        println!("[u8  :x] {:x}", 42u8);
+        println!("[u16 :x] {:x}", 42u16);
+        println!("[u32 :x] {:x}", 42u32);
+        // Step 3: 手动 "0x" 前缀 —— 绕过 # flag
+        println!("[u8  man] 0x{:x}", 42u8);
+        // Step 4: as u64 绕过 —— 走 64-bit 安全路径
+        println!("[u8  u64] 0x{:x}", 42u8 as u64);
+        println!("[u32 u64] 0x{:x}", 42u32 as u64);
+        // Step 5: u64 原生 0x{:x} —— 已知安全
+        println!("[u64 #x] 0x{:#x}", 42u64);
+        // Step 6（最后）: u8/u32 原生 0x{:x} —— 预期 panic
+        println!("[u8  #x] 0x{:#x}", 42u8);
+        println!("[u32 #x] 0x{:#x}", 42u32);
+        println!(" === All fmt tests done ===");
         info!("searching pci...");
-        // 仅调试用，搜索，实例化并列出设备
-        // 和BLOCK是后续才实例化的
-        drivers::search_pci();
+        // drivers::search_pci();
         info!("done drivers");
+
     }
     //#[cfg(target_arch = "riscv64")]
+    #[cfg(board = "virt")]
     {
         lazy_static::initialize(&NET_DEVICE);
         lazy_static::initialize(&crate::net::NET_IFACE);
@@ -179,7 +341,7 @@ fn main_init(hart_id: usize) {
     println!("main_init done, run tasks...");
     task::run_tasks();
 }
-
+*/
 #[cfg(target_arch = "riscv64")]
 fn init_other_hart(hart_id: usize) {
     /*unsafe {
@@ -215,7 +377,7 @@ fn init_other_hart(hart_id: usize) {
         //参考2025年RocketOS的实现，先把启动地址写入目标核的csr_mail，然后发ipi唤醒
         arch::la::ipi::csr_mail_send(start_addr as u64, i, 0);
         arch::la::ipi::send_ipi_single(i, 1);
-        info!("[kernel][la] wakeup hart {} with start={:#x}", i, start_addr);
+        info!("[kernel][la] wakeup hart {} with start=0x{:x}", i, start_addr as u64);
     }
 }
 
@@ -273,7 +435,7 @@ pub fn debug_csr_info() {
         asm!("csrrd {}, 0x19", out(reg) pgdl);
         asm!("csrrd {}, 0x0", out(reg) crmd);
     }
-    debug!("pgdl: {:#x}, crmd: {:#b}", pgdl, crmd);
+    debug!("pgdl: 0x{:x}, crmd: 0b{:b}", pgdl, crmd);
 }
 
 #[cfg(target_arch = "loongarch64")]
@@ -297,4 +459,8 @@ pub fn mem_test() {
         }
     }
     println!("mem_test passed!");
+}
+
+fn test_call() {
+    println!("test_call: call test_func");
 }

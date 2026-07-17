@@ -427,7 +427,7 @@ fn set_log_buf(token: usize, ptr: u64, len: u32, message: &[u8]) {
         return;
     }
     /*println!(
-        "set_log_buf: ptr={:#x}, len={}, message_len={}",
+        "set_log_buf: ptr=0x{:x}, len={}, message_len={}",
         ptr,
         len,
         message.len()
@@ -600,7 +600,7 @@ fn bpf_map_update(token: usize, attr: *const u8, size: usize) -> isize {
 }
 
 fn bpf_prog_load(token: usize, attr: *const u8, size: usize) -> isize {
-    //println!("bpf_prog_load called with attr={:#x}, size={}", attr as usize, size);
+    //println!("bpf_prog_load called with attr=0x{:x}, size={}", attr as usize, size);
     if size < size_of::<BpfProgLoadAttr>() {
         return Errno::EINVAL.as_isize();
     }

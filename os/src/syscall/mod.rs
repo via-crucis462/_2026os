@@ -280,22 +280,22 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         
         /*match syscall_id {
             SYSCALL_MMAP => {
-                println!("mmap called with addr: {:#x}, length: {:#x}, prot: {:#x}, flags: {:#x}, fd: {:#x}, offset: {:#x}", 
+                println!("mmap called with addr: 0x{:x}, length: 0x{:x}, prot: 0x{:x}, flags: 0x{:x}, fd: 0x{:x}, offset: 0x{:x}", 
                     args[0], args[1], args[2], args[3], args[4], args[5]
                 );
             },
             SYSCALL_MUNMAP => {
-                println!("munmap called with addr: {:#x}, length: {:#x}", args[0], args[1]);
+                println!("munmap called with addr: 0x{:x}, length: 0x{:x}", args[0], args[1]);
             },
             SYSCALL_BRK => {
-                println!("brk called with addr: {:#x}", args[0]);
+                println!("brk called with addr: 0x{:x}", args[0]);
             },
             _ => {}
         }*/
         let proc = current_task().unwrap().process();
         let inner = proc.inner_exclusive_access();
         for i in inner.memory_set.areas().iter() {
-            println!("before exec memory syscall mmap area: {:#x} - {:#x} ", i.get_vpn_range().get_start().0 << 12, i.get_vpn_range().get_end().0 << 12);
+            println!("before exec memory syscall mmap area: 0x{:x} - 0x{:x} ", i.get_vpn_range().get_start().0 << 12, i.get_vpn_range().get_end().0 << 12);
         }
     }*/
     //println!("[kernel] >>> Ready to enter Syscall ID: {}", syscall_id);
@@ -305,7 +305,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         inner.info_map_areas();
     }*/
     //println!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, current_task().unwrap().tid.0, syscall_id);
-    //println!("[K] syscall args: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}", args[0], args[1], args[2], args[3], args[4], args[5]);
+    //println!("[K] syscall args: 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}", args[0], args[1], args[2], args[3], args[4], args[5]);
     info!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, current_task().unwrap().tid.0, syscall_id);
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
@@ -494,7 +494,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     }
     /*if ret < 0 {
         println!(
-            "[Syscall Error] PID: {} |  TID: {} | ID: {:3} | Args: [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}] | Errno: {}", 
+            "[Syscall Error] PID: {} |  TID: {} | ID: {:3} | Args: [0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}] | Errno: {}", 
             current_task().unwrap().process().pid.0, current_task().unwrap().tid.0, syscall_id, args[0], args[1], args[2], args[3], args[4], -ret
         );
     }*/
@@ -502,11 +502,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         let proc = current_task().unwrap().process();
         let inner = proc.inner_exclusive_access();
         for i in inner.memory_set.areas().iter() {
-            println!("after exec memory syscall mmap area: {:#x} - {:#x} ", i.get_vpn_range().get_start().0 << 12, i.get_vpn_range().get_end().0 << 12);
+            println!("after exec memory syscall mmap area: 0x{:x} - 0x{:x} ", i.get_vpn_range().get_start().0 << 12, i.get_vpn_range().get_end().0 << 12);
         }
     }*/
         /*println!(
-            "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}] | Ret: {}", 
+            "[Syscall Trace] ID: {:3} | Args: [0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], args[3], args[4], ret
         );*/
     //println!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);

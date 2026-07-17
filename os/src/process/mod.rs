@@ -214,7 +214,7 @@ pub(crate) fn restore_signal_context(task_inner: &mut TaskControlBlockInner) -> 
     let user_ctx: SignalUserContext = try_translated_read(current_user_token(), ucontext_ptr as *const SignalUserContext)?;
     #[cfg(target_arch = "riscv64")]
     warn!(
-        "[SIG_RESTORE TP] tid={} saved_pc={:#x} saved_sp={:#x} saved_ra={:#x} saved_tp={:#x} saved_a0={:#x} user_pc={:#x} user_sp={:#x} user_ra={:#x} user_tp={:#x} user_a0={:#x}",
+        "[SIG_RESTORE TP] tid={} saved_pc=0x{:x} saved_sp=0x{:x} saved_ra=0x{:x} saved_tp=0x{:x} saved_a0=0x{:x} user_pc=0x{:x} user_sp=0x{:x} user_ra=0x{:x} user_tp=0x{:x} user_a0=0x{:x}",
         current_task().unwrap().gettid(),
         trap_ctx.get_rt(),
         trap_ctx.get_sp(),
@@ -232,7 +232,7 @@ pub(crate) fn restore_signal_context(task_inner: &mut TaskControlBlockInner) -> 
     *task_inner.get_trap_cx() = trap_ctx;
     #[cfg(target_arch = "riscv64")]
     warn!(
-        "[SIG_RESTORE RET] tid={} restored_pc={:#x} restored_sp={:#x} restored_ra={:#x} restored_tp={:#x} restored_a0={:#x}",
+        "[SIG_RESTORE RET] tid={} restored_pc=0x{:x} restored_sp=0x{:x} restored_ra=0x{:x} restored_tp=0x{:x} restored_a0=0x{:x}",
         current_task().unwrap().gettid(),
         task_inner.get_trap_cx().get_rt(),
         task_inner.get_trap_cx().get_sp(),
@@ -653,7 +653,7 @@ pub fn handle_signals() {
         // 无待处理信号
         drop(proc_inner);
         if raw_signals.bits() != 0 {
-            warn!("[SIG PROBE] Signals exist ({:#x}) but fully masked ({:#x})", raw_signals, mask);
+            warn!("[SIG PROBE] Signals exist (0x{:x}) but fully masked (0x{:x})", raw_signals, mask);
         }
     }
 }
@@ -708,7 +708,7 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
         #[cfg(target_arch = "riscv64")]
         if sig + 1 == 33 {
             warn!(
-                "[SIGCANCEL TP] tid={} handler={:#x} pc={:#x} sp={:#x} ra={:#x} tp={:#x} info={:#x} uctx={:#x}",
+                "[SIGCANCEL TP] tid={} handler=0x{:x} pc=0x{:x} sp=0x{:x} ra=0x{:x} tp=0x{:x} info=0x{:x} uctx=0x{:x}",
                 task.gettid(),
                 handler,
                 trap_ctx.get_rt(),
@@ -792,7 +792,7 @@ fn check_pending_signals() {
     let handling = task_inner.handling_sig;
 
     if signals != 0 {
-        info!("[PROBE 3.1] check_pending: signals={:#x}, mask={:#x}, handling_sig={}", signals, mask, handling);
+        info!("[PROBE 3.1] check_pending: signals=0x{:x}, mask=0x{:x}, handling_sig={}", signals, mask, handling);
     }
     drop(task_inner); 
 

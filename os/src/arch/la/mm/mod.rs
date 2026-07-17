@@ -2,15 +2,22 @@
 //! 处理龙芯与riscv内存管理的差异部分
 //! 尚不完善
 pub mod pte;
+pub mod info;
 
 use crate::arch::config::*;
 use core::arch::asm;
+use core::sync::atomic::AtomicUsize;
+
+/// 诊断用：记录 CSR.MISC 写入前后的值，验证 ALCL 位是否可写
+pub static MISC_BEFORE_WRITE: AtomicUsize = AtomicUsize::new(0);
+pub static MISC_AFTER_WRITE: AtomicUsize = AtomicUsize::new(0);
 
 // 摘自手册：当CSR.CRMD的DA=0且PG=1时，处理器核的MMU处于映射地址翻译模式。具体又分为直接映射
 // 地址翻译模式（简称“直接映射模式”）和页表映射地址翻译模式（简称“页表映射模式”）两种。
 // 0x1设置特权级plv0，0x10设置缓存开启
 const DMW0_VAL: usize = UNCHACHED_KERNEL_BASE | 0x1;
 const DMW1_VAL: usize = KERNEL_BASE | 0x11;//0b10001
+//const DMW1_VAL: usize = KERNEL_BASE | 0x1; //暂时不启用缓存
 const DMW2_VAL: usize = 0 | 0x1;
 const DMW3_VAL: usize = 0;
 
@@ -57,6 +64,22 @@ pub fn la_kernel_init_mem() {
         t |= 1 << 4;
         t &= !(1 << 3);
         asm!("csrwr {crmd}, 0x0", crmd = inout(reg) t => _);
+
+        // 关闭全部特权级的访存地址对齐检查（CSR.MISC ALCL0~ALCL3，位 12~15）
+        // 2K1000 实机默认开启对齐检查，而 Rust core::fmt 的 format_args!
+        // 在 .rodata 中生成的元数据可能出现非对齐地址，导致 ALE 异常。
+        // 若 LA264 硬件不支持非对齐访存，这些位只读恒为 1，写入无效。
+        let mut misc: usize;
+        asm!("csrrd {}, 0x3", out(reg) misc);
+        let misc_old = misc;
+        misc &= !(0b1111 << 12); // 清除 ALCL0~ALCL3（位 12~15）
+        asm!("csrwr {misc}, 0x3", misc = inout(reg) misc => _);
+        // 回读验证：若 ALCL 位仍为 1，说明硬件不支持非对齐访存
+        let mut misc_after: usize;
+        asm!("csrrd {}, 0x3", out(reg) misc_after);
+        // 将 misc_old/misc_after 存入全局变量供后续打印诊断
+        crate::arch::la::mm::MISC_BEFORE_WRITE.store(misc_old, core::sync::atomic::Ordering::Relaxed);
+        crate::arch::la::mm::MISC_AFTER_WRITE.store(misc_after, core::sync::atomic::Ordering::Relaxed);
     }
     init_tlb();
 }
@@ -79,7 +102,7 @@ fn init_tlb() {
     unsafe{
         asm!("cpucfg {}, {}", out(reg) cfg01, in(reg) 0x1);
     }
-   debug!("[kernel] cfg01: {:#x}", cfg01);
+   debug!("[kernel] cfg01: 0x{:x}", cfg01);
 }
 
 pub fn flush_tlb_for_asid(asid: usize) {

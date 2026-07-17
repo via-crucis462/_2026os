@@ -14,6 +14,7 @@ use crate::task::{
     current_user_token, exit_current_and_run_next,
     suspend_current_and_run_next, handle_signals
 };
+#[cfg(board = "virt")]
 use crate::net::net_poll;
 use alloc::sync::Arc;
 use core::arch::{asm, global_asm};
@@ -43,7 +44,7 @@ pub fn trap_from_kernel() -> ! {
     let hart_id = get_hart_id();
     let (ecode_name, ecode, esubcode, timer_pending) = decode_estat(estat);
     error!(
-        "[kernel][panic] trap_from_kernel: hart={}, ESTAT={:#x}, ECODE={}({:#x}), ESUBCODE={:#x}, timer_pending={}, ERA={:#x}, BADV={:#x}, BADI={:#x}",
+        "[kernel][panic] trap_from_kernel: hart={}, ESTAT=0x{:x}, ECODE={}(0x{:x}), ESUBCODE=0x{:x}, timer_pending={}, ERA=0x{:x}, BADV=0x{:x}, BADI=0x{:x}",
         hart_id,
         estat,
         ecode_name,
@@ -58,7 +59,7 @@ pub fn trap_from_kernel() -> ! {
         let proc = task.process();
         let inner = proc.inner_exclusive_access();
         error!(
-            "[kernel][panic] current task snapshot: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
+            "[kernel][panic] current task snapshot: pid={}, tid={}, heap_bottom=0x{:x}, program_brk=0x{:x}",
             task.getpid(),
             task.gettid(),
             inner.heap_bottom,
@@ -69,7 +70,7 @@ pub fn trap_from_kernel() -> ! {
         error!("[kernel][panic] no current task on this hart");
     }
     debug!(
-        "a trap from kernel! hart={}, estat={:#x}, ecode={}({:#x}), esubcode={:#x}, timer_pending={}, era={:#x}, badv={:#x}, badi={:#x}",
+        "a trap from kernel! hart={}, estat=0x{:x}, ecode={}(0x{:x}), esubcode=0x{:x}, timer_pending={}, era=0x{:x}, badv=0x{:x}, badi=0x{:x}",
         hart_id,
         estat,
         ecode_name,
@@ -104,7 +105,7 @@ fn set_kernel_trap_entry() {
             trap_handler = inout(reg) trap_handler => _,
         );
     }
-    //debug!("[kernel] set_kernel_trap_entry: trap_handler address = {:#x}", trap_handler);
+    //debug!("[kernel] set_kernel_trap_entry: trap_handler address = 0x{:x}", trap_handler);
 }
 
 /// 插入__all_trap的地址
@@ -217,7 +218,7 @@ fn is_brk_process() -> bool {
 fn debug_dump_user_stack_window(tag: &str, token: usize, sp: usize, words: usize) {
     let page_table = PageTable::from_token(token);
     error!(
-        "[kernel] brk_stack {}: sp={:#x}, dumping {} words",
+        "[kernel] brk_stack {}: sp=0x{:x}, dumping {} words",
         tag,
         sp,
         words
@@ -228,7 +229,7 @@ fn debug_dump_user_stack_window(tag: &str, token: usize, sp: usize, words: usize
             Some(pa) => {
                 let value = *pa.get_ref::<usize>();
                 error!(
-                    "[kernel] brk_stack {}: [{:#x}] = {:#x}",
+                    "[kernel] brk_stack {}: [0x{:x}] = 0x{:x}",
                     tag,
                     va,
                     value
@@ -236,7 +237,7 @@ fn debug_dump_user_stack_window(tag: &str, token: usize, sp: usize, words: usize
             }
             None => {
                 error!(
-                    "[kernel] brk_stack {}: [{:#x}] = <unmapped>",
+                    "[kernel] brk_stack {}: [0x{:x}] = <unmapped>",
                     tag,
                     va
                 );
@@ -247,7 +248,7 @@ fn debug_dump_user_stack_window(tag: &str, token: usize, sp: usize, words: usize
 
 fn debug_dump_brk_snapshot(tag: &str, cx: &TrapContext, token: usize) {
     error!(
-        "[kernel] brk_trace {}: era={:#x}, user_sp={:#x}, a0={:#x}, a1={:#x}, a2={:#x}, a3={:#x}, a4={:#x}, a5={:#x}, a6={:#x}, a7={:#x}",
+        "[kernel] brk_trace {}: era=0x{:x}, user_sp=0x{:x}, a0=0x{:x}, a1=0x{:x}, a2=0x{:x}, a3=0x{:x}, a4=0x{:x}, a5=0x{:x}, a6=0x{:x}, a7=0x{:x}",
         tag,
         cx.get_rt(),
         cx.r[3],
@@ -301,7 +302,7 @@ pub fn trap_handler() -> ! {
         Cause::Syscall => {
             let mut cx = current_trap_cx();
             let syscall_id = cx.r[11];
-            //println!("[kernel] trap_handler: syscall_id={}, pid={}, tid={}, hart_id={}, era={:#x} , ra={:#x}, sp={:#x}", syscall_id, current_task().unwrap().getpid(), current_tid(), get_hart_id(), cx.get_rt(), cx.r[1], cx.r[2]);
+            //println!("[kernel] trap_handler: syscall_id={}, pid={}, tid={}, hart_id={}, era=0x{:x} , ra=0x{:x}, sp=0x{:x}", syscall_id, current_task().unwrap().getpid(), current_tid(), get_hart_id(), cx.get_rt(), cx.r[1], cx.r[2]);
             let should_trace = is_brk_process() && matches!(syscall_id, SYS_WRITE | SYS_BRK);
             if should_trace {
                  //debug_dump_brk_snapshot("before_syscall", cx, current_user_token());
@@ -345,6 +346,7 @@ pub fn trap_handler() -> ! {
                     }
                 }
             }
+            #[cfg(board = "virt")]
             net_poll();
             crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
@@ -380,7 +382,7 @@ pub fn trap_handler() -> ! {
                 match inner.memory_set.translate(vpn) {
                     Some(pte) => {
                         trace!(
-                            "[kernel] user_fault_pte: current hart id={}, estat={:#x}, ecode={}({:#x}), esubcode={:#x}, era={:#x}, badv={:#x}, badi={:#x}, ra={:#x}, sp={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
+                            "[kernel] user_fault_pte: current hart id={}, estat=0x{:x}, ecode={}(0x{:x}), esubcode=0x{:x}, era=0x{:x}, badv=0x{:x}, badi=0x{:x}, ra=0x{:x}, sp=0x{:x}, vpn=0x{:x}, pte_bits=0x{:x}, valid={}, r={}, w={}, x={}",
                             get_hart_id(),
                             estat,
                             ecode_name,
@@ -401,7 +403,7 @@ pub fn trap_handler() -> ! {
                     }
                     None => {
                         trace!(
-                            "[kernel] user_fault_pte: current hart id={}, estat={:#x}, ecode={}({:#x}), esubcode={:#x}, era={:#x}, badv={:#x}, badi={:#x}, ra={:#x}, sp={:#x}, vpn={:#x}, pte=<none>",
+                            "[kernel] user_fault_pte: current hart id={}, estat=0x{:x}, ecode={}(0x{:x}), esubcode=0x{:x}, era=0x{:x}, badv=0x{:x}, badi=0x{:x}, ra=0x{:x}, sp=0x{:x}, vpn=0x{:x}, pte=<none>",
                             get_hart_id(),
                             estat,
                             ecode_name,
@@ -428,7 +430,7 @@ pub fn trap_handler() -> ! {
                             asm!("csrrd {}, 0x18", out(reg) hw_asid);
                         }
                         error!(
-                            "[BRK诊断] hw_pgdl={:#x}, hw_asid={:#x}, 软件pgdl={:#x}",
+                            "[BRK诊断] hw_pgdl=0x{:x}, hw_asid=0x{:x}, 软件pgdl=0x{:x}",
                             hw_pgdl, hw_asid, inner.get_user_token()
                         );
                         match inner.memory_set.translate(era_vpn) {
@@ -450,16 +452,16 @@ pub fn trap_handler() -> ! {
                                     None => (0xdead, 0x0),
                                 };
                                 error!(
-                                    "[BRK诊断] era={:#x} vpn={:#x} 软件ppn={:#x} pte={:#x} 物理指令={:#010x} badi={:#010x}",
+                                    "[BRK诊断] era=0x{:x} vpn=0x{:x} 软件ppn=0x{:x} pte=0x{:x} 物理指令={:#010x} badi={:#010x}",
                                     era, era_vpn.0, era_ppn.0, era_pte.bits, w, badi
                                 );
                                 error!(
-                                    "[BRK诊断] 硬件页表查找: hw_ppn={:#x} hw_pte={:#x}",
+                                    "[BRK诊断] 硬件页表查找: hw_ppn=0x{:x} hw_pte=0x{:x}",
                                     hw_ppn_val, hw_pte_bits
                                 );
                             }
                             None => {
-                                error!("[BRK诊断] era={:#x}, era_vpn={:#x}, 软件页表无PTE!", era, era_vpn.0);
+                                error!("[BRK诊断] era=0x{:x}, era_vpn=0x{:x}, 软件页表无PTE!", era, era_vpn.0);
                             }
                         }
                     }*/
@@ -478,7 +480,7 @@ pub fn trap_handler() -> ! {
                 let proc = task.process();
                 let inner = proc.inner_exclusive_access();
                 trace!(
-                    "[kernel] trap_handler: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
+                    "[kernel] trap_handler: pid={}, tid={}, heap_bottom=0x{:x}, program_brk=0x{:x}",
                     task.getpid(),
                     task.gettid(),
                     inner.heap_bottom,
@@ -492,12 +494,12 @@ pub fn trap_handler() -> ! {
         }
     }
     /*println!(
-        "[trap_handler] before handle_signals: cause={:?}, estat={:#x}, era={:#x}, badv={:#x}, badi={:#x}",
+        "[trap_handler] before handle_signals: cause={:?}, estat=0x{:x}, era=0x{:x}, badv=0x{:x}, badi=0x{:x}",
         cause, estat, era, badv, badi
     );
     handle_signals();
     println!(
-        "[trap_handler] after handle_signals: cause={:?}, estat={:#x}, era={:#x}, badv={:#x}, badi={:#x}",
+        "[trap_handler] after handle_signals: cause={:?}, estat=0x{:x}, era=0x{:x}, badv=0x{:x}, badi=0x{:x}",
         cause, estat, era, badv, badi
     );*/
     /* 
@@ -508,7 +510,7 @@ pub fn trap_handler() -> ! {
     }
     */
     /*println!(
-        "[trap_return] estat={:#x}, era_csr={:#x}, badv={:#x}, badi={:#x}, next_era={:#x}, ra={:#x}, sp={:#x}",
+        "[trap_return] estat=0x{:x}, era_csr=0x{:x}, badv=0x{:x}, badi=0x{:x}, next_era=0x{:x}, ra=0x{:x}, sp=0x{:x}",
         estat,
         era,
         badv,
@@ -543,7 +545,7 @@ pub fn trap_return() -> ! {
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
     let id = current_user_asid();
-    //println!("[kernel] trap_return: user_satp={:#x}, id={:#x}, trap_cx_ptr={:#x}", user_satp, id, trap_cx_ptr as usize);
+    //println!("[kernel] trap_return: user_satp=0x{:x}, id=0x{:x}, trap_cx_ptr=0x{:x}", user_satp, id, trap_cx_ptr as usize);
     unsafe {
         let mut euen: usize;
         asm!("csrrd {}, 0x2", out(reg) euen);
@@ -552,7 +554,7 @@ pub fn trap_return() -> ! {
     }
     flush_tlb_for_asid(id);
 //  crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
-    //info!("trap_return: going to user mode, satp = {:#x}", user_satp);
+    //info!("trap_return: going to user mode, satp = 0x{:x}", user_satp);
     extern "C" {
         fn __alltraps();
         fn __restore();
@@ -563,7 +565,7 @@ pub fn trap_return() -> ! {
     //let debug_buff = translated_byte_buffer(user_satp, 0x20_0000 as *const u8, 128);
     //println!("[kernel] trap_return: debug_buff = {:x?}", debug_buff);
     // 1_001000_0000_0000_0000_0000 访存指令地址错例外
-    //println!("[kernel] calling __restore, address: {:#x}", restore);
+    //println!("[kernel] calling __restore, address: 0x{:x}", restore);
 
     unsafe {
         asm!("csrwr {}, 0x18", in(reg) id); // 设置asid为pid
@@ -588,11 +590,11 @@ pub  extern "C" fn csr_info(){
     unsafe {
         let mut csr: usize;
         asm!("csrrd {}, 0x8C", out(reg) csr); // TLBRELO0?
-        error!("[kernel] csr_info: TLBRELO0 = {:#x}", csr );
+        error!("[kernel] csr_info: TLBRELO0 = 0x{:x}", csr );
         //11001001001011000110010001
         asm!("csrrd {}, 0x8D", out(reg) csr); // TLBRELO1?
         //11001001001110000110010001
-        error!("[kernel] csr_info: TLBRELO1 = {:#x}", csr );
+        error!("[kernel] csr_info: TLBRELO1 = 0x{:x}", csr );
     }
 }
 

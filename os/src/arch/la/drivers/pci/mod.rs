@@ -124,6 +124,14 @@ impl Location {
             | ((self.device as usize) << 11)
             | ((self.function as usize) << 8)
     }
+    pub fn new(base_addr: usize, bus: u8, device: u8, function: u8) -> Self {
+        Location {
+            base_addr,
+            bus,
+            device,
+            function,
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -198,6 +206,12 @@ pub struct BusScan {
 
 impl BusScan {
     fn done(&self) -> bool {
+        // 2K1000 所有内部设备均在 bus 0 (手册表6-6), 不扫描其他总线避免真机总线异常
+        #[cfg(board = "2k1000")]
+        if self.loc.bus >= 1 {
+            println!("BusScan done: bus >= 1, stop scanning");
+            return true;
+        }
         if self.loc.bus == 255 && self.loc.device == 31 && self.loc.function == 7 {
             true
         } else {
@@ -219,7 +233,7 @@ impl BusScan {
                 self.loc.device = 0;
                 if self.loc.bus == 255 {
                     self.loc.device = 31;
-                    self.loc.device = 7;
+                    self.loc.function = 7;
                 } else {
                     self.loc.bus += 1;
                     return;
@@ -293,10 +307,11 @@ pub fn scan_bus(am: CSpaceAccessMethod) -> BusScan {
 
 
 use crate::drivers::{DeviceType};
+#[cfg(board = "virt")]
 use super::VirtioHal;
 use alloc::boxed::Box;
 
-
+#[cfg(board = "virt")]
 pub fn scan_and_init_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTransport> {
     //! bug: root会被泄露到堆中，可能会有问题
     //! 如果不使用这样的方式，此函数会有生命周期问题，不过目前的实现能跑
@@ -304,7 +319,7 @@ pub fn scan_and_init_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTran
     // 调用库中的扫描函数扫描第一个块设备
     for dev in scan_bus(am) {
         // 调试用，输出信息
-        info!("found a device: bus={:#x} dev={:#x} func={:#x}", 
+        info!("found a device: bus=0x{:x} dev=0x{:x} func=0x{:x}", 
             dev.loc.bus,
             dev.loc.device,
             dev.loc.function
@@ -324,14 +339,14 @@ pub fn scan_and_init_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTran
             },
             // _ => continue,
         }
-        info!("found a target device, info: vendor_id={:#x}, device_id={:#x}, class={:#x}, subclass={:#x}",
-            dev.id.vendor_id, dev.id.device_id, dev.id.class, dev.id.subclass);
+        info!("found a target device, info: vendor_id=0x{:x}, device_id=0x{:x}, class=0x{:x}, subclass=0x{:x}",
+            dev.id.vendor_id as u32, dev.id.device_id as u32, dev.id.class as u32, dev.id.subclass as u32);
         // 初始化bar
         for (idx, obar) in dev.bars.iter().enumerate() {
             if let Some(bar) = obar {
                 match bar {
                     BAR::Memory(_base, len, prefetchable, ty) => {
-                        debug!("BAR{}: type Memory at {:#x}, length {:#x}, {:?}, {:?}",
+                        debug!("BAR{}: type Memory at 0x{:x}, length 0x{:x}, {:?}, {:?}",
                             idx, _base, len, prefetchable, ty
                         );
                         // 分配MMIO地址
@@ -359,7 +374,7 @@ pub fn scan_and_init_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTran
                         }
                     }
                     BAR::IO(port) => {
-                        debug!("BAR{}: type IO at {:#x}", idx, port);
+                        debug!("BAR{}: type IO at 0x{:x}", idx, port);
                     }
                 }
             }
@@ -375,7 +390,7 @@ pub fn scan_and_init_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTran
         let r_oot = Box::new(root);
         // 注：将生命周期暴力改为static（会泄露内存），不过暂时不会有问题，因为不会反复调用
         let ref_root  = Box::leak(r_oot);
-        info!("creating transport for device: bus={:#x} dev={:#x} func={:#x}", 
+        info!("creating transport for device: bus=0x{:x} dev=0x{:x} func=0x{:x}", 
             dev.loc.bus,
             dev.loc.device,
             dev.loc.function

@@ -13,7 +13,9 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
 }
 /// heap space ([u8; KERNEL_HEAP_SIZE])
 /// 会被放到.bss段中
-static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
+/// MUST be 8-byte aligned: LA264 enforces alignment, and buddy allocator
+/// requires the base to be properly aligned to return valid pointers.
+static mut HEAP_SPACE: [u64; KERNEL_HEAP_SIZE / 8] = [0; KERNEL_HEAP_SIZE / 8];
 /// initiate heap allocator
 #[allow(warnings)]
 pub fn init_heap() {

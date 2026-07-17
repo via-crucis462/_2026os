@@ -403,7 +403,7 @@ pub fn sys_shmctl(shmid: u32, cmd: usize, buf: usize) -> isize {
 /// 分离共享内存段
 pub fn sys_shmdt(shmaddr: usize) -> isize {
     let pid = current_task().unwrap().process().pid.0;
-    info!("kernel:pid[{}] sys_shmdt: addr={:#x}", pid, shmaddr);
+    info!("kernel:pid[{}] sys_shmdt: addr=0x{:x}", pid, shmaddr);
 
     if shmaddr == 0 || shmaddr % crate::PAGE_SIZE != 0 {
         return EINVAL.as_isize();
@@ -444,7 +444,7 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: i32) -> isize {
     const SHM_RDONLY: i32 = 0o10000;
     const SHM_RND: i32 = 0o20000;
 
-    info!("kernel:pid[{}] sys_shmat: shmid={}, addr={:#x}, flg={:#o}",
+    info!("kernel:pid[{}] sys_shmat: shmid={}, addr=0x{:x}, flg=0o{:o}",
         current_task().unwrap().process().pid.0, shmid, shmaddr, shmflg);
 
     // 获取共享内存段

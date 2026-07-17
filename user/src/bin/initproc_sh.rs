@@ -32,7 +32,7 @@ fn run_shell(_cmd: &str) -> i32 {
             core::ptr::null(),
         ];
 
-        exec("/musl/busybox\0", argv);
+        exec("/init/busybox\0", argv);
         // exec only returns on error
         exit(-1);
     } else if forked > 0 {
@@ -46,7 +46,6 @@ fn run_shell(_cmd: &str) -> i32 {
 
 #[no_mangle]
 fn main() -> i32 {
-    chdir("/musl\0");
     run_shell("");
     // Init (PID 1) must never exit — otherwise the kernel panics.
     // Loop forever, reaping any zombie children.

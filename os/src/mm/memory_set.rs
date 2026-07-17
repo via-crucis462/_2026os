@@ -85,7 +85,7 @@ impl MemorySet {
     pub fn share_from_parent(parent: &Self) -> Self {
         let areas: Vec<MapArea> = parent.areas.iter().map(|a| MapArea::from_another(a)).collect();
         /*for area in &areas {
-            println!("shared area: [{:#x}, {:#x}), {:?}", area.vpn_range.get_start().0 * PAGE_SIZE, area.vpn_range.get_end().0 * PAGE_SIZE, area.map_perm);
+            println!("shared area: [0x{:x}, 0x{:x}), {:?}", area.vpn_range.get_start().0 * PAGE_SIZE, area.vpn_range.get_end().0 * PAGE_SIZE, area.map_perm);
         }*/
         Self {
             page_table: PageTable::alias_of(&parent.page_table), // 共享根页表，但不拥有中间页帧
@@ -173,7 +173,7 @@ impl MemorySet {
         if let Some(data) = data {
             map_area.copy_data(&mut self.page_table, data, start_va);
         }
-        trace!("map area: [{:#x}, {:#x}), {:?}", map_area.vpn_range.get_start().0 * PAGE_SIZE, map_area.vpn_range.get_end().0 * PAGE_SIZE, map_area.map_perm);
+        trace!("map area: [0x{:x}, 0x{:x}), {:?}", map_area.vpn_range.get_start().0 * PAGE_SIZE, map_area.vpn_range.get_end().0 * PAGE_SIZE, map_area.map_perm);
         self.areas.push(map_area);
     }
     fn push_guard_area(&mut self, guard_start: usize, guard_pages: usize) {
@@ -212,11 +212,11 @@ impl MemorySet {
     pub fn new_kernel() -> Self {
         let mut memory_set = Self::new_bare();
         // map kernel sections
-        info!(".text [{:#x}, {:#x})", stext as *const () as usize, etext as *const () as usize);
-        info!(".rodata [{:#x}, {:#x})", srodata as *const () as usize, erodata as *const () as usize);
-        info!(".data [{:#x}, {:#x})", sdata as *const () as usize, edata as *const () as usize);
+        info!(".text [0x{:x}, 0x{:x})", stext as *const () as u64, etext as *const () as u64);
+        info!(".rodata [0x{:x}, 0x{:x})", srodata as *const () as u64, erodata as *const () as u64);
+        info!(".data [0x{:x}, 0x{:x})", sdata as *const () as u64, edata as *const () as u64);
         info!(
-            ".bss [{:#x}, {:#x})",
+            ".bss [0x{:x}, 0x{:x})",
             sbss_with_stack as *const () as usize, ebss as *const () as usize
         );
         
@@ -494,7 +494,7 @@ impl MemorySet {
                 final_entry = interp_load_bias + interp_elf.header.pt2.entry_point() as usize;
                 loaded_interp = true;
                 info!(
-                    "MemorySet::from_elf: PT_INTERP loaded '{}', entry switched {:#x} -> {:#x}",
+                    "MemorySet::from_elf: PT_INTERP loaded '{}', entry switched 0x{:x} -> 0x{:x}",
                     interp_path,
                     main_entry,
                     final_entry
@@ -543,13 +543,13 @@ impl MemorySet {
         }
         if saw_interp && !loaded_interp {
             info!(
-                "MemorySet::from_elf: PT_INTERP present but unresolved, using main entry {:#x}",
+                "MemorySet::from_elf: PT_INTERP present but unresolved, using main entry 0x{:x}",
                 final_entry
             );
         }
         if !saw_interp {
             info!(
-                "MemorySet::from_elf: no PT_INTERP, using main entry {:#x}",
+                "MemorySet::from_elf: no PT_INTERP, using main entry 0x{:x}",
                 final_entry
             );
         }
@@ -945,7 +945,7 @@ impl MemorySet {
         let needing_std_pages = 
             VirtAddr(addr+length).std_ceil().0 -
             VirtAddr(addr).std_floor().0;
-        info!("mapping memory: addr={:#x}, length={:#x}, prot={:?}, flags={:?}, free_std_pages={}, needing_std_pages={}", 
+        info!("mapping memory: addr=0x{:x}, length=0x{:x}, prot={:?}, flags={:?}, free_std_pages={}, needing_std_pages={}", 
             addr, length, prot, mmap_flags, free_std_pages, needing_std_pages);
         // 检查内存是否充足
         if free_std_pages < needing_std_pages {
@@ -961,10 +961,10 @@ impl MemorySet {
         let mut start_va = addr;
         if start_va == 0 {
             if let Some(new_addr) = self.find_free_area(length) {
-                //println!("[kernel] mmap: found free area at {:#x} for length {:#x}", new_addr, length);
+                //println!("[kernel] mmap: found free area at 0x{:x} for length 0x{:x}", new_addr, length);
                 start_va = new_addr;
             } else {
-                error!("mmap failed: no suitable free area found for length {:#x}", length);
+                error!("mmap failed: no suitable free area found for length 0x{:x}", length);
                 return Err(Errno::EEXIST.as_isize());
             }
         } else {
@@ -973,13 +973,13 @@ impl MemorySet {
                 if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED) {
                     if let Ok(_ret) = self.munmap(start_va, length) {
                         // Handle the result if needed
-                        //println!("[kernel] mmap: MAP_FIXED flag set, unmapped conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
+                        //println!("[kernel] mmap: MAP_FIXED flag set, unmapped conflicting area at [0x{:x}, 0x{:x})", start_va, start_va + length);
                     }else {
-                        //println!("[kernel] mmap: MAP_FIXED flag set, but failed to unmap conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
+                        //println!("[kernel] mmap: MAP_FIXED flag set, but failed to unmap conflicting area at [0x{:x}, 0x{:x})", start_va, start_va + length);
                         return Err(Errno::EEXIST.as_isize());
                     }
                 } else {
-                    //println!("[kernel] mmap failed: address range [{:#x}, {:#x}) conflicts with existing mapping", start_va, start_va + length);
+                    //println!("[kernel] mmap failed: address range [0x{:x}, 0x{:x}) conflicts with existing mapping", start_va, start_va + length);
                     return Err(Errno::EEXIST.as_isize());
                 }
             }
@@ -1048,7 +1048,7 @@ impl MemorySet {
             self.areas.push(area);
         } else {
             // 普通映射
-            //println!("[kernel] mmap: inserting file area at [{:#x}, {:#x}) with permissions {:?} and shared={}", start_va, start_va + length, permission, is_shared);
+            //println!("[kernel] mmap: inserting file area at [0x{:x}, 0x{:x}) with permissions {:?} and shared={}", start_va, start_va + length, permission, is_shared);
             self.insert_file_area(
                 VirtAddr::from(start_va),
                 VirtAddr::from(start_va + length),
@@ -1073,7 +1073,7 @@ impl MemorySet {
     /// 在当前地址空间中寻找一个长度为 length 的空闲连续区域
     /// 找的是逻辑区域，与实际物理页无关
     pub fn find_free_area(&self, length: usize) -> Option<usize> {
-        //println!("[kernel] find_free_area: finding free area for length {:#x}", length);
+        //println!("[kernel] find_free_area: finding free area for length 0x{:x}", length);
         // 将长度向上对齐到页，似乎没必要
         // let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
@@ -1091,7 +1091,7 @@ impl MemorySet {
         
         for _area in sorted_areas.iter() {
             /*println!(
-                "[kernel] find_free_area: existing area [{:#x}, {:#x})",
+                "[kernel] find_free_area: existing area [0x{:x}, 0x{:x})",
                 area.vpn_range.get_start().0 * PAGE_SIZE,
                 area.vpn_range.get_end().0 * PAGE_SIZE
             );*/
@@ -1483,7 +1483,7 @@ impl MemorySet {
             #[cfg(target_arch = "loongarch64")]
             Self::flush_tlb_after_mapping_change();
             
-            // trace!("[kernel] User stack dynamically expanded down to {:#x}", bad_addr);
+            // trace!("[kernel] User stack dynamically expanded down to 0x{:x}", bad_addr);
             return true; // 栈扩张修复成功！
         }
 
@@ -1504,7 +1504,7 @@ impl MemorySet {
             let badv_hit = badv.map(|addr| addr >= start && addr < end).unwrap_or(false);
             let era_hit = era.map(|addr| addr >= start && addr < end).unwrap_or(false);
             println!(
-                "[kernel] area[{}] [{:#x}, {:#x}) {:?}{}{}{}",
+                "[kernel] area[{}] [0x{:x}, 0x{:x}) {:?}{}{}{}",
                 idx,
                 start,
                 end,
@@ -1703,7 +1703,7 @@ impl MapArea {
         let step = self.page_size.num_pages();
         let mut vpn = self.vpn_range.get_end();
         while vpn < new_end {
-            trace!("MapArea::append_to: old vpn end={:#x} , mapping new page vpn={:#x}", self.vpn_range.get_end().0, vpn.0);
+            trace!("MapArea::append_to: old vpn end=0x{:x} , mapping new page vpn=0x{:x}", self.vpn_range.get_end().0, vpn.0);
             self.map_one(page_table, vpn, self.page_size);
             vpn.step_by(step);
         }

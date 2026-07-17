@@ -98,7 +98,7 @@ unsafe impl Hal for VirtioHal {
     }
     unsafe fn dma_dealloc(paddr: VirtioPhysAddr, _vaddr: NonNull<u8>, pages: usize) -> i32 {
         let paddr = paddr as usize & 0x00FF_FFFF_FFFF_FFFF;// 应对传入的是窗口地址的情况
-        info!("deallocating DMA memory starts at {:#x} , end: {:#x} pages.", paddr, pages);
+        info!("deallocating DMA memory starts at 0x{:x} , end: 0x{:x} pages.", paddr, pages);
         let mut manager = QUEUE_FRAMES.exclusive_access();
         let start_ppn = PhysAddr(paddr as usize).std_floor(); // 硬件统一使用标准页
         let end_ppn = PhysPageNum(start_ppn.0 + pages);
@@ -107,7 +107,7 @@ unsafe impl Hal for VirtioHal {
             r.get_end().0 > start_ppn.0 && r.get_start().0 < end_ppn.0
         ) {
             manager.allocated.remove(pos);
-            info!("deallocated DMA memory, start:{:#x}, end:{:#x}.", start_ppn.0, end_ppn.0);
+            info!("deallocated DMA memory, start:0x{:x}, end:0x{:x}.", start_ppn.0, end_ppn.0);
         }
         // 
 

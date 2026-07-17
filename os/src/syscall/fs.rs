@@ -109,7 +109,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
     let inner = proc.inner_exclusive_access();
-    info!("pid[{}] [sys_write] ENTER fd={}, buf={:#x}, len={}", proc.pid.0, fd, buf as usize, len);
+    info!("pid[{}] [sys_write] ENTER fd={}, buf=0x{:x}, len={}", proc.pid.0, fd, buf as u64, len);
     // 检查 FD 是否越界或未打开
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return EBADF.as_isize(); // 注意引入正确的 EBADF 路径
@@ -486,7 +486,7 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     let va = pipe as usize;
     if page_table.translate_va(crate::mm::VirtAddr::from(va)).is_none() ||
        page_table.translate_va(crate::mm::VirtAddr::from(va + 4)).is_none() {
-        trace!("kernel:pid[{}] sys_pipe error point: {:#x}，", task.process().pid.0, va);
+        trace!("kernel:pid[{}] sys_pipe error point: 0x{:x}，", task.process().pid.0, va);
           return EFAULT.as_isize();
     }
     let (pipe_read, pipe_write) = make_pipe();
@@ -624,7 +624,7 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     let task = current_task().unwrap();
     let proc = task.process();
     let inner = proc.inner_exclusive_access();
-    info!("pid[{}] [sys_writev] ENTER fd={}, iov_ptr={:#x}, iovcnt={}", proc.pid.0, fd, iov_ptr, iovcnt);
+    info!("pid[{}] [sys_writev] ENTER fd={}, iov_ptr=0x{:x}, iovcnt={}", proc.pid.0, fd, iov_ptr, iovcnt);
     if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
         return EBADF.as_isize();
     }
@@ -735,7 +735,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
             return EFAULT.as_isize();
         }
     };
-    //println!("kernel:pid[{}] sys_statx: dirfd={}, path={}, flags={:#x}, mask={:#x}", task.process().pid.0, dirfd, path_str, flags, mask);
+    //println!("kernel:pid[{}] sys_statx: dirfd={}, path={}, flags=0x{:x}, mask=0x{:x}", task.process().pid.0, dirfd, path_str, flags, mask);
     const AT_EMPTY_PATH: u32 = 0x1000;
     if path_str.is_empty() {
         if (flags & AT_EMPTY_PATH) == 0 {
@@ -922,7 +922,7 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
 }
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
-    //warn!("sys_fcntl fd={}, cmd={}, arg={:#x}", fd, cmd, arg);
+    //warn!("sys_fcntl fd={}, cmd={}, arg=0x{:x}", fd, cmd, arg);
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
 
@@ -1015,7 +1015,7 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
     if path_str.len() > 255 {
         return ENAMETOOLONG.as_isize();
     }
-    trace!("kernel:pid[{}] sys_unlinkat dirfd={} path={} flags={:#x}", current_task().unwrap().process().pid.0, dirfd, path_str, flags);
+    trace!("kernel:pid[{}] sys_unlinkat dirfd={} path={} flags=0x{:x}", current_task().unwrap().process().pid.0, dirfd, path_str, flags);
 
     let task = current_task().unwrap();
     let proc = task.process();
@@ -1742,7 +1742,7 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
 }
 
 pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> isize {
-    //warn!("fd={}, iov={:?}, iovcnt={}, flags={:#x}", fd, iov, iovcnt, flags);
+    //warn!("fd={}, iov={:?}, iovcnt={}, flags=0x{:x}", fd, iov, iovcnt, flags);
     const IOV_MAX: usize = 1024;
     const IOV_BUF_MAX: usize = 1024 * 1024; // 1 MiB per iovec element
     const SPLICE_F_MOVE: u32 = 0x01;

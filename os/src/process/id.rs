@@ -113,7 +113,7 @@ pub struct KernelStack(pub usize);
 pub fn kstack_alloc() -> KernelStack {
     let kstack_id = KSTACK_ALLOCATOR.exclusive_access().alloc();
     let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
-    debug!("kstack_alloc: allocated kernel stack {} with bottom {:#x} and top {:#x}", kstack_id, kstack_bottom, kstack_top);
+    debug!("kstack_alloc: allocated kernel stack {} with bottom 0x{:x} and top 0x{:x}", kstack_id, kstack_bottom, kstack_top);
     KERNEL_SPACE.exclusive_access().insert_framed_area(
         kstack_bottom.into(),
         kstack_top.into(),
@@ -148,11 +148,11 @@ impl KernelStack {
         let align = core::mem::align_of::<T>();
         let sp = (kernel_stack_top - size) & !(align - 1);
         let ptr_mut = sp as *mut T;
-        //println!("push_on_top: kernel_stack_top={:#x}, size={}, align={}, sp={:#x}", kernel_stack_top, size, align, sp);
+        //println!("push_on_top: kernel_stack_top=0x{:x}, size={}, align={}, sp=0x{:x}", kernel_stack_top, size, align, sp);
         unsafe {
             core::ptr::write(ptr_mut, value);
         }
-        //println!("push_on_top: value pushed at {:#x}", ptr_mut as usize);
+        //println!("push_on_top: value pushed at 0x{:x}", ptr_mut as usize);
         ptr_mut
     }
     /// Get the top of the KernelStack

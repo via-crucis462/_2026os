@@ -136,7 +136,7 @@ const POLLERR: i16 = 0x008;
 const POLLHUP: u16 = 0x0010;
 
 pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> isize {
-    debug!("[kernel] sys_ppoll: ufds={:#x}, nfds={}, tmo_p={:#x}", ufds_ptr, nfds, tmo_p);
+    debug!("[kernel] sys_ppoll: ufds=0x{:x}, nfds={}, tmo_p=0x{:x}", ufds_ptr, nfds, tmo_p);
     if ufds_ptr == 0 && nfds > 0 {
         return EFAULT.as_isize(); // EFAULT
     }
@@ -199,7 +199,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         if (pending | unmaskable) != 0 {
          
             //task_inner.signal_mask = original_mask;
-            debug!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
+            debug!("[PROBE 1] ppoll return -4. pending signals: 0x{:x}, current mask: 0x{:x}", 
                      (task_inner.signals | proc_inner.signals).bits(), task_inner.signal_mask.bits());
             drop(proc_inner);
             drop(task_inner); // 放锁
@@ -261,7 +261,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
             if !try_translated_write(token, pollfd_ptr, pollfd) {
                 return EFAULT.as_isize();
             }
-            //trace!("[kernel] ppoll fd={} target_events={:#x} ready_revents={:#x}", pollfd.fd, pollfd.events, pollfd.revents);
+            //trace!("[kernel] ppoll fd={} target_events=0x{:x} ready_revents=0x{:x}", pollfd.fd, pollfd.events, pollfd.revents);
         }
         
         // 4. 如果找到了就绪事件，恢复掩码并返回！
@@ -632,7 +632,7 @@ fn current_wallclock_ns() -> i64 {
 }
 
 pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
-    //warn!("kernel: sys_clock_gettime: clock_id={}, tp={:#x}", clock_id, tp as usize);
+    //warn!("kernel: sys_clock_gettime: clock_id={}, tp=0x{:x}", clock_id, tp as usize);
     if tp as usize == 0 {
         return EFAULT.as_isize();
     }
@@ -735,7 +735,7 @@ pub struct IfReq {
 /// io设备控制系统调用
 /// 虽然loop设备驱动实现好了，但这里部分loop设备操作是伪实现的
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
-    //warn!("kernel: sys_ioctl: fd={}, request={:#x}, argp={:#x}", fd, request, argp);
+    //warn!("kernel: sys_ioctl: fd={}, request=0x{:x}, argp=0x{:x}", fd, request, argp);
     let task = current_task().unwrap();
     let proc = task.process();
     let fd_table = proc.inner_exclusive_access().fd_table.clone();
@@ -1531,7 +1531,7 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usi
     let (ctid, tls) = (arg3, arg4);
 
     debug!(
-        "sys_clone: flags={:#x}, stack={:#x}, ptid={:#x}, ctid={:#x}, tls={:#x}",
+        "sys_clone: flags=0x{:x}, stack=0x{:x}, ptid=0x{:x}, ctid=0x{:x}, tls=0x{:x}",
         flags, stack, ptid, ctid, tls
     );
 
@@ -1571,7 +1571,7 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usi
         #[cfg(target_arch = "riscv64")]
         if flags & CLONE_THREAD != 0 && flags & CLONE_SETTLS != 0 {
             warn!(
-                "[CLONE TP] new_tid={} tls={:#x} trap_tp={:#x} ptid={:#x} ctid={:#x}",
+                "[CLONE TP] new_tid={} tls=0x{:x} trap_tp=0x{:x} ptid=0x{:x} ctid=0x{:x}",
                 new_tid,
                 tls,
                 new_inner.get_trap_cx().x[4],
@@ -1597,7 +1597,7 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usi
     new_tid as isize
 }
 pub fn sys_pthread_create(thread: *mut usize, attr: *const usize, start_routine: usize, arg: usize) -> isize {
-    warn!("sys_pthread_create: thread={:#x}, attr={:#x}, start_routine={:#x}, arg={:#x}", thread as usize, attr as usize, start_routine, arg);
+    warn!("sys_pthread_create: thread=0x{:x}, attr=0x{:x}, start_routine=0x{:x}, arg=0x{:x}", thread as u64, attr as u64, start_routine, arg);
     
     let token = current_user_token();
     let current_task = current_task().unwrap();
@@ -1798,7 +1798,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             let perm = app_inode.get_perm();
             let can_exec = perm.can_execute(uid, gid);
             if is_dir || !can_exec {
-                warn!("[kernel] sys_exec: target '{}' is not executable (is_dir={}, mode={:#o})", path_str, is_dir, stat.mode);
+                warn!("[kernel] sys_exec: target '{}' is not executable (is_dir={}, mode=0o{:o})", path_str, is_dir, stat.mode);
                 return EACCES.as_isize();
             }
         }
@@ -1944,7 +1944,7 @@ const SIGCHLD_NUM: i32 = 17;
 
 /// 等待子进程退出
 pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
-    //warn!("[wait4] Called with pid={}, options={:#x}", pid, options);
+    //warn!("[wait4] Called with pid={}, options=0x{:x}", pid, options);
     loop {
         let task = current_task().unwrap();
         let proc = task.process();
@@ -2059,7 +2059,7 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
             return child_pid as isize;
         }
     }
-    //warn!("sys_wait4 called with pid={}, options={:#x}", pid, options);
+    //warn!("sys_wait4 called with pid={}, options=0x{:x}", pid, options);
 /*  let task = current_task().unwrap();
     let proc = task.process();
     // 提前拿到当前进程的 pgid
@@ -2554,7 +2554,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 pub const UTIME_NOW: usize = 0x3fffffff;
 pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usize) -> isize {
-    //warn!("sys_utimensat called with dirfd={}, path_ptr={:#x}, times_ptr={:#x}, flags={:#x}", dirfd, path_ptr, times_ptr, _flags);
+    //warn!("sys_utimensat called with dirfd={}, path_ptr=0x{:x}, times_ptr=0x{:x}, flags=0x{:x}", dirfd, path_ptr, times_ptr, _flags);
     let task = current_task().unwrap();
     let proc = task.process();
 
@@ -2907,10 +2907,10 @@ pub fn sys_brk(addr: usize) -> isize {
     let mut inner = process.inner_exclusive_access();
     let current_brk = inner.program_brk;
     
-    trace!("kernel:pid[{}] sys_brk: request addr={:#x}, current_brk={:#x}", process.pid.0, addr, current_brk);
+    trace!("kernel:pid[{}] sys_brk: request addr=0x{:x}, current_brk=0x{:x}", process.pid.0, addr, current_brk);
 
     if addr == 0 {
-        info!("sys_brk: query current brk, returning {:#x}", current_brk);
+        info!("sys_brk: query current brk, returning 0x{:x}", current_brk);
         return current_brk as isize;
     }
 
@@ -2918,11 +2918,11 @@ pub fn sys_brk(addr: usize) -> isize {
     let result = mmap::do_brk(addr);
     match result {
         Ok(new_brk) => {
-            info!("sys_brk: updated brk to {:#x}", new_brk);
+            info!("sys_brk: updated brk to 0x{:x}", new_brk);
             new_brk as isize
         },
         Err(no) => {
-            warn!("sys_brk: failed to update brk to {:#x}", addr);
+            warn!("sys_brk: failed to update brk to 0x{:x}", addr);
             no as isize
         }
     }
@@ -3204,7 +3204,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
 
 pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i32) -> isize {
     info!(
-        "[kernel] sys_epoll_wait: epfd={}, events_ptr={:#x}, maxevents={}, timeout={}ms",
+        "[kernel] sys_epoll_wait: epfd={}, events_ptr=0x{:x}, maxevents={}, timeout={}ms",
         epfd, events_ptr, maxevents, timeout
     );
     let task = current_task().unwrap();
@@ -3550,7 +3550,7 @@ pub fn sys_ftruncate(fd: usize, len: usize) -> isize {
             else if a.downcast_ref::<crate::syscall::bpf::BpfProgFile>().is_some() { "BpfProgFile" }
             else { "Unknown" }
         };
-        warn!("[kernel] sys_ftruncate: fd={}, file_type={}, mode={:#o}", fd, file_type_name, typ.mode);
+        warn!("[kernel] sys_ftruncate: fd={}, file_type={}, mode=0o{:o}", fd, file_type_name, typ.mode);
         // 鉴权
         if !file.writable() {
             return EACCES.as_isize();
@@ -3578,7 +3578,7 @@ pub fn sys_sigreturn() -> isize {
     {
         let trap_cx = inner.get_trap_cx();
         warn!(
-            "[SIG_RET TP] tid={} tp={:#x} pc={:#x} sp={:#x} ra={:#x} a0={:#x}",
+            "[SIG_RET TP] tid={} tp=0x{:x} pc=0x{:x} sp=0x{:x} ra=0x{:x} a0=0x{:x}",
             task.gettid(),
             trap_cx.x[4],
             trap_cx.get_rt(),
@@ -4052,7 +4052,7 @@ pub fn sys_keyctl(_operation: i32, _arg2: usize, _arg3: usize, _arg4: usize, _ar
 }
 
 pub fn sys_times(tms_ptr: *mut usize) -> isize {
-    //warn!("[kernel] sys_times called with tms_ptr={:#x}", tms_ptr as usize);
+    //warn!("[kernel] sys_times called with tms_ptr=0x{:x}", tms_ptr as usize);
     let token = current_user_token();
     // 暂时伪实现，写0
     let tms_val = Tms {
@@ -4426,7 +4426,7 @@ pub fn sys_prlimit64(
     const RLIMIT_MEMLOCK: i32 = 8;   // 锁定内存大小
     const RLIMIT_AS: i32 = 9;        // 虚拟地址空间大小
     
-    info!("sys_prlimit64 called with pid={}, resource={}, new_limit={:#x}, old_limit={:#x}", pid, resource, new_limit as usize, old_limit as usize);
+    info!("sys_prlimit64 called with pid={}, resource={}, new_limit=0x{:x}, old_limit=0x{:x}", pid, resource, new_limit as u64, old_limit as u64);
     if pid != 0 {
        if pid != current_task().unwrap().process().getpid() {
             return Errno::EPERM.as_isize(); 
@@ -4584,7 +4584,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             };
 
             warn!(
-                "[FUTEX WAIT IN] tid={} uaddr={:#x} expect={} current={}",
+                "[FUTEX WAIT IN] tid={} uaddr=0x{:x} expect={} current={}",
                 current_task().unwrap().gettid(),
                 uaddr as usize,
                 val,
@@ -4593,7 +4593,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
 
             if current_val != val {
                 warn!(
-                    "[FUTEX WAIT EAGAIN] tid={} uaddr={:#x} expect={} current={}",
+                    "[FUTEX WAIT EAGAIN] tid={} uaddr=0x{:x} expect={} current={}",
                     current_task().unwrap().gettid(),
                     uaddr as usize,
                     val,
@@ -4639,7 +4639,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             let current_tid = current.gettid();
             if crate::process::check_pending_signal() {
                 warn!(
-                    "[FUTEX PRE-SIGNAL] tid={} uaddr={:#x} return=EINTR",
+                    "[FUTEX PRE-SIGNAL] tid={} uaddr=0x{:x} return=EINTR",
                     current_tid,
                     uaddr as usize
                 );
@@ -4667,7 +4667,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
 
             if crate::process::take_current_signal_interrupted() {
                 warn!(
-                    "[FUTEX SIGWAKE] tid={} uaddr={:#x} return=EINTR",
+                    "[FUTEX SIGWAKE] tid={} uaddr=0x{:x} return=EINTR",
                     current_tid,
                     uaddr as usize
                 );
@@ -4682,7 +4682,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             let unmaskable = pending_signals.bits()
                 & (SignalFlags::SIGKILL | SignalFlags::SIGSTOP).bits();
             warn!(
-                "[FUTEX WAIT OUT] tid={} uaddr={:#x} pending_all={:#x} mask={:#x} pending={:#x} unmaskable={:#x}",
+                "[FUTEX WAIT OUT] tid={} uaddr=0x{:x} pending_all=0x{:x} mask=0x{:x} pending=0x{:x} unmaskable=0x{:x}",
                 current_tid,
                 uaddr as usize,
                 pending_signals.bits(),
@@ -4695,7 +4695,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
 
             if (pending | unmaskable) != 0 {
                 warn!(
-                    "[FUTEX EINTR] tid={} pending={:#x} unmaskable={:#x}",
+                    "[FUTEX EINTR] tid={} pending=0x{:x} unmaskable=0x{:x}",
                     current_tid,
                     pending,
                     unmaskable
@@ -4703,7 +4703,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 EINTR.as_isize()
             } else {
                 warn!(
-                    "[FUTEX OK] tid={} uaddr={:#x} return=0",
+                    "[FUTEX OK] tid={} uaddr=0x{:x} return=0",
                     current_tid,
                     uaddr as usize
                 );

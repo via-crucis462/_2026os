@@ -91,7 +91,7 @@ pub fn dump_processes(reason: &str) {
             .map_or(0, |parent| parent.getpid());
 
         println!(
-            "[PROC] pid={} parent_pid={} pgid={} tgid={} tid={} name={} status={} policy={} prio={} children={} proc_sig={:#x} task_sig={:#x} killed={} term={:?} main_hart={} owner={:?}",
+            "[PROC] pid={} parent_pid={} pgid={} tgid={} tid={} name={} status={} policy={} prio={} children={} proc_sig=0x{:x} task_sig=0x{:x} killed={} term={:?} main_hart={} owner={:?}",
             process.getpid(),
             ppid,
             proc_inner.pgid,

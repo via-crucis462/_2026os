@@ -116,7 +116,7 @@ impl ProcessControlBlock {
                 panic!("TaskControlBlock::new: invalid ELF for init process");
             };
         debug!(
-            "TaskControlBlock::new: entry_point={:#x}",
+            "TaskControlBlock::new: entry_point=0x{:x}",
             entry_point
         );
         
@@ -137,7 +137,7 @@ impl ProcessControlBlock {
             // 什么？你说你问为什么不同的进程明明独立，但唯一标识符的异常上下文栈位置也一定不相同，这样做是不是有些粗糙
             // 答案是确实粗糙
             trap_cx_va = trap_cx_va_by_kernel_stack(&kernel_stack).into();
-            info!("TaskControlBlock::new: calculated trap_cx_va = {:#x}", trap_cx_va.0);
+            info!("TaskControlBlock::new: calculated trap_cx_va = 0x{:x}", trap_cx_va.0);
             memory_set.push(
                 MapArea::new(
                     trap_cx_va,
@@ -161,11 +161,11 @@ impl ProcessControlBlock {
 
             // 内核栈顶地址，即切换到内核任务流后内核执行栈的初始值（内核sp）
             kernel_stack_top = kernel_stack.get_top();
-            //println!("TaskControlBlock::new: calculated trap_cx_addr = {:#x}, kernel_stack_top = {:#x}, user_sp = {:#x}", trap_cx_addr, kernel_stack_top, initial_user_sp);
+            //println!("TaskControlBlock::new: calculated trap_cx_addr = 0x{:x}, kernel_stack_top = 0x{:x}, user_sp = 0x{:x}", trap_cx_addr, kernel_stack_top, initial_user_sp);
         }
 
        
-        //info!("TaskControlBlock::new: translated trap_cx_addr = {:#x}", trap_cx_addr);
+        //info!("TaskControlBlock::new: translated trap_cx_addr = 0x{:x}", trap_cx_addr);
         #[cfg(target_arch = "loongarch64")]{
             // loongarch在进入跳板前会将上下文压入内核地址空间的内核栈，所以直接在内核栈上分配TrapContext即可
             trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
@@ -173,7 +173,7 @@ impl ProcessControlBlock {
             kernel_stack_top = trap_cx_addr;
         }
 
-        debug!("TaskControlBlock::new: kernel_stack_top={:#x}", kernel_stack.get_top());
+        debug!("TaskControlBlock::new: kernel_stack_top=0x{:x}", kernel_stack.get_top());
         // 进程控制块
         let proc_control_block = Arc::new(ProcessControlBlock {
             pid: pid_handle.clone(),// 注意：实际上只克隆了指针
@@ -261,7 +261,7 @@ impl ProcessControlBlock {
         debug!("TaskControlBlock::new: finished creating a new process");
         
         proc_control_block.inner.exclusive_access().tasks.push(task_control_block.clone());
-        //println!("[kernel] TaskControlBlock::new: created init process with PID {}, main thread TID {}, entry_point={:#x}", proc_control_block.getpid(), task_control_block.gettid(), entry_point);
+        //println!("[kernel] TaskControlBlock::new: created init process with PID {}, main thread TID {}, entry_point=0x{:x}", proc_control_block.getpid(), task_control_block.gettid(), entry_point);
         // 返回PCB和主线程
         (proc_control_block, task_control_block)
     }
@@ -317,7 +317,7 @@ impl ProcessControlBlock {
         }
         
         debug!(
-            "[kernel] task::exec: entry_point={:#x}, user_sp={:#x}",
+            "[kernel] task::exec: entry_point=0x{:x}, user_sp=0x{:x}",
             final_entry_point, user_sp
         );
 
@@ -377,14 +377,14 @@ impl ProcessControlBlock {
                 auxv.push((AT_BASE, interp_base));
             }
             info!(
-                "exec: dynamic-link branch, injected AT_BASE={:#x}, first_jump={:#x}, file_entry={:#x}",
+                "exec: dynamic-link branch, injected AT_BASE=0x{:x}, first_jump=0x{:x}, file_entry=0x{:x}",
                 interp_base.unwrap_or(0),
                 final_entry_point,
                 main_entry_point
             );
         } else {
             info!(
-                "exec: fallback branch, no AT_BASE, first_jump={:#x}, file_entry={:#x}",
+                "exec: fallback branch, no AT_BASE, first_jump=0x{:x}, file_entry=0x{:x}",
                 final_entry_point,
                 main_entry_point
             );
@@ -496,7 +496,7 @@ impl ProcessControlBlock {
             remove_task_from_global_pool(old_task.gettid());
         }
         /*for i in proc_inner.memory_set.areas().iter() {
-            println!("exec: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+            println!("exec: map_area: [0x{:x}, 0x{:x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
         }*/
         
     }
@@ -514,7 +514,7 @@ impl ProcessControlBlock {
         // ---- hold parent PCB lock
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
-        //println!("[kernel] ProcessControlBlock::fork: copying user space for new process, flags={:#x}", _flags);
+        //println!("[kernel] ProcessControlBlock::fork: copying user space for new process, flags=0x{:x}", _flags);
         let mut memory_set = if _flags & CLONE_VM != 0 {
             // CLONE_VM: 真正共享地址空间——共享同一个页表，不做COW拷贝
             //parent_inner.info_map_areas();
@@ -791,32 +791,32 @@ impl ProcessControlBlock {
         let mut inner = self.inner_exclusive_access();
         let heap_bottom = inner.memory_set.areas()[inner.memory_set.brk_index()].get_vpn_range().get_start().0 * PAGE_SIZE;
         //let heap_bottom = inner.heap_bottom;
-        debug!("change_program_brk: addr={:#x}, current_brk={:#x}, current_heap_bottom={:#x}, size={}", addr, inner.program_brk, heap_bottom, size);
+        debug!("change_program_brk: addr=0x{:x}, current_brk=0x{:x}, current_heap_bottom=0x{:x}, size={}", addr, inner.program_brk, heap_bottom, size);
         let _old_break = inner.program_brk;
         let new_brk = addr as isize;
         if new_brk < heap_bottom as isize {
             return Err(ENOMEM.as_isize() as i32);
         }
         let result = if size < 0 {
-            debug!("change_program_brk: before shrink_to, heap_bottom={:#x}, new_brk={:#x}", heap_bottom, new_brk);
+            debug!("change_program_brk: before shrink_to, heap_bottom=0x{:x}, new_brk=0x{:x}", heap_bottom, new_brk);
             inner
                 .memory_set
                 .shrink_to(VirtAddr(heap_bottom), VirtAddr(new_brk as *const () as usize))
         } else {
-            debug!("change_program_brk: before append_to, heap_bottom={:#x}, new_brk={:#x}", heap_bottom, new_brk);
+            debug!("change_program_brk: before append_to, heap_bottom=0x{:x}, new_brk=0x{:x}", heap_bottom, new_brk);
             for i in inner.memory_set.areas().iter() {
-                trace!("change_program_brk: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+                trace!("change_program_brk: map_area: [0x{:x}, 0x{:x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
             }
             inner
                 .memory_set
                 .append_to(VirtAddr(heap_bottom), VirtAddr(new_brk as *const () as usize));
             
             for i in inner.memory_set.areas().iter() {
-                trace!("change_program_brk: map_area: [{:#x}, {:#x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
+                trace!("change_program_brk: map_area: [0x{:x}, 0x{:x})", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0);
             }
              true
         };
-        //println!("brk: change from {:#x} to {:#x}", _old_break, new_brk);
+        //println!("brk: change from 0x{:x} to 0x{:x}", _old_break, new_brk);
         if result {
             inner.program_brk = new_brk as *const () as usize;
             Ok(addr)
@@ -998,7 +998,7 @@ impl ProcessControlBlockInner {
     pub fn info_map_areas(&self) {
             info!("mapped asid {}:", self.get_asid());
         for i in self.memory_set.areas().iter() {
-            info!("mapped: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
+            info!("mapped: 0x{:x} -> 0x{:x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
         }
     }
 }

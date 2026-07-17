@@ -1,9 +1,9 @@
 //! virtio_blk device driver
 
-mod virtio_blk;
-mod virtio_net;
+mod net;
+mod sata_blk;
 
-pub use virtio_blk::*;
+pub use sata_blk::*;
 
 
 use crate::{ext4fs::BlockDevice};
@@ -12,24 +12,20 @@ use lazy_static::*;
 #[allow(unused)]
 use crate::arch::drivers::pci;
 use alloc::sync::Arc;
-type BlockDeviceImpl = virtio_blk::VirtIOBlock;
-type NetDeviceImpl = virtio_net::VirtIONetWrapper;
+type BlockDeviceImpl = SataBlock;
+type NetDeviceImpl = net::LA2k1000NetWrapper;
 
 lazy_static! {
     /// The global block device driver instance: BLOCK_DEVICE with BlockDevice trait
     /// 已修改：从固定mmio地址改为扫描获取
     pub static ref BLOCK_DEVICE: Arc<BlockDeviceImpl> = {
-        let pci_block_device_trans = pci::scan_and_init_pci_device_to_trans(DeviceType::VirtIOBlock).expect("Failed to find PCI device");
-        unsafe {
-             Arc::new(BlockDeviceImpl::new(pci_block_device_trans))
-        }
+        Arc::new(BlockDeviceImpl::new())
     };
-    pub static ref NET_DEVICE: Arc<virtio_net::VirtIONetWrapper> = {
+    pub static ref NET_DEVICE: Arc<net::LA2k1000NetWrapper> = {
         debug!("NET_DEVICE lazy init: begin scan transport");
-        let pci_net_device_trans = pci::scan_and_init_pci_device_to_trans(DeviceType::VirtIONet).expect("Failed to find PCI device");
         debug!("NET_DEVICE lazy init: transport ready, build VirtIONetWrapper");
         unsafe {
-            let net = Arc::new(virtio_net::VirtIONetWrapper::new(pci_net_device_trans));
+            let net = Arc::new(net::LA2k1000NetWrapper::new());
             debug!("NET_DEVICE lazy init: done");
             net
         }
@@ -40,52 +36,12 @@ lazy_static! {
 pub const BLOCK_SZ: usize = 4096;
 
 use crate::drivers::block::block_cache::get_block_cache;
-impl BlockDevice for VirtIOBlock {
+impl BlockDevice for SataBlock {
     fn raw_read_block(&self, block_id: usize, buf: &mut [u8]) {
-        let len = buf.len();
-        // 扇区大小
-        const SECTOR_SIZE: usize = 512;
-        // 4096 / 512 = 8
-        let sectors = len / SECTOR_SIZE;
-        
-        let mut driver = self.inner.exclusive_access();
-        
-        let start_sector = block_id * sectors;
-        // 滑动窗口说是
-        for i in 0..sectors {
-            let offset = i * SECTOR_SIZE;
-            let sub_buf = &mut buf[offset..offset + SECTOR_SIZE];
-            #[cfg (target_arch = "loongarch64")]
-            driver
-                .read_blocks(start_sector + i, sub_buf)
-                .expect("Error when reading VirtIOBlk");
-            #[cfg (target_arch = "riscv64")]
-            driver
-                .read_block(start_sector + i, sub_buf)
-                .expect("Error when reading VirtIOBlk");
-        }
+
     }
     fn raw_write_block(&self, block_id: usize, buf: &[u8]) {
-        // 与 read_block 类似
-        let len = buf.len();
-        const SECTOR_SIZE: usize = 512;
-        let sectors = len / SECTOR_SIZE;
-        
-        let mut driver = self.inner.exclusive_access();
-        let start_sector = block_id * sectors;
 
-        for i in 0..sectors {
-            let offset = i * SECTOR_SIZE;
-            let sub_buf = &buf[offset..offset + SECTOR_SIZE];
-            #[cfg (target_arch = "loongarch64")]
-            driver
-                .write_blocks(start_sector + i, sub_buf)
-                .expect("Error when writing VirtIOBlk");
-            #[cfg (target_arch = "riscv64")]
-            driver
-                .write_block(start_sector + i, sub_buf)
-                .expect("Error when writing VirtIOBlk");
-        }
     }
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
         let cache = get_block_cache(block_id, BLOCK_DEVICE.clone());

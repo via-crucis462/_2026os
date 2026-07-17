@@ -172,7 +172,7 @@ fn write(&self, buf: UserBuffer) -> usize {
                 #[cfg(target_arch = "riscv64")]
                 let real_mac = crate::net::NET_DEVICE.0.exclusive_access().mac();
                 #[cfg(target_arch = "loongarch64")]
-                let real_mac = crate::net::NET_DEVICE.0.exclusive_access().mac_address();
+                let real_mac = crate::net::NET_DEVICE.get_mac_address();
 
                 let mut packet = LinkReplyPacket {
                     nl_hdr: NlMsgHdr { 

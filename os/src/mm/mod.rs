@@ -37,7 +37,7 @@ pub use memory_set::{MapArea, MapType};
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {
     heap_allocator::init_heap();
-    frame_allocator::init_frame_allocator();
+    // frame_allocator::init_frame_allocator();
     #[cfg(target_arch = "riscv64")]
     KERNEL_SPACE.exclusive_access().activate();
 }

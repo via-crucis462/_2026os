@@ -1,6 +1,11 @@
 //! Constants in the kernel
 
 #![allow(unused)]
+
+
+pub use super::mm::info::*;
+
+
 /// kernel address space
 pub const UNCHACHED_KERNEL_BASE: usize = 0x8000_0000_0000_0000;
 pub const KERNEL_BASE: usize = 0x9000_0000_0000_0000;
@@ -39,38 +44,21 @@ pub const UART_PHYS: usize = 0x1fe001e0;
 #[cfg(board = "2k1000")]
 pub const UART_PHYS: usize = 0x1fe20000;
 
-/// 实际打印 qemu ram 发现，la 的物理地址 1G 并不从 elf 起点开始连续
-/// 而是从 0x0 - 约0x20_0000 给固件
-/// 0x20_0000 - 0x800_0000 有一段 （254MB）连续的内存
-/// 剩下的从 0x800_0000 开始，连续 768MB 是主要内存空间
-///
-/// 因此暂时：
-/// 让内核只用highram，地址从0x8000_0000开始
-/// 低部分有约254MB，留给内核栈
-
-pub const LOWRAM_BASE: usize = 0x20_0000;
-
-pub const LOWRAM_END: usize = 0x800_0000;
-
-/// 内核和用户帧分配暂时设计为使用 highram 区域
+/// 可用内存分为两部分
 /// 
-/// qemu主要内存起始地址, 注意linker.ld需要与此同步
-pub const MEMORY_BASE: usize = 0x8000_0000;
-/// 可用主内存大小 (1GB 总物理内存 - 256MB lowram)
-pub const MEMORY_SIZE: usize = 0x3000_0000; // 1GB - 256MB = 768MB
+/// 给内核栈使用
+pub const LOWRAM_BASE: usize = BANK0_START_EFFECTIVE;
+pub const LOWRAM_END: usize = BANK0_END_EFFECTIVE;
+/// 内核和用户帧分配使用
+/// 主要内存起始地址, 注意linker.ld需要与此同步
+pub const MEMORY_BASE: usize = BANK1_START_EFFECTIVE;
 /// the physical memory end
-pub const MEMORY_END: usize = MEMORY_BASE + MEMORY_SIZE; // 0xb000_0000
+pub const MEMORY_END: usize = BANK1_END_EFFECTIVE;
+/// 可用主内存大小
+pub const MEMORY_SIZE: usize = BANK1_END_EFFECTIVE - BANK1_START_EFFECTIVE;
 
-/// 查看qemu的源代码可以知道配置空间的基地址为0x2000_0000，不写成虚拟地址
-pub const PCI_CONFIG_SPACE_BASE: usize = 0x2000_0000;
-/// MMIO基址设置为0x4000_0000起，改成更低的地址会有问题，ai解释是qemu规定这里开始才是合法的MMIO地址
-pub const PCI_MMIO_BASE: usize = 0x4000_0000;
-/// MMIO范围，并非真正的内存，cpu尝试访问这些地址相当于给设备发信号
-pub const MMIO: &[(usize, usize)] = &[
-    (0x8000_0000_1000_0000, 0x1000_0000), // 留给UART
-    (0x8000_0000_2000_0000, 0x1000_0000), // PCI配置空间
-    (0x8000_0000_4000_0000, 0x1000_0000), // PCI MMIO
-]; 
+/// PCI 配置空间 / MMIO 相关常量已移至 arch/la/mm/info/{lavirt,la2k1000}.rs
+/// 经由 pub use super::mm::info::* 按板级条件编译引入
 
 /// 调试用，暂不删除
 pub const OFFSET_FOR_USER_APP: usize = 0;

@@ -1,7 +1,7 @@
 export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
 export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
 
-MODE ?= release
+MODE ?= debug
 RV_SMP ?= 1
 LA_SMP ?= 1
 RV_GDB_PORT ?= 1234
@@ -28,6 +28,13 @@ build-rv:
 	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)
 build-la:
 	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD)
+ifeq ($(BOARD),2k1000)
+	@echo "  -> Packing uImage for 2K1000..."
+	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la-$(BOARD)
+	python3 boot/build_uimage.py kernel-la-$(BOARD) kernel-la-$(BOARD).uImage
+	@echo "  -> Making binary for 2K1000..."
+	rust-objcopy -O binary kernel-la-2k1000 kernel-la-2k1000.bin
+endif
 
 build-user-rv:
 	cd user && $(MAKE) build ARCH=riscv64
@@ -42,6 +49,8 @@ copy-la:
 ifeq ($(BOARD),2k1000)
 	@echo "  -> Packing uImage for 2K1000..."
 	python3 boot/build_uimage.py kernel-la-$(BOARD) kernel-la-$(BOARD).uImage
+	@echo "  -> Making binary for 2K1000..."
+	rust-objcopy -O binary kernel-la-2k1000 kernel-la-2k1000.bin
 endif
 
 copy-user-rv:
@@ -72,7 +81,25 @@ test-la: MODE = release
 test-la: build-user-la copy-user-la build-la copy-la
 	@rm -f kernel_output.log
 	@qemu-system-loongarch64 \
-	-kernel kernel-la \
+	-kernel kernel-la-$(BOARD) \
+	-m 1G -nographic \
+	-smp $(LA_SMP) \
+	-drive file=sdcard-la.img,if=none,format=raw,id=x0 \
+	-device virtio-blk-pci,drive=x0 \
+	-no-reboot \
+	-device virtio-net-pci,netdev=net0 \
+	-netdev user,id=net0 \
+	-rtc base=utc \
+	| tee kernel_output.log
+
+test-la-2k1000: MODE = release
+test-la-2k1000: BOARD = 2k1000
+test-la-2k1000: build-user-la copy-user-la build-la copy-la
+	@rm -f kernel_output.log
+	@qemu-system-loongarch64 \
+	-machine virt \
+	-cpu la464 \
+	-kernel kernel-la-2k1000 \
 	-m 1G -nographic \
 	-smp $(LA_SMP) \
 	-drive file=sdcard-la.img,if=none,format=raw,id=x0 \
