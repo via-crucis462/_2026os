@@ -30,6 +30,9 @@ extern crate log;
 
 extern crate alloc;
 
+use core::arch::asm;
+use core::sync::atomic::Ordering;
+
 #[macro_use]
 mod console;
 pub mod arch;
@@ -66,7 +69,7 @@ pub use arch::timer::*;
 #[cfg(board = "virt")]
 use crate::arch::drivers::NET_DEVICE;
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize};
 use lazy_static::*;
 use spin::Mutex;
 
@@ -102,6 +105,25 @@ extern "C" {
     fn _start();
 }
 
+macro_rules! check_eq {
+    ($got:expr, $expect:expr) => {{
+        let g = $got;
+        let e = $expect;
+        if g != e {
+            panic!("got=0x{:x}, expect=0x{:x}", g as usize as u64, e as usize as u64);
+        }
+    }};
+    ($got:expr, $expect:expr, $($arg:tt)*) => {{
+        let g = $got;
+        let e = $expect;
+        if g != e {
+            panic!("{}: got=0x{:x}, expect=0x{:x}", format_args!($($arg)*),
+                  g as usize as u64, e as usize as u64);
+        }
+    }};
+}
+
+
 #[no_mangle]
 pub fn rust_main(hart_id: usize) -> ! {
     clear_bss();
@@ -110,50 +132,392 @@ pub fn rust_main(hart_id: usize) -> ! {
     trap::init();
     println!("[kernel] Hello, world! hart_id={}", hart_id);
 
-    /*
-    println!("[kernel] test_broke num={:#x}", 42u8);
-    println!("[kernel] test_broke num={:#x}", 42u16);
-    println!("[kernel] test_broke num={:#x}", 42u32);
-    println!("[kernel] test_broke num={:#x}", 42u64);
-    */
-
-    let aligned_adr = 0x9000_0000_0000_0000usize;
-    let unaligned_adr = aligned_adr + 1;
-    let aligned_ptr = aligned_adr as *mut u64;
-    let unaligned_ptr = unaligned_adr as *mut u64;
-
-    
-    // 读取crmd
+    // 读取 crmd / misc
     unsafe {
         let mut crmd: usize;
         asm!("csrrd {}, 0x0", out(reg) crmd);
         println!("[kernel] crmd=0x{:x}", crmd);
-    }
-
-    // 读取misc
-    unsafe {
         let mut misc: usize;
         asm!("csrrd {}, 0x3", out(reg) misc);
         println!("[kernel] misc=0x{:x}", misc);
     }
 
-    let test_num = 0x34u8;
-    // test ldx stx
-    unsafe {
-        asm!("stx.d $t0, {aligned}, $zero", aligned = in(reg) aligned_ptr, out("$t1") _);
-        asm!("ldx.d $t0, {aligned}, $zero", aligned = in(reg) aligned_ptr, out("$t0") _);
-     
-    }
-    println!("pass aligned ldx stx test");
-    println!("[kernel] starting unaligned test, k_trap_count={}", crate::arch::la::trap::K_TRAP_COUNT.load(core::sync::atomic::Ordering::SeqCst));
-    unsafe {
-        asm!("ldx.d $t0, {unaligned}, $zero", unaligned = in(reg) unaligned_ptr, out("$t0") _);
-        asm!("stx.d $t1, {unaligned}, $zero", unaligned = in(reg) unaligned_ptr, out("$t1") _);     
-    }
-    println!("[kernel] unaligned test done, k_trap_count={}", crate::arch::la::trap::K_TRAP_COUNT.load(core::sync::atomic::Ordering::SeqCst));
-    println!("pass unaligned ldx stx test");
-    
+    unaligned_test_si12();
+    unaligned_test_rk();
+    unaligned_test_cross();
+
+    // ─── 人工可读验证：不依赖 read_unaligned，直接字节级算期望 ───
+    verify_manual();
+
+    let final_count = crate::arch::la::trap::K_TRAP_COUNT.load(core::sync::atomic::Ordering::SeqCst);
+    println!("[kernel] All unaligned tests passed! total k_trap_count={}", final_count);
     panic!("main end");
+}
+
+// 从 16 字节数组 offset 处读取小端序 u16
+fn expected_u16(buf: &[u8; 16], off: usize) -> u16 {
+    buf[off] as u16 | ((buf[off + 1] as u16) << 8)
+}
+fn expected_u32(buf: &[u8; 16], off: usize) -> u32 {
+    buf[off] as u32 | ((buf[off+1] as u32) << 8) | ((buf[off+2] as u32) << 16) | ((buf[off+3] as u32) << 24)
+}
+fn expected_u64(buf: &[u8; 16], off: usize) -> u64 {
+    expected_u32(buf, off) as u64 | ((expected_u32(buf, off + 4) as u64) << 32)
+}
+
+fn verify_manual() {
+    use core::sync::atomic::Ordering;
+    let base = 0x9000_0000_0020_0000usize;
+
+    // 写入 16 字节小端序 pattern，手动指定每个字节
+    // pattern: bytes 0..15 = 00 11 22 33 44 55 66 77  88 99 AA BB CC DD EE FF
+    let bytes: [u8; 16] = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+    ];
+    unsafe {
+        (base as *mut u64).write_volatile(u64::from_le_bytes(bytes[0..8].try_into().unwrap()));
+        ((base + 8) as *mut u64).write_volatile(u64::from_le_bytes(bytes[8..16].try_into().unwrap()));
+    }
+    println!("[verify] wrote 16-byte pattern: 00 11 22 33 44 55 66 77  88 99 AA BB CC DD EE FF");
+
+    macro_rules! verify_one {
+        ($name:expr, $off:expr, $asm:expr, out($outreg:ident) $outvar:ident, $expect_fn:ident) => {
+            let $outvar: usize;
+            unsafe { ::core::arch::asm!($asm, out(reg) $outvar, in(reg) base); }
+            let expect = $expect_fn(&bytes, $off);
+            let got = $outvar as usize as u64;
+            println!("[verify] {:>12} off={} expect=0x{:016x} got=0x{:016x} {}",
+                $name, $off, expect as u64, got,
+                if got == expect as u64 { "OK" } else { "FAIL" });
+        };
+    }
+
+    // si12 reads（verify_one! 宏硬编码了 base，偏移在立即数中）
+    verify_one!("ld.h  1", 1, "ld.h {}, {}, 1", out(r) r, expected_u16);
+    verify_one!("ld.hu 3", 3, "ld.hu {}, {}, 3", out(r) r, expected_u16);
+    verify_one!("ld.w  2", 2, "ld.w {}, {}, 2", out(r) r, expected_u32);
+    verify_one!("ld.wu 6", 6, "ld.wu {}, {}, 6", out(r) r, expected_u32);
+    verify_one!("ld.d  5", 5, "ld.d {}, {}, 5", out(r) r, expected_u64);
+
+    // rk reads（手动构造 off_ptr，不能用 verify_one!）
+    let off_ptr_1 = unsafe { base + 1 };
+    let off_ptr_4 = unsafe { base + 4 };
+    { let r: usize; unsafe { asm!("ldx.h {}, {}, $zero", out(reg) r, in(reg) off_ptr_1); }
+      let e = expected_u16(&bytes, 1); let g = r as u64;
+      println!("[verify] {:>12} off=1 expect=0x{:016x} got=0x{:016x} {}",
+               "ldx.h +1", e as u64, g, if g==e as u64 {"OK"} else {"FAIL"}); }
+    { let r: usize; unsafe { asm!("ldx.w {}, {}, $zero", out(reg) r, in(reg) (base+2)); }
+      let e = expected_u32(&bytes, 2); let g = r as u64;
+      println!("[verify] {:>12} off=2 expect=0x{:016x} got=0x{:016x} {}",
+               "ldx.w +2", e as u64, g, if g==e as u64 {"OK"} else {"FAIL"}); }
+    { let r: usize; unsafe { asm!("ldx.d {}, {}, $zero", out(reg) r, in(reg) off_ptr_4); }
+      let e = expected_u64(&bytes, 4); let g = r as u64;
+      println!("[verify] {:>12} off=4 expect=0x{:016x} got=0x{:016x} {}",
+               "ldx.d +4", e, g, if g==e {"OK"} else {"FAIL"}); }
+
+    // si12 stores (先重置 → 写入 → 对齐读回验证)
+    unsafe {
+        // st.h +7
+        (base as *mut u64).write_volatile(0xFFFFFFFF_FFFFFFFFu64);
+        ((base + 8) as *mut u64).write_volatile(0xFFFFFFFF_FFFFFFFFu64);
+        asm!("st.h {}, {}, 7", in(reg) 0xABCDu16, in(reg) base);
+        let got = u16::from_le_bytes([
+            *((base + 7) as *const u8),
+            *((base + 8) as *const u8),
+        ]);
+        println!("[verify] {:>12} off=7 val=0xABCD expect=0xABCD got=0x{:04x} {}",
+            "st.h", got, if got == 0xABCD { "OK" } else { "FAIL" });
+
+        // stx.w +3
+        (base as *mut u64).write_volatile(0xFFFFFFFF_FFFFFFFFu64);
+        asm!("stx.w {}, {}, $zero", in(reg) 0x12345678u32, in(reg) (base + 3));
+        let got = u32::from_le_bytes([
+            *((base + 3) as *const u8),
+            *((base + 4) as *const u8),
+            *((base + 5) as *const u8),
+            *((base + 6) as *const u8),
+        ]);
+        println!("[verify] {:>12} off=3 val=0x12345678 expect=0x12345678 got=0x{:08x} {}",
+            "stx.w", got, if got == 0x12345678 { "OK" } else { "FAIL" });
+    }
+}
+
+// ─── 测试辅助 ───
+const TEST_BASE: usize = 0x9000_0000_0010_0000;
+
+fn k_trap_snapshot() -> usize {
+    crate::arch::la::trap::K_TRAP_COUNT.load(core::sync::atomic::Ordering::SeqCst)
+}
+
+// ─── si12 类型: ld/st 指令测试 ───
+fn unaligned_test_si12() {
+    let start = k_trap_snapshot();
+    let base = TEST_BASE as *mut u64;
+
+    // 写入 8 字节测试模式
+    let pattern: u64 = 0x8877665544332211;
+    unsafe { base.write_volatile(pattern); }
+
+    // ld.h  — 2 字节符号扩展 (offset: 1,3,5,7)
+    macro_rules! test_ld_h {
+        ($off:expr) => {
+            let ptr = unsafe { (TEST_BASE as *const u8).add($off) };
+            let expect = unsafe { (ptr as *const i16).read_unaligned() as i64 as usize };
+            let got: usize;
+            unsafe { asm!(concat!("ld.h {}, {}, ", $off), out(reg) got, in(reg) base); }
+            check_eq!(got, expect, "ld.h off={}", $off);
+        };
+    }
+    test_ld_h!(1); test_ld_h!(3); test_ld_h!(5); test_ld_h!(7);
+    println!("  si12 ld.h   OK");
+
+    // ld.hu — 2 字节零扩展
+    macro_rules! test_ld_hu {
+        ($off:expr) => {
+            let ptr = unsafe { (TEST_BASE as *const u8).add($off) };
+            let expect = unsafe { (ptr as *const u16).read_unaligned() as usize };
+            let got: usize;
+            unsafe { asm!(concat!("ld.hu {}, {}, ", $off), out(reg) got, in(reg) base); }
+            check_eq!(got, expect, "ld.hu off={}", $off);
+        };
+    }
+    test_ld_hu!(1); test_ld_hu!(3); test_ld_hu!(5); test_ld_hu!(7);
+    println!("  si12 ld.hu  OK");
+
+    // ld.w  — 4 字节符号扩展
+    macro_rules! test_ld_w {
+        ($off:expr) => {
+            let ptr = unsafe { (TEST_BASE as *const u8).add($off) };
+            let expect = unsafe { (ptr as *const i32).read_unaligned() as i64 as usize };
+            let got: usize;
+            unsafe { asm!(concat!("ld.w {}, {}, ", $off), out(reg) got, in(reg) base); }
+            check_eq!(got, expect, "ld.w off={}", $off);
+        };
+    }
+    test_ld_w!(1); test_ld_w!(2); test_ld_w!(3);
+    println!("  si12 ld.w   OK");
+
+    // ld.wu — 4 字节零扩展
+    macro_rules! test_ld_wu {
+        ($off:expr) => {
+            let ptr = unsafe { (TEST_BASE as *const u8).add($off) };
+            let expect = unsafe { (ptr as *const u32).read_unaligned() as usize };
+            let got: usize;
+            unsafe { asm!(concat!("ld.wu {}, {}, ", $off), out(reg) got, in(reg) base); }
+            check_eq!(got, expect, "ld.wu off={}", $off);
+        };
+    }
+    test_ld_wu!(1); test_ld_wu!(2); test_ld_wu!(3);
+    println!("  si12 ld.wu  OK");
+
+    // ld.d  — 8 字节
+    macro_rules! test_ld_d {
+        ($off:expr) => {
+            let ptr = unsafe { (TEST_BASE as *const u8).add($off) };
+            let expect = unsafe { (ptr as *const u64).read_unaligned() };
+            let got: usize;
+            unsafe { asm!(concat!("ld.d {}, {}, ", $off), out(reg) got, in(reg) base); }
+            check_eq!(got as u64, expect, "ld.d off={}", $off);
+        };
+    }
+    test_ld_d!(1); test_ld_d!(2); test_ld_d!(3); test_ld_d!(4);
+    test_ld_d!(5); test_ld_d!(6); test_ld_d!(7);
+    println!("  si12 ld.d   OK");
+
+    // st.h — 2 字节
+    let marker: u64 = 0xDEADBEEF_CAFEBABE;
+    macro_rules! test_st_h {
+        ($off:expr, $val:expr) => {
+            unsafe { base.write_volatile(marker); }
+            unsafe { asm!(concat!("st.h {}, {}, ", $off), in(reg) $val, in(reg) base); }
+            let ptr = unsafe { (TEST_BASE as *const u8).add($off) };
+            let got = unsafe { (ptr as *const u16).read_unaligned() };
+            check_eq!(got, $val, "st.h off={}", $off);
+        };
+    }
+    test_st_h!(1, 0x5678u16);
+    test_st_h!(3, 0x9ABC);
+    test_st_h!(5, 0xDEF0);
+    test_st_h!(7, 0x1234);
+    println!("  si12 st.h   OK");
+
+    // st.w — 4 字节
+    macro_rules! test_st_w {
+        ($off:expr, $val:expr) => {
+            unsafe { base.write_volatile(marker); }
+            unsafe { asm!(concat!("st.w {}, {}, ", $off), in(reg) $val, in(reg) base); }
+            let ptr = unsafe { (TEST_BASE as *const u8).add($off) };
+            let got = unsafe { (ptr as *const u32).read_unaligned() };
+            check_eq!(got, $val, "st.w off={}", $off);
+        };
+    }
+    test_st_w!(1, 0x12345678u32);
+    test_st_w!(2, 0xAABBCCDDu32);
+    test_st_w!(3, 0xDEADBEEFu32);
+    println!("  si12 st.w   OK");
+
+    // st.d — 8 字节
+    macro_rules! test_st_d {
+        ($off:expr, $val:expr) => {
+            unsafe { asm!(concat!("st.d {}, {}, ", $off), in(reg) $val, in(reg) base); }
+            let ptr = unsafe { (TEST_BASE as *const u8).add($off) };
+            let got = unsafe { (ptr as *const u64).read_unaligned() };
+            check_eq!(got, $val, "st.d off={}", $off);
+        };
+    }
+    test_st_d!(1, 0xFEDCBA9876543210u64);
+    test_st_d!(2, 0x11111111_22222222u64);
+    test_st_d!(3, 0x33333333_44444444u64);
+    test_st_d!(4, 0x55555555_66666666u64);
+    test_st_d!(5, 0x77777777_88888888u64);
+    test_st_d!(6, 0x99999999_AAAAAAAAu64);
+    test_st_d!(7, 0xBBBBBBBB_CCCCCCCCu64);
+    println!("  si12 st.d   OK");
+
+    let count = k_trap_snapshot() - start;
+    println!("si12 tests done, traps={}", count);
+}
+
+// ─── rk 类型: ldx/stx 指令测试 ───
+fn unaligned_test_rk() {
+    let start = k_trap_snapshot();
+
+    // ldx.d / stx.d 已在前面简单测试通过，这里覆盖全部 8 种
+    let base_ptr = TEST_BASE as *mut u64;
+    let pattern: u64 = 0x0123456789ABCDEF;
+    unsafe { base_ptr.write_volatile(pattern); }
+
+    // 使用 $zero 作为 rk，base + offset 作为 rj
+    // ldx.h
+    for off in [1usize, 3, 5, 7].iter() {
+        let off_ptr = unsafe { TEST_BASE + off };
+        let expect = unsafe { ((TEST_BASE + off) as *const i16).read_unaligned() as i64 as usize };
+        let got: usize;
+        unsafe { asm!("ldx.h {}, {}, $zero", out(reg) got, in(reg) off_ptr); }
+        check_eq!(got, expect, "ldx.h off={}", off);
+    }
+    println!("  rk ldx.h   OK");
+
+    // ldx.hu
+    for off in [1usize, 3, 5, 7].iter() {
+        let off_ptr = unsafe { TEST_BASE + off };
+        let expect = unsafe { ((TEST_BASE + off) as *const u16).read_unaligned() as usize };
+        let got: usize;
+        unsafe { asm!("ldx.hu {}, {}, $zero", out(reg) got, in(reg) off_ptr); }
+        check_eq!(got, expect, "ldx.hu off={}", off);
+    }
+    println!("  rk ldx.hu  OK");
+
+    // ldx.w
+    for off in [1usize, 2, 3].iter() {
+        let off_ptr = unsafe { TEST_BASE + off };
+        let expect = unsafe { ((TEST_BASE + off) as *const i32).read_unaligned() as i64 as usize };
+        let got: usize;
+        unsafe { asm!("ldx.w {}, {}, $zero", out(reg) got, in(reg) off_ptr); }
+        check_eq!(got, expect, "ldx.w off={}", off);
+    }
+    println!("  rk ldx.w   OK");
+
+    // ldx.wu
+    for off in [1usize, 2, 3].iter() {
+        let off_ptr = unsafe { TEST_BASE + off };
+        let expect = unsafe { ((TEST_BASE + off) as *const u32).read_unaligned() as usize };
+        let got: usize;
+        unsafe { asm!("ldx.wu {}, {}, $zero", out(reg) got, in(reg) off_ptr); }
+        check_eq!(got, expect, "ldx.wu off={}", off);
+    }
+    println!("  rk ldx.wu  OK");
+
+    // ldx.d
+    for off in [1usize, 2, 3, 4, 5, 6, 7].iter() {
+        let off_ptr = unsafe { TEST_BASE + off };
+        let expect = unsafe { (off_ptr as *const u64).read_unaligned() };
+        let got: usize;
+        unsafe { asm!("ldx.d {}, {}, $zero", out(reg) got, in(reg) off_ptr); }
+        check_eq!(got as u64, expect, "ldx.d off={}", off);
+    }
+    println!("  rk ldx.d   OK");
+
+    // stx.h
+    let marker: u64 = 0xAAAAAAAA_BBBBBBBB;
+    for off in [1usize, 3, 5, 7].iter() {
+        let off_ptr = unsafe { TEST_BASE + off };
+        let val = 0x2E2Eu16;
+        unsafe { base_ptr.write_volatile(marker); }
+        unsafe { asm!("stx.h {}, {}, $zero", in(reg) val, in(reg) off_ptr); }
+        let got = unsafe { (off_ptr as *const u16).read_unaligned() };
+        check_eq!(got, val, "stx.h off={}", off);
+    }
+    println!("  rk stx.h   OK");
+
+    // stx.w
+    for off in [1usize, 2, 3].iter() {
+        let off_ptr = unsafe { TEST_BASE + off };
+        let val = 0x1CE1CEu32;
+        unsafe { base_ptr.write_volatile(marker); }
+        unsafe { asm!("stx.w {}, {}, $zero", in(reg) val, in(reg) off_ptr); }
+        let got = unsafe { (off_ptr as *const u32).read_unaligned() };
+        check_eq!(got, val, "stx.w off={}", off);
+    }
+    println!("  rk stx.w   OK");
+
+    // stx.d
+    for off in [1usize, 2, 3, 4, 5, 6, 7].iter() {
+        let off_ptr = unsafe { TEST_BASE + off };
+        let val = 0xDEAD_BEEF_CAFE_BABEu64;
+        unsafe { asm!("stx.d {}, {}, $zero", in(reg) val, in(reg) off_ptr); }
+        let got = unsafe { (off_ptr as *const u64).read_unaligned() };
+        check_eq!(got, val, "stx.d off={}", off);
+    }
+    println!("  rk stx.d   OK");
+
+    let count = k_trap_snapshot() - start;
+    println!("rk tests done, traps={}", count);
+}
+
+// ─── 交叉验证: 每种 store 独立测试 ───
+fn unaligned_test_cross() {
+    let start = k_trap_snapshot();
+    let base = TEST_BASE as *mut u64;
+
+    // st.h +1
+    unsafe { base.write_volatile(0xFFFFFFFF_FFFFFFFFu64); }
+    unsafe { asm!("st.h {}, {}, 1", in(reg) 0x11u16, in(reg) base); }
+    let got = unsafe { ((TEST_BASE + 1) as *const u16).read_unaligned() };
+    check_eq!(got, 0x11u16, "cross st.h +1");
+
+    // st.w +2
+    unsafe { base.write_volatile(0xFFFFFFFF_FFFFFFFFu64); }
+    unsafe { asm!("st.w {}, {}, 2", in(reg) 0x2222u32, in(reg) base); }
+    let got = unsafe { ((TEST_BASE + 2) as *const u32).read_unaligned() };
+    check_eq!(got, 0x2222u32, "cross st.w +2");
+
+    // st.d +3
+    unsafe { base.write_volatile(0xFFFFFFFF_FFFFFFFFu64); }
+    unsafe { asm!("st.d {}, {}, 3", in(reg) 0x33333333u64, in(reg) base); }
+    let got = unsafe { ((TEST_BASE + 3) as *const u64).read_unaligned() };
+    check_eq!(got, 0x33333333u64, "cross st.d +3");
+
+    // stx.h +4
+    unsafe { base.write_volatile(0xFFFFFFFF_FFFFFFFFu64); }
+    unsafe { asm!("stx.h {}, {}, $zero", in(reg) 0x44u16, in(reg) (TEST_BASE + 4)); }
+    let got = unsafe { ((TEST_BASE + 4) as *const u16).read_unaligned() };
+    check_eq!(got, 0x44u16, "cross stx.h +4");
+
+    // stx.w +5
+    unsafe { base.write_volatile(0xFFFFFFFF_FFFFFFFFu64); }
+    unsafe { asm!("stx.w {}, {}, $zero", in(reg) 0x5555u32, in(reg) (TEST_BASE + 5)); }
+    let got = unsafe { ((TEST_BASE + 5) as *const u32).read_unaligned() };
+    check_eq!(got, 0x5555u32, "cross stx.w +5");
+
+    // stx.d +6
+    unsafe { base.write_volatile(0xFFFFFFFF_FFFFFFFFu64); }
+    unsafe { asm!("stx.d {}, {}, $zero", in(reg) 0x66666666u64, in(reg) (TEST_BASE + 6)); }
+    let got = unsafe { ((TEST_BASE + 6) as *const u64).read_unaligned() };
+    check_eq!(got, 0x66666666u64, "cross stx.d +6");
+
+    println!("cross tests done, traps={}", k_trap_snapshot() - start);
 }
 
 /*
@@ -428,7 +792,6 @@ pub fn get_hart_id() -> usize {
 }
 
 #[allow(unused)]
-use core::arch::{asm};
 #[cfg(target_arch = "loongarch64")]
 #[no_mangle]
 pub fn debug_csr_info() {
@@ -450,7 +813,7 @@ pub fn mem_test() {
             let ptr = addr as *mut u64;
             ptr.write_volatile(0x12345678_9abcdeff);
             let val = ptr.read_volatile();
-            assert_eq!(val, 0x12345678_9abcdeff);
+            check_eq!(val, 0x12345678_9abcdeff);
         }
     }
     for addr in (aim1..aim2).step_by(8) {
@@ -458,7 +821,7 @@ pub fn mem_test() {
             let ptr = addr as *mut u64;
             ptr.write_volatile(0);
             let val = ptr.read_volatile();
-            assert_eq!(val, 0);
+            check_eq!(val, 0);
         }
     }
     println!("mem_test passed!");

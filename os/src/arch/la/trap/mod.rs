@@ -45,16 +45,19 @@ pub fn set_uboot_trap_handler_to_csr() {
 }
 
 // ─── 未对齐访存辅助函数 ───
+// LoongArch 的 LLVM 后端对 read_unaligned/write_unaligned 仍生成
+// 多字节访存指令（ld.h/ld.w 等），必须用 volatile 逐字节读写
+// 防止编译器合并优化。
 unsafe fn read_unaligned_u16(addr: usize) -> u16 {
-    let b0 = *(addr as *const u8) as u16;
-    let b1 = *((addr + 1) as *const u8) as u16;
+    let b0 = core::ptr::read_volatile(addr as *const u8) as u16;
+    let b1 = core::ptr::read_volatile((addr + 1) as *const u8) as u16;
     b0 | (b1 << 8)
 }
 unsafe fn read_unaligned_u32(addr: usize) -> u32 {
-    let b0 = *(addr as *const u8) as u32;
-    let b1 = *((addr + 1) as *const u8) as u32;
-    let b2 = *((addr + 2) as *const u8) as u32;
-    let b3 = *((addr + 3) as *const u8) as u32;
+    let b0 = core::ptr::read_volatile(addr as *const u8) as u32;
+    let b1 = core::ptr::read_volatile((addr + 1) as *const u8) as u32;
+    let b2 = core::ptr::read_volatile((addr + 2) as *const u8) as u32;
+    let b3 = core::ptr::read_volatile((addr + 3) as *const u8) as u32;
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 }
 unsafe fn read_unaligned_u64(addr: usize) -> u64 {
@@ -63,14 +66,14 @@ unsafe fn read_unaligned_u64(addr: usize) -> u64 {
     lo | (hi << 32)
 }
 unsafe fn write_unaligned_u16(addr: usize, val: u16) {
-    *(addr as *mut u8) = val as u8;
-    *((addr + 1) as *mut u8) = (val >> 8) as u8;
+    core::ptr::write_volatile(addr as *mut u8, val as u8);
+    core::ptr::write_volatile((addr + 1) as *mut u8, (val >> 8) as u8);
 }
 unsafe fn write_unaligned_u32(addr: usize, val: u32) {
-    *(addr as *mut u8) = val as u8;
-    *((addr + 1) as *mut u8) = (val >> 8) as u8;
-    *((addr + 2) as *mut u8) = (val >> 16) as u8;
-    *((addr + 3) as *mut u8) = (val >> 24) as u8;
+    core::ptr::write_volatile(addr as *mut u8, val as u8);
+    core::ptr::write_volatile((addr + 1) as *mut u8, (val >> 8) as u8);
+    core::ptr::write_volatile((addr + 2) as *mut u8, (val >> 16) as u8);
+    core::ptr::write_volatile((addr + 3) as *mut u8, (val >> 24) as u8);
 }
 unsafe fn write_unaligned_u64(addr: usize, val: u64) {
     write_unaligned_u32(addr, val as u32);
@@ -135,15 +138,15 @@ pub extern "C" fn k_trap_handler(trap_cx: *mut TrapContext) {
                 0x0A0 | 0x0A4 | 0x0A8 => { // 字节访存永远不应触发 ALE
                     panic!("[kernel] ALE on byte access: badv=0x{:x}, era=0x{:x}", badv, era);
                 }
-                // rk 类型: ldx/stx
+                // rk 类型: ldx/stx, opcode 在 bits 31-16
                 _ => {
-                    let opcode_14 = bad_ins >> 18;
-                    match opcode_14 {
+                    let opcode_16 = bad_ins >> 16;
+                    match opcode_16 {
                         0x3804 | 0x3808 | 0x380C | 0x3814 | 0x3818 | 0x381C | 0x3824 | 0x3828 => {
-                            let rj = ((bad_ins >> 13) & 0x1F) as usize;
-                            let rk = ((bad_ins >> 8) & 0x1F) as usize;
+                            let rj = ((bad_ins >> 5) & 0x1F) as usize;
+                            let rk = ((bad_ins >> 10) & 0x3F) as usize;
                             let vaddr = cx.r[rj].wrapping_add(cx.r[rk]);
-                            match opcode_14 {
+                            match opcode_16 {
                                 0x3804 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u16(vaddr) } as i16 as i64 as usize; } }       // LDX.H
                                 0x3808 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u32(vaddr) } as i32 as i64 as usize; } }       // LDX.W
                                 0x380C => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u64(vaddr) } as usize; } }                     // LDX.D
@@ -156,12 +159,12 @@ pub extern "C" fn k_trap_handler(trap_cx: *mut TrapContext) {
                             }
                             cx.set_rt(era + 4);
                         }
-                        0x3800 | 0x3810 | 0x3820 => { // 字节访存永远不应触发 ALE
+                        0x3800 | 0x3810 | 0x3820 => {
                             panic!("[kernel] ALE on byte access (rk): badv=0x{:x}, era=0x{:x}", badv, era);
                         }
                         _ => {
-                            panic!("[kernel] unhandled ALE: opcode_10=0x{:x}, opcode_14=0x{:x}, era=0x{:x}, badv=0x{:x}",
-                                opcode_10, opcode_14, era, badv);
+                            panic!("[kernel] unhandled ALE (rk): bad_ins=0x{:08x}, opcode_16=0x{:04x}, era=0x{:x}, badv=0x{:x}",
+                                bad_ins, opcode_16, era, badv);
                         }
                     }
                 }
@@ -175,7 +178,7 @@ pub extern "C" fn k_trap_handler(trap_cx: *mut TrapContext) {
 
     // 恢复内核 trap 入口
     set_kernel_trap_entry();
-    
+
     // 这里会自动返回到 __k_restore
 }
 
