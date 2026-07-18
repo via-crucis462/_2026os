@@ -55,6 +55,7 @@ pub use process::task;
 
 #[allow(unused)]
 use crate::arch::sbi::*;
+use crate::arch::trap;
 use core::arch::global_asm;
 #[cfg(target_arch = "loongarch64")]
 #[allow(unused)]
@@ -105,14 +106,17 @@ extern "C" {
 pub fn rust_main(hart_id: usize) -> ! {
     clear_bss();
     logging::init();
+    mm::init();
+    trap::init();
     println!("[kernel] Hello, world! hart_id={}", hart_id);
 
+    /*
     println!("[kernel] test_broke num={:#x}", 42u8);
     println!("[kernel] test_broke num={:#x}", 42u16);
     println!("[kernel] test_broke num={:#x}", 42u32);
     println!("[kernel] test_broke num={:#x}", 42u64);
+    */
 
-    /* 
     let aligned_adr = 0x9000_0000_0000_0000usize;
     let unaligned_adr = aligned_adr + 1;
     let aligned_ptr = aligned_adr as *mut u64;
@@ -141,14 +145,13 @@ pub fn rust_main(hart_id: usize) -> ! {
      
     }
     println!("pass aligned ldx stx test");
+    println!("[kernel] starting unaligned test, k_trap_count={}", crate::arch::la::trap::K_TRAP_COUNT.load(core::sync::atomic::Ordering::SeqCst));
     unsafe {
         asm!("ldx.d $t0, {unaligned}, $zero", unaligned = in(reg) unaligned_ptr, out("$t0") _);
         asm!("stx.d $t1, {unaligned}, $zero", unaligned = in(reg) unaligned_ptr, out("$t1") _);     
     }
+    println!("[kernel] unaligned test done, k_trap_count={}", crate::arch::la::trap::K_TRAP_COUNT.load(core::sync::atomic::Ordering::SeqCst));
     println!("pass unaligned ldx stx test");
-    */
-
-
     
     panic!("main end");
 }

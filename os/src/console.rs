@@ -22,8 +22,8 @@ impl Write for Stdout {
 
 pub fn print(args: fmt::Arguments) {
     // 诊断用：通过 NO_CONSOLE_LOCK=1 环境变量可跳过此锁
-    #[cfg(not(no_console_lock))]
-    let _lock = CONSOLE_LOCK.exclusive_access();
+    // #[cfg(not(no_console_lock))]
+    // let _lock = CONSOLE_LOCK.exclusive_access();
     // 这行会把fmt全部输出完
     Stdout.write_fmt(args).unwrap();
 }

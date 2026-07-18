@@ -22,6 +22,161 @@ global_asm!(include_str!("trap.S"));
 
 extern "C" {
     fn __alltraps();
+    fn __k_alltraps();
+}
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+static UBOOT_TRAP_HANDLER: AtomicUsize = AtomicUsize::new(0);
+
+/// 诊断：k_trap_handler 被调用的次数
+pub static K_TRAP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn get_uboot_trap_handler_from_csr() {
+    let eentry: usize;
+    unsafe { asm!("csrrd {}, 0xc", out(reg) eentry); }
+    UBOOT_TRAP_HANDLER.store(eentry, Ordering::SeqCst);
+}
+
+pub fn set_uboot_trap_handler_to_csr() {
+    let eentry = UBOOT_TRAP_HANDLER.load(Ordering::SeqCst);
+    if eentry == 0 { return; }
+    unsafe { asm!("csrwr {}, 0xc", in(reg) eentry); }
+}
+
+// ─── 未对齐访存辅助函数 ───
+unsafe fn read_unaligned_u16(addr: usize) -> u16 {
+    let b0 = *(addr as *const u8) as u16;
+    let b1 = *((addr + 1) as *const u8) as u16;
+    b0 | (b1 << 8)
+}
+unsafe fn read_unaligned_u32(addr: usize) -> u32 {
+    let b0 = *(addr as *const u8) as u32;
+    let b1 = *((addr + 1) as *const u8) as u32;
+    let b2 = *((addr + 2) as *const u8) as u32;
+    let b3 = *((addr + 3) as *const u8) as u32;
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+unsafe fn read_unaligned_u64(addr: usize) -> u64 {
+    let lo = read_unaligned_u32(addr) as u64;
+    let hi = read_unaligned_u32(addr + 4) as u64;
+    lo | (hi << 32)
+}
+unsafe fn write_unaligned_u16(addr: usize, val: u16) {
+    *(addr as *mut u8) = val as u8;
+    *((addr + 1) as *mut u8) = (val >> 8) as u8;
+}
+unsafe fn write_unaligned_u32(addr: usize, val: u32) {
+    *(addr as *mut u8) = val as u8;
+    *((addr + 1) as *mut u8) = (val >> 8) as u8;
+    *((addr + 2) as *mut u8) = (val >> 16) as u8;
+    *((addr + 3) as *mut u8) = (val >> 24) as u8;
+}
+unsafe fn write_unaligned_u64(addr: usize, val: u64) {
+    write_unaligned_u32(addr, val as u32);
+    write_unaligned_u32(addr + 4, (val >> 32) as u32);
+}
+
+/// 内核态trap处理入口，由 __k_alltraps 调用
+/// trap_cx 指向栈上保存的 TrapContext
+/// 目前主要用于处理未对齐访存异常（ALE）
+#[no_mangle]
+pub extern "C" fn k_trap_handler(trap_cx: *mut TrapContext) {
+    // 诊断用，递增调用计数
+    K_TRAP_COUNT.fetch_add(1, Ordering::SeqCst);
+
+    // 防止嵌套 trap 循环
+    set_uboot_trap_handler_to_csr();
+
+    let cx = unsafe { &mut *trap_cx };
+
+    let estat: usize;
+    let badv: usize;
+    unsafe {
+        asm!("csrrd {}, 0x5", out(reg) estat);
+        asm!("csrrd {}, 0x7", out(reg) badv);
+    }
+
+    let ecode = (estat >> 16) & 0x3f;
+
+    match ecode {
+        0x9 => { // ALE — 未对齐访存
+
+            // FIX ME：如果只保存rd rj rk，可以大幅提高性能
+            // 现在通过一个完整trap处理
+            
+            let era = cx.get_rt();
+            let bad_ins = unsafe { *(era as *const u32) };
+            let rd = (bad_ins & 0x1F) as usize;
+            let opcode_10 = bad_ins >> 22;
+
+            // 下面这部分当前是LLM批量实现版本，可能有优化空间
+            match opcode_10 {
+                // si12 类型: ld.h/w/d, st.h/w/d, ld.hu/wu
+                0x0A1 | 0x0A2 | 0x0A3 | 0x0A5 | 0x0A6 | 0x0A7 | 0x0A9 | 0x0AA => {
+                    let rj = ((bad_ins >> 5) & 0x1F) as usize;
+                    let si12 = (bad_ins >> 10) & 0xFFF;
+                    let si12_ext = ((si12 & 0xFFF) as i64) << 52 >> 52;
+                    let vaddr = (cx.r[rj] as i64).wrapping_add(si12_ext) as usize;
+                    match opcode_10 {
+                        0x0A1 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u16(vaddr) } as i16 as i64 as usize; } }       // LD.H
+                        0x0A2 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u32(vaddr) } as i32 as i64 as usize; } }       // LD.W
+                        0x0A3 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u64(vaddr) } as usize; } }                     // LD.D
+                        0x0A5 => { let v = if rd != 0 { cx.r[rd] as u16 } else { 0 }; unsafe { write_unaligned_u16(vaddr, v); } } // ST.H
+                        0x0A6 => { let v = if rd != 0 { cx.r[rd] as u32 } else { 0 }; unsafe { write_unaligned_u32(vaddr, v); } } // ST.W
+                        0x0A7 => { let v = if rd != 0 { cx.r[rd] as u64 } else { 0 }; unsafe { write_unaligned_u64(vaddr, v); } } // ST.D
+                        0x0A9 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u16(vaddr) } as usize; } }                      // LD.HU
+                        0x0AA => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u32(vaddr) } as usize; } }                      // LD.WU
+                        _ => {}
+                    }
+                    // 绕过触发trap的指令
+                    cx.set_rt(era + 4);
+                }
+                0x0A0 | 0x0A4 | 0x0A8 => { // 字节访存永远不应触发 ALE
+                    panic!("[kernel] ALE on byte access: badv=0x{:x}, era=0x{:x}", badv, era);
+                }
+                // rk 类型: ldx/stx
+                _ => {
+                    let opcode_14 = bad_ins >> 18;
+                    match opcode_14 {
+                        0x3804 | 0x3808 | 0x380C | 0x3814 | 0x3818 | 0x381C | 0x3824 | 0x3828 => {
+                            let rj = ((bad_ins >> 13) & 0x1F) as usize;
+                            let rk = ((bad_ins >> 8) & 0x1F) as usize;
+                            let vaddr = cx.r[rj].wrapping_add(cx.r[rk]);
+                            match opcode_14 {
+                                0x3804 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u16(vaddr) } as i16 as i64 as usize; } }       // LDX.H
+                                0x3808 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u32(vaddr) } as i32 as i64 as usize; } }       // LDX.W
+                                0x380C => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u64(vaddr) } as usize; } }                     // LDX.D
+                                0x3814 => { let v = if rd != 0 { cx.r[rd] as u16 } else { 0 }; unsafe { write_unaligned_u16(vaddr, v); } } // STX.H
+                                0x3818 => { let v = if rd != 0 { cx.r[rd] as u32 } else { 0 }; unsafe { write_unaligned_u32(vaddr, v); } } // STX.W
+                                0x381C => { let v = if rd != 0 { cx.r[rd] as u64 } else { 0 }; unsafe { write_unaligned_u64(vaddr, v); } } // STX.D
+                                0x3824 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u16(vaddr) } as usize; } }                      // LDX.HU
+                                0x3828 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u32(vaddr) } as usize; } }                      // LDX.WU
+                                _ => {}
+                            }
+                            cx.set_rt(era + 4);
+                        }
+                        0x3800 | 0x3810 | 0x3820 => { // 字节访存永远不应触发 ALE
+                            panic!("[kernel] ALE on byte access (rk): badv=0x{:x}, era=0x{:x}", badv, era);
+                        }
+                        _ => {
+                            panic!("[kernel] unhandled ALE: opcode_10=0x{:x}, opcode_14=0x{:x}, era=0x{:x}, badv=0x{:x}",
+                                opcode_10, opcode_14, era, badv);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            panic!("[kernel] unhandled kernel trap: ecode=0x{:x}, era=0x{:x}, badv=0x{:x}",
+                ecode, cx.get_rt(), badv);
+        }
+    }
+
+    // 恢复内核 trap 入口
+    set_kernel_trap_entry();
+    
+    // 这里会自动返回到 __k_restore
 }
 
 #[no_mangle]
@@ -86,26 +241,27 @@ pub fn trap_from_kernel() -> ! {
 
 /// Initialize trap handling
 pub fn init() {
-    unsafe{
-        let mut crmd: usize;
-        asm!("csrrd {}, 0x0", out(reg) crmd);
-        crmd &= !(1 << 2); // 先关闭中断
-        asm!("csrwr {}, 0x0", in(reg) crmd);
-    }
+    get_uboot_trap_handler_from_csr();
+    let target = __k_alltraps as *const () as usize;
+    // 诊断：打印 __k_alltraps 地址和 U-Boot EENTRY 值
+    let uboot_eentry = UBOOT_TRAP_HANDLER.load(Ordering::SeqCst);
+    println!("[kernel] trap::init: uboot_eentry=0x{:x}, __k_alltraps=0x{:x}", uboot_eentry, target);
     set_kernel_trap_entry();
+    // 回读确认
+    let verify: usize;
+    unsafe { asm!("csrrd {}, 0xc", out(reg) verify); }
+    println!("[kernel] trap::init: EENTRY after set=0x{:x}", verify);
 }
 
 // 从内核trap时的入口
 fn set_kernel_trap_entry() {
-    let target = trap_from_kernel as *const () as usize;
-    let trap_handler: usize = target;
+    let target = __k_alltraps as *const () as usize;
     unsafe {
         asm!(
-            "csrwr {trap_handler},0xc",
-            trap_handler = inout(reg) trap_handler => _,
+            "csrwr {},0xc",
+            inout(reg) target => _,
         );
     }
-    //debug!("[kernel] set_kernel_trap_entry: trap_handler address = 0x{:x}", trap_handler);
 }
 
 /// 插入__all_trap的地址

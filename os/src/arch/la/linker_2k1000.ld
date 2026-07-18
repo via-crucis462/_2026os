@@ -16,6 +16,8 @@ SECTIONS
         strampoline = .;
         *(.text.trampoline);
         . = ALIGN(4K);
+        *(.text.ktrap);
+        . = ALIGN(4K);
         *(.text .text.*)
     }
 
