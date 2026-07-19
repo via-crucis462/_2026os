@@ -21,8 +21,15 @@ else
 	GDB = gdb
 endif
 
+all: prev build-user copy-user build copy
 
-all: build-user copy-user build copy
+# 通过符号链接准备自定义rust sysroot环境
+prev: 
+	cd os && $(MAKE) env
+	cd os && $(MAKE) env-la
+	@echo "  -> Creating sysroot lns..."
+	./setup-custom-sysroot.sh
+	@echo "  -> Created sysroot lns"
 
 build-rv:
 	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)

@@ -2,11 +2,10 @@ cargo-features = ["profile-rustflags"]
 
 [workspace]
 resolver = "1"
+# 修改为 core 和 alloc，用于自定义 rust 依赖
 members = [
-  "std",
-  "sysroot",
-  "coretests",
-  "alloctests",
+  "core",
+  "alloc",
 ]
 
 exclude = [

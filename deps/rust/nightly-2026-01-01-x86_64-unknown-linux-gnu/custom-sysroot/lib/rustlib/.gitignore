@@ -1,0 +1,14 @@
+# 这些符号链接到工具链的源码/rlib目录
+etc
+loongarch64-unknown-none
+riscv64gc-unknown-none-elf
+x86_64-unknown-linux-gnu
+
+src/rust/library/*
+
+# 这些是真实生效（可能有修改）的源码目录
+!src/rust/library/core
+!src/rust/library/alloc
+!src/rust/library/compiler_builtins
+!src/rust/library/*.*
+

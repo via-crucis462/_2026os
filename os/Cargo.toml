@@ -1,7 +1,7 @@
 [package]
 name = "os"
 version = "0.2.0"
-authors = ["Yifan Wu<shinbokuow@163.com>"]
+authors = ["Yifan Wu<shinbokuow@163.com>", "Bowen Tang<3556495919@qq.com>", "Mengxi Feng<fmxi666@outlook.com>", "Mingjun Gao<1273938538@qq.com>"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

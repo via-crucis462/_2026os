@@ -1,6 +1,9 @@
 [build]
 target = "loongarch64-unknown-none"
 
+[unstable]
+build-std = ["core", "alloc", "compiler_builtins"]
+
 [target.riscv64gc-unknown-none-elf]
 rustflags = [
     "-Clink-arg=-Tsrc/arch/riscv/linker.ld", "-Cforce-frame-pointers=yes"
@@ -30,3 +33,4 @@ directory = "vendor"
 
 [env]
 SMOLTCP_IFACE_MAX_ADDR_COUNT = "128"
+

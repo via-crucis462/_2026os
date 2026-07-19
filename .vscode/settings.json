@@ -6,7 +6,9 @@
     // "rust-analyzer.cargo.target": "riscv64gc-unknown-none-elf",
     "rust-analyzer.cargo.target": "loongarch64-unknown-none",
 
+
     // 调整板卡
+    "rust-analyzer.cargo.sysroot": "deps/rust/nightly-2026-01-01-x86_64-unknown-linux-gnu/custom-sysroot",
     "rust-analyzer.cargo.extraEnv": {
         "BOARD": "2k1000"
         // "BOARD": "virt"
