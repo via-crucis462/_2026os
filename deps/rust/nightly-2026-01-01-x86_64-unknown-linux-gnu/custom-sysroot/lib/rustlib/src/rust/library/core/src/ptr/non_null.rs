@@ -1023,8 +1023,7 @@ impl<T: PointeeSized> NonNull<T> {
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
-    #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
-    pub const unsafe fn read_unaligned(self) -> T
+    pub unsafe fn read_unaligned(self) -> T
     where
         T: Sized,
     {
@@ -1197,8 +1196,7 @@ impl<T: PointeeSized> NonNull<T> {
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
-    #[rustc_const_stable(feature = "const_ptr_write", since = "1.83.0")]
-    pub const unsafe fn write_unaligned(self, val: T)
+    pub unsafe fn write_unaligned(self, val: T)
     where
         T: Sized,
     {

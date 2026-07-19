@@ -1293,10 +1293,9 @@ impl<T: PointeeSized> *mut T {
     ///
     /// [`ptr::read_unaligned`]: crate::ptr::read_unaligned()
     #[stable(feature = "pointer_methods", since = "1.26.0")]
-    #[rustc_const_stable(feature = "const_ptr_read", since = "1.71.0")]
     #[inline(always)]
     #[track_caller]
-    pub const unsafe fn read_unaligned(self) -> T
+    pub unsafe fn read_unaligned(self) -> T
     where
         T: Sized,
     {
@@ -1467,10 +1466,9 @@ impl<T: PointeeSized> *mut T {
     ///
     /// [`ptr::write_unaligned`]: crate::ptr::write_unaligned()
     #[stable(feature = "pointer_methods", since = "1.26.0")]
-    #[rustc_const_stable(feature = "const_ptr_write", since = "1.83.0")]
     #[inline(always)]
     #[track_caller]
-    pub const unsafe fn write_unaligned(self, val: T)
+    pub unsafe fn write_unaligned(self, val: T)
     where
         T: Sized,
     {

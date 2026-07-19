@@ -1201,10 +1201,9 @@ impl<T: PointeeSized> *const T {
     ///
     /// [`ptr::read_unaligned`]: crate::ptr::read_unaligned()
     #[stable(feature = "pointer_methods", since = "1.26.0")]
-    #[rustc_const_stable(feature = "const_ptr_read", since = "1.71.0")]
     #[inline]
     #[track_caller]
-    pub const unsafe fn read_unaligned(self) -> T
+    pub unsafe fn read_unaligned(self) -> T
     where
         T: Sized,
     {

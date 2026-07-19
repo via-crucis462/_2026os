@@ -1781,10 +1781,9 @@ pub const unsafe fn read<T>(src: *const T) -> T {
 /// ```
 #[inline]
 #[stable(feature = "ptr_unaligned", since = "1.17.0")]
-#[rustc_const_stable(feature = "const_ptr_read", since = "1.71.0")]
 #[track_caller]
 #[rustc_diagnostic_item = "ptr_read_unaligned"]
-pub const unsafe fn read_unaligned<T>(src: *const T) -> T {
+pub unsafe fn read_unaligned<T>(src: *const T) -> T {
     let mut tmp = MaybeUninit::<T>::uninit();
     // SAFETY: the caller must guarantee that `src` is valid for reads.
     // `src` cannot overlap `tmp` because `tmp` was just allocated on
@@ -1792,8 +1791,15 @@ pub const unsafe fn read_unaligned<T>(src: *const T) -> T {
     //
     // Also, since we just wrote a valid value into `tmp`, it is guaranteed
     // to be properly initialized.
+    //
+    // NOTE: 此处改为逐字节 volatile 读写，避免 LLVM 后端生成多字节未对齐
+    // 访存指令（如 LoongArch 的 ld.h/ld.w 等），在未对齐地址上触发 ALE 异常。
     unsafe {
-        copy_nonoverlapping(src as *const u8, tmp.as_mut_ptr() as *mut u8, size_of::<T>());
+        let dst = tmp.as_mut_ptr() as *mut u8;
+        let src = src as *const u8;
+        for i in 0..size_of::<T>() {
+            dst.add(i).write_volatile(src.add(i).read_volatile());
+        }
         tmp.assume_init()
     }
 }
@@ -1983,15 +1989,21 @@ pub const unsafe fn write<T>(dst: *mut T, src: T) {
 /// ```
 #[inline]
 #[stable(feature = "ptr_unaligned", since = "1.17.0")]
-#[rustc_const_stable(feature = "const_ptr_write", since = "1.83.0")]
 #[rustc_diagnostic_item = "ptr_write_unaligned"]
 #[track_caller]
-pub const unsafe fn write_unaligned<T>(dst: *mut T, src: T) {
+pub unsafe fn write_unaligned<T>(dst: *mut T, src: T) {
     // SAFETY: the caller must guarantee that `dst` is valid for writes.
     // `dst` cannot overlap `src` because the caller has mutable access
     // to `dst` while `src` is owned by this function.
+    //
+    // NOTE: 此处改为逐字节 volatile 读写，避免 LLVM 后端生成多字节未对齐
+    // 访存指令（如 LoongArch 的 st.h/st.w 等），在未对齐地址上触发 ALE 异常。
     unsafe {
-        copy_nonoverlapping((&raw const src) as *const u8, dst as *mut u8, size_of::<T>());
+        let src_bytes = (&raw const src) as *const u8;
+        let dst_bytes = dst as *mut u8;
+        for i in 0..size_of::<T>() {
+            dst_bytes.add(i).write_volatile(src_bytes.add(i).read_volatile());
+        }
         // We are calling the intrinsic directly to avoid function calls in the generated code.
         intrinsics::forget(src);
     }
