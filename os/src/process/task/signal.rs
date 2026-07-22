@@ -1,5 +1,8 @@
 use bitflags::*;
-
+use alloc::vec::Vec;
+use alloc::sync::{Arc, Weak};
+use crate::process::task::rlimit::Rlimit;
+use super::*;
 /// The max signal number
 pub const MAX_SIG: usize = 64;
 
@@ -106,4 +109,20 @@ impl SignalFlags {
         }
         None
     }
+}
+pub struct Sigpending{
+    queue: Vec<Signal>, // 挂起信号队列
+    signals: SignalFlags, // 挂起信号集
+    wait_chldexit: bool, // 是否等待子进程退出
+}
+pub struct Signal{
+    shared_pending: Sigpending, // 共享挂起信号集
+    group_exit_state: i32, // 线程组退出状态
+    thread_num: usize, // 线程组中线程数量
+    next_thread: Option<Weak<TaskStruct>>, // 线程组中下一个线程
+    rlimits: [Rlimit; 16], // 资源限制
+}
+
+pub struct SigHand{
+    sig_actions: SignalActions, // 信号处理函数
 }

@@ -8,6 +8,12 @@ use crate::{
     sync::MPSafeCell,
     ipc::namespace::NsProxy,
 };
+use crate::process::task::{
+    context::ThreadStruct,
+    cred::Cred,
+    signal::{Signal, SigHand, Sigpending},
+    task_fs::FsStruct,
+};
 use alloc::{
     string::String,
     sync::{Arc, Weak},
@@ -215,48 +221,4 @@ pub struct TaskStructInner {
     pub clear_child_tid: usize, // 线程清理指针
     pub personality: usize, // 进程个性化标志
     pub comm: [u8; 10],
-}
-
-pub struct ThreadStruct {
-    pub task_ctx: TaskContext, // 线程上下文，保存寄存器等信息
-    pub trap_ctx: usize,  // 陷阱上下文，保存陷阱相关寄存器等信息
-}
-pub struct Signal{
-    shared_pending: Sigpending, // 共享挂起信号集
-    group_exit_state: i32, // 线程组退出状态
-    thread_num: usize, // 线程组中线程数量
-    next_thread: Option<Weak<TaskStruct>>, // 线程组中下一个线程
-    rlimits: [Rlimit; 16], // 资源限制
-}
-
-pub struct SigHand{
-    sig_actions: SignalActions, // 信号处理函数
-}
-
-pub struct Cred{
-    uid: u32, // 用户ID
-    gid: u32, // 组ID
-    euid: u32, // 有效用户ID
-    egid: u32, // 有效组ID
-    suid: u32, // 保存的用户ID
-    sgid: u32, // 保存的组ID
-    fsuid: u32, // 文件系统用户ID
-    fsgid: u32, // 文件系统组ID
-}
-
-pub struct FsStruct{
-    root: Arc<Dentry>, // 根目录
-    pwd: Arc<Dentry>, // 当前工作目录
-    umask: u32, // 文件创建掩码
-}
-
-pub struct Rlimit {
-    rlim_cur: usize, // 当前资源限制
-    rlim_max: usize, // 最大资源限制
-}
-
-pub struct Sigpending{
-    queue: Vec<Signal>, // 挂起信号队列
-    signals: SignalFlags, // 挂起信号集
-    wait_chldexit: bool, // 是否等待子进程退出
 }
