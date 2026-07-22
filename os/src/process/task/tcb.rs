@@ -6,6 +6,7 @@ use crate::{
     fs::{Dentry, File, ROOT_DENTRY,Stdin, Stdout},
     mm::{KERNEL_SPACE, MemorySet, PhysAddr, VirtAddr, mmap},
     sync::MPSafeCell,
+    ipc::namespace::NsProxy,
 };
 use alloc::{
     string::String,
@@ -143,34 +144,119 @@ impl TaskControlBlock {
 
 }
 
-#[derive(Copy, Clone, PartialEq , Debug)]
-/// task status: UnInit, Ready, Running, Exited
-pub enum TaskStatus {
-    /// uninitialized
-    UnInit,
-    /// ready to run
-    Ready,
-    /// running
-    Running,
-    /// 被阻塞（目前是被锁阻塞）
-    Blocked,
-    /// exited
-    Zombie,
-    /// 加入了等待队列但正在保存上下文
-    BlockSaving,
 
+pub struct TaskStruct {
+    pub inner: MPSafeCell<TaskStructInner>,
+}
+pub struct TaskStructInner {
+
+    // 命名空间
+    pub nsproxy: Arc<NsProxy>,
+    /* 0. 上下文 */
+    pub thread: ThreadStruct, // 线程上下文，保存寄存器等信息
+
+    /* 1. 进程标识信息 */
+    pub pid: Arc<TIdHandle>,                // 全局唯一进程 ID
+    pub tgid: Arc<TIdHandle>,               // 线程组 ID，主线程 pid=tgid
+    pub group_leader: Weak<TaskStruct>,  // 线程组领头进程
+    pub kernel_stack: KernelStack,
+
+    /* 2. 进程亲缘关系 */
+    pub real_parent: Weak<TaskStruct>,  // 实际创建当前进程的父进程
+    pub parent: Weak<TaskStruct>,       // 接收 SIGCHLD 信号的父进程
+    pub children: Vec<Arc<TaskStruct>>,              // 子进程链表头
+
+    /* 3. 进程状态 */
+    pub state: TaskStatus,        // 进程运行状态
+    pub exit_state: i64,            // 进程退出状态
+    pub exit_code: i32,     // 进程退出码
+    pub exit_signal: i32,   // 进程退出信号
+    pub flags: u32,         // 进程特性标志
+    pub errno: i32,         // 进程错误码
+
+    /* 4. 进程调度相关 */
+    /*pub sched_class: *const sched_class,  // 绑定的调度器类
+    pub se: sched_entity,     // CFS 完全公平调度实体
+    pub rt: sched_rt_entity,  // 实时调度实体
+    pub prio: i32,                  // 动态优先级
+    pub static_prio: i32,           // 静态优先级
+    pub normal_prio: i32,           // 普通优先级*/
+    pub sched_policy: isize,
+    pub sched_priority: i32,
+
+    /* 5. 内存管理相关 */
+    pub mm: Option<Arc<MPSafeCell<MemorySet>>>,       // 用户进程内存描述符
+    // pub active_mm: *mut mm_struct,// 上下文切换使用的活动 mm
+
+    /* 6. 文件系统与文件描述符 */
+    pub fs: Option<Arc<MPSafeCell<FsStruct>>>,       // 进程当前目录、根目录信息
+    pub files: Option<Arc<MPSafeCell<Vec<FileDescriptor>>>>, // 进程打开的文件描述符表
+
+    /*7. 信号处理相关 */
+    pub signal: Option<Arc<MPSafeCell<Signal>>>,  // 信号处理相关信息
+    pub signal_hand: Option<Arc<MPSafeCell<SigHand>>>, // 信号处理函数相关信息
+    pub blocked: SignalFlags, // 当前阻塞的信号集
+    pub pending: Sigpending, // 当前挂起的信号集 
+
+    /* 8. gid uid等 */
+    pub cred: Option<Arc<MPSafeCell<Cred>>>, // 进程的凭证信息
+    pub real_cred: Option<Arc<MPSafeCell<Cred>>>, // 进程的真实凭证信息
+
+    /* 9. 其他 */
+    pub start_time: u64, // 进程启动时间
+    pub start_boottime: u64, // 进程启动时间的低位
+
+    /* 10 .CPU调度  */
+    pub on_cpu: bool,
+    pub on_rq: bool,
+    pub cpu: usize,
+
+    /*11 .线程退出清理地址 */
+    pub clear_child_tid: usize, // 线程清理指针
+    pub personality: usize, // 进程个性化标志
+    pub comm: [u8; 10],
 }
 
-impl core::fmt::Display for TaskStatus {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let status = match self {
-            TaskStatus::UnInit => "UnInit",
-            TaskStatus::Ready => "Ready",
-            TaskStatus::Running => "Running",
-            TaskStatus::Blocked => "Blocked",
-            TaskStatus::Zombie => "Zombie",
-            TaskStatus::BlockSaving => "BlockSaving",
-        };
-        f.write_str(status)
-    }
+pub struct ThreadStruct {
+    pub task_ctx: TaskContext, // 线程上下文，保存寄存器等信息
+    pub trap_ctx: usize,  // 陷阱上下文，保存陷阱相关寄存器等信息
+}
+pub struct Signal{
+    shared_pending: Sigpending, // 共享挂起信号集
+    group_exit_state: i32, // 线程组退出状态
+    thread_num: usize, // 线程组中线程数量
+    next_thread: Option<Weak<TaskStruct>>, // 线程组中下一个线程
+    rlimits: [Rlimit; 16], // 资源限制
+}
+
+pub struct SigHand{
+    sig_actions: SignalActions, // 信号处理函数
+}
+
+pub struct Cred{
+    uid: u32, // 用户ID
+    gid: u32, // 组ID
+    euid: u32, // 有效用户ID
+    egid: u32, // 有效组ID
+    suid: u32, // 保存的用户ID
+    sgid: u32, // 保存的组ID
+    fsuid: u32, // 文件系统用户ID
+    fsgid: u32, // 文件系统组ID
+}
+
+pub struct FsStruct{
+    root: Arc<Dentry>, // 根目录
+    pwd: Arc<Dentry>, // 当前工作目录
+    umask: u32, // 文件创建掩码
+}
+
+pub struct Rlimit {
+    rlim_cur: usize, // 当前资源限制
+    rlim_max: usize, // 最大资源限制
+}
+
+pub struct Sigpending{
+    queue: Vec<Signal>, // 挂起信号队列
+    signals: SignalFlags, // 挂起信号集
+    wait_chldexit: bool, // 是否等待子进程退出
 }

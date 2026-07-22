@@ -43,7 +43,7 @@ pub use context::TaskContext;
 use lazy_static::*;
 use manager::fetch_task;
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus, TaskControlBlockInner};
+pub use task::{TaskControlBlock, task::taskstatus::TaskStatus, TaskControlBlockInner};
 
 pub use action::{SignalAction, SignalActions};
 pub use manager::{add_task, tid2task};

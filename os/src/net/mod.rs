@@ -17,7 +17,7 @@ use spin::Mutex;
 use crate::sync::WaitQueue;
 use smoltcp::iface::SocketHandle;
 use alloc::collections::VecDeque;
-use crate::process::TaskStatus;
+use crate::process::task::taskstatus::TaskStatus;
 use alloc::format;
 use crate::process::manager::TID2TCB;
 

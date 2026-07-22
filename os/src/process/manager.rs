@@ -7,7 +7,7 @@
 use core::cmp::Ordering;
 
 use super::TaskControlBlock;
-use super::TaskStatus;
+use super::task::taskstatus::TaskStatus;
 use super::schedule::*;
 use super::pcb::*;
 use crate::MAIN_HART_ID;
