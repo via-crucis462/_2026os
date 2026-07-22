@@ -45,7 +45,7 @@ devicetree  = board
 
 
 /// DRAM 物理地址
-/// 
+///
 /// Bank0 起始物理地址 (DDR3 低 256MB)
 pub const DRAM_BANK0_START: usize = 0x9000_0000_0000_0000;
 /// Bank0 大小
@@ -105,18 +105,50 @@ pub const FB_SIZE: usize = 1024 * 600 * 4; // 2.34 MB
 
 /// 外设寄存器
 /// 用deepseek v4从手册中提取，待验证
-/// 
+///
+/// 注意，涉及外设访问（dma）的地址，必须使用物理地址，不能使用虚拟地址（因为不经过mmu）
+///
 /// SATA 控制器 (Dev 8, Fun 0), 兼容 AHCI 1.1
 /// SATA PCI 配置头 (芯片级, 不建议直接访问)
-pub const SATA_PCI_CFG_HEADER: usize = 0x1fe0_3240;
+const SATA_PCI_CFG_HEADER: usize = 0x1fe0_3240;
 /// SATA PHY 配置寄存器 (芯片级, PLL/电气特性)
-pub const SATA_PHY_CFG: usize = 0x1fe0_0460;
+const SATA_PHY_CFG: usize = 0x1fe0_0460;
 /// 获取 sata 控制器基址
+use super::super::super::{
+    drivers::{pci, DEVICE_MANAGER}
+};
 lazy_static!(
-    pub static ref SATA_BASE: usize = {
-        use super::super::super::drivers::pci;
-        let loc = pci::Location::new(SATA_PCI_CFG_HEADER, 0, 8, 0);
-        0
+    /// SATA AHCI 控制器 MMIO 物理基址。
+    ///
+    /// 需要保证首次访问在 `search_pci()` 完成之后。该值来自 U-Boot
+    /// 已配置的 BAR0；这里只读验证配置，不重新分配 BAR。
+    pub static ref SATA_AHCI_MMIO_PA: usize = {
+        let dm = DEVICE_MANAGER.exclusive_access();
+        let sata_block_pci_dev = dm.get_devices().iter()
+            .find(|dev| dev.loc.bus == 0 && dev.loc.device == 8 && dev.loc.function == 0)
+            .expect("SATA PCI device not found");
+
+        if sata_block_pci_dev.id.class != 0x01 || sata_block_pci_dev.id.subclass != 0x06 {
+            panic!("PCI device 00:08.0 is not a SATA controller");
+        }
+
+        let command = sata_block_pci_dev.command();
+        if command & 0x6 != 0x6 {
+            panic!("SATA PCI Memory Space Enable or Bus Master Enable is disabled");
+        }
+
+        match sata_block_pci_dev.get_bar(0) {
+            Some(pci::BAR::Memory(addr, _, _, _)) if addr != 0 => {
+                let hba_pa = addr as usize;
+                if hba_pa as u64 != addr {
+                    panic!("SATA BAR0 cannot be represented as a physical address");
+                }
+                hba_pa
+            }
+            Some(pci::BAR::Memory(..)) => panic!("SATA BAR0 has no assigned base"),
+            Some(_) => panic!("SATA PCI device BAR0 is not a memory BAR"),
+            None => panic!("SATA PCI device BAR0 not found"),
+        }
     };
 );
 
@@ -151,4 +183,3 @@ pub const BANK0_END_EFFECTIVE: usize = BANK0_END_NO_RESERVED_ALIGN;
 /// Bank1
 pub const BANK1_START_EFFECTIVE: usize = DRAM_BANK1_START;
 pub const BANK1_END_EFFECTIVE: usize = DRAM_BANK1_END;
-

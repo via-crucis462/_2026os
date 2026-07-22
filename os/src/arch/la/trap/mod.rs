@@ -51,6 +51,7 @@ pub fn set_uboot_trap_handler_to_csr() {
 pub extern "C" fn k_trap_handler(trap_cx: *mut TrapContext) {
     // 诊断用，递增调用计数
     K_TRAP_COUNT.fetch_add(1, Ordering::SeqCst);
+    trace!("[kernel] k_trap_handler called, count={:#x}", K_TRAP_COUNT.load(Ordering::SeqCst));
 
     // 防止嵌套 trap 循环
     set_uboot_trap_handler_to_csr();

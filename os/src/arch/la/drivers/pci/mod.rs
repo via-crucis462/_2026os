@@ -81,14 +81,14 @@ impl CSpaceAccessMethod {
     }
     pub unsafe fn write8(self, loc: Location, offset: u16, val: u8) {
         let old = self.read32(loc, offset);
-        let dest = offset as usize & 0b11 << 3;
+        let dest = (offset as usize & 0b11) << 3;
         let mask = (0xFF << dest) as u32;
         self.write32(loc, offset, ((val as u32) << dest | (old & !mask)).to_le());
     }
     /// Converts val to little endian before writing.
     pub unsafe fn write16(self, loc: Location, offset: u16, val: u16) {
         let old = self.read32(loc, offset);
-        let dest = offset as usize & 0b10 << 3;
+        let dest = (offset as usize & 0b10) << 3;
         let mask = (0xFFFF << dest) as u32;
         self.write32(loc, offset, ((val as u32) << dest | (old & !mask)).to_le());
     }
@@ -152,23 +152,50 @@ pub struct PCIDevice {
     pub id: Identifier,
     pub bars: [Option<BAR>; 6],
     pub cspace_access_method: CSpaceAccessMethod,
+    header_type: u8,
 }
 
+impl PCIDevice {
+    #[inline]
+    fn is_multifunction(&self) -> bool {
+        self.header_type & 0x80 != 0
+    }
+    #[inline]
+    pub fn get_bar(&self, index: usize) -> Option<BAR> {
+        if index < self.bars.len() {
+            self.bars[index]
+        } else {
+            None
+        }
+    }
+
+    /// Read the PCI command register without changing the firmware configuration.
+    #[inline]
+    pub fn command(&self) -> u16 {
+        unsafe { self.cspace_access_method.read16(self.loc, 0x04) }
+    }
+}
+
+/// 是否可通过预取读取：如果读取没有副作用（如显存），可预取以提升性能
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Prefetchable {
     Yes,
-    No
+    No,
 }
 
+/// BAR 地址宽度
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Type {
     Bits32,
-    Bits64
+    Bits64,
 }
 
+/// PCI Base Address Register（基址寄存器）
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum BAR {
+    /// 内存映射 I/O：(基址（从bar解析出的基址）, 大小, 可预取性, 地址宽度)
     Memory(u64, u32, Prefetchable, Type),
+    /// I/O 端口：(端口地址)
     IO(u32),
 }
 
@@ -196,6 +223,51 @@ impl BAR {
             (Some(BAR::IO(raw & !0x3)), idx as usize + 1)
         }
     }
+
+    /// Parse a BAR without the all-ones size probe.
+    ///
+    /// Board firmware owns the BAR assignments of integrated 2K1000 devices.
+    /// Reprogramming a BAR, even temporarily for size discovery, can disrupt an
+    /// active device, so the board path records an unknown length as zero.
+    /// 此处具体数值解析难度不高但较为繁琐，暂由 AI 生成，待验证。
+    pub unsafe fn decode_read_only(
+        loc: Location,
+        am: CSpaceAccessMethod,
+        idx: u16,
+    ) -> (Option<BAR>, usize) {
+        let raw = am.read32(loc, 16 + (idx << 2));
+        if raw & 1 != 0 {
+            return (Some(BAR::IO(raw & !0x3)), idx as usize + 1);
+        }
+
+        let prefetchable = if raw & 0b1000 == 0 {
+            Prefetchable::No
+        } else {
+            Prefetchable::Yes
+        };
+        match (raw & 0b110) >> 1 {
+            0b00 => (
+                Some(BAR::Memory(
+                    (raw & !0xF) as u64,
+                    0,
+                    prefetchable,
+                    Type::Bits32,
+                )),
+                idx as usize + 1,
+            ),
+            0b10 => (
+                Some(BAR::Memory(
+                    ((raw & !0xF) as u64)
+                        | ((am.read32(loc, 16 + ((idx + 1) << 2)) as u64) << 32),
+                    0,
+                    prefetchable,
+                    Type::Bits64,
+                )),
+                idx as usize + 2,
+            ),
+            _ => (None, idx as usize + 1),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -218,27 +290,33 @@ impl BusScan {
             false
         }
     }
-    fn increment(&mut self) {
-        // TODO: Decide whether this is actually nicer than taking a u16 and incrementing until it
-        // wraps.
+    fn increment_device(&mut self) {
+        self.loc.function = 0;
+        if self.loc.device < 31 {
+            self.loc.device += 1;
+        } else {
+            self.loc.device = 0;
+            if self.loc.bus == 255 {
+                self.loc.device = 31;
+                self.loc.function = 7;
+            } else {
+                self.loc.bus += 1;
+            }
+        }
+    }
+
+    fn increment(&mut self, device: Option<&PCIDevice>) {
+        // 仅当func0表示该设备（device）是多功能（multifunction）时，才扫描其他功能（function）
+        if self.loc.function == 0 && !matches!(device, Some(dev) if dev.is_multifunction()) {
+            self.increment_device();
+            return;
+        }
+
         if self.loc.function < 7 {
             self.loc.function += 1;
-            return
+            return;
         } else {
-            self.loc.function = 0;
-            if self.loc.device < 31 {
-                self.loc.device += 1;
-                return;
-            } else {
-                self.loc.device = 0;
-                if self.loc.bus == 255 {
-                    self.loc.device = 31;
-                    self.loc.function = 7;
-                } else {
-                    self.loc.bus += 1;
-                    return;
-                }
-            }
+            self.increment_device();
         }
     }
 }
@@ -255,7 +333,7 @@ impl<'a> ::core::iter::Iterator for BusScan {
                 return ret;
             }
             ret = unsafe { probe_function(self.loc, self.am) };
-            self.increment();
+            self.increment(ret.as_ref());
             if ret.is_some() {
                 return ret;
             }
@@ -263,6 +341,7 @@ impl<'a> ::core::iter::Iterator for BusScan {
     }
 }
 
+// 从位置扫描得到pci设备对象
 pub unsafe fn probe_function(loc: Location, am: CSpaceAccessMethod) -> Option<PCIDevice> {
     // FIXME: it'd be more efficient to use read32 and decode separately.
     let vid = am.read16(loc, 0);
@@ -280,16 +359,19 @@ pub unsafe fn probe_function(loc: Location, am: CSpaceAccessMethod) -> Option<PC
         class: class,
         subclass: subclass,
     };
-    let hdrty = am.read8( loc, 14);
+    let header_type = am.read8(loc, 14);
     let mut bars = [None, None, None, None, None, None];
-    let max = match hdrty {
+    let max = match header_type & 0x7F { // 最高位是多功能标志位，低7位是类型
         0 => 6,
         1 => 2,
         _ => 0,
     };
     let mut i = 0;
     while i < max {
-        let (bar, next) = BAR::decode( loc, am, i as u16);
+        #[cfg(board = "2k1000")]
+        let (bar, next) = BAR::decode_read_only(loc, am, i as u16);
+        #[cfg(not(board = "2k1000"))]
+        let (bar, next) = BAR::decode(loc, am, i as u16);
         bars[i] = bar;
         i = next;
     }
@@ -298,6 +380,7 @@ pub unsafe fn probe_function(loc: Location, am: CSpaceAccessMethod) -> Option<PC
         id: id,
         bars: bars,
         cspace_access_method: am,
+        header_type,
     })
 }
 
@@ -445,5 +528,3 @@ pub fn loc_to_func(loc: Location) -> DeviceFunction {
         function: loc.function,
     }
 }
-
-

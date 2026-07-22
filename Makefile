@@ -1,7 +1,7 @@
 export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
 export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
 
-MODE ?= debug
+MODE ?= release
 RV_SMP ?= 1
 LA_SMP ?= 1
 RV_GDB_PORT ?= 1234
