@@ -39,9 +39,6 @@ LA_FS_IMG := ../fs_img/la64_ext4.img
 # KERNEL ENTRY
 KERNEL_ENTRY_PA := 0x80200000
 
-# Wrapper to inject custom sysroot (local core/alloc source)
-RUSTC_WRAP := ./rustc-sysroot-wrap.sh
-
 # Binutils
 OBJDUMP := rust-objdump --arch-name=riscv64
 OBJCOPY := rust-objcopy --binary-architecture=riscv64
@@ -62,7 +59,7 @@ $(KERNEL_BIN): kernel
 
 kernel:
 	@echo Platform: $(BOARD)
-	@RUSTC=$(RUSTC_WRAP) LOG=$(LOG) INITPROC=$(INITPROC) cargo build --target riscv64gc-unknown-none-elf $(MODE_ARG) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=""
+	@LOG=$(LOG) INITPROC=$(INITPROC) cargo build --target riscv64gc-unknown-none-elf $(MODE_ARG) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=""
 
 clean:
 	@cargo clean
@@ -116,7 +113,7 @@ $(LA_KERNEL_BIN): kernel-la
 
 kernel-la:
 	@echo Building for loongarch64, BOARD=$(BOARD)...
-	@RUSTC=$(RUSTC_WRAP) RUSTFLAGS="-Clink-arg=-T$(LA_LINKER) -Cforce-frame-pointers=yes" LOG=$(LOG) INITPROC=$(INITPROC) BOARD=$(BOARD) cargo build --target loongarch64-unknown-none $(MODE_ARG) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=""
+	@RUSTFLAGS="-Clink-arg=-T$(LA_LINKER) -Cforce-frame-pointers=yes -Ctarget-feature=-ual" LOG=$(LOG) INITPROC=$(INITPROC) BOARD=$(BOARD) cargo build --target loongarch64-unknown-none $(MODE_ARG) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=""
 
 build-la: env-la kernel-la
 

@@ -4,21 +4,8 @@ target = "loongarch64-unknown-none"
 [unstable]
 build-std = ["core", "alloc", "compiler_builtins"]
 
-[target.riscv64gc-unknown-none-elf]
-rustflags = [
-    "-Clink-arg=-Tsrc/arch/riscv/linker.ld", "-Cforce-frame-pointers=yes"
-]
-
-[target.loongarch64-unknown-none]
-rustflags = [
-    "-Clink-arg=-Tsrc/arch/la/linker.ld", "-Cforce-frame-pointers=yes"
-]
-
-
-# 使用本地依赖
-[source.crates-io]
-replace-with = "vendored-sources"
-
+# Keep crates.io registry-backed: the environment rust-src has build dependencies
+# that are not part of this project's vendor directory.
 [source."git+https://github.com/rcore-os/riscv"]
 git = "https://github.com/rcore-os/riscv"
 replace-with = "vendored-sources"
@@ -33,4 +20,3 @@ directory = "vendor"
 
 [env]
 SMOLTCP_IFACE_MAX_ADDR_COUNT = "128"
-

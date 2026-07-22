@@ -23,13 +23,9 @@ endif
 
 all: prev build-user copy-user build copy
 
-# 通过符号链接准备自定义rust sysroot环境
 prev: 
 	cd os && $(MAKE) env
 	cd os && $(MAKE) env-la
-	@echo "  -> Creating sysroot lns..."
-	./setup-custom-sysroot.sh
-	@echo "  -> Created sysroot lns"
 
 build-rv:
 	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)
@@ -41,6 +37,8 @@ ifeq ($(BOARD),2k1000)
 	python3 boot/build_uimage.py kernel-la-$(BOARD) kernel-la-$(BOARD).uImage
 	@echo "  -> Making binary for 2K1000..."
 	rust-objcopy -O binary kernel-la-2k1000 kernel-la-2k1000.bin
+	mkdir -p ~/loongson/tftproot && cp -f kernel-la-2k1000.bin ~/loongson/tftproot
+	mkdir -p ~/loongson/tftproot && cp -f kernel-la-2k1000.uImage ~/loongson/tftproot
 endif
 
 build-user-rv:

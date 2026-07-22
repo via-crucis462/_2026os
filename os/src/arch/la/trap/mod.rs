@@ -44,42 +44,6 @@ pub fn set_uboot_trap_handler_to_csr() {
     unsafe { asm!("csrwr {}, 0xc", in(reg) eentry); }
 }
 
-// ─── 未对齐访存辅助函数 ───
-// LoongArch 的 LLVM 后端对 read_unaligned/write_unaligned 仍生成
-// 多字节访存指令（ld.h/ld.w 等），必须用 volatile 逐字节读写
-// 防止编译器合并优化。
-unsafe fn read_unaligned_u16(addr: usize) -> u16 {
-    let b0 = core::ptr::read_volatile(addr as *const u8) as u16;
-    let b1 = core::ptr::read_volatile((addr + 1) as *const u8) as u16;
-    b0 | (b1 << 8)
-}
-unsafe fn read_unaligned_u32(addr: usize) -> u32 {
-    let b0 = core::ptr::read_volatile(addr as *const u8) as u32;
-    let b1 = core::ptr::read_volatile((addr + 1) as *const u8) as u32;
-    let b2 = core::ptr::read_volatile((addr + 2) as *const u8) as u32;
-    let b3 = core::ptr::read_volatile((addr + 3) as *const u8) as u32;
-    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-}
-unsafe fn read_unaligned_u64(addr: usize) -> u64 {
-    let lo = read_unaligned_u32(addr) as u64;
-    let hi = read_unaligned_u32(addr + 4) as u64;
-    lo | (hi << 32)
-}
-unsafe fn write_unaligned_u16(addr: usize, val: u16) {
-    core::ptr::write_volatile(addr as *mut u8, val as u8);
-    core::ptr::write_volatile((addr + 1) as *mut u8, (val >> 8) as u8);
-}
-unsafe fn write_unaligned_u32(addr: usize, val: u32) {
-    core::ptr::write_volatile(addr as *mut u8, val as u8);
-    core::ptr::write_volatile((addr + 1) as *mut u8, (val >> 8) as u8);
-    core::ptr::write_volatile((addr + 2) as *mut u8, (val >> 16) as u8);
-    core::ptr::write_volatile((addr + 3) as *mut u8, (val >> 24) as u8);
-}
-unsafe fn write_unaligned_u64(addr: usize, val: u64) {
-    write_unaligned_u32(addr, val as u32);
-    write_unaligned_u32(addr + 4, (val >> 32) as u32);
-}
-
 /// 内核态trap处理入口，由 __k_alltraps 调用
 /// trap_cx 指向栈上保存的 TrapContext
 /// 目前主要用于处理未对齐访存异常（ALE）
@@ -121,15 +85,29 @@ pub extern "C" fn k_trap_handler(trap_cx: *mut TrapContext) {
                     let si12 = (bad_ins >> 10) & 0xFFF;
                     let si12_ext = ((si12 & 0xFFF) as i64) << 52 >> 52;
                     let vaddr = (cx.r[rj] as i64).wrapping_add(si12_ext) as usize;
+                    // 诊断：对比硬件 badv
+                    if vaddr != badv {
+                        panic!("[ALE] si12 vaddr mismatch: vaddr=0x{:x}, badv=0x{:x}, rj={}, cx.r[rj]=0x{:x}, si12_ext=0x{:x}",
+                            vaddr, badv, rj, cx.r[rj], si12_ext);
+                    }
                     match opcode_10 {
-                        0x0A1 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u16(vaddr) } as i16 as i64 as usize; } }       // LD.H
-                        0x0A2 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u32(vaddr) } as i32 as i64 as usize; } }       // LD.W
-                        0x0A3 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u64(vaddr) } as usize; } }                     // LD.D
-                        0x0A5 => { let v = if rd != 0 { cx.r[rd] as u16 } else { 0 }; unsafe { write_unaligned_u16(vaddr, v); } } // ST.H
-                        0x0A6 => { let v = if rd != 0 { cx.r[rd] as u32 } else { 0 }; unsafe { write_unaligned_u32(vaddr, v); } } // ST.W
-                        0x0A7 => { let v = if rd != 0 { cx.r[rd] as u64 } else { 0 }; unsafe { write_unaligned_u64(vaddr, v); } } // ST.D
-                        0x0A9 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u16(vaddr) } as usize; } }                      // LD.HU
-                        0x0AA => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u32(vaddr) } as usize; } }                      // LD.WU
+                        0x0A1 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u16).read_unaligned() } as i16 as i64 as usize; } }       // LD.H
+                        0x0A2 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u32).read_unaligned() } as i32 as i64 as usize; } }       // LD.W
+                        0x0A3 => { if rd != 0 {
+                            let val = unsafe { (vaddr as *const u64).read_unaligned() };
+                            // 诊断：dump vaddr 处 8 字节
+                            let mut raw: [u8; 8] = [42; 8];
+                            for i in 0..8 {
+                                raw[i] = unsafe { *(vaddr as *const u8).add(i) };
+                            }
+                            println!("[ALE ld.d] vaddr=0x{:x} raw={:02x?} val=0x{:016x}", vaddr, raw, val);
+                            cx.r[rd] = val as usize;
+                        } }                     // LD.D
+                        0x0A5 => { let v = if rd != 0 { cx.r[rd] as u16 } else { 0 }; unsafe { (vaddr as *mut u16).write_unaligned(v); } } // ST.H
+                        0x0A6 => { let v = if rd != 0 { cx.r[rd] as u32 } else { 0 }; unsafe { (vaddr as *mut u32).write_unaligned(v); } } // ST.W
+                        0x0A7 => { let v = if rd != 0 { cx.r[rd] as u64 } else { 0 }; unsafe { (vaddr as *mut u64).write_unaligned(v); } } // ST.D
+                        0x0A9 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u16).read_unaligned() } as usize; } }                      // LD.HU
+                        0x0AA => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u32).read_unaligned() } as usize; } }                      // LD.WU
                         _ => {}
                     }
                     // 绕过触发trap的指令
@@ -147,14 +125,14 @@ pub extern "C" fn k_trap_handler(trap_cx: *mut TrapContext) {
                             let rk = ((bad_ins >> 10) & 0x3F) as usize;
                             let vaddr = cx.r[rj].wrapping_add(cx.r[rk]);
                             match opcode_16 {
-                                0x3804 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u16(vaddr) } as i16 as i64 as usize; } }       // LDX.H
-                                0x3808 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u32(vaddr) } as i32 as i64 as usize; } }       // LDX.W
-                                0x380C => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u64(vaddr) } as usize; } }                     // LDX.D
-                                0x3814 => { let v = if rd != 0 { cx.r[rd] as u16 } else { 0 }; unsafe { write_unaligned_u16(vaddr, v); } } // STX.H
-                                0x3818 => { let v = if rd != 0 { cx.r[rd] as u32 } else { 0 }; unsafe { write_unaligned_u32(vaddr, v); } } // STX.W
-                                0x381C => { let v = if rd != 0 { cx.r[rd] as u64 } else { 0 }; unsafe { write_unaligned_u64(vaddr, v); } } // STX.D
-                                0x3824 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u16(vaddr) } as usize; } }                      // LDX.HU
-                                0x3828 => { if rd != 0 { cx.r[rd] = unsafe { read_unaligned_u32(vaddr) } as usize; } }                      // LDX.WU
+                                0x3804 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u16).read_unaligned() } as i16 as i64 as usize; } }       // LDX.H
+                                0x3808 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u32).read_unaligned() } as i32 as i64 as usize; } }       // LDX.W
+                                0x380C => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u64).read_unaligned() } as usize; } }                     // LDX.D
+                                0x3814 => { let v = if rd != 0 { cx.r[rd] as u16 } else { 0 }; unsafe { (vaddr as *mut u16).write_unaligned(v); } } // STX.H
+                                0x3818 => { let v = if rd != 0 { cx.r[rd] as u32 } else { 0 }; unsafe { (vaddr as *mut u32).write_unaligned(v); } } // STX.W
+                                0x381C => { let v = if rd != 0 { cx.r[rd] as u64 } else { 0 }; unsafe { (vaddr as *mut u64).write_unaligned(v); } } // STX.D
+                                0x3824 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u16).read_unaligned() } as usize; } }                      // LDX.HU
+                                0x3828 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u32).read_unaligned() } as usize; } }                      // LDX.WU
                                 _ => {}
                             }
                             cx.set_rt(era + 4);
