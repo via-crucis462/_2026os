@@ -1,4 +1,7 @@
 
+
+setenv serverip 192.168.1.12
+
 tftp 0x9000000098000000 kernel-la-2k1000.bin
 
 fatload usb 0:1 0x9000000098000000 /install/kernel-la-2k1000.bin

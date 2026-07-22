@@ -255,9 +255,12 @@ fn unaligned_test_si12() {
     let start = k_trap_snapshot();
     let base = TEST_BASE as *mut u64;
 
-    // 写入 8 字节测试模式
+    // ld.d +7 会读到第 15 字节，因此完整初始化 16 字节。
     let pattern: u64 = 0x8877665544332211;
-    unsafe { base.write_volatile(pattern); }
+    unsafe {
+        base.write_volatile(pattern);
+        base.add(1).write_volatile(0xFFEEDDCCBBAA9988);
+    }
 
     // ld.h  — 2 字节符号扩展 (offset: 1,3,5,7)
     macro_rules! test_ld_h {
@@ -386,7 +389,10 @@ fn unaligned_test_rk() {
     // ldx.d / stx.d 已在前面简单测试通过，这里覆盖全部 8 种
     let base_ptr = TEST_BASE as *mut u64;
     let pattern: u64 = 0x0123456789ABCDEF;
-    unsafe { base_ptr.write_volatile(pattern); }
+    unsafe {
+        base_ptr.write_volatile(pattern);
+        base_ptr.add(1).write_volatile(0xFEDCBA9876543210);
+    }
 
     // 使用 $zero 作为 rk，base + offset 作为 rj
     // ldx.h

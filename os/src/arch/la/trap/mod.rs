@@ -93,16 +93,7 @@ pub extern "C" fn k_trap_handler(trap_cx: *mut TrapContext) {
                     match opcode_10 {
                         0x0A1 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u16).read_unaligned() } as i16 as i64 as usize; } }       // LD.H
                         0x0A2 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u32).read_unaligned() } as i32 as i64 as usize; } }       // LD.W
-                        0x0A3 => { if rd != 0 {
-                            let val = unsafe { (vaddr as *const u64).read_unaligned() };
-                            // 诊断：dump vaddr 处 8 字节
-                            let mut raw: [u8; 8] = [42; 8];
-                            for i in 0..8 {
-                                raw[i] = unsafe { *(vaddr as *const u8).add(i) };
-                            }
-                            println!("[ALE ld.d] vaddr=0x{:x} raw={:02x?} val=0x{:016x}", vaddr, raw, val);
-                            cx.r[rd] = val as usize;
-                        } }                     // LD.D
+                        0x0A3 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u64).read_unaligned() } as usize; } }                     // LD.D
                         0x0A5 => { let v = if rd != 0 { cx.r[rd] as u16 } else { 0 }; unsafe { (vaddr as *mut u16).write_unaligned(v); } } // ST.H
                         0x0A6 => { let v = if rd != 0 { cx.r[rd] as u32 } else { 0 }; unsafe { (vaddr as *mut u32).write_unaligned(v); } } // ST.W
                         0x0A7 => { let v = if rd != 0 { cx.r[rd] as u64 } else { 0 }; unsafe { (vaddr as *mut u64).write_unaligned(v); } } // ST.D
@@ -122,7 +113,7 @@ pub extern "C" fn k_trap_handler(trap_cx: *mut TrapContext) {
                     match opcode_16 {
                         0x3804 | 0x3808 | 0x380C | 0x3814 | 0x3818 | 0x381C | 0x3824 | 0x3828 => {
                             let rj = ((bad_ins >> 5) & 0x1F) as usize;
-                            let rk = ((bad_ins >> 10) & 0x3F) as usize;
+                            let rk = ((bad_ins >> 10) & 0x1F) as usize;
                             let vaddr = cx.r[rj].wrapping_add(cx.r[rk]);
                             match opcode_16 {
                                 0x3804 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u16).read_unaligned() } as i16 as i64 as usize; } }       // LDX.H

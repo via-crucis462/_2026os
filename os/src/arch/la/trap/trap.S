@@ -102,14 +102,16 @@ __k_alltraps:
     st.d $zero, $sp, 0*8
     st.d $r1, $sp, 1*8
     st.d $r2, $sp, 2*8
-    # r3/sp 保存分配前的栈指针
-    addi.d $t2, $sp, 272
-    st.d $t2, $sp, 3*8
+    # 先保存所有通用寄存器
     .set n, 4
     .rept 28
         SAVE_GP %n
         .set n, n+1
     .endr
+
+    # 保存压栈前的栈指针
+    addi.d $t2, $sp, 272
+    st.d $t2, $sp, 3*8
 
     # 保存 PRMD 和 ERA
     csrrd $t0, 0x1
@@ -120,7 +122,7 @@ __k_alltraps:
     # 调用内核 trap 处理函数
     move $a0, $sp
     bl k_trap_handler
-    # 处理完毕后自动进入 __k_restore
+    # 处理完毕后返回此处，自动往下执行进入 __k_restore
 __k_restore:
     # 恢复 PRMD 和 ERA 到 CSR
     ld.d $t0, $sp, 8*32
