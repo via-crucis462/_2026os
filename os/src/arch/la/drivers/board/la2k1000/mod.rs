@@ -19,7 +19,7 @@ lazy_static! {
     /// The global block device driver instance: BLOCK_DEVICE with BlockDevice trait
     /// 已修改：从固定mmio地址改为扫描获取
     pub static ref BLOCK_DEVICE: Arc<BlockDeviceImpl> = {
-        Arc::new(BlockDeviceImpl::new())
+        SATA_BLOCK.clone()
     };
     pub static ref NET_DEVICE: Arc<net::LA2k1000NetWrapper> = {
         debug!("NET_DEVICE lazy init: begin scan transport");

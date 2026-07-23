@@ -65,6 +65,7 @@ use core::arch::global_asm;
 use crate::arch::la;
 
 pub use arch::timer::*;
+pub use arch::config;
 
 #[cfg(board = "virt")]
 use crate::arch::drivers::NET_DEVICE;

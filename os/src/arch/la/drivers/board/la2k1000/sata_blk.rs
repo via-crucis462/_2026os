@@ -1,14 +1,103 @@
-//! SATA 块设备驱动
+//! SATA 块设备驱动，实现了对 AHCI 控制器的访问和对 SATA 磁盘的读写操作
 //! 各枚举定义了 AHCI 控制器和端口的寄存器偏移
 //! 寄存器偏移的具体值参考 AHCI 规范和 llm 工具
 
-use crate::{UNCHACHED_KERNEL_BASE, arch::config::SATA_AHCI_MMIO_PA};
-use spin::{Mutex, lazy};
-use alloc::{
-    sync::Arc,
-    vec::Vec
+use alloc::{sync::Arc, vec::Vec};
+use core::{
+    hint::spin_loop,
+    sync::atomic::{fence, Ordering},
+};
+use spin::Mutex;
+
+use crate::{
+    arch::{
+        config::{PAGE_SIZE, SATA_AHCI_MMIO_PA, UNCHACHED_KERNEL_BASE},
+        drivers::dma::{DmaBuffer, QUEUE_FRAMES},
+        timer::get_time_ms,
+    },
+    mm::PhysAddr,
 };
 use lazy_static::lazy_static;
+
+// 一些 AHCI dma 区域的边界值
+const AHCI_MAX_PORTS: usize = 32;
+const PORT_ENGINE_TIMEOUT_MS: usize = 500;
+const PORT_DMA_SIZE: usize = 0x2000;
+const COMMAND_LIST_OFFSET: usize = 0x0000;
+const RECEIVED_FIS_OFFSET: usize = 0x0400;
+const COMMAND_TABLE_OFFSET: usize = 0x0500;
+const DATA_BUFFER_OFFSET: usize = 0x1000;
+const PXCMD_ST: u32 = 1 << 0;
+const PXCMD_FRE: u32 = 1 << 4;
+const PXCMD_FR: u32 = 1 << 14;
+const PXCMD_CR: u32 = 1 << 15;
+
+/// AHCI Command Header
+///
+/// 位于 PxCLB 指向的 Command List 中，每个端口最多包含 32 个命令槽
+/// 每个命令槽对应一个 32 B Command Header
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AHCICommandHeader {
+    /// DW0[15:0] 命令属性
+    ///
+    /// CFL[4:0]：Command FIS 长度，单位为 DWORD，Register H2D FIS 应填写 5
+    /// A[5]：是否为 ATAPI 命令
+    /// W[6]：数据方向，0 表示设备写入内存，1 表示内存写入设备
+    /// P[7]：Prefetchable
+    /// R[8]：Reset
+    /// B[9]：BIST
+    /// C[10]：Clear Busy upon R_OK
+    /// PMP[15:12]：Port Multiplier 端口号，普通单盘使用 0
+    flags: u16,
+    /// DW0[31:16] PRDT Length
+    ///
+    /// Command Table 中有效 PRDT Entry 的数量
+    /// 单个连续数据缓冲区通常填写 1，没有数据传输时填写 0
+    prdt_length: u16,
+    /// DW1 PRD Byte Count
+    ///
+    /// 提交命令前由软件清零，命令执行期间由 HBA 更新为已传输字节数
+    prd_byte_count: u32,
+    /// DW2 Command Table Base Address
+    ///
+    /// Command Table DMA 物理地址低 32 位，地址必须按 128 B 对齐
+    command_table_base: u32,
+    /// DW3 Command Table Base Address Upper
+    ///
+    /// Command Table DMA 物理地址高 32 位，CAP.S64A 为 0 时必须为 0
+    command_table_base_upper: u32,
+    /// DW4-DW7 保留字段，软件必须写 0
+    reserved: [u32; 4],
+}
+
+const _: () = assert!(core::mem::size_of::<AHCICommandHeader>() == 32);
+
+/// 单个端口所使用的 DMA 区域布局
+///
+/// 所有字段均为提供给 HBA 的物理地址，CPU 访问时需要转换到非缓存 DMW
+#[derive(Clone, Copy)]
+struct AHCIPortDmaLayout {
+    /// Command List 物理地址，写入 PxCLB/PxCLBU，必须按 1 KiB 对齐
+    command_list: PhysAddr,
+    /// Received FIS Buffer 物理地址，写入 PxFB/PxFBU，必须按 256 B 对齐
+    received_fis: PhysAddr,
+    /// slot 0 Command Table 物理地址，写入 Command Header 的 CTBA/CTBAU
+    command_table: PhysAddr,
+    /// 命令数据缓冲区物理地址，后续由 PRDT Entry 引用
+    data_buffer: PhysAddr,
+}
+
+impl AHCIPortDmaLayout {
+    fn from_base(base: PhysAddr) -> Self {
+        Self {
+            command_list: PhysAddr(base.0 + COMMAND_LIST_OFFSET),
+            received_fis: PhysAddr(base.0 + RECEIVED_FIS_OFFSET),
+            command_table: PhysAddr(base.0 + COMMAND_TABLE_OFFSET),
+            data_buffer: PhysAddr(base.0 + DATA_BUFFER_OFFSET),
+        }
+    }
+}
 
 lazy_static! {
     /// AHCI 控制器实例
@@ -19,13 +108,15 @@ lazy_static! {
 
 lazy_static! {
     pub static ref SATA_BLOCK: Arc<SataBlock> = {
-        SataBlock::new_with_port(AHCI_CONTROLLER.lock().find_first_sata_disk().expect("No SATA disk found")).into()
+        Arc::new(SataBlock::new())
     };
 }
 
 /// SATA 块设备
 pub struct SataBlock {
+    /// 全局唯一 AHCI 控制器，锁覆盖一次完整命令的构造、提交和完成过程
     ctl: &'static Mutex<AHCIController>,
+    /// 当前块设备对应的 AHCI 端口
     port: AHCIPort,
     // 此锁暂时未使用
     _lock: spin::Mutex<()>,
@@ -33,11 +124,17 @@ pub struct SataBlock {
 
 impl SataBlock {
     pub fn new() -> Self {
-        SataBlock {
+        let port = AHCI_CONTROLLER
+            .lock()
+            .find_first_sata_disk()
+            .expect("No SATA disk found");
+        let block = SataBlock {
             ctl: &AHCI_CONTROLLER,
-            port: AHCIPort(0),
+            port,
             _lock: spin::Mutex::new(())
-        }
+        };
+        assert!(block.init(), "Failed to initialize SATA port {}", port.0);
+        block
     }
     pub fn new_with_port(port: AHCIPort) -> Self {
         SataBlock {
@@ -46,10 +143,9 @@ impl SataBlock {
             _lock: spin::Mutex::new(())
         }
     }
-    pub fn init(&self) {
-        let ctl = self.ctl.lock();
-        ctl.init();
-        ctl.init_port(self.port);
+    pub fn init(&self) -> bool {
+        let mut ctl = self.ctl.lock();
+        ctl.init_port(self.port)
     }
     pub fn read_block(){
 
@@ -57,12 +153,6 @@ impl SataBlock {
     pub fn write_block(){
 
     }
-}
-
-/// AHCI 控制器
-pub struct AHCIController {
-    // 控制器mmio基址
-    base_addr: usize,
 }
 
 /// AHCI HBA 全局寄存器，相对控制器 MMIO 基址的 32 位偏移
@@ -78,6 +168,7 @@ pub enum AHCIReg {
     /// PSC[13] / SSC[14]：是否支持 Partial / Slumber 电源状态
     /// PMD[15]：是否支持机械式设备存在检测
     /// FBSS[16]：是否支持 FIS-based switching
+    /// - FIS 即 Frame Information Structure，sata 报文帧
     /// SPM[17]：是否支持 SATA Port Multiplier
     /// SAM[18]：是否只支持 AHCI 模式
     /// ISS[23:20]：支持的 SATA 接口速率代际
@@ -129,6 +220,7 @@ impl AHCIPort {
 
 /// AHCI 端口寄存器，相对 Px 端口基址的 32 位偏移
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(usize)]
 pub enum AHCIPortReg {
     /// Command List Base
     ///
@@ -149,7 +241,7 @@ pub enum AHCIPortReg {
     ///
     /// FBU[31:0]：Received FIS Buffer DMA 地址高 32 位，CAP.S64A 未置位时必须为 0
     Fbu = 0x0C,
-    /// Port Interrupt Status（W1C）
+    /// Port Interrupt Status（W1C，写1清除）
     ///
     /// DHRS[0]：收到 Device-to-Host Register FIS，非 NCQ 完成时常见
     /// PSS[1] / DSS[2] / SDBS[3]：收到 PIO Setup、DMA Setup、Set Device Bits FIS
@@ -170,7 +262,8 @@ pub enum AHCIPortReg {
     /// ST[0]：启动 Command List 引擎
     /// FRE[4]：启动 FIS Receive 引擎
     /// CCS[12:8]：当前执行命令槽号，只读
-    /// FR[14] / CR[15]：FIS 接收 / Command List 引擎运行状态，只读
+    /// FR[14] FIS 接收，只读
+    /// CR[15]：Command List 引擎运行状态，只读
     ///
     /// 停止时清 ST、FRE，等待 FR、CR 清零后才能更新 CLB/FB；启动时先置 FRE，
     /// 再置 ST
@@ -228,6 +321,33 @@ pub enum AHCIPortReg {
     Fbs = 0x40,
 }
 
+impl AHCIPortReg {
+    pub const ALL: &'static [Self] = &[
+        Self::Clb,
+        Self::Clbu,
+        Self::Fb,
+        Self::Fbu,
+        Self::Is,
+        Self::Ie,
+        Self::Cmd,
+        Self::Tfd,
+        Self::Sig,
+        Self::Ssts,
+        Self::Sctl,
+        Self::Serr,
+        Self::Sact,
+        Self::Ci,
+        Self::Sntf,
+        Self::Fbs,
+    ];
+
+    pub const fn offset(self) -> usize {
+        self as usize
+    }
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AHCIDevType {
     /// 普通 SATA ATA 磁盘
     Ata = 0x0000_0101,
@@ -239,14 +359,49 @@ pub enum AHCIDevType {
     Pm = 0x9669_0101,
 }
 
+impl TryFrom<u32> for AHCIDevType {
+    type Error = ();
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0x0000_0101 => Ok(AHCIDevType::Ata),
+            0xeb14_0101 => Ok(AHCIDevType::Satapi),
+            0xc33c_0101 => Ok(AHCIDevType::Semb),
+            0x9669_0101 => Ok(AHCIDevType::Pm),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct AHCIError {
+    /// 发生错误时的端口寄存器快照
+    ///
+    /// 数组下标为寄存器相对端口基址的字节偏移除以 4
+    /// 未在 AHCIPortReg::ALL 中列出的保留位置保持为 0
+    pub regs: [u32; 0x44 / 4],
+}
+
+
+/// AHCI 控制器
+pub struct AHCIController {
+    /// 从 PCI BAR0 读取的 AHCI MMIO 物理基址，不包含 DMW 虚拟窗口位
+    base_addr: usize,
+    /// 控制器持有的 DMA 分配对象，保证端口仍在使用时对应物理页不会被回收
+    dma_buffers: Vec<DmaBuffer>,
+    /// 每个端口对应的 DMA 区域物理基址，用于复用已分配的端口内存
+    port_dma_bases: [Option<PhysAddr>; AHCI_MAX_PORTS],
+}
+
 impl AHCIController {
     pub fn new(base_addr: usize) -> Self {
         AHCIController {
             base_addr,
+            dma_buffers: Vec::new(),
+            port_dma_bases: [None; AHCI_MAX_PORTS],
         }
     }
-    #[inline(always)]
-    pub fn windowed_base_addr(&self) -> usize {
+    pub const fn windowed_base_addr(&self) -> usize {
         self.base_addr | UNCHACHED_KERNEL_BASE
     }
     pub fn reg_read(&self, reg: AHCIReg) -> u32 {
@@ -266,6 +421,14 @@ impl AHCIController {
         let port_base = self.windowed_base_addr() + port.offset();
         let reg_addr = port_base + reg as usize;
         unsafe { core::ptr::write_volatile(reg_addr as *mut u32, value) }
+    }
+    pub fn port_regs_read(&self, port: AHCIPort) -> [u32; 0x44 / 4] {
+        let mut regs = [0u32; 0x44 / 4];
+        for reg in AHCIPortReg::ALL.iter() {
+            let value = self.port_reg_read(port, *reg);
+            regs[*reg as usize / 4] = value;
+        }
+        regs
     }
     pub fn print_all_regs(&self) {
         println!("AHCI Controller Registers:");
@@ -287,48 +450,227 @@ impl AHCIController {
     }
     pub fn print_port_regs(&self, port: AHCIPort) {
         println!("AHCI Port {:?} Registers:", port);
-        for reg in [
-            AHCIPortReg::Clb,
-            AHCIPortReg::Clbu,
-            AHCIPortReg::Fb,
-            AHCIPortReg::Fbu,
-            AHCIPortReg::Is,
-            AHCIPortReg::Ie,
-            AHCIPortReg::Cmd,
-            AHCIPortReg::Tfd,
-            AHCIPortReg::Sig,
-            AHCIPortReg::Ssts,
-            AHCIPortReg::Sctl,
-            AHCIPortReg::Serr,
-            AHCIPortReg::Sact,
-            AHCIPortReg::Ci,
-            AHCIPortReg::Sntf,
-            AHCIPortReg::Fbs,
-        ] {
-            let value = self.port_reg_read(port, reg);
-            println!("{:?} (0x{:02X}): 0x{:08X}", reg, reg as usize, value);
+        for reg in AHCIPortReg::ALL.iter() {
+            let value = self.port_reg_read(port, *reg);
+            println!("{:?} (0x{:02X}): 0x{:08X}", reg, *reg as usize, value);
         }
     }
-    pub fn init(&self) {
-        // 初始化AHCI控制器
-        let hba_cap = self.reg_read(AHCIReg::HbaCap);
-        let port_count = (hba_cap & 0x1F) + 1;
-        let slot_count = (hba_cap >> 8) & 0x1F;
-        let supports_64bit = (hba_cap >> 31) & 0x1 == 1;
-        // todo：根据需要初始化控制器
+    // 等待 PxCMD 的 mask 位清零
+    fn wait_port_cmd_clear(&self, port: AHCIPort, mask: u32) -> Result<(), AHCIError> {
+        let start_ms = get_time_ms();
+        loop {
+            let cmd = self.port_reg_read(port, AHCIPortReg::Cmd);
+            if cmd & mask == 0 {
+                return Ok(());
+            }
+            if get_time_ms().saturating_sub(start_ms) >= PORT_ENGINE_TIMEOUT_MS {
+                return Err(AHCIError {
+                    regs: self.port_regs_read(port),
+                });
+            }
+            spin_loop();
+        }
     }
-    pub fn init_port(&self, port: AHCIPort) {
-        // 初始化指定端口
+    // 停止端口命令引擎（Command List Engine）和端口帧信息接收引擎（FIS Receive Engine）
+    fn stop_port_engine(&self, port: AHCIPort) -> Result<(), AHCIError> {
+        let cmd = self.port_reg_read(port, AHCIPortReg::Cmd);
+        let new_cmd = cmd & !PXCMD_ST;
+        self.port_reg_write(port, AHCIPortReg::Cmd, new_cmd);
+        if let Err(err) = self.wait_port_cmd_clear(port, PXCMD_CR) {
+            return Err(err);
+        }
+        let new_cmd = self.port_reg_read(port, AHCIPortReg::Cmd) & !PXCMD_FRE;
+        self.port_reg_write(port, AHCIPortReg::Cmd, new_cmd);
+        self.wait_port_cmd_clear(port, PXCMD_FR)
+    }
+    // 启动时必须先启动 FIS 接收引擎，再启动命令列表引擎
+    fn start_port_engine(&self, port: AHCIPort) -> Result<(), AHCIError> {
+        // 确保启动引擎前，命令列表和端口寄存器的写入对 HBA 可见
+        fence(Ordering::SeqCst);
+
+        let cmd = self.port_reg_read(port, AHCIPortReg::Cmd);
+        self.port_reg_write(port, AHCIPortReg::Cmd, cmd | PXCMD_FRE);
+        let cmd = self.port_reg_read(port, AHCIPortReg::Cmd);
+        self.port_reg_write(port, AHCIPortReg::Cmd, cmd | PXCMD_ST);
+
+        let cmd = self.port_reg_read(port, AHCIPortReg::Cmd);
+        if cmd & (PXCMD_ST | PXCMD_FRE) == (PXCMD_ST | PXCMD_FRE) {
+            Ok(())
+        } else {
+            Err(AHCIError {
+                regs: self.port_regs_read(port),
+            })
+        }
+    }
+    // 检查端口号、PI、链路状态和设备类型
+    fn validate_sata_port(&self, port: AHCIPort) -> Option<usize> {
+        let Ok(port_index) = usize::try_from(port.0) else {
+            error!("Invalid negative AHCI port {}", port.0);
+            return None;
+        };
+        if port_index >= AHCI_MAX_PORTS {
+            error!("AHCI port {} is out of range", port.0);
+            return None;
+        }
+        if self.reg_read(AHCIReg::HbaPi) & (1u32 << port_index) == 0 {
+            error!("Port {} is not implemented in this controller", port.0);
+            return None;
+        }
+
         let ssts = self.port_reg_read(port, AHCIPortReg::Ssts);
         let det = ssts & 0xF;
         let ipm = (ssts >> 8) & 0xF;
-        // todo：启动
+        if det != 3 || ipm != 1 {
+            error!("Port {} is not ready for communication", port.0);
+            return None;
+        }
+
+        let sig = self.port_reg_read(port, AHCIPortReg::Sig);
+        if !matches!(AHCIDevType::try_from(sig), Ok(AHCIDevType::Ata)) {
+            error!(
+                "Port {} is not a supported SATA ATA disk, PxSIG=0x{:08x}",
+                port.0, sig
+            );
+            return None;
+        }
+        Some(port_index)
     }
+    // 关闭端口中断并清除 U-Boot 遗留的中断和 SATA 错误状态
+    fn clear_port_status(&self, port: AHCIPort) {
+        let old_is = self.port_reg_read(port, AHCIPortReg::Is);
+        let old_serr = self.port_reg_read(port, AHCIPortReg::Serr);
+        if old_is != 0 || old_serr != 0 {
+            debug!(
+                "Clearing AHCI port {} status: PxIS=0x{:08x}, PxSERR=0x{:08x}",
+                port.0, old_is, old_serr
+            );
+        }
+        self.port_reg_write(port, AHCIPortReg::Ie, 0);
+        self.port_reg_write(port, AHCIPortReg::Is, u32::MAX);
+        self.port_reg_write(port, AHCIPortReg::Serr, u32::MAX);
+    }
+    // 分配 DMA 缓冲区，返回首地址（物理地址）
+    pub fn alloc_dma_buffer(&mut self, pages: usize) -> Option<PhysAddr> {
+        let dma_buf = QUEUE_FRAMES.exclusive_access().alloc(pages)?;
+        let phys_addr = dma_buf.phys_addr();
+        unsafe {
+            core::ptr::write_bytes(dma_buf.uncached_ptr(), 0, pages * PAGE_SIZE);
+        }
+        self.dma_buffers.push(dma_buf);
+        Some(phys_addr)
+    }
+    // 分配或复用端口 DMA 区域，并构造各部分物理地址
+    fn prepare_port_dma(
+        &mut self,
+        port: AHCIPort,
+        port_index: usize,
+    ) -> Option<AHCIPortDmaLayout> {
+        let dma_pa = match self.port_dma_bases[port_index] {
+            Some(pa) => pa,
+            None => {
+                let Some(pa) = self.alloc_dma_buffer(PORT_DMA_SIZE / PAGE_SIZE) else {
+                    error!("Failed to allocate DMA memory for AHCI port {}", port.0);
+                    return None;
+                };
+                self.port_dma_bases[port_index] = Some(pa);
+                pa
+            }
+        };
+
+        // DMA 区域按页分配，同时满足 CLB 的 1 KiB 对齐要求
+        debug_assert_eq!(dma_pa.0 & (PAGE_SIZE - 1), 0);
+        let supports_64bit = self.reg_read(AHCIReg::HbaCap) & (1 << 31) != 0;
+        if !supports_64bit && dma_pa.0 >> 32 != 0 {
+            error!("AHCI controller does not support the allocated 64-bit DMA address");
+            return None;
+        }
+
+        // 端口可能被重新初始化，旧的命令、FIS 和数据不能继续交给 HBA
+        unsafe {
+            core::ptr::write_bytes(
+                (dma_pa.0 | UNCHACHED_KERNEL_BASE) as *mut u8,
+                0,
+                PORT_DMA_SIZE,
+            );
+        }
+        Some(AHCIPortDmaLayout::from_base(dma_pa))
+    }
+    // 填写 slot 0 命令头，并让端口寄存器指向内核管理的 DMA 区域
+    fn program_port_dma(&self, port: AHCIPort, layout: AHCIPortDmaLayout) {
+        let command_header = AHCICommandHeader {
+            flags: 0,
+            prdt_length: 0,
+            prd_byte_count: 0,
+            command_table_base: layout.command_table.0 as u32,
+            command_table_base_upper: (layout.command_table.0 >> 32) as u32,
+            reserved: [0; 4],
+        };
+        let command_header_va =
+            (layout.command_list.0 | UNCHACHED_KERNEL_BASE) as *mut AHCICommandHeader;
+        unsafe {
+            core::ptr::write_volatile(command_header_va, command_header);
+        }
+
+        self.port_reg_write(port, AHCIPortReg::Clb, layout.command_list.0 as u32);
+        self.port_reg_write(
+            port,
+            AHCIPortReg::Clbu,
+            (layout.command_list.0 >> 32) as u32,
+        );
+        self.port_reg_write(port, AHCIPortReg::Fb, layout.received_fis.0 as u32);
+        self.port_reg_write(
+            port,
+            AHCIPortReg::Fbu,
+            (layout.received_fis.0 >> 32) as u32,
+        );
+    }
+    /// 初始化端口，返回是否成功
+    pub fn init_port(&mut self, port: AHCIPort) -> bool {
+        let Some(port_index) = self.validate_sata_port(port) else {
+            return false;
+        };
+        info!("Port {} is a SATA ATA disk. Initializing...", port.0);
+
+        // 清除 U-Boot 的遗留状态，改用内核管理的 DMA 区域
+        if let Err(err) = self.stop_port_engine(port) {
+            error!("Failed to stop AHCI port {}: {:?}", port.0, err.regs);
+            return false;
+        }
+        self.clear_port_status(port);
+
+        let Some(layout) = self.prepare_port_dma(port, port_index) else {
+            return false;
+        };
+        self.program_port_dma(port, layout);
+
+        if let Err(err) = self.start_port_engine(port) {
+            error!("Failed to start AHCI port {}: {:?}", port.0, err.regs);
+            return false;
+        }
+        info!(
+            "AHCI port {} initialized: CLB=0x{:x}, FB=0x{:x}, CTBA=0x{:x}, data=0x{:x}",
+            port.0,
+            layout.command_list.0,
+            layout.received_fis.0,
+            layout.command_table.0,
+            layout.data_buffer.0
+        );
+        true
+    }
+    /// 查找第一个已连接的 SATA 磁盘端口，返回端口
     pub fn find_first_sata_disk(&self) -> Option<AHCIPort> {
         let hba_cap = self.reg_read(AHCIReg::HbaCap);
         let port_count = (hba_cap & 0x1F) + 1;
+        let ports_implemented = self.reg_read(AHCIReg::HbaPi);
         for port_num in 0..port_count {
+            if ports_implemented & (1 << port_num) == 0 {
+                continue;
+            }
             let port = AHCIPort(port_num as isize);
+            let ssts = self.port_reg_read(port, AHCIPortReg::Ssts);
+            if ssts & 0xF != 3 || (ssts >> 8) & 0xF != 1 {
+                continue;
+            }
             let sig = self.port_reg_read(port, AHCIPortReg::Sig);
             if sig == AHCIDevType::Ata as u32 {
                 return Some(port);
@@ -340,8 +682,16 @@ impl AHCIController {
     pub fn list_sata_disks(&self) {
         let hba_cap = self.reg_read(AHCIReg::HbaCap);
         let port_count = (hba_cap & 0x1F) + 1;
+        let ports_implemented = self.reg_read(AHCIReg::HbaPi);
         for port_num in 0..port_count {
+            if ports_implemented & (1 << port_num) == 0 {
+                continue;
+            }
             let port = AHCIPort(port_num as isize);
+            let ssts = self.port_reg_read(port, AHCIPortReg::Ssts);
+            if ssts & 0xF != 3 || (ssts >> 8) & 0xF != 1 {
+                continue;
+            }
             let sig = self.port_reg_read(port, AHCIPortReg::Sig);
             if sig == AHCIDevType::Ata as u32 {
                 println!("Found SATA disk at port {}", port_num);

@@ -148,10 +148,12 @@ impl From<VirtPageNum> for VirtAddr {
 }
 impl PhysAddr {
     /// Get the (floor) physical page number
+    /// 向下取整
     pub fn std_floor(&self) -> PhysPageNum {
         PhysPageNum(self.0 / PAGE_SIZE)
     }
     /// Get the (ceil) physical page number
+    /// 向上取整
     pub fn std_ceil(&self) -> PhysPageNum {
         PhysPageNum((self.0  + PAGE_SIZE - 1) / PAGE_SIZE)
     }

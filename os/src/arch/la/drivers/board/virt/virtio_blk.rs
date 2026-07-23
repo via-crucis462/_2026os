@@ -27,28 +27,6 @@ pub struct VirtIOBlock{
     pub inner: MPSafeCell<VirtIOBlk<VirtioHal, PciTransport>>,
 }
 
-// 维护DMA区域的内存的管理器，不过回收还没完全实现
-pub struct DmaMemManager {
-    pub start_ppn: PhysPageNum,
-    pub end_ppn: PhysPageNum,
-    // 虽然是物理页，但这里用VPNRange来管理
-    pub allocated: Vec<VPNRange>,
-}
-
-extern "C"{
-    fn ekernel();
-}
-
-/// 固定的DMA区域物理页管理器
-/// 现在摆脱了对FA的依赖并且保证了分配的连续性
-lazy_static!{
-    pub static ref QUEUE_FRAMES: MPSafeCell<DmaMemManager> = unsafe { MPSafeCell::new(DmaMemManager {
-        start_ppn: PhysPageNum(ekernel as *const() as usize / PAGE_SIZE),
-        end_ppn: PhysAddr(ekernel as *const() as usize + DMA_SIZE).std_floor(),
-        allocated: Vec::new(),
-    }) };
-}
-
 #[allow(unused)]
 #[allow(dead_code)]
 impl VirtIOBlock {
