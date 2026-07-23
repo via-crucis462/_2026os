@@ -53,8 +53,9 @@ impl File for Stdin {
         let ch = loop {
             let task = crate::task::current_task().unwrap();
             let task_inner = task.inner_exclusive_access();
-            let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
-            let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18));
+            let pending_bits = task_inner.pending.bits();
+            let pending = pending_bits & !task_inner.blocked.bits();
+            let unmaskable = pending_bits & ((1 << 8) | (1 << 18));
             drop(task_inner);
 
             if pending != 0 || unmaskable != 0 {

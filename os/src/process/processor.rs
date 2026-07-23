@@ -19,6 +19,30 @@ use crate::task::{add_task_into_pool, manager};
 use alloc::sync::Arc;
 use lazy_static::*;
 
+fn dump_switch_context(tag: &str, task: &Arc<TaskControlBlock>) {
+    let inner = task.inner_exclusive_access();
+    let task_ctx = &inner.thread.task_ctx;
+    let trap_cx = inner.get_trap_cx();
+    /*println!(
+        "[CTX {}] pid={} tid={} state={:?} task_ctx@{:p} ra={:#x} ksp={:#x} s0={:#x} s1={:#x} trap_ctx@{:p} sepc={:#x} usp={:#x} ura={:#x} tp={:#x} a0={:#x}",
+        tag,
+        task.getpid(),
+        task.gettid(),
+        inner.state,
+        task_ctx as *const TaskContext,
+        task_ctx.ra,
+        task_ctx.sp,
+        task_ctx.s[0],
+        task_ctx.s[1],
+        trap_cx as *const TrapContext,
+        trap_cx.get_rt(),
+        trap_cx.get_sp(),
+        trap_cx.x[1],
+        trap_cx.x[4],
+        trap_cx.get_a0(),
+    );*/
+}
+
 /// Processor management structure
 /// 控制单个核心的运行
 pub struct Processor {
@@ -75,7 +99,6 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 ///The main part of process execution and scheduling
 ///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
 pub fn run_tasks() {
-    //println!("run_tasks: current hart id={}", get_hart_id());
     //let mut counter: usize = 0;
         let hart_id = get_hart_id();
         info!("[kernel] Hello from hart {}!", hart_id);
@@ -85,12 +108,12 @@ pub fn run_tasks() {
         let hart_id = get_hart_id();
         if let Some(task) = fetch_task() {
             let mut processor = current_processor();
-            if (task.process().inner_exclusive_access().on_main_hart &&
+            if (task.inner_exclusive_access().on_main_hart &&
                 hart_id != MAIN_HART_ID.load(Ordering::Acquire)) {
                 let _dispatch = crate::task::lock_dispatch();
                 let mut task_inner = task.inner_exclusive_access();
-                task_inner.task_status = TaskStatus::Ready;
-                task_inner.owner_hart = None;
+                task_inner.state = TaskStatus::Ready;
+                //task_inner.owner_hart = None;
                 drop(task_inner);
                 info!("[kernel] run_tasks: task pid={} is on main hart, but current hart is {}, put it back into pool", task.getpid(), hart_id);
                 crate::task::add_task_into_pool_unlocked(task);
@@ -111,8 +134,9 @@ pub fn run_tasks() {
             //warn!("[kernel] hart {}, run_tasks: fetched tid={} of pid={}", hart_id, task.tid.0, task.getpid());
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             let task_inner = task.inner_exclusive_access();
-            let next_task_cx_ptr = &task_inner.task_cx as *const TaskContext;
+            let next_task_cx_ptr = &task_inner.thread.task_ctx as *const TaskContext;
             drop(task_inner);
+            //dump_switch_context("before-run", &task);
             // release coming task TCB manually
             processor.current = Some(task);
             // release processor manually
@@ -126,7 +150,9 @@ pub fn run_tasks() {
             unsafe {
                 // 切换到下一个任务执行流
                 //println!("hart {}: switch to task with tid={} of pid={}", hart_id, current_task().unwrap().tid.0, current_task().unwrap().getpid());
+                //println!("hart {}:  switch to task with tid={} of pid={}", hart_id, current_task().unwrap().pid.0, current_task().unwrap().getpid());
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
+                //println!("hart {}: returned from task with tid={} of pid={}", hart_id, current_task().unwrap().pid.0, current_task().unwrap().getpid());
             }
             // suspend_current_and_run_next以及exit_current_and_run_next会跳到这里
             let prev_task = {
@@ -134,17 +160,18 @@ pub fn run_tasks() {
                 processor.take_current()
             };
             if let Some(prev_task) = prev_task {
+                //dump_switch_context("after-return", &prev_task);
                 let _dispatch = crate::task::lock_dispatch();
                 let mut prev_inner = prev_task.inner_exclusive_access();
-                let status = prev_inner.task_status;
-                prev_inner.owner_hart = None;
+                let status = prev_inner.state;
+                //prev_inner.owner_hart = None;
                 drop(prev_inner);
                 if status == TaskStatus::Ready {
                     // 之前已经保存好了
                     crate::task::add_task_into_pool_unlocked(prev_task);
                 } else if status == TaskStatus::BlockSaving {
                     // 调用了wait函数
-                    prev_task.inner_exclusive_access().task_status = TaskStatus::Blocked;
+                    prev_task.inner_exclusive_access().state = TaskStatus::Blocked;
                     // println!("SET BLOCKED: tid={} of pid={} done", prev_task.tid.0, prev_task.getpid());
                 }
                 // 如果 status 是 Zombie 或 Blocked，什么都不做，自然销毁或等别人唤醒
@@ -181,12 +208,14 @@ pub fn current_tid() -> usize {
 /// Get the current user token(addr of page table)
 pub fn current_user_token() -> usize {
     let task = current_task().unwrap();
-    task.process().inner_exclusive_access().get_user_token()
+    let token = task.inner_exclusive_access().get_user_token();
+    token
 }
 
 pub fn current_user_asid() -> usize {
     let task = current_task().unwrap();
-    task.process().inner_exclusive_access().get_asid()
+    let asid = task.inner_exclusive_access().get_asid();
+    asid
 }
 
 /// Get the mutable reference to trap context of current task

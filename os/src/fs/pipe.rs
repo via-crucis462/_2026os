@@ -45,15 +45,9 @@ impl Pipe {
         }
 
         let task = crate::task::current_task().unwrap();
-        {
-            let process = task.process();
-            let mut proc_inner = process.inner_exclusive_access();
-            proc_inner.signals.insert(SignalFlags::SIGPIPE);
-        }
-
         let mut task_inner = task.inner_exclusive_access();
-        task_inner.signals.insert(SignalFlags::SIGPIPE);
-        let is_unblocked = !task_inner.signal_mask.contains(SignalFlags::SIGPIPE);
+        task_inner.pending.insert(SignalFlags::SIGPIPE);
+        let is_unblocked = !task_inner.blocked.contains(SignalFlags::SIGPIPE);
         drop(task_inner);
 
         if is_unblocked {
@@ -215,12 +209,7 @@ impl File for Pipe {
                 }
                //println!("[kernel] Pipe Read Empty: already_read={}, waiting...", already_read);
                 drop(ring_buffer);
-                let killed = {
-                    let task = crate::task::current_task().unwrap();
-                    let killed = task.inner_exclusive_access().killed;
-                    killed
-                };
-                if killed || check_pending_signal() {
+                if check_pending_signal() {
                     return already_read; 
                 }
                 suspend_current_and_run_next();
@@ -263,12 +252,7 @@ impl File for Pipe {
                 }
               //  println!("[kernel] Pipe Write Full: already_write={}, waiting for consumer...", already_write);
                 drop(ring_buffer);
-                let killed = {
-                    let task = crate::task::current_task().unwrap();
-                    let killed = task.inner_exclusive_access().killed;
-                    killed
-                };
-                if killed || check_pending_signal() {
+                if check_pending_signal() {
                     return already_write;
                 }
                 suspend_current_and_run_next();

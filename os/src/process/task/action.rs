@@ -33,8 +33,8 @@ pub struct SignalActions {
     pub table: [SignalAction; MAX_SIG],
 }
 
-impl Default for SignalActions {
-    fn default() -> Self {
+impl SignalActions {
+    pub fn new() -> Self {
         Self {
             table: [SignalAction::default(); MAX_SIG],
         }

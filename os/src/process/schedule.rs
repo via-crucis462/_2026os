@@ -190,8 +190,8 @@ pub fn sleep_current_until(deadline_ns: usize) {
     let task = take_current_task().unwrap();
     let task_cx_ptr = {
         let mut inner = task.inner_exclusive_access();
-        let ptr = &mut inner.task_cx as *mut TaskContext;
-        inner.task_status = TaskStatus::Blocked;
+        let ptr = &mut inner.thread.task_ctx as *mut TaskContext;
+        inner.state = TaskStatus::Blocked;
         ptr
     };
     SLEEP_QUEUE.exclusive_access().push(deadline_ns, task);
@@ -209,8 +209,8 @@ pub fn wake_expired_sleep_tasks() {
         };
 
         let mut inner = task.inner_exclusive_access();
-        if matches!(inner.task_status, TaskStatus::Blocked) {
-            inner.task_status = TaskStatus::Ready;
+        if matches!(inner.state, TaskStatus::Blocked) {
+            inner.state = TaskStatus::Ready;
             drop(inner);
             SCHEDULER.exclusive_access().get_pool().add_task(task);
         }
@@ -351,8 +351,8 @@ pub fn wake_up_task(task: Arc<TaskControlBlock>) {
     let _dispatch = lock_dispatch();
     let mut inner = task.inner_exclusive_access();
 
-    if matches!(inner.task_status, TaskStatus::Blocked) {
-        inner.task_status = TaskStatus::Ready;
+    if matches!(inner.state, TaskStatus::Blocked) {
+        inner.state = TaskStatus::Ready;
         //inner.owner_hart = None;
         drop(inner); 
         

@@ -47,37 +47,31 @@ pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5:
     trace!("kernel:pid[{}] sys_prctl option={}", current_task().unwrap().process().pid.0, option);
     match option {
         PR_SETNAME => {
-            // 将buff的内容写进pname字段
+            // 将名称写入当前线程的 comm 字段。
             let name = if let Some(name) = try_translated_str(current_user_token(), _arg2 as *const u8) {
                 name
             } else {
                 return -EINVAL;
             };
-            let mut name_bytes = String::new();
-            for &b in name.as_bytes().iter() {
-                if b == 0 {
-                    break;
-                }
-                name_bytes.push(b as char);
-            }
             let task = current_task().unwrap();
-            let process = task.process();
-            let mut proc_inner = process.inner_exclusive_access();
-            proc_inner.pname = name_bytes;
+            let mut inner = task.inner_exclusive_access();
+            inner.comm = [0; 10];
+            let name_bytes = name.as_bytes();
+            let copy_len = name_bytes.len().min(inner.comm.len() - 1);
+            inner.comm[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
             0
         },
         PR_GETNAME => {
             // 与set相反
             let task = current_task().unwrap();
-            let process = task.process();
-            let inner = process.inner_exclusive_access();
-            let name = inner.pname.clone();
-            drop(inner);
+            let (name, token) = {
+                let inner = task.inner_exclusive_access();
+                (inner.comm, inner.get_user_token())
+            };
             let mut out = [0u8; 16];
-            for (i, &b) in name.as_bytes().iter().take(15).enumerate() {
-                out[i] = b;
-            }
-            if !try_translated_write(current_user_token(), _arg2 as *mut [u8; 16], out){
+            let copy_len = name.iter().position(|byte| *byte == 0).unwrap_or(name.len());
+            out[..copy_len].copy_from_slice(&name[..copy_len]);
+            if !try_translated_write(token, _arg2 as *mut [u8; 16], out){
                 return EFAULT.as_isize();
             };
             0

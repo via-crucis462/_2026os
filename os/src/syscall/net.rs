@@ -29,15 +29,15 @@ pub struct SockAddrIn {
 }
 pub fn sys_getpeername(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let task = current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    let token = inner.memory_set.token();
+    let token = current_user_token();
+    let files = task.inner_exclusive_access().files.clone();
+    let inner = files.exclusive_access();
     
 
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner); 
 
     // 读取用户态传入的地址长度限制
@@ -140,13 +140,13 @@ pub fn sys_getpeername(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
 /// 将内核中 Socket 的 local_endpoint 信息格式化为 sockaddr_in 结构并拷贝回用户空间。 asd
 pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let task = current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    let token = inner.memory_set.token();
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    let token = current_user_token();
+    let files = task.inner_exclusive_access().files.clone();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return EBADF.as_isize(); // EBADF
     }
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner); 
     let mut user_len = unsafe {
         if let Some(ul) = try_translated_read(token, addrlen) {
@@ -293,17 +293,17 @@ pub fn sys_setsockopt(
     const SO_ATTACH_BPF: usize = 50;
     const SO_RCVTIMEO: usize = 20; // 接收超时常量
     let task = crate::task::current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    let token = inner.memory_set.token();
+    let token = current_user_token();
+    let files = task.inner_exclusive_access().files.clone();
+    let inner = files.exclusive_access();
 
     // 1. 检查 fd 是否合法
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return crate::syscall::errno::Errno::EBADF.as_isize();
     }
 
     // 2. 获取文件对象
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner); // 提前释放进程锁
     if level == SOL_SOCKET && optname == SO_RCVTIMEO {
         if optlen < core::mem::size_of::<TimeVal>() as u32 || optval.is_null() {
@@ -368,13 +368,13 @@ pub fn sys_setsockopt(
 /// 从用户态读取目标 sockaddr_in（IP和端口），转换成大端序网络地址，并调用底层 TcpSocket 尝试建立连接。
 pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
     let task = current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    let token = inner.memory_set.token();
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    let token = current_user_token();
+    let files = task.inner_exclusive_access().files.clone();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return Errno::EBADF.as_isize();
     }
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
 
     drop(inner); 
     if addrlen < 16 {
@@ -437,12 +437,14 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
             net_poll();
             crate::timer::check_timer_cooperative();
             let task = crate::task::current_task().unwrap();
-            let task_inner = task.inner_exclusive_access();
-            if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
-                drop(task_inner);
+            let (thread_pending, signal) = {
+                let inner = task.inner_exclusive_access();
+                (inner.pending.flags(), inner.signal.clone())
+            };
+            let pending = thread_pending | signal.exclusive_access().pending_flags();
+            if pending.contains(crate::task::SignalFlags::SIGALRM) {
                 return Errno::EINTR.as_isize();
             }
-            drop(task_inner);
             crate::task::suspend_current_and_run_next();
         }
         
@@ -469,13 +471,13 @@ pub fn sys_sendto(
 ) -> isize {
     
     let task = current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    let token = inner.memory_set.token();
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    let token = current_user_token();
+    let files = task.inner_exclusive_access().files.clone();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return Errno::EBADF.as_isize();
     }
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner);
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         // 1. 从用户空间拷贝出发送数据
@@ -542,13 +544,13 @@ pub fn sys_recvfrom(
 ) -> isize {
     const MSG_DONTWAIT: i32 = 0x40;
     let task = current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    let token = inner.memory_set.token();
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    let token = current_user_token();
+    let files = task.inner_exclusive_access().files.clone();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return Errno::EBADF.as_isize();
     }
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner);
     let is_nonblocking = (_flags & MSG_DONTWAIT != 0) 
         || file.get_flags().contains(crate::fs::OpenFlags::NONBLOCK);
@@ -620,12 +622,14 @@ pub fn sys_recvfrom(
                 }
                 crate::timer::check_timer_cooperative();
                 let task = crate::task::current_task().unwrap();
-                let task_inner = task.inner_exclusive_access();
-                if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
-                    drop(task_inner); 
+                let (thread_pending, signal) = {
+                    let inner = task.inner_exclusive_access();
+                    (inner.pending.flags(), inner.signal.clone())
+                };
+                let pending = thread_pending | signal.exclusive_access().pending_flags();
+                if pending.contains(crate::task::SignalFlags::SIGALRM) {
                     return crate::syscall::errno::Errno::EINTR.as_isize(); 
                 }
-                drop(task_inner);
                 crate::task::suspend_current_and_run_next();
                 continue;
             }
@@ -673,8 +677,8 @@ pub fn sys_recvfrom(
 
 pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     let task = current_task().unwrap();
-    let process = task.process(); 
-    let mut inner = process.inner_exclusive_access();
+    let files = task.inner_exclusive_access().files.clone();
+    let mut inner = files.exclusive_access();
     // 1. 提取标志位
     let cloexec = (socket_type & 0o2000000) != 0;
     let nonblock = (socket_type & 0o4000) != 0;
@@ -687,7 +691,10 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
         return crate::syscall::errno::Errno::EAFNOSUPPORT.as_isize();
     }
     // 3. 寻找空闲 FD
-    let allocated_fd = inner.alloc_fd();
+    let fd = match inner.alloc_fd() {
+        Some(fd) => fd,
+        None => return Errno::EMFILE.as_isize(),
+    };
     // 4. 根据类型分配不同的 Socket
     let socket_file: Arc<dyn crate::fs::File> = if domain == AF_NETLINK {
         // netlink 
@@ -707,17 +714,10 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
         flags: FdFlags::from_bits_truncate(if nonblock { 0o4000 } else { 0 } | if cloexec { 0o2000000 } else { 0 }),
         status: if nonblock { 0o4000 } else { 0 },
     };
-    let fd = if let Some(idx) = allocated_fd {
-        inner.fd_table[idx] = fd_desc;
-        idx
-    } else {
-        let idx = inner.fd_table.len();
-        inner.fd_table.push(fd_desc);
-        idx
-    };
+    inner.fds[fd] = fd_desc;
     warn!(
         "[kernel] sys_socket: pid={} created {} {} socket, protocol={}, nonblock={}, allocated fd={}",
-        process.getpid(),                             // 当前进程 PID
+        task.getpid(),                                // 当前进程 PID
         match domain {
             1 => "AF_UNIX",
             2 => "AF_INET",
@@ -740,9 +740,9 @@ pub fn sys_socketpair(domain: usize, socket_type: usize, protocol: usize, sv: *m
     const SOCK_CLOEXEC: usize = 0o2000000;
 
     let task = current_task().unwrap();
-    let process = task.process();
-    let mut inner = process.inner_exclusive_access();
-    let token = inner.memory_set.token();
+    let token = current_user_token();
+    let files = task.inner_exclusive_access().files.clone();
+    let mut inner = files.exclusive_access();
 
     if domain != AF_UNIX {
         return Errno::EAFNOSUPPORT.as_isize();
@@ -796,13 +796,13 @@ fn alloc_ephemeral_port() -> u16 {
 }
 pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
     let task = current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    let token = inner.memory_set.token();
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    let token = current_user_token();
+    let files = task.inner_exclusive_access().files.clone();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return Errno::EBADF.as_isize();
     }
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner); // 提早释放锁
     if let Some(_netlink_sock) = file.as_any().downcast_ref::<StandardNetlinkSocket>() {
         // 对于简化的 Netlink 实现，不需要真实的端口绑定逻辑，返回成功即可
@@ -852,13 +852,13 @@ pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
 
 pub fn sys_listen(fd: usize, _backlog: i32) -> isize {
     let task = current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    let files = task.inner_exclusive_access().files.clone();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return crate::syscall::errno::Errno::EBADF.as_isize();
     }
     //  提取 file 
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner);
     // 检查是否是 TCP Socket
     if let Some(socket) = file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
@@ -896,20 +896,20 @@ pub fn sys_listen(fd: usize, _backlog: i32) -> isize {
 const O_RDWR: u32 = 0o2;
 pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let task = current_task().unwrap();
-    let process = task.process();
-    let token = process.inner_exclusive_access().memory_set.token(); 
+    let token = current_user_token();
+    let files = task.inner_exclusive_access().files.clone();
     let (file, status) = {
-            let inner = process.inner_exclusive_access();
+            let inner = files.exclusive_access();
             const O_PATH: usize = 0o10000000; 
             
-            if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+            if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
                 return crate::syscall::errno::Errno::EBADF.as_isize();
             }
-            let status = inner.fd_table[fd].status;
+            let status = inner.fds[fd].status;
             if (status & O_PATH) != 0 {
                 return crate::syscall::errno::Errno::EBADF.as_isize();
             }
-            (inner.fd_table[fd].file.as_ref().unwrap().clone(), status)
+            (inner.fds[fd].file.as_ref().unwrap().clone(), status)
         };
     const O_NONBLOCK: usize = 0o4000;
     let fatal_signals = crate::task::SignalFlags::SIGKILL 
@@ -954,12 +954,16 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
             }
             crate::task::suspend_current_and_run_next();
             let task = current_task().unwrap();
-            let pending_signals = task.inner_exclusive_access().signals; // 获取当前挂起的信号
+            let (thread_pending, signal) = {
+                let inner = task.inner_exclusive_access();
+                (inner.pending.flags(), inner.signal.clone())
+            };
+            let pending_signals = thread_pending | signal.exclusive_access().pending_flags();
             if pending_signals.intersects(fatal_signals) {
                 return Errno::EINTR.as_isize();
             }
         }
-        let mut inner = process.inner_exclusive_access();
+        let mut inner = files.exclusive_access();
         let new_fd = match inner.alloc_fd() {
             Some(idx) => idx,
             None => return crate::syscall::errno::Errno::EMFILE.as_isize(), 
@@ -973,8 +977,8 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
             }
         }
         orig_socket.is_listener.store(false, core::sync::atomic::Ordering::SeqCst);
-        inner.fd_table[fd].file = Some(new_listener); 
-        inner.fd_table[new_fd] = FileDescriptor {
+        inner.fds[fd].file = Some(new_listener); 
+        inner.fds[new_fd] = FileDescriptor {
             file: Some(file.clone()),
             flags: FdFlags::empty(),
             status:O_RDWR as usize ,
@@ -1015,14 +1019,14 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
 /// 系统调用号: 211
 pub fn sys_sendmsg(fd: usize, msg_ptr: *const MsgHdr, _flags: i32) -> isize {
     let task = crate::task::current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    let token = inner.memory_set.token();
+    let token = current_user_token();
+    let files = task.inner_exclusive_access().files.clone();
+    let inner = files.exclusive_access();
 
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return crate::syscall::errno::Errno::EBADF.as_isize();
     }
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner);
     if !file.writable() {
         return crate::syscall::errno::Errno::EACCES.as_isize();
@@ -1049,14 +1053,14 @@ pub fn sys_sendmsg(fd: usize, msg_ptr: *const MsgHdr, _flags: i32) -> isize {
 /// 系统调用号: 212
 pub fn sys_recvmsg(fd: usize, msg_ptr: *mut MsgHdr, _flags: i32) -> isize {
     let task = crate::task::current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    let token = inner.memory_set.token();
+    let token = current_user_token();
+    let files = task.inner_exclusive_access().files.clone();
+    let inner = files.exclusive_access();
 
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return crate::syscall::errno::Errno::EBADF.as_isize();
     }
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner);
 
 
@@ -1135,15 +1139,15 @@ pub fn sys_getsockopt(
     optlen: *mut u32
 ) -> isize {
     let task = crate::task::current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    let token = inner.memory_set.token();
+    let token = current_user_token();
+    let files = task.inner_exclusive_access().files.clone();
+    let inner = files.exclusive_access();
 
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return crate::syscall::errno::Errno::EBADF.as_isize();
     }
    
-    let _file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let _file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner);
 
 
@@ -1207,12 +1211,12 @@ pub fn sys_getsockopt(
 
 pub fn sys_shutdown(fd: usize, how: i32) -> isize {
     let task = crate::task::current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    let files = task.inner_exclusive_access().files.clone();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return EBADF.as_isize(); 
     }
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner); 
 
     if let Some(tcp_wrapper) = file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {

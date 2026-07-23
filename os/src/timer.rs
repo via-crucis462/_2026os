@@ -97,14 +97,20 @@ pub fn check_timer_cooperative() {
     
     for pid in expired_pids {
         if let Some(process) = crate::task::get_process(pid) {
-            let mut process_inner = process.inner_exclusive_access();
-            for task in process_inner.tasks.iter() {
+            let tasks = crate::task::manager::TID2TCB
+                .exclusive_access()
+                .values()
+                .filter(|task| task.gettgid() == process.gettgid())
+                .cloned()
+                .collect::<Vec<_>>();
+            for task in tasks {
                 let mut task_inner = task.inner_exclusive_access();
-                task_inner.signals |= crate::task::SignalFlags::SIGALRM;
-                if task_inner.task_status == crate::task::TaskStatus::Blocked {
+                task_inner.pending.insert(crate::task::SignalFlags::SIGALRM);
+                if task_inner.state == crate::task::TaskStatus::Blocked {
                     task_inner.signal_interrupted = true;
-                    task_inner.task_status = crate::task::TaskStatus::Ready;
-                    crate::task::add_task(Arc::clone(task)); 
+                    task_inner.state = crate::task::TaskStatus::Ready;
+                    drop(task_inner);
+                    crate::task::add_task(task); 
                 }
             }
         }

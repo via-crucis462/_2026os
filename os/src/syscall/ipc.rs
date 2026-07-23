@@ -46,9 +46,10 @@ fn msgget_flags_from(msgflg: usize) -> (MsgGetFlags, u16) {
 pub fn sys_msgget(key: u32, msgflg: usize) -> isize {
     let (flags, mode) = msgget_flags_from(msgflg);
     let (uid, gid) = {
-        let proc = current_task().unwrap().process.upgrade().unwrap();
+        let proc = current_task().unwrap().process();
         let inner = proc.inner_exclusive_access();
-        (inner.euid, inner.egid)
+        let cred = inner.cred.exclusive_access();
+        (cred.euid(), cred.egid())
     };
     let ns = current_ipc_namespace();
     let mut ns_lckd = ns.lock();
@@ -80,9 +81,10 @@ pub fn sys_msgsnd(msqid: usize, msgp: usize, msgsz: usize, msgflg: usize) -> isi
     let pid = current_task().unwrap().process().pid.0;
     let token = current_user_token();
     let (uid, gid) = {
-        let proc = current_task().unwrap().process.upgrade().unwrap();
+        let proc = current_task().unwrap().process();
         let inner = proc.inner_exclusive_access();
-        (inner.euid, inner.egid)
+        let cred = inner.cred.exclusive_access();
+        (cred.euid(), cred.egid())
     };
     let _flags = MsgFlags::from_bits_truncate(msgflg);
 
@@ -141,9 +143,10 @@ pub fn sys_msgrcv(msqid: usize, msgp: usize, msgsz: usize, msgtyp: isize, msgflg
     let pid = current_task().unwrap().process().pid.0;
     let token = current_user_token();
     let (uid, gid) = {
-        let proc = current_task().unwrap().process.upgrade().unwrap();
+        let proc = current_task().unwrap().process();
         let inner = proc.inner_exclusive_access();
-        (inner.euid, inner.egid)
+        let cred = inner.cred.exclusive_access();
+        (cred.euid(), cred.egid())
     };
     let flags = MsgFlags::from_bits_truncate(msgflg);
     let ns = current_ipc_namespace();
@@ -194,9 +197,10 @@ pub fn sys_msgrcv(msqid: usize, msgp: usize, msgsz: usize, msgtyp: isize, msgflg
 pub fn sys_msgctl(msqid: u32, cmd: usize, buf: usize) -> isize {
     let token = current_user_token();
     let (uid, gid) = {
-        let proc = current_task().unwrap().process.upgrade().unwrap();
+        let proc = current_task().unwrap().process();
         let inner = proc.inner_exclusive_access();
-        (inner.euid, inner.egid)
+        let cred = inner.cred.exclusive_access();
+        (cred.euid(), cred.egid())
     };
 
     match cmd {
@@ -294,9 +298,10 @@ pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
     let ipc_flags = ShmFlags::from_bits_truncate(flags & !0o777);
 
     let (uid, gid) = {
-        let proc = current_task().unwrap().process.upgrade().unwrap();
+        let proc = current_task().unwrap().process();
         let inner = proc.inner_exclusive_access();
-        (inner.euid, inner.egid)
+        let cred = inner.cred.exclusive_access();
+        (cred.euid(), cred.egid())
     };
 
     // IPC_PRIVATE 始终创建新段
@@ -352,9 +357,10 @@ pub fn sys_shmctl(shmid: u32, cmd: usize, buf: usize) -> isize {
     use crate::ipc::shm::ShmidDs;
     let token = current_user_token();
     let (uid, gid) = {
-        let proc = current_task().unwrap().process.upgrade().unwrap();
+        let proc = current_task().unwrap().process();
         let inner = proc.inner_exclusive_access();
-        (inner.euid, inner.egid)
+        let cred = inner.cred.exclusive_access();
+        (cred.euid(), cred.egid())
     };
     let ns = current_ipc_namespace();
     let mut ns_lckd = ns.lock();
@@ -460,9 +466,10 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: i32) -> isize {
 
     // 权限检查
     let (uid, gid) = {
-        let proc = current_task().unwrap().process.upgrade().unwrap();
+        let proc = current_task().unwrap().process();
         let inner = proc.inner_exclusive_access();
-        (inner.euid, inner.egid)
+        let cred = inner.cred.exclusive_access();
+        (cred.euid(), cred.egid())
     };
     let is_readonly = (shmflg & SHM_RDONLY) != 0;
     let perm_stat = PermStat::new(

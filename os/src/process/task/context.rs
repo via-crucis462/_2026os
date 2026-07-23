@@ -32,3 +32,7 @@ impl TaskContext {
         }
     }
 }
+pub struct ThreadStruct {
+    pub task_ctx: TaskContext, // 线程上下文，保存寄存器等信息
+    pub trap_ctx: usize,  // 陷阱上下文，保存陷阱相关寄存器等信息
+}

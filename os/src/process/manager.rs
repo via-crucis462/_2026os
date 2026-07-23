@@ -6,11 +6,9 @@
 
 use core::cmp::Ordering;
 
-use super::TaskControlBlock;
-use super::TaskStatus;
+use super::TaskStruct;
+use super::task::taskstatus::TaskStatus;
 use super::schedule::*;
-use super::pcb::*;
-use crate::MAIN_HART_ID;
 use crate::sync::MPSafeCell;
 use crate::arch::config::CPU_CORE_NUM;
 use crate::get_hart_id;
@@ -18,58 +16,46 @@ use alloc::collections::{BTreeMap, BinaryHeap, VecDeque};
 use alloc::sync::Arc;
 use lazy_static::*;
 
-
-
-lazy_static!{
-    pub static ref PROCESS_MANAGER: MPSafeCell<ProcessManager> = MPSafeCell::new(ProcessManager{
-        process_pool: BTreeMap::new(),
-    });
+/// Compatibility wrapper for callers that still register a process.
+/// A process is represented by its thread-group leader in the task table.
+pub fn add_process(process: Arc<TaskStruct>) {
+    TID2TCB
+        .exclusive_access()
+        .insert(process.gettid(), process);
 }
 
-// 全局进程管理器/列表，掌握所有进程的生命周期
-// 用B树+arc指针实现，应该能很快地遍历/删除等
-pub struct ProcessManager{
-    // 进程池
-    process_pool: BTreeMap<usize, Arc<ProcessControlBlock>>,
-}
-
-impl ProcessManager{
-    pub fn add_process(&mut self, process: Arc<ProcessControlBlock>){
-        self.process_pool.insert(process.getpid(), process);
-    }
-
-    pub fn get_process(&self, pid: usize) -> Option<Arc<ProcessControlBlock>>{
-        self.process_pool.get(&pid).map(Arc::clone)
-    }
-
-    pub fn list_pids(&self) -> alloc::vec::Vec<usize> {
-        self.process_pool.keys().copied().collect()
-    }
-
-    pub fn remove_process(&mut self, pid: usize){
-        info!("ProcessManager::try to remove_process: pid={}", pid);
-        if self.process_pool.remove(&pid).is_none(){
-            panic!("cannot find pid {} in process pool! hart_id={}", pid , get_hart_id());
-        }
-        info!("ProcessManager::remove_process: pid={} removed", pid);
-    }
-}
-
-
-pub fn add_process(process: Arc<ProcessControlBlock>){
-    PROCESS_MANAGER.exclusive_access().add_process(process);
-}
-
-pub fn get_process(pid: usize) -> Option<Arc<ProcessControlBlock>>{
-    PROCESS_MANAGER.exclusive_access().get_process(pid)
+pub fn get_process(pid: usize) -> Option<Arc<TaskStruct>> {
+    let tasks = TID2TCB.exclusive_access();
+    tasks
+        .get(&pid)
+        .filter(|task| task.gettgid() == pid)
+        .cloned()
+        .or_else(|| tasks.values().find(|task| task.gettgid() == pid).cloned())
 }
 
 pub fn list_pids() -> alloc::vec::Vec<usize> {
-    PROCESS_MANAGER.exclusive_access().list_pids()
+    let tasks = TID2TCB.exclusive_access();
+    let mut pids = tasks.values().map(|task| task.gettgid()).collect::<alloc::vec::Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
 }
 
-pub fn remove_process(pid: usize){
-    PROCESS_MANAGER.exclusive_access().remove_process(pid);
+pub fn remove_process(pid: usize) {
+    let _dispatch = lock_dispatch();
+    let tids = {
+        let tasks = TID2TCB.exclusive_access();
+        tasks
+            .values()
+            .filter(|task| task.gettgid() == pid)
+            .map(|task| task.gettid())
+            .collect::<alloc::vec::Vec<_>>()
+    };
+    for tid in tids {
+        remove_from_tid2task(tid);
+        remove_task_from_all_local_queues_unlocked(tid);
+        remove_task_from_global_pool_unlocked(tid);
+    }
 }
 
 pub fn dump_processes(reason: &str) {
@@ -81,33 +67,25 @@ pub fn dump_processes(reason: &str) {
     };
 
     for task in tasks {
-        let process = task.process();
-        let proc_inner = process.inner_exclusive_access();
         let task_inner = task.inner_exclusive_access();
-        let ppid = proc_inner
+        let ppid = task_inner
             .parent
-            .as_ref()
-            .and_then(|parent| parent.upgrade())
+            .upgrade()
             .map_or(0, |parent| parent.getpid());
 
         println!(
-            "[PROC] pid={} parent_pid={} pgid={} tgid={} tid={} name={} status={} policy={} prio={} children={} proc_sig={:#x} task_sig={:#x} killed={} term={:?} main_hart={} owner={:?}",
-            process.getpid(),
+            "[PROC] pid={} parent_pid={} tgid={} tid={} status={:?} policy={} prio={} children={} pending={:#x} term={:?} main_hart={}",
+            task.getpid(),
             ppid,
-            proc_inner.pgid,
             task.gettgid(),
             task.gettid(),
-            proc_inner.pname,
-            task_inner.task_status,
+            task_inner.state,
             task_inner.sched_policy,
             task_inner.sched_priority,
-            proc_inner.children.len(),
-            proc_inner.signals.bits(),
-            task_inner.signals.bits(),
-            task_inner.killed,
+            task_inner.children.len(),
+            task_inner.pending.bits(),
             task_inner.term_signal,
-            proc_inner.on_main_hart,
-            task_inner.owner_hart,
+            task_inner.on_main_hart,
         );
     }
 
@@ -117,7 +95,7 @@ pub fn dump_processes(reason: &str) {
 struct HeapInode{
     priority: usize,
     order: usize,
-    tcb: Arc<TaskControlBlock>,
+    tcb: Arc<TaskStruct>,
 }
 impl PartialEq for HeapInode {
     fn eq(&self, other: &Self) -> bool {
@@ -167,7 +145,7 @@ impl TaskManager {
         }
     }
     /// Add process back to ready queue
-    pub fn add(&mut self, task: Arc<TaskControlBlock>) {
+    pub fn add(&mut self, task: Arc<TaskStruct>) {
         let tid = task.gettid();
         if self.ready_queue.iter().any(|inode| inode.tcb.gettid() == tid) {
             return;
@@ -179,7 +157,7 @@ impl TaskManager {
         self.ready_queue.push(HeapInode { priority, order, tcb: task });
     }
     /// Take a process out of the ready queue
-    pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
+    pub fn fetch(&mut self) -> Option<Arc<TaskStruct>> {
         self.ready_queue.pop().map(|inode| inode.tcb)
     }
     pub fn task_count(&self) -> usize {
@@ -197,7 +175,7 @@ lazy_static! {
         core::array::from_fn(|_| MPSafeCell::new(TaskManager::new()))
     };
     /// TID2TCB instance (map of tid to pcb)
-    pub static ref TID2TCB: MPSafeCell<BTreeMap<usize, Arc<TaskControlBlock>>> =
+    pub static ref TID2TCB: MPSafeCell<BTreeMap<usize, Arc<TaskStruct>>> =
         MPSafeCell::new(BTreeMap::new());
 }
 
@@ -222,22 +200,27 @@ pub fn current_add_tasks() {
 }
 
 /// Add process to ready queue
-pub fn add_task(task: Arc<TaskControlBlock>) {
+pub fn add_task(task: Arc<TaskStruct>) {
     debug!("[kernel] TaskManager::add_task: pid={}", task.getpid());
     //dump_processes("add_task");
     TID2TCB
         .exclusive_access()
         .insert(task.gettid(), Arc::clone(&task));
+    /*if task.gettid() == task.getpid() {
+        PROCESS_MANAGER
+            .exclusive_access()
+            .add_process(Arc::clone(&task));
+    }*/
     //dump_processes("add_task");
     add_task_into_pool(task);
 }
 
-pub fn add_task_in_current_hart(task: Arc<TaskControlBlock>) {
+pub fn add_task_in_current_hart(task: Arc<TaskStruct>) {
     let _dispatch = lock_dispatch();
     add_task_in_current_hart_unlocked(task);
 }
 
-pub(crate) fn add_task_in_current_hart_unlocked(task: Arc<TaskControlBlock>) {
+pub(crate) fn add_task_in_current_hart_unlocked(task: Arc<TaskStruct>) {
     remove_task_from_all_local_queues_unlocked(task.gettid());
     remove_task_from_global_pool_unlocked(task.gettid());
     let mut manager = get_current_task_manager().exclusive_access();
@@ -245,7 +228,7 @@ pub(crate) fn add_task_in_current_hart_unlocked(task: Arc<TaskControlBlock>) {
 }
 
 /// Take a process out of the ready queue
-pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
+pub fn fetch_task() -> Option<Arc<TaskStruct>> {
 	//trace!("kernel: TaskManager::fetch_task");
     let _dispatch = lock_dispatch();
     current_add_tasks();
@@ -257,10 +240,10 @@ pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
         };
         //println!("[kernel] fetch_task: hart_id={}, got task pid={} tid={} priority={}", hart_id, task.getpid(), task.gettid(), task.inner_exclusive_access().sched_priority);
         let mut task_inner = task.inner_exclusive_access();
-        if task_inner.task_status != TaskStatus::Ready || task_inner.owner_hart.is_some() {
+        if task_inner.state != TaskStatus::Ready{
             continue;
         }
-        task_inner.task_status = TaskStatus::Running;
+        task_inner.state = TaskStatus::Running;
         drop(task_inner);
         remove_task_from_all_local_queues_unlocked(task.gettid());
         remove_task_from_global_pool_unlocked(task.gettid());
@@ -280,7 +263,7 @@ pub fn cores_fetch_task() {
 }
 
 /// Get process by tid
-pub fn tid2task(tid: usize) -> Option<Arc<TaskControlBlock>> {
+pub fn tid2task(tid: usize) -> Option<Arc<TaskStruct>> {
     let map = TID2TCB.exclusive_access();
     map.get(&tid).map(Arc::clone)
 }

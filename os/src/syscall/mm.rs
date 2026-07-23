@@ -47,12 +47,12 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: u
             return Errno::EBADF.as_isize();
         }
         let task = current_task().unwrap();
-        let process = task.process();
-        let inner = process.inner_exclusive_access();
+        let files = task.inner_exclusive_access().files.clone();
+        let files = files.exclusive_access();
         let fd_usize = fd as usize;
         
-        if fd_usize < inner.fd_table.len() {
-            if let Some(file) = &inner.fd_table[fd_usize].file {
+        if fd_usize < files.fds.len() {
+            if let Some(file) = &files.fds[fd_usize].file {
                 Some(file.clone())
             } else {
                 return Errno::EBADF.as_isize();
@@ -120,8 +120,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: u
     // 但是当前内核没有真正的swap，所以也不需要阻止换出（所有页都在内存中）
     if mmap_flags.contains(mmap::MMapFlags::MAP_LOCKED) {
         let task = current_task().unwrap();
-        let proc = task.process();
-        let mut inner = proc.inner_exclusive_access();
+        let mut inner = task.inner_exclusive_access();
         inner.locked_bytes = inner.locked_bytes.saturating_add(len);
     }
 

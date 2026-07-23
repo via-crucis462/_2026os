@@ -5,6 +5,7 @@ use super::msg::*;
 use super::shm::*;
 
 use alloc::sync::Arc;
+use alloc::task;
 use spin::mutex::Mutex;
 
 /// 命名空间代理（NameSpace Proxy）
@@ -97,8 +98,9 @@ impl Default for IPCNamespace {
 
 use crate::process::current_task;
 pub fn current_ipc_namespace() -> Arc<Mutex<IPCNamespace>> {
-    let proc = current_task().unwrap().process();
-    let ns_proxy = &proc.ns_proxy;
+    let task = current_task().unwrap();
+    let task_inner = task.inner_exclusive_access();
+    let ns_proxy = &task_inner.nsproxy;
     let ipc_ns = ns_proxy.ipc_namespace();
     ipc_ns
 }
