@@ -19,98 +19,7 @@ use crate::{
 };
 use lazy_static::lazy_static;
 
-// 一些 AHCI dma 区域的边界值
-const AHCI_MAX_PORTS: usize = 32;
-const PORT_ENGINE_TIMEOUT_MS: usize = 500;
-const PORT_DMA_SIZE: usize = 0x2000;
-const COMMAND_LIST_OFFSET: usize = 0x0000;
-const RECEIVED_FIS_OFFSET: usize = 0x0400;
-const COMMAND_TABLE_OFFSET: usize = 0x0500;
-const DATA_BUFFER_OFFSET: usize = 0x1000;
-const PXCMD_ST: u32 = 1 << 0;
-const PXCMD_FRE: u32 = 1 << 4;
-const PXCMD_FR: u32 = 1 << 14;
-const PXCMD_CR: u32 = 1 << 15;
 
-/// AHCI Command Header
-///
-/// 位于 PxCLB 指向的 Command List 中，每个端口最多包含 32 个命令槽
-/// 每个命令槽对应一个 32 B Command Header
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct AHCICommandHeader {
-    /// DW0[15:0] 命令属性
-    ///
-    /// CFL[4:0]：Command FIS 长度，单位为 DWORD，Register H2D FIS 应填写 5
-    /// A[5]：是否为 ATAPI 命令
-    /// W[6]：数据方向，0 表示设备写入内存，1 表示内存写入设备
-    /// P[7]：Prefetchable
-    /// R[8]：Reset
-    /// B[9]：BIST
-    /// C[10]：Clear Busy upon R_OK
-    /// PMP[15:12]：Port Multiplier 端口号，普通单盘使用 0
-    flags: u16,
-    /// DW0[31:16] PRDT Length
-    ///
-    /// Command Table 中有效 PRDT Entry 的数量
-    /// 单个连续数据缓冲区通常填写 1，没有数据传输时填写 0
-    prdt_length: u16,
-    /// DW1 PRD Byte Count
-    ///
-    /// 提交命令前由软件清零，命令执行期间由 HBA 更新为已传输字节数
-    prd_byte_count: u32,
-    /// DW2 Command Table Base Address
-    ///
-    /// Command Table DMA 物理地址低 32 位，地址必须按 128 B 对齐
-    command_table_base: u32,
-    /// DW3 Command Table Base Address Upper
-    ///
-    /// Command Table DMA 物理地址高 32 位，CAP.S64A 为 0 时必须为 0
-    command_table_base_upper: u32,
-    /// DW4-DW7 保留字段，软件必须写 0
-    reserved: [u32; 4],
-}
-
-const _: () = assert!(core::mem::size_of::<AHCICommandHeader>() == 32);
-
-/// 单个端口所使用的 DMA 区域布局
-///
-/// 所有字段均为提供给 HBA 的物理地址，CPU 访问时需要转换到非缓存 DMW
-#[derive(Clone, Copy)]
-struct AHCIPortDmaLayout {
-    /// Command List 物理地址，写入 PxCLB/PxCLBU，必须按 1 KiB 对齐
-    command_list: PhysAddr,
-    /// Received FIS Buffer 物理地址，写入 PxFB/PxFBU，必须按 256 B 对齐
-    received_fis: PhysAddr,
-    /// slot 0 Command Table 物理地址，写入 Command Header 的 CTBA/CTBAU
-    command_table: PhysAddr,
-    /// 命令数据缓冲区物理地址，后续由 PRDT Entry 引用
-    data_buffer: PhysAddr,
-}
-
-impl AHCIPortDmaLayout {
-    fn from_base(base: PhysAddr) -> Self {
-        Self {
-            command_list: PhysAddr(base.0 + COMMAND_LIST_OFFSET),
-            received_fis: PhysAddr(base.0 + RECEIVED_FIS_OFFSET),
-            command_table: PhysAddr(base.0 + COMMAND_TABLE_OFFSET),
-            data_buffer: PhysAddr(base.0 + DATA_BUFFER_OFFSET),
-        }
-    }
-}
-
-lazy_static! {
-    /// AHCI 控制器实例
-    pub static ref AHCI_CONTROLLER: Mutex<AHCIController> = Mutex::new(
-        AHCIController::new(*SATA_AHCI_MMIO_PA)
-    );
-}
-
-lazy_static! {
-    pub static ref SATA_BLOCK: Arc<SataBlock> = {
-        Arc::new(SataBlock::new())
-    };
-}
 
 /// SATA 块设备
 pub struct SataBlock {
@@ -153,6 +62,294 @@ impl SataBlock {
     pub fn write_block(){
 
     }
+}
+
+// 一些 AHCI 常量定义
+//
+// 最大端口数
+const AHCI_MAX_PORTS: usize = 32;
+// 端口引擎超时，毫秒
+const PORT_ENGINE_TIMEOUT_MS: usize = 500;
+// dma 区域布局偏移设置
+const PORT_DMA_SIZE: usize = 0x2000;
+const COMMAND_LIST_OFFSET: usize = 0x0000;
+const RECEIVED_FIS_OFFSET: usize = 0x0400;
+const COMMAND_TABLE_OFFSET: usize = 0x0500;
+const DATA_BUFFER_OFFSET: usize = 0x1000;
+// PxCMD 寄存器位
+const PXCMD_ST: u32 = 1 << 0;
+const PXCMD_FRE: u32 = 1 << 4;
+const PXCMD_FR: u32 = 1 << 14;
+const PXCMD_CR: u32 = 1 << 15;
+// --- 其他杂项定义 ---
+const PRDT_MAX_BYTE_COUNT: usize = 1 << 22;
+const PRDT_INTERRUPT_ON_COMPLETION: u32 = 1 << 31;
+// Host to Device，从控制器到外设
+const FIS_TYPE_REGISTER_H2D: u8 = 0x27;
+const FIS_REGISTER_H2D_COMMAND: u8 = 1 << 7;
+const ATA_DEVICE_LBA: u8 = 1 << 6;
+const ATA_LBA48_LIMIT: u64 = 1 << 48;
+const ATA_LBA48_MAX_SECTORS_PER_COMMAND: u32 = 1 << 16;
+
+/// AHCI Command Header
+///
+/// 位于 PxCLB 指向的 Command List 中，每个端口最多包含 32 个命令槽
+/// 每个命令槽对应一个 32 B Command Header
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AHCICommandHeader {
+    /// DW0[15:0] 命令属性
+    ///
+    /// CFL[4:0]：Command FIS(Frame Information Structure) Length
+    /// - 单位为 DWORD，Register H2D FIS 应填写 5
+    /// A[5]：是否为 ATAPI 命令
+    /// W[6]：数据方向，0 表示设备写入内存，1 表示内存写入设备
+    /// P[7]：Prefetchable
+    /// R[8]：Reset
+    /// B[9]：BIST
+    /// C[10]：Clear Busy upon R_OK
+    /// PMP[15:12]：Port Multiplier 端口号，普通单盘使用 0
+    flags: u16,
+    /// DW0[31:16] PRDT(Physical Region Descriptor Table) Length
+    /// 物理区域描述符表长度，即 Command Table 中有效 PRDT Entry 的数量
+    ///
+    /// 单个连续数据缓冲区通常填写 1，没有数据传输时填写 0
+    prdt_length: u16,
+    /// DW1 PRD Byte Count
+    /// 物理区域描述符传输的字节数，单位为字节
+    ///
+    /// 提交命令前由软件清零，命令执行期间由 HBA 更新为已传输字节数
+    prd_byte_count: u32,
+    /// DW2 Command Table Base Address
+    ///
+    /// 命令表 DMA 物理地址低 32 位，地址必须按 128 B 对齐
+    command_table_base: u32,
+    /// DW3 Command Table Base Address Upper
+    ///
+    /// 命令表 DMA 物理地址高 32 位
+    /// CAP.S64A 未置位（即不支持64位地址）时必须为 0
+    command_table_base_upper: u32,
+    /// DW4-DW7 保留字段，软件必须写 0
+    reserved: [u32; 4],
+}
+
+const _: () = assert!(core::mem::size_of::<AHCICommandHeader>() == 32);
+
+/// Register Host-to-Device FIS
+///
+/// 软件将该 FIS 放在 Command Table 的 CFIS 区域，HBA 据此生成 ATA 命令
+/// 结构固定为 20 B，因此 Command Header 的 CFL 应填写 5 DWORD
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AHCIRegisterH2DFIS {
+    /// Byte 0 FIS Type，Register H2D 固定为 0x27
+    fis_type: u8,
+    /// Byte 1 Port Multiplier 与命令标志
+    ///
+    /// PM Port[3:0]：Port Multiplier 端口，普通单盘使用 0
+    /// Reserved[6:4]：保留位
+    /// C[7]：1 表示 Command，0 表示 Control
+    pm_port_and_flags: u8,
+    /// Byte 2 ATA Command，例如 IDENTIFY DEVICE 0xEC、READ DMA EXT 0x25
+    command: u8,
+    /// Byte 3 Features[7:0]
+    feature_low: u8,
+    /// Byte 4-6 LBA[23:0]
+    lba0: u8,
+    lba1: u8,
+    lba2: u8,
+    /// Byte 7 Device
+    ///
+    /// LBA 命令需要设置 bit 6，LBA48 模式下其余设备选择位通常为 0
+    device: u8,
+    /// Byte 8-10 LBA[47:24]
+    lba3: u8,
+    lba4: u8,
+    lba5: u8,
+    /// Byte 11 Features[15:8]
+    feature_high: u8,
+    /// Byte 12-13 Sector Count[15:0]
+    count_low: u8,
+    count_high: u8,
+    /// Byte 14 Isochronous Command Completion，普通 ATA 命令填写 0
+    icc: u8,
+    /// Byte 15 ATA Control
+    control: u8,
+    /// Byte 16-19 保留字段，软件必须写 0
+    reserved: [u8; 4],
+}
+
+impl AHCIRegisterH2DFIS {
+    /// 构造不携带 LBA 参数的 ATA 命令 FIS，例如 IDENTIFY DEVICE
+    fn new(command: u8) -> Self {
+        Self {
+            fis_type: FIS_TYPE_REGISTER_H2D,
+            pm_port_and_flags: FIS_REGISTER_H2D_COMMAND,
+            command,
+            feature_low: 0,
+            lba0: 0,
+            lba1: 0,
+            lba2: 0,
+            device: 0,
+            lba3: 0,
+            lba4: 0,
+            lba5: 0,
+            feature_high: 0,
+            count_low: 0,
+            count_high: 0,
+            icc: 0,
+            control: 0,
+            reserved: [0; 4],
+        }
+    }
+
+    /// 构造 LBA48(Logical Block Addressing 48-bit) ATA 命令 FIS
+    /// LBA48 即 48 位逻辑块寻址模式
+    ///
+    /// 构造读写磁盘的请求
+    /// 
+    /// lba：起始ATA/SATA 协议逻辑块号
+    /// - 这里的 Block 实际上就是 Sector
+    /// sector_count：每个块的扇区数，最大为 65536
+    /// - 读取一个内核逻辑磁盘块，即读取sector_count个扇区
+    fn new_lba48(command: u8, lba: u64, sector_count: u32) -> Option<Self> {
+        if sector_count == 0 || sector_count > ATA_LBA48_MAX_SECTORS_PER_COMMAND {
+            return None;
+        }
+        let end_lba = lba.checked_add(sector_count as u64)?;
+        if end_lba > ATA_LBA48_LIMIT {
+            return None;
+        }
+
+        let encoded_count = if sector_count == ATA_LBA48_MAX_SECTORS_PER_COMMAND {
+            0 // 0 表示 65536
+        } else {
+            sector_count as u16
+        };
+        let mut fis = Self::new(command);
+        fis.lba0 = lba as u8;
+        fis.lba1 = (lba >> 8) as u8;
+        fis.lba2 = (lba >> 16) as u8;
+        fis.device = ATA_DEVICE_LBA;
+        fis.lba3 = (lba >> 24) as u8;
+        fis.lba4 = (lba >> 32) as u8;
+        fis.lba5 = (lba >> 40) as u8;
+        fis.count_low = encoded_count as u8;
+        fis.count_high = (encoded_count >> 8) as u8;
+        Some(fis)
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<AHCIRegisterH2DFIS>() == 20);
+
+/// AHCI PRDT (Physical Region Descriptor Table) Entry
+/// 为 AHCI PRDT 的单个条目，也可叫 PRD
+///
+/// 位于 Command Table 的 0x80 + 16 B * PRD索引 处
+/// 一个 PRDT Entry 描述一段物理连续的 DMA 数据区域
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AHCIPRDTEntry {
+    /// DW0 Data Base Address
+    ///
+    /// DMA 数据区域物理地址低 32 位，地址至少按 2 B 对齐
+    data_base: u32,
+    /// DW1 Data Base Address Upper
+    ///
+    /// DMA 数据区域物理地址高 32 位，CAP.S64A 为 0 时必须为 0
+    data_base_upper: u32,
+    /// DW2 保留字段，软件必须写 0
+    reserved: u32,
+    /// DW3 Data Byte Count & Interrupt on Completion
+    /// 传输字节数和中断请求标志
+    ///
+    /// DBC[21:0]：传输字节数减 1，单个 PRDT Entry 最多描述 4 MiB
+    /// Reserved[30:22]：软件必须写 0
+    /// I[31]：该 PRD 完成后是否请求端口中断
+    byte_count_and_flags: u32,
+}
+
+impl AHCIPRDTEntry {
+    /// 根据 DMA 物理地址和实际传输字节数构造 PRDT Entry
+    ///
+    /// ATA 数据传输以 word 为单位，因此要求地址和字节数均按 2 B 对齐
+    fn new(
+        data_base: PhysAddr,
+        byte_count: usize,
+        interrupt_on_completion: bool,
+    ) -> Option<Self> {
+        if data_base.0 & 1 != 0
+            || byte_count == 0
+            || byte_count > PRDT_MAX_BYTE_COUNT
+            || byte_count & 1 != 0
+        {
+            return None;
+        }
+
+        let interrupt = if interrupt_on_completion {
+            PRDT_INTERRUPT_ON_COMPLETION
+        } else {
+            0
+        };
+        Some(Self {
+            data_base: data_base.0 as u32,
+            data_base_upper: (data_base.0 >> 32) as u32,
+            reserved: 0,
+            byte_count_and_flags: (byte_count as u32 - 1) | interrupt,
+        })
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<AHCIPRDTEntry>() == 16);
+
+/// 单个端口所使用的 DMA 区域布局
+///
+/// 所有字段均为提供给 HBA 的物理地址，CPU 访问时需要转换到非缓存 DMW
+#[derive(Clone, Copy)]
+struct AHCIPortDmaLayout {
+    /// Command List 物理地址，写入 PxCLB/PxCLBU，必须按 1 KB 对齐
+    ///
+    /// 命令列表，有 32 个 slot（每个32B），一个 slot 中装一个命令头，共 1KB
+    pub command_list: PhysAddr,
+    /// Received FIS Buffer 物理地址，写入 PxFB/PxFBU，必须按 256 B 对齐
+    ///
+    /// HBA 会将硬盘返回的FIS 写入此缓冲区
+    pub received_fis: PhysAddr,
+    /// slot 0 Command Table 物理地址，写入 Command Header 的 CTBA/CTBAU
+    ///
+    /// - CFIS(0x00,64B)
+    /// - ATAPI(0x40,16B,ATA填0)
+    /// - PRDT(0x80,每项PRD 16B)
+    /// 目前只初始化 slot 0
+    pub command_table: PhysAddr,
+    /// 命令数据缓冲区物理地址，后续由 PRDT Entry 引用
+    ///
+    /// 放读写数据的缓冲区，目前暂时固定 4KB，后续改为动态分配并支持大块预读
+    pub data_buffer: PhysAddr,
+}
+
+impl AHCIPortDmaLayout {
+    fn from_base(base: PhysAddr) -> Self {
+        Self {
+            command_list: PhysAddr(base.0 + COMMAND_LIST_OFFSET),
+            received_fis: PhysAddr(base.0 + RECEIVED_FIS_OFFSET),
+            command_table: PhysAddr(base.0 + COMMAND_TABLE_OFFSET),
+            data_buffer: PhysAddr(base.0 + DATA_BUFFER_OFFSET),
+        }
+    }
+}
+
+lazy_static! {
+    /// AHCI 控制器实例
+    pub static ref AHCI_CONTROLLER: Mutex<AHCIController> = Mutex::new(
+        AHCIController::new(*SATA_AHCI_MMIO_PA)
+    );
+}
+
+lazy_static! {
+    pub static ref SATA_BLOCK: Arc<SataBlock> = {
+        Arc::new(SataBlock::new())
+    };
 }
 
 /// AHCI HBA 全局寄存器，相对控制器 MMIO 基址的 32 位偏移
@@ -201,8 +398,8 @@ pub enum AHCIReg {
 
 /// AHCI 端口号
 ///
-/// 端口号必须小于 CAP.NP + 1，且其位必须在 PI 中置位；实际读写前还应
-/// 通过 PxSSTS 检查是否已连接并激活设备
+/// 端口号必须小于 CAP.NP + 1，且其位必须在 PI 中置位；
+/// 实际读写前还应通过 PxSSTS 检查是否已连接并激活设备
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AHCIPort(pub isize);
 
@@ -299,10 +496,12 @@ pub enum AHCIPortReg {
     Serr = 0x30,
     /// SATA Active / SCR3
     ///
-    /// SACT[n]：NCQ 命令槽 n 正在执行，提交 FPDMA QUEUED 命令时先设置
-    /// SACT[n]，再设置 CI[n]；普通非 NCQ 单槽实现不使用它
+    /// SACT[n]：NCQ 命令槽 n 正在执行
+    /// 提交 FPDMA QUEUED 命令时先设置 SACT[n]，再设置 CI[n]
+    /// 普通非 NCQ(Native Command Queuing)，即单槽，情况下不使用
     Sact = 0x34,
     /// Command Issue
+    /// 用于通知 HBA 执行对应命令槽的命令，目前只使用 slot 0
     ///
     /// CI[n]：向空闲命令槽 n 写 1，通知 HBA 读取该槽 Command Header、CFIS 和
     /// PRDT，HBA 完成命令后清除该位
@@ -384,6 +583,7 @@ pub struct AHCIError {
 
 
 /// AHCI 控制器
+/// 即 HBA（Host Bus Adapter）
 pub struct AHCIController {
     /// 从 PCI BAR0 读取的 AHCI MMIO 物理基址，不包含 DMW 虚拟窗口位
     base_addr: usize,
@@ -483,6 +683,8 @@ impl AHCIController {
         self.port_reg_write(port, AHCIPortReg::Cmd, new_cmd);
         self.wait_port_cmd_clear(port, PXCMD_FR)
     }
+    // 启动端口命令引擎（Command List Engine）
+    //
     // 启动时必须先启动 FIS 接收引擎，再启动命令列表引擎
     fn start_port_engine(&self, port: AHCIPort) -> Result<(), AHCIError> {
         // 确保启动引擎前，命令列表和端口寄存器的写入对 HBA 可见
@@ -595,8 +797,9 @@ impl AHCIController {
         }
         Some(AHCIPortDmaLayout::from_base(dma_pa))
     }
-    // 填写 slot 0 命令头，并让端口寄存器指向内核管理的 DMA 区域
+    // 设置端口的 DMA 区域
     fn program_port_dma(&self, port: AHCIPort, layout: AHCIPortDmaLayout) {
+        // 构造 slot0 的命令头
         let command_header = AHCICommandHeader {
             flags: 0,
             prdt_length: 0,
@@ -605,6 +808,7 @@ impl AHCIController {
             command_table_base_upper: (layout.command_table.0 >> 32) as u32,
             reserved: [0; 4],
         };
+        // 将命令头写入 DMA 区域
         let command_header_va =
             (layout.command_list.0 | UNCHACHED_KERNEL_BASE) as *mut AHCICommandHeader;
         unsafe {
