@@ -1,7 +1,7 @@
 use bitflags::*;
 use alloc::vec::Vec;
 use alloc::sync::{Arc, Weak};
-use crate::process::task::rlimit::Rlimit;
+use crate::process::task::rlimit::Rlimits;
 use super::*;
 /// The max signal number
 pub const MAX_SIG: usize = 64;
@@ -110,19 +110,118 @@ impl SignalFlags {
         None
     }
 }
+#[derive(Clone)]
 pub struct Sigpending{
-    queue: Vec<Signal>, // 挂起信号队列
+    queue: Vec<usize>, // 挂起信号队列
     signals: SignalFlags, // 挂起信号集
     wait_chldexit: bool, // 是否等待子进程退出
 }
+
+impl Sigpending {
+    pub fn new() -> Self {
+        Self {
+            queue: Vec::new(),
+            signals: SignalFlags::empty(),
+            wait_chldexit: false,
+        }
+    }
+
+    pub fn insert(&mut self, signal: SignalFlags) {
+        self.signals.insert(signal);
+        if let Some(number) = signal.number() {
+            self.queue.push(number);
+        }
+    }
+
+    pub fn bits(&self) -> u64 {
+        self.signals.bits()
+    }
+
+    pub fn contains(&self, signal: SignalFlags) -> bool {
+        self.signals.contains(signal)
+    }
+
+    pub fn remove(&mut self, signal: SignalFlags) {
+        self.signals.remove(signal);
+        if let Some(number) = signal.number() {
+            self.queue.retain(|queued| *queued != number);
+        }
+    }
+
+    pub fn flags(&self) -> SignalFlags {
+        self.signals
+    }
+}
+
 pub struct Signal{
     shared_pending: Sigpending, // 共享挂起信号集
     group_exit_state: i32, // 线程组退出状态
     thread_num: usize, // 线程组中线程数量
-    next_thread: Option<Weak<TaskStruct>>, // 线程组中下一个线程
-    rlimits: [Rlimit; 16], // 资源限制
+    pub next_thread: Option<Weak<TaskControlBlock>>, // 线程组中下一个线程
+    rlimits: Rlimits, // 线程组共享的资源限制
 }
+impl Signal{
+    pub fn new() -> Self {
+        Self {
+            shared_pending: Sigpending::new(),
+            group_exit_state: 0,
+            thread_num: 1,
+            next_thread: None,
+            rlimits: Rlimits::new(),
+        }
+    }
 
+    pub fn fork_from(parent: &Self) -> Self {
+        Self {
+            shared_pending: Sigpending::new(),
+            group_exit_state: 0,
+            thread_num: 1,
+            next_thread: None,
+            rlimits: parent.rlimits.clone(),
+        }
+    }
+
+    pub fn add_thread(&mut self) {
+        self.thread_num += 1;
+    }
+
+    pub fn insert_pending(&mut self, signal: SignalFlags) {
+        self.shared_pending.insert(signal);
+    }
+
+    pub fn pending_flags(&self) -> SignalFlags {
+        self.shared_pending.flags()
+    }
+
+    pub fn remove_pending(&mut self, signal: SignalFlags) {
+        self.shared_pending.remove(signal);
+    }
+
+    pub fn rlimits(&self) -> &Rlimits {
+        &self.rlimits
+    }
+
+    pub fn rlimits_mut(&mut self) -> &mut Rlimits {
+        &mut self.rlimits
+    }
+}
+#[derive(Clone)]
 pub struct SigHand{
     sig_actions: SignalActions, // 信号处理函数
+}
+
+impl SigHand {
+    pub fn new() -> Self {
+        Self {
+            sig_actions: SignalActions::new(),
+        }
+    }
+
+    pub fn action(&self, signal_index: usize) -> SignalAction {
+        self.sig_actions.table[signal_index]
+    }
+
+    pub fn set_action(&mut self, signal_index: usize, action: SignalAction) {
+        self.sig_actions.table[signal_index] = action;
+    }
 }

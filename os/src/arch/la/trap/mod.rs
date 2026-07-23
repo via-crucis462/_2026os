@@ -55,16 +55,25 @@ pub fn trap_from_kernel() -> ! {
         badi
     );
     if let Some(task) = current_task() {
-        let proc = task.process();
-        let inner = proc.inner_exclusive_access();
+        let mm = task.inner_exclusive_access().mm.as_ref().cloned();
+        let Some(mm) = mm else {
+            error!("[kernel][panic] current task has no user mm");
+            loop {}
+        };
+        let memory_set = mm.exclusive_access();
+        let heap_bottom = memory_set.areas()[memory_set.brk_index()]
+            .get_vpn_range()
+            .get_start()
+            .0
+            * PAGE_SIZE;
         error!(
             "[kernel][panic] current task snapshot: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
             task.getpid(),
             task.gettid(),
-            inner.heap_bottom,
-            inner.program_brk,
+            heap_bottom,
+            memory_set.current_brk(),
         );
-        inner.memory_set.debug_dump_areas(Some(badv), Some(era));
+        memory_set.debug_dump_areas(Some(badv), Some(era));
     } else {
         error!("[kernel][panic] no current task on this hart");
     }
@@ -207,9 +216,11 @@ fn decode_estat(estat: usize) -> (&'static str, usize, usize, bool) {
 fn is_brk_process() -> bool {
     current_task()
         .map(|task| {
-            let proc = task.process();
-            let inner = proc.inner_exclusive_access();
-            inner.pname == BRK_PROCESS_NAME || inner.pname.ends_with("/brk")
+            let comm = task.inner_exclusive_access().comm;
+            let len = comm.iter().position(|byte| *byte == 0).unwrap_or(comm.len());
+            core::str::from_utf8(&comm[..len])
+                .map(|name| name == BRK_PROCESS_NAME || name.ends_with("/brk"))
+                .unwrap_or(false)
         })
         .unwrap_or(false)
 }
@@ -332,15 +343,20 @@ pub fn trap_handler() -> ! {
             let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
             for pid in expired_pids {
                 if let Some(process) = crate::task::get_process(pid) {
-                    let process_inner = process.inner_exclusive_access();
-
-                    for task in process_inner.tasks.iter() {
+                    let tasks = crate::task::manager::TID2TCB
+                        .exclusive_access()
+                        .values()
+                        .filter(|task| task.gettgid() == process.gettgid())
+                        .cloned()
+                        .collect::<alloc::vec::Vec<_>>();
+                    for task in tasks {
                         let mut task_inner = task.inner_exclusive_access();
-                        task_inner.signals |= crate::task::SignalFlags::SIGALRM;
-                        if task_inner.task_status == crate::task::TaskStatus::Blocked {
+                        task_inner.pending.insert(crate::task::SignalFlags::SIGALRM);
+                        if task_inner.state == crate::task::TaskStatus::Blocked {
                             task_inner.signal_interrupted = true;
-                            task_inner.task_status = crate::task::TaskStatus::Ready;
-                            crate::task::add_task(Arc::clone(task));
+                            task_inner.state = crate::task::TaskStatus::Ready;
+                            drop(task_inner);
+                            crate::task::add_task(task);
                         }
                     }
                 }
@@ -351,33 +367,35 @@ pub fn trap_handler() -> ! {
         }
         _ => {
             if let Some(task) = current_task() {
-                let proc = task.process();
-                let mut inner = proc.inner_exclusive_access();
+                let mm = task.inner_exclusive_access().mm.as_ref().cloned();
+                let Some(mm) = mm else {
+                    error!("[kernel] user fault without mm: pid={}, tid={}", task.getpid(), task.gettid());
+                    exit_current_and_run_next(-11);
+                    panic!("unreachable: exited task without mm");
+                };
+                let mut memory_set = mm.exclusive_access();
                 let sp = current_trap_cx().r[3];
                 let vpn = VirtAddr::from(badv).std_floor();
                 if ecode == 4 {
-                    if let Some(pte) = inner.memory_set.translate(vpn) {
-                        if pte.is_valid() && pte.writable() && inner.memory_set.set_pte_dirty(vpn) {
-                            drop(inner);
-                            drop(proc);
+                    if let Some(pte) = memory_set.translate(vpn) {
+                        if pte.is_valid() && pte.writable() && memory_set.set_pte_dirty(vpn) {
+                            drop(memory_set);
                             drop(task);
                             trap_return();
                         }
                     }
                 }
-                if inner.memory_set.handle_cow_fault(badv) {
-                    drop(inner);
-                    drop(proc);
+                if memory_set.handle_cow_fault(badv) {
+                    drop(memory_set);
                     drop(task);
                     trap_return();
                 }
-                if inner.memory_set.handle_page_fault(badv, sp) {
-                    drop(inner);
-                    drop(proc);
+                if memory_set.handle_page_fault(badv, sp) {
+                    drop(memory_set);
                     drop(task);
                     trap_return();
                 }
-                match inner.memory_set.translate(vpn) {
+                match memory_set.translate(vpn) {
                     Some(pte) => {
                         trace!(
                             "[kernel] user_fault_pte: current hart id={}, estat={:#x}, ecode={}({:#x}), esubcode={:#x}, era={:#x}, badv={:#x}, badi={:#x}, ra={:#x}, sp={:#x}, vpn={:#x}, pte_bits={:#x}, valid={}, r={}, w={}, x={}",
@@ -475,14 +493,24 @@ pub fn trap_handler() -> ! {
                 );
             }*/
             if let Some(task) = current_task() {
-                let proc = task.process();
-                let inner = proc.inner_exclusive_access();
+                let mm = task.inner_exclusive_access().mm.as_ref().cloned();
+                let Some(mm) = mm else {
+                    trace!("[kernel] trap_handler: pid={}, tid={}, no user mm", task.getpid(), task.gettid());
+                    exit_current_and_run_next(-11);
+                    panic!("unreachable: exited task without mm");
+                };
+                let memory_set = mm.exclusive_access();
+                let heap_bottom = memory_set.areas()[memory_set.brk_index()]
+                    .get_vpn_range()
+                    .get_start()
+                    .0
+                    * PAGE_SIZE;
                 trace!(
                     "[kernel] trap_handler: pid={}, tid={}, heap_bottom={:#x}, program_brk={:#x}",
                     task.getpid(),
                     task.gettid(),
-                    inner.heap_bottom,
-                    inner.program_brk,
+                    heap_bottom,
+                    memory_set.current_brk(),
                 );
                 // inner.memory_set.debug_dump_areas(Some(badv), Some(era));
             } else {
@@ -528,17 +556,12 @@ pub fn trap_return() -> ! {
     //set_user_trap_entry();
     // 直接用物理地址
     handle_signals();
-    let term_signal = {
-        let task = current_task().unwrap();
-        let inner = task.inner_exclusive_access();
-        if inner.killed {
-            inner.term_signal.unwrap_or(1)
-        } else {
-            0
-        }
-    };
-    if term_signal != 0 {
-        exit_current_and_run_next(-term_signal);
+    let term_signal = current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .term_signal;
+    if let Some(signal) = term_signal {
+        exit_current_and_run_next(-signal);
     }
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
@@ -599,7 +622,7 @@ pub  extern "C" fn csr_info(){
 pub use context::TrapContext;
 
 pub fn current_trap_cx_user_va() -> usize {
-    current_task().unwrap().kernel_stack.get_top() - KERNEL_STACK_SIZE
+    current_task().unwrap().inner_exclusive_access().kernel_stack.get_top() - KERNEL_STACK_SIZE
 }
 
 pub fn trap_cx_va_by_kernel_stack(kernel_stack: &KernelStack) -> usize {

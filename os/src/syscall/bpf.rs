@@ -7,6 +7,7 @@ use alloc::{
 use core::{
     any::Any,
     mem::size_of,
+    ops::Deref,
 };
 use spin::Mutex;
 
@@ -443,43 +444,73 @@ fn set_log_buf(token: usize, ptr: u64, len: u32, message: &[u8]) {
 
 fn install_bpf_fd(file: Arc<dyn File + Send + Sync>) -> Result<isize, Errno> {
     let task = current_task().unwrap();
-    let process = task.process();
-    let mut inner = process.inner_exclusive_access();
-    let fd = inner.alloc_fd().ok_or(Errno::EMFILE)?;
-    inner.set_fd(fd, file, FdFlags::empty(), 0);
+    let files = task.inner_exclusive_access().files.clone();
+    let mut files = files.exclusive_access();
+    let fd = files.alloc_fd().ok_or(Errno::EMFILE)?;
+    files.set_fd(fd, file, FdFlags::empty(), 0);
     Ok(fd as isize)
 }
 
-fn get_bpf_map(fd: usize) -> Result<&'static BpfMapFile, Errno> {
-    let task = current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    if fd >= inner.fd_table.len() {
-        return Err(Errno::EBADF);
-    }
-    let Some(file) = inner.fd_table[fd].file.as_ref() else {
-        return Err(Errno::EBADF);
-    };
-    let map = file.as_any().downcast_ref::<BpfMapFile>().ok_or(Errno::EBADF)?;
-    let map_ptr = map as *const BpfMapFile;
-    drop(inner);
-    Ok(unsafe { &*map_ptr })
+struct BpfMapHandle {
+    file: Arc<dyn File + Send + Sync>,
 }
 
-fn get_bpf_prog(fd: usize) -> Result<&'static BpfProgFile, Errno> {
+impl Deref for BpfMapHandle {
+    type Target = BpfMapFile;
+
+    fn deref(&self) -> &Self::Target {
+        self.file
+            .as_any()
+            .downcast_ref::<BpfMapFile>()
+            .expect("BpfMapHandle must contain BpfMapFile")
+    }
+}
+
+struct BpfProgHandle {
+    file: Arc<dyn File + Send + Sync>,
+}
+
+impl Deref for BpfProgHandle {
+    type Target = BpfProgFile;
+
+    fn deref(&self) -> &Self::Target {
+        self.file
+            .as_any()
+            .downcast_ref::<BpfProgFile>()
+            .expect("BpfProgHandle must contain BpfProgFile")
+    }
+}
+
+fn get_bpf_map(fd: usize) -> Result<BpfMapHandle, Errno> {
     let task = current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    if fd >= inner.fd_table.len() {
+    let files = task.inner_exclusive_access().files.clone();
+    let files = files.exclusive_access();
+    if fd >= files.fds.len() {
         return Err(Errno::EBADF);
     }
-    let Some(file) = inner.fd_table[fd].file.as_ref() else {
+    let Some(file) = files.fds[fd].file.as_ref().cloned() else {
         return Err(Errno::EBADF);
     };
-    let prog = file.as_any().downcast_ref::<BpfProgFile>().ok_or(Errno::EBADF)?;
-    let prog_ptr = prog as *const BpfProgFile;
-    drop(inner);
-    Ok(unsafe { &*prog_ptr })
+    if file.as_any().downcast_ref::<BpfMapFile>().is_none() {
+        return Err(Errno::EBADF);
+    }
+    Ok(BpfMapHandle { file })
+}
+
+fn get_bpf_prog(fd: usize) -> Result<BpfProgHandle, Errno> {
+    let task = current_task().unwrap();
+    let files = task.inner_exclusive_access().files.clone();
+    let files = files.exclusive_access();
+    if fd >= files.fds.len() {
+        return Err(Errno::EBADF);
+    }
+    let Some(file) = files.fds[fd].file.as_ref().cloned() else {
+        return Err(Errno::EBADF);
+    };
+    if file.as_any().downcast_ref::<BpfProgFile>().is_none() {
+        return Err(Errno::EBADF);
+    }
+    Ok(BpfProgHandle { file })
 }
 
 fn read_stack_range(stack: &[u8; BPF_STACK_SIZE], base: u64, len: usize) -> Result<Vec<u8>, Errno> {
@@ -630,8 +661,7 @@ fn bpf_prog_load(token: usize, attr: *const u8, size: usize) -> isize {
 
 pub fn sys_bpf(cmd: usize, attr: *const u8, size: usize) -> isize {
     let task = current_task().unwrap();
-    let process = task.process();
-    let token = process.inner_exclusive_access().memory_set.token();
+    let token = task.inner_exclusive_access().get_user_token();
     match cmd {
         BPF_MAP_CREATE => bpf_map_create(token, attr, size),    //创建一个BPF map并返回文件描述符，BPF是供用户空间程序与内核空间程序交互的一种机制，BPF map是BPF程序用来存储数据结构的对象
         BPF_MAP_LOOKUP_ELEM => bpf_map_lookup(token, attr, size),//在BPF map中查找元素

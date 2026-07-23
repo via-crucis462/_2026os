@@ -187,32 +187,42 @@ impl File for UserPageFaultInfo {
                 let len: u64 = try_translated_read(token, (argp + 16) as *const u64).unwrap_or(0);
                 let mode: u64 = try_translated_read(token, (argp + 24) as *const u64).unwrap_or(0);
 
-                // 先提取 proc 引用，释放锁后再操作，避免死锁
-                let proc = {
+                // 先提取故障任务的 mm，释放 faulting_task 锁后再操作，避免死锁。
+                let mm = {
                     let guard = self.faulting_task.lock();
-                    guard.as_ref().map(|t| t.process())
+                    guard.as_ref().and_then(|task| {
+                        task.inner_exclusive_access().mm.clone()
+                    })
                 };
-                let proc = match proc {
-                    Some(p) => p,
+                let mm = match mm {
+                    Some(mm) => mm,
                     None => return Errno::EINVAL.as_isize(),
                 };
 
                 // 1. 为缺页地址建立物理页映射
-                let _ = proc.mmap(
-                    dst as usize, core::cmp::max(len as usize, 4096),
-                    crate::mm::mmap::MMapProt::PROT_READ | crate::mm::mmap::MMapProt::PROT_WRITE,
-                    crate::mm::mmap::MMapFlags::MAP_ANONYMOUS
-                        | crate::mm::mmap::MMapFlags::MAP_PRIVATE
-                        | crate::mm::mmap::MMapFlags::MAP_FIXED,
-                    None, 0,
-                );
+                let faulting_token = {
+                    let mut memory = mm.exclusive_access();
+                    let _ = memory.mmap(
+                        dst as usize, core::cmp::max(len as usize, 4096),
+                        crate::mm::mmap::MMapProt::PROT_READ
+                            | crate::mm::mmap::MMapProt::PROT_WRITE,
+                        crate::mm::mmap::MMapFlags::MAP_ANONYMOUS
+                            | crate::mm::mmap::MMapFlags::MAP_PRIVATE
+                            | crate::mm::mmap::MMapFlags::MAP_FIXED,
+                        None, 0,
+                    );
+                    memory.token()
+                };
 
                 // 2. 从 src 拷贝数据到 dst
                 let src_bufs = translated_byte_buffer(token, src as *const u8, len as usize);
                 let mut total = 0;
                 for src_buf in src_bufs.iter() {
                     let mut dst_bufs = crate::mm::translated_byte_buffer_mut(
-                        token, (dst as usize + total) as *const u8, src_buf.len());
+                        faulting_token,
+                        (dst as usize + total) as *const u8,
+                        src_buf.len(),
+                    );
                     for (d, s) in dst_bufs.iter_mut().zip(core::iter::repeat(src_buf)) {
                         d.copy_from_slice(s);
                     }

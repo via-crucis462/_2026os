@@ -1,6 +1,4 @@
 //! 权限管理相关
-use alloc::task;
-
 use crate::process::current_task;
 use bitflags::bitflags;
 
@@ -29,12 +27,12 @@ impl PermStat {
     }
     /// 获取当前用户对目标文件的权限集合
     pub fn current_perm_set(&self) -> PermSet {
-        let proc = current_task().unwrap().process.upgrade().unwrap();
-        let inner = proc.inner_exclusive_access();
-        let uid = inner.euid;
-        let gid = inner.gid;
-        drop(inner);
-        drop(proc);
+        let task = current_task().unwrap();
+        let cred = task.inner_exclusive_access().cred.clone();
+        let (uid, gid) = {
+            let cred = cred.exclusive_access();
+            (cred.euid(), cred.egid())
+        };
         PermSet {
             w: self.can_write(uid, gid),
             r: self.can_read(uid, gid),

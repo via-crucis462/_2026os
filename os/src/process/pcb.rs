@@ -7,6 +7,9 @@ use core::mem;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::mm::get_free_frames;
+use crate::task::context::ThreadStruct;
+use crate::task::signal::{Sigpending, Signal, SigHand};
+use crate::task::cred::Cred;
 use crate::{
     arch::trap::{TrapContext, trap_handler, trap_cx_va_by_kernel_stack},
     fs::{open_file, Dentry, File, OpenFlags, ROOT_DENTRY,Stdin, Stdout, Stderr},
@@ -50,7 +53,64 @@ bitflags::bitflags! {
         const NONBLOCK = 0o4000;    // O_NONBLOCK: 非阻塞 I/O
     }
 }
+#[derive(Clone)]
+pub struct FileDescriptorTable {
+    pub fds: Vec<FileDescriptor>,
+    pub next_fd: usize, // 下一个可用的文件描述符
+    //待填充
+}
+impl FileDescriptorTable {
+    pub const DEFAULT_LIMIT: usize = 1024;
 
+    pub fn new() -> Self {
+        let mut fds = Vec::new();
+        fds.push(FileDescriptor::new(Arc::new(Stdin), FdFlags::empty(), 0));
+        fds.push(FileDescriptor::new(Arc::new(Stdout), FdFlags::empty(), 0));
+        fds.push(FileDescriptor::new(Arc::new(Stderr), FdFlags::empty(), 0));
+        Self {
+            fds,
+            next_fd: 3,
+        }
+    }
+
+    pub fn alloc_fd(&mut self) -> Option<usize> {
+        if let Some(fd) = (0..self.fds.len()).find(|fd| self.fds[*fd].is_available()) {
+            self.fds[fd] = FileDescriptor::reserved();
+            return Some(fd);
+        }
+        if self.fds.len() >= Self::DEFAULT_LIMIT {
+            return None;
+        }
+        let fd = self.fds.len();
+        self.fds.push(FileDescriptor::reserved());
+        Some(fd)
+    }
+
+    pub fn ensure_slots(&mut self, target_len: usize) -> bool {
+        if target_len > Self::DEFAULT_LIMIT {
+            return false;
+        }
+        while self.fds.len() < target_len {
+            self.fds.push(FileDescriptor::empty());
+        }
+        true
+    }
+
+    pub fn set_fd(
+        &mut self,
+        fd: usize,
+        file: Arc<dyn File + Send + Sync>,
+        flags: FdFlags,
+        status: usize,
+    ) {
+        let _ = self.ensure_slots(fd + 1);
+        self.fds[fd] = FileDescriptor::new(file, flags, status);
+    }
+
+    pub fn clear_fd(&mut self, fd: usize) {
+        self.fds[fd] = FileDescriptor::empty();
+    }
+}
 #[derive(Clone)]
 pub struct FileDescriptor {
     pub file: Option<Arc<dyn File + Send + Sync>>,
@@ -90,7 +150,7 @@ impl FileDescriptor {
     }
 }
 
-pub struct ProcessControlBlock {
+/*pub struct ProcessControlBlock {
     pub pid: Arc<PidHandle>,
     pub oom_score_adj: AtomicI32,
     pub ns_proxy: NsProxy,
@@ -107,7 +167,7 @@ impl ProcessControlBlock {
     /// 为la64修改
     /// At present, it is only used for the creation of initproc
     /// 现在会返回新创建的PCB及其主线程TCB（均为arc）
-    pub fn new(elf_data: &[u8]) -> (Arc<Self>, Arc<TaskControlBlock>) {
+    pub fn new(elf_data: &[u8]) -> Arc<TaskControlBlock> {
         //println!("[kernel] TaskControlBlock::new: start creating a new process");
 
         //处理 ELF 文件，创建内存空间，返回的memory_set中已经包含了用户程序的代码段、数据段、bss段以及长度为1的堆段
@@ -123,7 +183,7 @@ impl ProcessControlBlock {
         //pid ，tid 和内核栈的分配
         let pid_handle = Arc::new(pid_alloc());
         //println!("[kernel] TaskControlBlock::new: allocated PID {}", pid_handle.0);
-        let tid_handle = Arc::new(tid_from_pid(pid_handle.0));
+        //let tid_handle = Arc::new(tid_from_pid(pid_handle.0));
         //println!("[kernel] TaskControlBlock::new: allocated TID {}", tid_handle.0);
         let kernel_stack = kstack_alloc();
         
@@ -175,76 +235,49 @@ impl ProcessControlBlock {
 
         debug!("TaskControlBlock::new: kernel_stack_top={:#x}", kernel_stack.get_top());
         // 进程控制块
-        let proc_control_block = Arc::new(ProcessControlBlock {
-            pid: pid_handle.clone(),// 注意：实际上只克隆了指针
-            oom_score_adj: AtomicI32::new(0),
-            ns_proxy: NsProxy::new(IPCNamespace::new()),
-            inner: MPSafeCell::new(ProcessControlBlockInner {
-                on_main_hart: true, // initproc和shell默认在主核运行
-                pname: String::from("initproc"),
-                base_size: initial_user_sp,
-                memory_set,
-                parent: None,
-                children: Vec::new(),
-                heap_bottom: heap_bottom,
-                program_brk: heap_bottom,
-                fd_rlmt: Rlimit64 { cur_lmt: 1024, max_lmt: 1024 }, // 默认允许打开的最大文件描述符数量
-                // 初始化 fd_table，预先放入 stdin 和 stdout
-                fd_table: vec![
-                    FileDescriptor::new(Arc::new(Stdin), FdFlags::empty(), 0),
-                    FileDescriptor::new(Arc::new(Stdout), FdFlags::empty(), 0),
-                    FileDescriptor::new(Arc::new(Stderr), FdFlags::empty(), 0),
-                ],
-                rlimit_data: Rlimit64 { cur_lmt: usize::MAX, max_lmt: usize::MAX },
-            rlimit_nproc: Rlimit64 { cur_lmt: 4096, max_lmt: 4096 }, // 默认 4096 个进程上限
-            rlimit_as: Rlimit64 { cur_lmt: usize::MAX, max_lmt: usize::MAX },  
-                cwd: ROOT_DENTRY.clone(),
-                signals: SignalFlags::empty(),
-                signal_actions: SignalActions::default(),
-                exit_code: 0,
-                ruid: 0,
-                gid: 0,
-                sid:0,
-                euid: 0,
-                egid: 0,
-                sgid: 0,
-                max_file_size: RLIM_INFINITY, // 默认文件大小限制为无限制
-                umask: 0o022,
-                pgid: pid_handle.0,
-                alive_task_count: 0,
-                tasks: Vec::new(),
-                personality: 0, // 默认 personality 为 0 (通常表示标准 Linux 兼容模式)
-                locked_bytes: 0,
-                start_time_us: get_time_us(),
-            })
-        });
+
         // 为pcb创建主线程
-        let task_control_block = Arc::new(TaskControlBlock{
-            process: Arc::downgrade(&proc_control_block),
-            tid: tid_handle.clone(),
-            tgid: pid_handle.0,
-            kernel_stack,
-            inner: MPSafeCell::new(TaskControlBlockInner {
-                trap_cx_addr,
-                task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                task_status: TaskStatus::Ready,
-                owner_hart: None,
+        let task_control_block = Arc::new_cyclic(|task_weak| TaskStruct {
+            pid: pid_handle.clone(),
+            tgid: pid_handle,
+            group_leader: task_weak.clone(),
+            inner: MPSafeCell::new(TaskStructInner {
+                nsproxy: Arc::new(NsProxy::new(IPCNamespace::new())),
+                thread: ThreadStruct {
+                    trap_ctx: trap_cx_addr,
+                    task_ctx: TaskContext::goto_trap_return(kernel_stack_top),
+                },
+                group_leader: task_weak.clone(),
+                kernel_stack,
+                real_parent: Weak::new(),
+                parent: Weak::new(),
+                children: Vec::new(),
+                state: TaskStatus::Ready,
+                exit_state: 0,
+                exit_code: 0,
+                exit_signal: 0,
+                flags: 0,
+                errno: 0,
                 sched_policy: SCHED_IDLE, // initproc默认用SCHED_IDLE策略
                 sched_priority: 0,
-                signal_mask: SignalFlags::empty(),
-                killed: false,
-                term_signal: None,
-                signal_mask_backup: Vec::new(),
-                frozen: false,
-                trap_ctx_backup: Vec::new(),
-                signal_user_context_backup: Vec::new(),
-                exit_code: 0,
-                errno: 0,
-                signals: SignalFlags::empty(),
-                signal_interrupted: false,
+                mm: Some(Arc::new(MPSafeCell::new(memory_set))),
+                fs: Some(Arc::new(MPSafeCell::new(FsStruct::new(ROOT_DENTRY.clone(), ROOT_DENTRY.clone())))),
+                files: Some(Arc::new(MPSafeCell::new(FileDescriptorTable::new()))),
+                signal: Some(Arc::new(MPSafeCell::new(Signal::new()))),
+                signal_hand: Some(Arc::new(MPSafeCell::new(SigHand::new()))),
+                blocked: SignalFlags::empty(),
+                pending: Sigpending::new(),
+                cred: Some(Arc::new(MPSafeCell::new(Cred::new(0, 0, 0, 0, 0, 0, 0, 0)))),
+                real_cred: Some(Arc::new(MPSafeCell::new(Cred::new(0, 0, 0, 0, 0, 0, 0, 0)))),
+                start_time: get_time_us() as u64,
+                start_boottime: get_time_us() as u64,
+                on_cpu: false,
+                on_rq: false,
+                cpu: 0,
                 clear_child_tid: 0,
-
-            })
+                personality: 0,
+                comm: [0; 10],
+            }),
         });
         
         // prepare TrapContext in user space
@@ -259,11 +292,9 @@ impl ProcessControlBlock {
             trap_handler as *const () as usize,
         );
         debug!("TaskControlBlock::new: finished creating a new process");
-        
-        proc_control_block.inner.exclusive_access().tasks.push(task_control_block.clone());
         //println!("[kernel] TaskControlBlock::new: created init process with PID {}, main thread TID {}, entry_point={:#x}", proc_control_block.getpid(), task_control_block.gettid(), entry_point);
         // 返回PCB和主线程
-        (proc_control_block, task_control_block)
+        task_control_block
     }
 
         
@@ -1001,5 +1032,5 @@ impl ProcessControlBlockInner {
             info!("mapped: {:#x} -> {:#x}; permission: {:?}", i.get_vpn_range().get_start().0, i.get_vpn_range().get_end().0, i.get_map_permission());
         }
     }
-}
+}*/
 

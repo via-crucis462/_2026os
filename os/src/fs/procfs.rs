@@ -4,15 +4,38 @@ use alloc::string::{String, ToString};
 use crate::fs::{TmpfsDirInode, TmpfsFileInode, stat_to_statx};
 use core::fmt::{self, Write};
 use crate::mm::get_free_frames;
-use crate::task::get_process;
-use crate::process::list_pids;
 use crate::syscall::fs::Statfs;
-use core::sync::atomic::Ordering;
 use alloc::format;
 use crate::mm::MapPermission;
 use crate::fs::DirEntry;
 use crate::process::TaskStatus;
 use crate::fs::ino::get_next_ino;
+
+fn get_task(pid: usize) -> Option<Arc<crate::task::TaskStruct>> {
+    crate::task::manager::TID2TCB
+        .exclusive_access()
+        .values()
+        .find(|task| task.getpid() == pid && task.gettid() == pid)
+        .cloned()
+        .or_else(|| {
+            crate::task::manager::TID2TCB
+                .exclusive_access()
+                .values()
+                .find(|task| task.getpid() == pid)
+                .cloned()
+        })
+}
+
+fn list_process_ids() -> alloc::vec::Vec<usize> {
+    let mut pids = crate::task::manager::TID2TCB
+        .exclusive_access()
+        .values()
+        .map(|task| task.getpid())
+        .collect::<alloc::vec::Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
 
 fn dirent_type_from_mode(mode: u32) -> u8 {
     match mode & 0o170000 {
@@ -50,17 +73,10 @@ fn write_dirents(offset: &mut usize, buf: &mut [u8], entries: &[(String, u32, u8
 }
 
 fn proc_state_char(pid: usize) -> char {
-    let Some(process) = get_process(pid) else {
+    let Some(task) = get_task(pid) else {
         return 'Z';
     };
-    let task = {
-        let inner = process.inner_exclusive_access();
-        inner.tasks.first().cloned()
-    };
-    let Some(task) = task else {
-        return 'Z';
-    };
-    let status = task.inner_exclusive_access().task_status;
+    let status = task.inner_exclusive_access().state;
     match status {
         TaskStatus::Running => 'R',
         TaskStatus::Zombie => 'Z',
@@ -197,24 +213,18 @@ impl ProcStatInode {
 
 impl VfsInode for ProcStatInode {
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        let Some(process) = get_process(self.pid) else {
+        let Some(task) = get_task(self.pid) else {
             return 0;
         };
-        let (pname, ppid) = {
-            let inner = process.inner_exclusive_access();
-            let ppid = inner
-                .parent
-                .as_ref()
-                .and_then(|p| p.upgrade())
-                .map(|parent| parent.getpid())
-                .unwrap_or(0);
-            (inner.pname.clone(), ppid)
+        let ppid = {
+            let inner = task.inner_exclusive_access();
+            inner.parent.upgrade().map_or(0, |parent| parent.getpid())
         };
         let state = proc_state_char(self.pid);
         let stat_line = format!(
             "{} ({}) {} {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
             self.pid,
-            pname,
+            "oscomp_proc",
             state,
             ppid,
         );
@@ -267,13 +277,8 @@ impl VfsInode for OomScoreAdjInode {
         None 
     }
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        // 1. 去进程管理器里获取真实的 PCB
-        let score = if let Some(process) = get_process(self.pid) {
-            // 直接无锁读取里面真实的 oom_score_adj 值！
-            process.oom_score_adj.load(Ordering::SeqCst)
-        } else {
-            0 // 如果进程刚巧退出了，默认返回 0
-        };
+        // 新 TaskStruct 暂未保存 oom_score_adj，兼容性返回默认值 0。
+        let score = 0;
 
         // 2. 格式化为字符串
         let score_str = format!("{}\n", score);
@@ -291,12 +296,7 @@ impl VfsInode for OomScoreAdjInode {
     fn raw_write_at(&self, _offset: usize, buf: &[u8]) -> usize {
         // 1. 解析 LTP 传进来的 "-1000" 等字符串
         let s = core::str::from_utf8(buf).unwrap_or("").trim();
-        if let Ok(score) = s.parse::<i32>() {
-            // 2. 找到对应进程的 PCB，并将值无锁地保存进去！
-            if let Some(process) = get_process(self.pid) {
-                process.oom_score_adj.store(score, Ordering::SeqCst);
-            }
-        }
+        let _ = s.parse::<i32>();
         // 返回写入长度，告知系统调用成功
         buf.len()
     }
@@ -355,10 +355,11 @@ impl VfsInode for ProcMapsInode {
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let mut maps_str = alloc::string::String::new();
         
-        if let Some(process) = crate::task::get_process(self.pid) {
-            let inner = process.inner_exclusive_access();
-            
-            for area in inner.memory_set.areas.iter() {
+        if let Some(task) = get_task(self.pid) {
+            let mm = task.inner_exclusive_access().mm.clone();
+            if let Some(mm) = mm {
+                let memory = mm.exclusive_access();
+                for area in memory.areas.iter() {
                 let start_va: usize = area.vpn_range.get_start().into();
                 let end_va: usize = area.vpn_range.get_end().into();
                 
@@ -373,6 +374,7 @@ impl VfsInode for ProcMapsInode {
                     "{:08x}-{:08x} {}{}{}{} 00000000 00:00 0\n",
                     start_va, end_va, r, w, x, p
                 );
+                }
             }
         }
         
@@ -425,7 +427,7 @@ impl VfsInode for ProcRootInode {
         }
 
         if let Ok(pid) = name.parse::<usize>() {
-            if get_process(pid).is_some() { 
+            if get_task(pid).is_some() { 
                 return Some(Arc::new(
                     ProcPidDirInode {pid, ino: get_next_ino() }
                 ));
@@ -464,7 +466,7 @@ impl VfsInode for ProcRootInode {
                 (name, stat.ino as u32, dirent_type_from_mode(stat.mode))
             })
             .collect();
-        for pid in list_pids() {
+        for pid in list_process_ids() {
             entries.push((pid.to_string(), (10000 + pid) as u32, 4u8));
         }
         entries.sort_by(|left, right| left.0.cmp(&right.0));
@@ -540,16 +542,15 @@ impl ProcStatusInode {
 impl VfsInode for ProcStatusInode {
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
 
-        let process = match get_process(self.pid) {
-            Some(p) => p,
+        let task = match get_task(self.pid) {
+            Some(task) => task,
             None => return 0, 
         };
 
         let (uid, euid, gid, egid, locked_kb) = {
- 
-            let inner = process.inner.exclusive_access(); 
-            let locked_kb = inner.locked_bytes / 1024;
-            (inner.ruid, inner.euid, inner.gid, inner.egid, locked_kb)
+            let cred = task.inner_exclusive_access().cred.clone();
+            let cred = cred.exclusive_access();
+            (cred.uid(), cred.euid(), cred.gid(), cred.egid(), 0)
         };
 
 

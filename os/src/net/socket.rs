@@ -203,7 +203,7 @@ fn readable(&self) -> bool {
             crate::timer::check_timer_cooperative();
             let task = crate::task::current_task().unwrap();
             let task_inner = task.inner_exclusive_access();
-            if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
+            if task_inner.pending.contains(crate::task::SignalFlags::SIGALRM) {
                 drop(task_inner);
                 return EINTR.as_isize() as usize; 
             }
@@ -244,7 +244,7 @@ fn readable(&self) -> bool {
             crate::timer::check_timer_cooperative();
             let task = crate::task::current_task().unwrap();
             let task_inner = task.inner_exclusive_access();
-            if task_inner.signals.contains(crate::task::SignalFlags::SIGALRM) {
+            if task_inner.pending.contains(crate::task::SignalFlags::SIGALRM) {
                 drop(task_inner);
                 return EINTR.as_isize() as usize; 
             }
@@ -614,10 +614,7 @@ impl File for UnixSocket {
             if peer_closed {
                 return 0;
             }
-            let killed = crate::task::current_task()
-                .map(|task| task.inner_exclusive_access().killed)
-                .unwrap_or(false);
-            if killed || check_pending_signal() {
+            if check_pending_signal() {
                 return 0;
             }
             suspend_current_and_run_next();
@@ -668,10 +665,7 @@ impl File for UnixSocket {
             }
             drop(peer_inner);
 
-            let killed = crate::task::current_task()
-                .map(|task| task.inner_exclusive_access().killed)
-                .unwrap_or(false);
-            if killed || check_pending_signal() {
+            if check_pending_signal() {
                 return 0;
             }
             suspend_current_and_run_next();

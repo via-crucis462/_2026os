@@ -89,7 +89,7 @@ pub fn trap_handler() -> ! {
                 0
             };
             if result < 0 {
-                warn!("pid[{}] syscall {} returned error code {}", current_task().unwrap().process().pid.0, cx.x[17], result);
+                warn!("tid[{}] syscall {} returned error code {}", current_task().unwrap().gettid(), cx.x[17], result);
             }
             // cx is changed during sys_exec, so we have to call it again
             //println!("[kernel] syscall: id={}, args={:x?}, ret={:#x}", cx.x[17], [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]], result);
@@ -100,16 +100,19 @@ pub fn trap_handler() -> ! {
             let current_ms = get_time_ms();
             let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
             for pid in expired_pids {
-                if let Some(process) = crate::task::get_process(pid) {
-                    let mut process_inner = process.inner_exclusive_access();
-                    for task in process_inner.tasks.iter() {
-                        let mut task_inner = task.inner_exclusive_access();
-                        task_inner.signals |= crate::task::SignalFlags::SIGALRM;
-                        if task_inner.task_status == crate::task::TaskStatus::Blocked {
-                            task_inner.signal_interrupted = true;
-                            task_inner.task_status = crate::task::TaskStatus::Ready;
-                            crate::task::add_task(Arc::clone(task)); 
-                        }
+                let tasks = crate::task::manager::TID2TCB
+                    .exclusive_access()
+                    .values()
+                    .filter(|task| task.getpid() == pid)
+                    .cloned()
+                    .collect::<alloc::vec::Vec<_>>();
+                for task in tasks {
+                    let mut task_inner = task.inner_exclusive_access();
+                    task_inner.pending.insert(crate::task::SignalFlags::SIGALRM);
+                    if task_inner.state == crate::task::TaskStatus::Blocked {
+                        task_inner.state = crate::task::TaskStatus::Ready;
+                        drop(task_inner);
+                        crate::task::add_task(task);
                     }
                 }
             }
@@ -125,28 +128,33 @@ pub fn trap_handler() -> ! {
                 stval, sepc
             );*/
             let task = current_task().unwrap();
-            let process = task.process(); 
-            let mut process_inner = process.inner_exclusive_access();
+            let (mm, files) = {
+                let task_inner = task.inner_exclusive_access();
+                let Some(mm) = task_inner.mm.as_ref() else {
+                    current_add_signal(SignalFlags::SIGSEGV);
+                    trap_return();
+                };
+                (mm.clone(), task_inner.files.clone())
+            };
+            let mut memory = mm.exclusive_access();
             
             // 【修改 1】：获取当前的栈指针 SP
             let sp = current_trap_cx().x[2];
             //
-            if process_inner.memory_set.handle_cow_fault(stval) {
+            if memory.handle_cow_fault(stval) {
                 info!("[WATCHDOG][COW] : {:#x}, PC: {:#x}", stval, sepc);
-                drop(process_inner);
-                drop(process);
+                drop(memory);
                 drop(task);
-            } else if process_inner.memory_set.handle_page_fault(stval, sp) {
+            } else if memory.handle_page_fault(stval, sp) {
                 info!("[WATCHDOG] : {:#x}, PC: {:#x}", stval, sepc);
                 // 修复成功！释放锁
-                drop(process_inner);
-                drop(process);
+                drop(memory);
                 drop(task);
-            } else if process_inner.memory_set.check_mmap_page_fault(stval){
+            } else if memory.check_mmap_page_fault(stval){
                 error!("[WATCHDOG][BUS] : {:#x}, PC: {:#x}", stval, sepc);
                 error!(
                     "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
-                    crate::task::current_task().unwrap().process().pid.0,
+                    task.getpid(),
                     scause.cause(),
                     current_trap_cx().get_rt(),
                     stval
@@ -156,13 +164,12 @@ pub fn trap_handler() -> ! {
                 error!("[kernel] Stval:  {:#x} (Bad Address)", stval);
                 error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, bad instruction = {:#x}",
                 scause.cause(),
-                current_task().unwrap().process().pid.0,
+                task.getpid(),
                 stval,
                 current_trap_cx().get_rt(),
             );
                 // 触发了文件映射区域的page fault，说明是超出文件大小访问了，发送SIGBUS信号
-                drop(process_inner);
-                drop(process);
+                drop(memory);
                 drop(task);
                 current_add_signal(SignalFlags::SIGBUS);
             } else {
@@ -175,7 +182,9 @@ pub fn trap_handler() -> ! {
                     stval,
                     sp
                 );*/
-                let fd_table = &process_inner.fd_table;
+                drop(memory);
+                let files_guard = files.exclusive_access();
+                let fd_table = &files_guard.fds;
                 let mut uffd_handled = false;
 
                 // 调试：打印 fd_table 中每个条目的文件类型
@@ -200,13 +209,12 @@ pub fn trap_handler() -> ! {
                     }
                 }
                 info!("=== end fd_table dump ===");*/
-                process_inner.info_map_areas();
                 for fd_entry in fd_table.iter() {
                     if let Some(file) = &fd_entry.file {
                         if let Some(uffd) = file.as_any()
                             .downcast_ref::<crate::fs::UserPageFaultInfo>()
                         {
-                            println!("Checking UFFD registered ranges for PID {}...", process.pid.0);
+                            println!("Checking UFFD registered ranges for PID {}...", task.getpid());
                             let in_range = uffd.registered_ranges.lock()
                                 .iter().map(|&(start, len)| {
                                     println!("  Comparing fault address {:#x} with registered range {:#x} - {:#x}", stval, start, start + len);
@@ -221,8 +229,7 @@ pub fn trap_handler() -> ! {
                                 if let Some(handler) = guard.pop_front() {
                                     drop(guard);
                                     let mut h_inner = handler.inner_exclusive_access();
-                                    h_inner.task_status = TaskStatus::Ready;
-                                    h_inner.owner_hart = None;
+                                    h_inner.state = TaskStatus::Ready;
                                     drop(h_inner);
                                     add_task(handler);
                                 }
@@ -235,22 +242,19 @@ pub fn trap_handler() -> ! {
 
                 if uffd_handled {
                     // 释放所有锁，挂起当前缺页线程，等待 UFFDIO_COPY 唤醒
-                    drop(process_inner);
-                    drop(process);
+                    drop(files_guard);
                     drop(task);
                     suspend_current_and_run_next();
                 } else {
                     error!(
                         "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}, sp={:#x}",
-                        crate::task::current_task().unwrap().process().pid.0,
+                        task.getpid(),
                         scause.cause(),
                         current_trap_cx().get_rt(),
                         stval,
                         sp
                     );
-                    process_inner.info_map_areas();
-                    drop(process_inner);
-                    drop(process);
+                    drop(files_guard);
                     drop(task);
                     current_add_signal(SignalFlags::SIGSEGV);
                 }
@@ -259,7 +263,7 @@ pub fn trap_handler() -> ! {
         _ => {
             error!(
                 "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
-                crate::task::current_task().unwrap().process().pid.0,
+                crate::task::current_task().unwrap().getpid(),
                 scause.cause(),
                 current_trap_cx().get_rt(),
                 stval
@@ -269,7 +273,7 @@ pub fn trap_handler() -> ! {
             error!("[kernel] Stval:  {:#x} (Bad Address)", stval);
             error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, bad instruction = {:#x}",
                 scause.cause(),
-                current_task().unwrap().process().pid.0,
+                current_task().unwrap().getpid(),
                 stval,
                 current_trap_cx().get_rt(),
             );
@@ -286,7 +290,12 @@ pub fn trap_handler() -> ! {
 
 // 注意：不用VirtAddr包装，因为sv39要求高位符号扩展
 pub fn current_trap_cx_user_va() -> usize {
-    current_task().unwrap().kernel_stack.get_top() - KERNEL_STACK_SIZE
+    current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .kernel_stack
+        .get_top()
+        - KERNEL_STACK_SIZE
 }
 
 pub fn trap_cx_va_by_tid(tid: usize) -> usize {
@@ -305,34 +314,29 @@ pub fn trap_return() -> ! {
     let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
     
     for pid in expired_pids {
-        if let Some(process) = crate::task::get_process(pid) {
-            let mut process_inner = process.inner_exclusive_access();
-            for task in process_inner.tasks.iter() {
-                let mut task_inner = task.inner_exclusive_access();
-                // 注入 SIGALRM 信号
-                task_inner.signals |= crate::task::SignalFlags::SIGALRM;
-
-                if task_inner.task_status == crate::task::TaskStatus::Blocked {
-                    task_inner.signal_interrupted = true;
-                    task_inner.task_status = crate::task::TaskStatus::Ready;
-                    crate::task::add_task(Arc::clone(task)); 
-                }
+        let tasks = crate::task::manager::TID2TCB
+            .exclusive_access()
+            .values()
+            .filter(|task| task.getpid() == pid)
+            .cloned()
+            .collect::<alloc::vec::Vec<_>>();
+        for task in tasks {
+            let mut task_inner = task.inner_exclusive_access();
+            task_inner.pending.insert(crate::task::SignalFlags::SIGALRM);
+            if task_inner.state == crate::task::TaskStatus::Blocked {
+                task_inner.state = crate::task::TaskStatus::Ready;
+                drop(task_inner);
+                crate::task::add_task(task);
             }
         }
     }
     handle_signals();
-    let term_signal = {
-        let task = current_task().unwrap();
-        let inner = task.inner_exclusive_access();
-        if inner.killed {
-            inner.term_signal.unwrap_or(1)
-        } else {
-            0
-        }
-    };
-    if term_signal != 0 {
-        info!("[SIG PROBE] EXECUTING DEATH SENTENCE FOR PID!");
-        exit_current_and_run_next(-term_signal);
+    let term_signal = current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .term_signal;
+    if let Some(signal) = term_signal {
+        exit_current_and_run_next(-signal);
     }
     set_user_trap_entry();
     let trap_cx_ptr = current_trap_cx_user_va();

@@ -114,6 +114,49 @@ impl MemorySet {
     pub fn brk_index(&self) -> usize {
         self.brk_index
     }
+
+    /// 返回当前 program break，即 brk 区域的字节结束地址。
+    pub fn current_brk(&self) -> usize {
+        self.areas[self.brk_index]
+            .get_vpn_range()
+            .get_end()
+            .0
+            * PAGE_SIZE
+    }
+
+    /// 调整当前任务的 program break。
+    pub fn change_program_brk(&mut self, addr: usize) -> Result<usize, i32> {
+        let current_brk = self.current_brk();
+        if addr == 0 {
+            return Ok(current_brk);
+        }
+
+        let heap_bottom = self.areas[self.brk_index]
+            .get_vpn_range()
+            .get_start()
+            .0
+            * PAGE_SIZE;
+        if addr < heap_bottom {
+            return Err(Errno::ENOMEM.as_isize() as i32);
+        }
+
+        let size = addr as isize - current_brk as isize;
+        if size > 0 && get_free_frames() < (size as usize + PAGE_SIZE - 1) / PAGE_SIZE {
+            return Err(Errno::ENOMEM.as_isize() as i32);
+        }
+
+        let changed = if size < 0 {
+            self.shrink_to(VirtAddr(heap_bottom), VirtAddr(addr))
+        } else {
+            self.append_to(VirtAddr(heap_bottom), VirtAddr(addr));
+            true
+        };
+        if changed {
+            Ok(addr)
+        } else {
+            Err(Errno::ENOMEM.as_isize() as i32)
+        }
+    }
     /// Assume that no conflicts.
     pub fn insert_framed_area(
         &mut self,

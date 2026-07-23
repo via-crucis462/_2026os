@@ -59,8 +59,14 @@ pub const MAP_SHARED_VALIDATE: i32 = 0x03;
 /// 修改断点
 pub fn do_brk(addr: usize) -> Result<usize, i32> {
     let task = current_processor().current().unwrap();
-    let proc = task.process();
-    proc.change_program_brk(addr)
+    let mm = task
+        .inner_exclusive_access()
+        .mm
+        .as_ref()
+        .cloned()
+        .ok_or(crate::syscall::errno::Errno::EINVAL.as_isize() as i32)?;
+    let result = mm.exclusive_access().change_program_brk(addr);
+    result
 }
 
 /// 内存映射逻辑
@@ -74,16 +80,27 @@ pub fn do_mmap(
     offset: usize,                     
 ) -> Result<usize, isize> {
     let task = current_processor().current().unwrap();
-    let proc = task.process();
-    // 继续向下转发
-    proc.mmap(addr, length, prot, flags, file_inner, offset) 
+    let mm = task
+        .inner_exclusive_access()
+        .mm
+        .as_ref()
+        .cloned()
+        .ok_or(crate::syscall::errno::Errno::EINVAL.as_isize())?;
+    let result = mm.exclusive_access().mmap(addr, length, prot, flags, file_inner, offset);
+    result
 }
 
 /// 要求调用者已经完成了参数检查
 pub fn do_munmap(addr: usize, length: usize) -> Result<(), isize> {
     let task = current_processor().current().unwrap();
-    let proc = task.process();
-    proc.munmap(addr, length)
+    let mm = task
+        .inner_exclusive_access()
+        .mm
+        .as_ref()
+        .cloned()
+        .ok_or(crate::syscall::errno::Errno::EINVAL.as_isize())?;
+    let result = mm.exclusive_access().munmap(addr, length);
+    result
 }
 
 // shared映射需要page cache

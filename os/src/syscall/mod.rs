@@ -243,7 +243,8 @@ pub(crate) fn normalize_leading_dot_path(path: String) -> String {
     if !path.starts_with('.') {
         return path;
     }
-    let cwd = current_task().unwrap().process().inner_exclusive_access().cwd.get_full_path();
+    let fs = current_task().unwrap().inner_exclusive_access().fs.clone();
+    let cwd = fs.exclusive_access().get_pwd().get_full_path();
     if path == "." {
         return cwd;
     }
@@ -304,9 +305,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         let inner = process.inner_exclusive_access();
         inner.info_map_areas();
     }*/
-    //println!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, current_task().unwrap().tid.0, syscall_id);
-    //println!("[K] syscall args: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}", args[0], args[1], args[2], args[3], args[4], args[5]);
-    info!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().process().pid.0, current_task().unwrap().tid.0, syscall_id);
+    warn!("[K] hart[{}] PID{} , called syscall {}", get_hart_id(), current_task().unwrap().pid.0, syscall_id);
+    warn!("[K] syscall args: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}", args[0], args[1], args[2], args[3], args[4], args[5]);
+    info!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().getpid(), current_task().unwrap().gettid(), syscall_id);
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
@@ -487,10 +488,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     };
     if syscall_id == SYSCALL_EXIT || syscall_id == SYSCALL_EXIT_GROUP {
         // 进程已经退出，不需要打印日志了
-        println!(
+        /*println!(
             "[K] hart[{}] PID{} , TID{} called syscall {} and exited with code {}", 
-            get_hart_id(), current_task().unwrap().process().pid.0, current_task().unwrap().tid.0, syscall_id, args[0] as i32
-        );
+            get_hart_id(), current_task().unwrap().getpid(), current_task().unwrap().gettid(), syscall_id, args[0] as i32
+        );*/
     }
     /*if ret < 0 {
         println!(
@@ -509,7 +510,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], args[3], args[4], ret
         );*/
-    //println!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
+    warn!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
     info!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().process().pid.0, syscall_id, ret);
     ret
 }

@@ -272,14 +272,16 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
                     return Vec::new();
                 }
                 let task = current_task().unwrap();
-                let process = task.process();
+                let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
+                    return Vec::new();
+                };
                 let trap_cx_va = current_trap_cx_user_va();
                 let Some(trap_cx_pa) = page_table.translate_va(VirtAddr::from(trap_cx_va)) else {
                     return Vec::new();
                 };
                 let sp = trap_cx_pa.get_ref::<TrapContext>().get_sp();
-                let mut proc_inner = process.inner_exclusive_access();
-                if proc_inner.memory_set.handle_page_fault(start, sp) {
+                let mut memory = mm.exclusive_access();
+                if memory.handle_page_fault(start, sp) {
                     let (pte, size) = page_table.find_pte(vpn).unwrap();
                     (pte.ppn(), size)
                 } else {
@@ -363,7 +365,9 @@ pub fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
         warn!("prepare_user_read: token mismatch, token = {:#x}, current_user_token = {:#x}", token, current_user_token());
     }
     let task = current_task().unwrap();
-    let process = task.process();
+    let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
+        return false;
+    };
     #[cfg(target_arch = "riscv64")]
     let sp = {
         let trap_cx_va = current_trap_cx_user_va();
@@ -374,8 +378,10 @@ pub fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
     };
     #[cfg(target_arch = "loongarch64")]
     let sp = crate::task::current_trap_cx().get_sp();
-    let mut proc_inner = process.inner_exclusive_access();
-    proc_inner.memory_set.ensure_readable_user_range(ptr, len, sp)
+    let result = mm
+        .exclusive_access()
+        .ensure_readable_user_range(ptr, len, sp);
+    result
 }
 
 pub fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
@@ -413,7 +419,9 @@ pub fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
         warn!("prepare_user_write: token mismatch, token = {:#x}, current_user_token = {:#x}", token, current_user_token());
     }
     let task = current_task().unwrap();
-    let process = task.process();
+    let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
+        return false;
+    };
     #[cfg(target_arch = "riscv64")]
     let sp = {
         let trap_cx_va = current_trap_cx_user_va();
@@ -425,8 +433,10 @@ pub fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
     };
     #[cfg(target_arch = "loongarch64")]
     let sp = crate::task::current_trap_cx().get_sp();
-    let mut proc_inner = process.inner_exclusive_access();
-    proc_inner.memory_set.ensure_writable_user_range(ptr, len, sp)
+    let result = mm
+        .exclusive_access()
+        .ensure_writable_user_range(ptr, len, sp);
+    result
 }
 
 pub fn translated_byte_buffer_mut(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {

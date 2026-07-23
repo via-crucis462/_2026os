@@ -35,6 +35,28 @@ const O_RDWR: u32 = 0o2;
 use super::errno::Errno::*;
 
 const AT_REMOVEDIR: usize = 0x200;
+
+fn current_files() -> Arc<crate::sync::MPSafeCell<crate::process::FileDescriptorTable>> {
+    current_task().unwrap().inner_exclusive_access().files.clone()
+}
+
+fn current_pwd() -> Arc<Dentry> {
+    let fs = current_task().unwrap().inner_exclusive_access().fs.clone();
+    let pwd = fs.exclusive_access().get_pwd();
+    pwd
+}
+
+fn current_umask() -> u32 {
+    let fs = current_task().unwrap().inner_exclusive_access().fs.clone();
+    let mask = fs.exclusive_access().umask();
+    mask
+}
+
+fn current_euid() -> u32 {
+    let cred = current_task().unwrap().inner_exclusive_access().cred.clone();
+    let euid = cred.exclusive_access().euid();
+    euid
+}
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Statfs {
@@ -60,7 +82,7 @@ pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
             return EFAULT.as_isize();
         }
     };
-    trace!("kernel:pid[{}] sys_statfs path={}", current_task().unwrap().process().pid.0, path_str);
+    trace!("kernel:pid[{}] sys_statfs path={}", current_task().unwrap().getpid(), path_str);
 
     if buf.is_null() {
         return EFAULT.as_isize();
@@ -70,7 +92,7 @@ pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
     } else {
-        current_task().unwrap().process().inner_exclusive_access().cwd.clone()
+        current_pwd()
     };
     let target_dentry = if path_str == "/" {
         crate::fs::ROOT_DENTRY.clone()
@@ -91,15 +113,8 @@ pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
     0 // Success!
 }
 
-fn ensure_fd_slots(inner: &mut crate::process::ProcessControlBlockInner, target_len: usize) {
-    // 上限检查
-    if target_len > inner.fd_rlmt.cur_lmt {
-        warn!("ensure_fd_slots: target_len {} exceeds fd_rlmt {}", target_len, inner.fd_rlmt.cur_lmt);
-        return;
-    }
-    while inner.fd_table.len() < target_len {
-        inner.fd_table.push(crate::process::FileDescriptor::empty());
-    }
+fn ensure_fd_slots(files: &mut crate::process::FileDescriptorTable, target_len: usize) -> bool {
+    files.ensure_slots(target_len)
 }
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
@@ -107,21 +122,21 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         return EFAULT.as_isize();
     }
     let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
-    info!("pid[{}] [sys_write] ENTER fd={}, buf={:#x}, len={}", proc.pid.0, fd, buf as usize, len);
+    let files = current_files();
+    let inner = files.exclusive_access();
+    info!("pid[{}] [sys_write] ENTER fd={}, buf={:#x}, len={}", task.getpid(), fd, buf as usize, len);
     // 检查 FD 是否越界或未打开
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return EBADF.as_isize(); // 注意引入正确的 EBADF 路径
     }
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
-    let status = inner.fd_table[fd].status;
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
+    let status = inner.fds[fd].status;
         drop(inner);
         let is_sock = file.is_socket();
         let nonblock = (status & (O_NONBLOCK | O_NDELAY)) != 0;
     if !is_sock && !file.writable() {
         warn!("pid[{}] [sys_write] EACCES fd={} readable={} writable={}",
-              proc.pid.0, fd, file.readable(), file.writable());
+              task.getpid(), fd, file.readable(), file.writable());
         return EACCES.as_isize(); 
     }
     if is_sock && !file.writable() {
@@ -152,9 +167,9 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         }
     }
     if ax == 0 && len > 0 {
-        warn!("pid[{}] [sys_write] FATAL: Underlying file returned 0 on write! fd={}", proc.pid.0, fd);
+        warn!("pid[{}] [sys_write] FATAL: Underlying file returned 0 on write! fd={}", task.getpid(), fd);
     } else {
-        info!("pid[{}] [sys_write] LEAVE written={}", proc.pid.0, ax);
+        info!("pid[{}] [sys_write] LEAVE written={}", task.getpid(), ax);
     }
   
     ax
@@ -162,15 +177,14 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
 
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
-    let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
-    if fd >= inner.fd_table.len() {
+    let files = current_files();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() {
         return EBADF.as_isize();
     }
-    if let Some(file) = &inner.fd_table[fd].file {
+    if let Some(file) = &inner.fds[fd].file {
         let file = file.clone();
-        let status = inner.fd_table[fd].status;
+        let status = inner.fds[fd].status;
         drop(inner);
         let is_sock = file.is_socket();
         if !is_sock && !file.readable() {
@@ -194,15 +208,14 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     // 防止随机/恶意 iovcnt 导致死循环或 DOS
     const IOV_MAX: usize = 1024;
     let iovcnt = iovcnt.min(IOV_MAX);
-    let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
+    let files = current_files();
+    let inner = files.exclusive_access();
     // fd合法性检查
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
-    let token = inner.memory_set.token();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
+    let token = current_user_token();
     drop(inner);
 
     let mut total_read = 0;
@@ -242,7 +255,6 @@ const AT_FDCWD: isize = -100;
 
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize {
     let task = current_task().unwrap();
-    let proc = task.process();
     let token = current_user_token();
     let path_str = normalize_leading_dot_path(
         if let Some(s) = try_translated_str(token, path) { s } else { return EFAULT.as_isize(); }
@@ -261,13 +273,14 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {
-        proc.inner_exclusive_access().cwd.clone()
+        current_pwd()
     } else {
-        let inner = proc.inner_exclusive_access();
-        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if dirfd < 0 || dirfd as usize >= inner.fds.len() {
             return EBADF.as_isize();
         }
-        if let Some(file) = &inner.fd_table[dirfd as usize].file {
+        if let Some(file) = &inner.fds[dirfd as usize].file {
             if let Some(dentry) = file.get_dentry() {
                 dentry
             } else {
@@ -303,7 +316,8 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
         anon_dentry,
         ));
 
-        let mut inner = proc.inner_exclusive_access();
+        let files = current_files();
+        let mut inner = files.exclusive_access();
         let fd = match inner.alloc_fd() {
             Some(fd) => fd,
             None => return EMFILE.as_isize(),
@@ -311,16 +325,16 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
 
         // 4. 塞入进程的文件描述符表
         inner.set_fd(fd, anon_file, FdFlags::from_bits_truncate(flags as usize), flags as usize);
-        debug!("kernel:pid[{}] sys_openat: O_TMPFILE success fd={}", task.process().pid.0, fd);
+        debug!("kernel:pid[{}] sys_openat: O_TMPFILE success fd={}", task.getpid(), fd);
         
         return fd as isize;
     }
     
     let open_flags = OpenFlags::from_bits_truncate(flags);
-    let mask = mode & !proc.inner_exclusive_access().umask;
+    let mask = mode & !current_umask();
     if let Some(inode) = open_file(start_dentry, path_str.as_str(), open_flags, mask) {
         if open_flags.should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
-            trace!("kernel:pid[{}] VFS: sys_openat failed - '{}' is not a directory", task.process().pid.0, path_str);
+            trace!("kernel:pid[{}] VFS: sys_openat failed - '{}' is not a directory", task.getpid(), path_str);
             return ENOTDIR.as_isize(); // 目标文件不是目录
         }
         let file: Arc<dyn File> = if is_fifo_mode(inode.inode.get_stat().mode) {
@@ -328,7 +342,8 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
         } else {
             inode
         };
-        let mut inner = proc.inner_exclusive_access();
+        let files = current_files();
+        let mut inner = files.exclusive_access();
         let fd = match inner.alloc_fd() {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
@@ -336,15 +351,13 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
         inner.set_fd(fd, file, FdFlags::from_bits_truncate(flags as usize), flags as usize);
         fd as isize
     } else {
-        trace!("kernel:pid[{}] VFS: File '{}' not found", task.process().pid.0, path_str);
-        debug!("kernel:pid[{}] sys_openat: failed path={}", task.process().pid.0, path_str);
+        trace!("kernel:pid[{}] VFS: File '{}' not found", task.getpid(), path_str);
+        debug!("kernel:pid[{}] sys_openat: failed path={}", task.getpid(), path_str);
             ENOENT.as_isize()
     }
 }
 
 pub fn sys_mknod(dirfd: isize, path: *const u8, mode: u32, _dev: u64) -> isize {
-    let task = current_task().unwrap();
-    let proc = task.process();
     let token = current_user_token();
     let path_str = normalize_leading_dot_path(
         if let Some(s) = try_translated_str(token, path) { s } else { return EFAULT.as_isize(); }
@@ -357,13 +370,14 @@ pub fn sys_mknod(dirfd: isize, path: *const u8, mode: u32, _dev: u64) -> isize {
     let start_dentry = if path_str.starts_with('/') {
         ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {
-        proc.inner_exclusive_access().cwd.clone()
+        current_pwd()
     } else {
-        let inner = proc.inner_exclusive_access();
-        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if dirfd < 0 || dirfd as usize >= inner.fds.len() {
             return EBADF.as_isize();
         }
-        if let Some(file) = &inner.fd_table[dirfd as usize].file {
+        if let Some(file) = &inner.fds[dirfd as usize].file {
             if let Some(dentry) = file.get_dentry() {
                 if (dentry.inode.get_stat().mode & S_IFMT) != 0o040000 {
                     return ENOTDIR.as_isize();
@@ -405,17 +419,16 @@ pub fn sys_mknod(dirfd: isize, path: *const u8, mode: u32, _dev: u64) -> isize {
 }
 
 pub fn sys_close(fd: usize) -> isize {
-	info!("kernel:pid[{}] sys_close, aim fd = {}", current_task().unwrap().process().pid.0, fd);
-    let task = current_task().unwrap();
-    let proc = task.process();
-    let mut inner = proc.inner_exclusive_access();
-    if fd >= inner.fd_table.len() {
+	info!("kernel:pid[{}] sys_close, aim fd = {}", current_task().unwrap().getpid(), fd);
+    let files = current_files();
+    let mut inner = files.exclusive_access();
+    if fd >= inner.fds.len() {
         return EBADF.as_isize();
     }
-    if inner.fd_table[fd].file.is_none() {
+    if inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
-    let file_to_close = inner.fd_table[fd].file.take();
+    let file_to_close = inner.fds[fd].file.take();
     inner.clear_fd(fd);
     drop(file_to_close);
     0
@@ -423,23 +436,23 @@ pub fn sys_close(fd: usize) -> isize {
 
 pub fn sys_accessat(dirfd: isize, path: *const u8, mode: u32, _flags: u32) -> isize {
     let task = current_task().unwrap();
-    let proc = task.process();
     let token = current_user_token();
     let path_str = normalize_leading_dot_path(
         if let Some(s) = try_translated_str(token, path) { s } else { return EFAULT.as_isize(); }
     );
-    info!("kernel:pid[{}] sys_accessat: dirfd={}, path={}, mode={}", task.process().pid.0, dirfd, path_str, mode);
+    info!("kernel:pid[{}] sys_accessat: dirfd={}, path={}, mode={}", task.getpid(), dirfd, path_str, mode);
 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {
-        proc.inner_exclusive_access().cwd.clone()
+        current_pwd()
     } else {
-        let inner = proc.inner_exclusive_access();
-        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if dirfd < 0 || dirfd as usize >= inner.fds.len() {
             return EBADF.as_isize();
         }
-        if let Some(file) = &inner.fd_table[dirfd as usize].file {
+        if let Some(file) = &inner.fds[dirfd as usize].file {
             if let Some(dentry) = file.get_dentry() {
                 // 检查 fd 是否指向目录
                 if (dentry.inode.get_stat().mode & 0o170000) != 0o040000 {
@@ -477,16 +490,16 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, mode: u32, _flags: u32) -> is
 }
 
 pub fn sys_pipe(pipe: *mut usize) -> isize {
-	warn!("kernel:pid[{}] sys_pipe", current_task().unwrap().process().pid.0);
+	warn!("kernel:pid[{}] sys_pipe", current_task().unwrap().getpid());
     let task = current_task().unwrap();
-    let proc = task.process();
     let token = current_user_token();
-    let mut inner = proc.inner_exclusive_access();
+    let files = current_files();
+    let mut inner = files.exclusive_access();
     let page_table = crate::mm::PageTable::from_token(token);
     let va = pipe as usize;
     if page_table.translate_va(crate::mm::VirtAddr::from(va)).is_none() ||
        page_table.translate_va(crate::mm::VirtAddr::from(va + 4)).is_none() {
-        trace!("kernel:pid[{}] sys_pipe error point: {:#x}，", task.process().pid.0, va);
+        trace!("kernel:pid[{}] sys_pipe error point: {:#x}，", task.getpid(), va);
           return EFAULT.as_isize();
     }
     let (pipe_read, pipe_write) = make_pipe();
@@ -494,7 +507,7 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
-    warn!("kernel:pid[{}] sys_pipe: allocated read_fd={}", task.process().pid.0, read_fd);
+    warn!("kernel:pid[{}] sys_pipe: allocated read_fd={}", task.getpid(), read_fd);
     inner.set_fd(read_fd, pipe_read, FdFlags::empty(), 0);
     let write_fd = match inner.alloc_fd() {
         Some(fd) => fd,
@@ -502,7 +515,7 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     };
     inner.set_fd(write_fd, pipe_write, FdFlags::empty(), O_WRONLY as usize);
     // 诊断：打印管道 fd 分配
-    warn!("kernel:pid[{}] sys_pipe: allocated write_fd={}", task.process().pid.0, write_fd);
+    warn!("kernel:pid[{}] sys_pipe: allocated write_fd={}", task.getpid(), write_fd);
     // 释放锁，因为下面的write会访问用户锁
     drop(inner);
     // User ABI for pipe is int pipefd[2], i.e. two 32-bit entries.
@@ -518,16 +531,15 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
 }
 
 pub fn sys_dup(fd: usize) -> isize {
-	trace!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().process().pid.0, fd);
+    trace!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().getpid(), fd);
     // warn!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().process().pid.0, fd);
-    let task = current_task().unwrap();
-    let proc = task.process();
-    let mut inner = proc.inner_exclusive_access();
+    let files = current_files();
+    let mut inner = files.exclusive_access();
     // warn!("table len = {}", inner.fd_table.len());
-    if fd >= inner.fd_table.len() {
+    if fd >= inner.fds.len() {
         return EBADF.as_isize();
     }
-    if inner.fd_table[fd].file.is_none() {
+    if inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
     let new_fd =match inner.alloc_fd() {
@@ -535,36 +547,33 @@ pub fn sys_dup(fd: usize) -> isize {
         None => return EMFILE.as_isize(), //   
     };
     // warn!("[kernel] sys_dup: new fd allocated: {}", new_fd);
-    let file = Arc::clone(inner.fd_table[fd].file.as_ref().unwrap());
-    let old_status = inner.fd_table[fd].status;
+    let file = Arc::clone(inner.fds[fd].file.as_ref().unwrap());
+    let old_status = inner.fds[fd].status;
     inner.set_fd(new_fd, file, FdFlags::empty(), old_status);
     new_fd as isize
 }
 
 pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> isize {
     // warn!("[DEBUG VFS] sys_lseek: fd={}, offset={}, whence={}", fd, offset, whence);
-    let token = current_user_token();
-    let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    let files = current_files();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
     
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
     file.lseek(offset, whence)
 }
 pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
-    trace!("kernel:pid[{}] sys_dup2", current_task().unwrap().process().pid.0);
-    let task = current_task().unwrap();
-    let proc = task.process();
-    let mut inner = proc.inner_exclusive_access();
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    trace!("kernel:pid[{}] sys_dup2", current_task().unwrap().getpid());
+    let files = current_files();
+    let mut inner = files.exclusive_access();
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
     
     // 不能超过限制
-    if new_fd >= inner.fd_rlmt.cur_lmt {
+    if new_fd >= crate::process::FileDescriptorTable::DEFAULT_LIMIT {
         return EBADF.as_isize();
     }
 
@@ -572,22 +581,23 @@ pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
         return new_fd as isize;
     }
     
-    ensure_fd_slots(&mut inner, new_fd + 1);
-    let file = Arc::clone(inner.fd_table[fd].file.as_ref().unwrap());
-    let old_status = inner.fd_table[fd].status;
+    if !ensure_fd_slots(&mut inner, new_fd + 1) {
+        return EBADF.as_isize();
+    }
+    let file = Arc::clone(inner.fds[fd].file.as_ref().unwrap());
+    let old_status = inner.fds[fd].status;
     inner.set_fd(new_fd, file, FdFlags::empty(), old_status);
     new_fd as isize
 }
 
 pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     let token = current_user_token();
-    let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
-    if fd >= inner.fd_table.len() {
+    let files = current_files();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() {
         return EBADF.as_isize();
     }
-    if let Some(file) = &inner.fd_table[fd].file {
+    if let Some(file) = &inner.fds[fd].file {
         let file = file.clone();
         drop(inner);
         let mut stat = file.get_stat();
@@ -597,9 +607,6 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
             stat.mtime_sec = msec;
             stat.mtime_nsec = mnsec;
         }
-        let inner = proc.inner_exclusive_access();
-        let token = inner.memory_set.token();
-         drop(inner);
         if !try_translated_write(token, st, stat) {
             return EFAULT.as_isize();
         }
@@ -622,15 +629,15 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
         return EINVAL.as_isize();
     }
     let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
-    info!("pid[{}] [sys_writev] ENTER fd={}, iov_ptr={:#x}, iovcnt={}", proc.pid.0, fd, iov_ptr, iovcnt);
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    let files = current_files();
+    let inner = files.exclusive_access();
+    info!("pid[{}] [sys_writev] ENTER fd={}, iov_ptr={:#x}, iovcnt={}", task.getpid(), fd, iov_ptr, iovcnt);
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
-    let status = inner.fd_table[fd].status;
-    let token = inner.memory_set.token();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
+    let status = inner.fds[fd].status;
+    let token = current_user_token();
     drop(inner);
     if !file.writable() {
         return EACCES.as_isize();
@@ -711,7 +718,7 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
                         total_written as isize
                     };
                 }
-                warn!("pid[{}] [sys_writev] FATAL: Underlying file returned 0 on write! fd={}", proc.pid.0, fd);
+                warn!("pid[{}] [sys_writev] FATAL: Underlying file returned 0 on write! fd={}", task.getpid(), fd);
                 return total_written as isize;
             }
             total_written += written;
@@ -721,13 +728,11 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
             }
         }
     }
-    info!("pid[{}] [sys_writev] LEAVE total_written={}", proc.pid.0, total_written);
+    info!("pid[{}] [sys_writev] LEAVE total_written={}", task.getpid(), total_written);
     total_written as isize
 }
 pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut Statx) -> isize {
-    let task = current_task().unwrap();
     let token = current_user_token();
-    let proc = task.process();
     let path_str = {
         if let Some(s) = try_translated_str(token, path) {
             s
@@ -742,12 +747,13 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
             return EINVAL.as_isize(); // 无效参数 
         }
 
-        let inner = proc.inner_exclusive_access();
-        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if dirfd < 0 || dirfd as usize >= inner.fds.len() {
             return EBADF.as_isize(); 
         }
 
-        if let Some(file) = &inner.fd_table[dirfd as usize].file {
+        if let Some(file) = &inner.fds[dirfd as usize].file {
             if let Some(dentry) = file.get_dentry() {
                 let mut statx_data = dentry.inode.get_statx();
                 // 检查是否有缓存的时间数据，如果有则覆盖 stat 中的时间字段
@@ -769,13 +775,14 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {
-        proc.inner_exclusive_access().cwd.clone()
+        current_pwd()
     } else {
-        let inner = proc.inner_exclusive_access();
-        if dirfd < 0 || dirfd as usize >= inner.fd_table.len() {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if dirfd < 0 || dirfd as usize >= inner.fds.len() {
             return EBADF.as_isize();
         }
-        if let Some(file) = &inner.fd_table[dirfd as usize].file {
+        if let Some(file) = &inner.fds[dirfd as usize].file {
             if let Some(dentry) = file.get_dentry() {
                 dentry
             } else {
@@ -819,12 +826,12 @@ pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
         return path.err().unwrap().as_isize();
     };
 
-    debug!("kernel:pid[{}] sys_mkdir: path={}", current_task().unwrap().process().pid.0, path);
+    debug!("kernel:pid[{}] sys_mkdir: path={}", current_task().unwrap().getpid(), path);
     
     let start = if path.starts_with('/') {
         ROOT_DENTRY.clone()
     } else {
-        current_task().unwrap().process().inner_exclusive_access().cwd.clone()
+        current_pwd()
     };
 
     // 目标存在
@@ -846,7 +853,7 @@ pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
 }
 
 pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_linkat NOT IMPLEMENTED", current_task().unwrap().process().pid.0);
+    trace!("kernel:pid[{}] sys_linkat NOT IMPLEMENTED", current_task().unwrap().getpid());
     ENOSYS.as_isize()
 }
 
@@ -871,18 +878,17 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
         return ENOENT.as_isize();
     }
     // 获取工作路径并查找
-    let task = current_task().unwrap();
-    let proc = task.process();
     let base_dentry = if path_str.starts_with('/') {
         ROOT_DENTRY.clone()
     } else if _dirfd == AT_FDCWD {
-        proc.inner_exclusive_access().cwd.clone()
+        current_pwd()
     } else {
-        let inner = proc.inner_exclusive_access();
-        if _dirfd < 0 || _dirfd as usize >= inner.fd_table.len() {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if _dirfd < 0 || _dirfd as usize >= inner.fds.len() {
             return EBADF.as_isize();
         }
-        if let Some(file) = &inner.fd_table[_dirfd as usize].file {
+        if let Some(file) = &inner.fds[_dirfd as usize].file {
             if let Some(dentry) = file.get_dentry() {
                 dentry
             } else {
@@ -923,14 +929,10 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
     //warn!("sys_fcntl fd={}, cmd={}, arg={:#x}", fd, cmd, arg);
-    let task = current_task().unwrap();
-    let mut inner = task.inner_exclusive_access();
+    let files = current_files();
+    let mut inner = files.exclusive_access();
 
-    let task = current_task().unwrap();
-    let proc = task.process();
-    let mut inner = proc.inner_exclusive_access();
-
-    let fd_valid = fd < inner.fd_table.len() && inner.fd_table[fd].file.is_some();
+    let fd_valid = fd < inner.fds.len() && inner.fds[fd].file.is_some();
     if !fd_valid && cmd != F_DUPFD && cmd != F_DUPFD_CLOEXEC {
         return EBADF.as_isize();
     }
@@ -941,23 +943,25 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
                 return EBADF.as_isize();
             }
             // 防溢出
-            if arg >= inner.fd_rlmt.cur_lmt {
+            if arg >= crate::process::FileDescriptorTable::DEFAULT_LIMIT {
                 return EBADF.as_isize();
             }
             let mut new_fd = arg;
-            while new_fd < inner.fd_table.len() {
-                if inner.fd_table[new_fd].file.is_none() {
+            while new_fd < inner.fds.len() {
+                if inner.fds[new_fd].file.is_none() {
                     break;
                 }
                 new_fd += 1;
             }
             // 再次检查
-            if new_fd >= inner.fd_rlmt.cur_lmt {
+            if new_fd >= crate::process::FileDescriptorTable::DEFAULT_LIMIT {
                 return EBADF.as_isize();
             }
-            ensure_fd_slots(&mut inner, new_fd + 1);
-            let file = Arc::clone(inner.fd_table[fd].file.as_ref().unwrap());
-            let old_status = inner.fd_table[fd].status;
+            if !ensure_fd_slots(&mut inner, new_fd + 1) {
+                return EBADF.as_isize();
+            }
+            let file = Arc::clone(inner.fds[fd].file.as_ref().unwrap());
+            let old_status = inner.fds[fd].status;
             inner.set_fd(
                 new_fd,
                 file,
@@ -967,24 +971,24 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             new_fd as isize
         }
         F_GETFD => {
-            if inner.fd_table[fd].flags.contains(FdFlags::CLOEXEC) { FD_CLOEXEC as isize } else { 0 }
+            if inner.fds[fd].flags.contains(FdFlags::CLOEXEC) { FD_CLOEXEC as isize } else { 0 }
         }
         F_SETFD => {
             if (arg & FD_CLOEXEC) != 0 {
-                inner.fd_table[fd].flags.insert(FdFlags::CLOEXEC);
+                inner.fds[fd].flags.insert(FdFlags::CLOEXEC);
             } else {
-                inner.fd_table[fd].flags.remove(FdFlags::CLOEXEC);
+                inner.fds[fd].flags.remove(FdFlags::CLOEXEC);
             }
             0
         }
-        F_GETFL => inner.fd_table[fd].status as isize,
+        F_GETFL => inner.fds[fd].status as isize,
         F_SETFL => {
-            let old = inner.fd_table[fd].status;
-            inner.fd_table[fd].status = (old & O_ACCMODE) | (arg & !O_ACCMODE);
+            let old = inner.fds[fd].status;
+            inner.fds[fd].status = (old & O_ACCMODE) | (arg & !O_ACCMODE);
             0
         }
         F_GETPIPE_SIZE => {
-            if inner.fd_table[fd].file.as_ref().unwrap().get_stat().mode & S_IFMT != crate::fs::S_IFIFO {
+            if inner.fds[fd].file.as_ref().unwrap().get_stat().mode & S_IFMT != crate::fs::S_IFIFO {
                 return EBADF.as_isize();
             }
             16*4096 as isize
@@ -1015,24 +1019,21 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
     if path_str.len() > 255 {
         return ENAMETOOLONG.as_isize();
     }
-    trace!("kernel:pid[{}] sys_unlinkat dirfd={} path={} flags={:#x}", current_task().unwrap().process().pid.0, dirfd, path_str, flags);
+    trace!("kernel:pid[{}] sys_unlinkat dirfd={} path={} flags={:#x}", current_task().unwrap().getpid(), dirfd, path_str, flags);
 
     let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
-
-    let cwd = inner.cwd.clone();
-    let fd_table_len = inner.fd_table.len();
     let base_dir = if path_str.starts_with('/') {
         ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {
-        cwd.clone() 
+        current_pwd()
     } else {
-        if dirfd < 0 || (dirfd as usize) >= fd_table_len || inner.fd_table[dirfd as usize].file.is_none() {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if dirfd < 0 || (dirfd as usize) >= inner.fds.len() || inner.fds[dirfd as usize].file.is_none() {
             return EBADF.as_isize();
         }
         // 确保 dirfd 指向的是一个目录，否则返回 ENOTDIR
-        let file = inner.fd_table[dirfd as usize].file.as_ref().unwrap().clone();
+        let file = inner.fds[dirfd as usize].file.as_ref().unwrap().clone();
         if let Some(dentry) = file.get_dentry() {
             if (dentry.inode.get_stat().mode & 0o170000) != 0o040000 {
                 return ENOTDIR.as_isize();
@@ -1042,8 +1043,6 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
             return ENOTDIR.as_isize();
         }
     };
-
-    drop(inner);
 
     // 找到目标文件的 dentry
     let target_dentry = base_dir.find_tree(&path_str, false);
@@ -1077,7 +1076,7 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
             return 0;
         } else {
             // 驱动引起的删除不成功
-            error!("kernel:pid[{}] VFS failed to delete '{}'. Underlay FS returned None.", task.process().pid.0, name);
+            error!("kernel:pid[{}] VFS failed to delete '{}'. Underlay FS returned None.", task.getpid(), name);
             return EACCES.as_isize();
         }
     }
@@ -1086,23 +1085,23 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
 pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_sendfile: out_fd={}, in_fd={}, count={}",
-        current_task().unwrap().process().pid.0,
+        current_task().unwrap().getpid(),
         out_fd,
         in_fd,
         count
     );
     let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
+    let files = current_files();
+    let inner = files.exclusive_access();
     // 文件描述符合法性检查
-    if out_fd >= inner.fd_table.len() || in_fd >= inner.fd_table.len() {
+    if out_fd >= inner.fds.len() || in_fd >= inner.fds.len() {
         return EBADF.as_isize();
     }
-    let out_file = match &inner.fd_table[out_fd].file {
+    let out_file = match &inner.fds[out_fd].file {
         Some(file) => file.clone(),
         None => return EBADF.as_isize(),
     };
-    let in_file = match &inner.fd_table[in_fd].file {
+    let in_file = match &inner.fds[in_fd].file {
         Some(file) => file.clone(),
         None => return EBADF.as_isize(),
     };
@@ -1157,7 +1156,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usiz
         total_transferred += written_so_far;
     }
 
-    trace!("kernel:pid[{}] sys_sendfile: transferred={}", task.process().pid.0, total_transferred);
+    trace!("kernel:pid[{}] sys_sendfile: transferred={}", task.getpid(), total_transferred);
     total_transferred as isize
 }
 
@@ -1179,18 +1178,18 @@ pub fn sys_copy_file_range(
 pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
-    if fd >= inner.fd_table.len() {
+    let files = current_files();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() {
         return EBADF.as_isize();
     }
-    if let Some(file) = &inner.fd_table[fd].file {
+    if let Some(file) = &inner.fds[fd].file {
         let file = file.clone();
         drop(inner);
         if !file.readable() {
             return EACCES.as_isize(); // 权限不足
         }
-        trace!("kernel:pid[{}] sys_getdents: fd={}, count={}", task.process().pid.0, fd, count);
+        trace!("kernel:pid[{}] sys_getdents: fd={}, count={}", task.getpid(), fd, count);
         let mut bufs = translated_byte_buffer(token, dirp, count);
         if bufs.is_empty() {
             return EFAULT.as_isize();
@@ -1203,11 +1202,7 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
 
 pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
     let token = current_user_token();
-    let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
-    let path = inner.cwd.get_full_path();
-    drop(inner);
+    let path = current_pwd().get_full_path();
 
     let path_bytes = path.as_bytes();
     if path_bytes.len() + 1 > size {
@@ -1241,15 +1236,12 @@ pub fn sys_chdir(path: *const u8) -> isize {
         return EFAULT.as_isize();
     };
 
-    debug!("kernel:pid[{}] sys_chdir: path={}", current_task().unwrap().process().pid.0, path_str);
+    debug!("kernel:pid[{}] sys_chdir: path={}", current_task().unwrap().getpid(), path_str);
     
     let task = current_task().unwrap();
-    let proc = task.process();
-    let cwd = proc.inner_exclusive_access().cwd.clone();
-    let current_path = {
-        let inner = proc.inner_exclusive_access();
-        inner.cwd.get_full_path()
-    };
+    let fs = task.inner_exclusive_access().fs.clone();
+    let cwd = fs.exclusive_access().get_pwd();
+    let current_path = cwd.get_full_path();
 
     let full_path = if path_str.starts_with('/') {
         path_str // 绝对路径
@@ -1264,8 +1256,7 @@ pub fn sys_chdir(path: *const u8) -> isize {
     };
 
     if let Some(inode) = open_file(cwd, full_path.as_str(), OpenFlags::DIRECTORY,0) {
-        let mut inner = proc.inner_exclusive_access();
-        inner.cwd = inode.get_dentry();
+        fs.exclusive_access().set_pwd(inode.get_dentry());
         0
     } else {
         ENOENT.as_isize() // 目录不存在
@@ -1330,24 +1321,21 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usiz
     let follow_links = (flags & AT_SYMLINK_NOFOLLOW) == 0;
     trace!("kernel:pid[{}] sys_fstatat dirfd={} path={} follow={}", current_task().unwrap().process().pid.0, dirfd, path_str, follow_links);
 
-    let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
-    let cwd = inner.cwd.clone();
-    let fd_table_len = inner.fd_table.len();
+    let cwd = current_pwd();
     //空路径查找文件描述符
     if path_str.is_empty() {
         if (flags & AT_EMPTY_PATH) == 0 {
             return ENOENT.as_isize();
         }
-        if dirfd < 0 || (dirfd as usize) >= fd_table_len {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if dirfd < 0 || (dirfd as usize) >= inner.fds.len() {
             return EBADF.as_isize();
         }
-        let Some(file) = &inner.fd_table[dirfd as usize].file else {
+        let Some(file) = &inner.fds[dirfd as usize].file else {
             return EBADF.as_isize();
         };
         let file = file.clone();
-        drop(inner);
         let mut stat = file.get_stat();
         if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&stat.ino) {
             stat.atime_sec = asec;
@@ -1374,14 +1362,15 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usiz
         cwd.clone()
     } else {
         // 相对路径 + 指定的目录 fd
-        if dirfd < 0 || (dirfd as usize) >= fd_table_len || inner.fd_table[dirfd as usize].file.is_none() {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if dirfd < 0 || (dirfd as usize) >= inner.fds.len() || inner.fds[dirfd as usize].file.is_none() {
             return EBADF.as_isize();
         }
         // 待实现
         cwd.clone()
     };
 
-    drop(inner); 
     // 查找文件（follow_links: stat 跟随符号链接，lstat 不跟随）
     let target_dentry = base_dir.find_tree(&path_str, follow_links);
 
@@ -1412,18 +1401,18 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usiz
 pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
-    if fd >= inner.fd_table.len() {
+    let files = current_files();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() {
         return EBADF.as_isize();
     }
-    if let Some(file) = &inner.fd_table[fd].file {
+    if let Some(file) = &inner.fds[fd].file {
         let file = file.clone();
         drop(inner);
         if !file.readable() {
             return EACCES.as_isize();
         }
-        trace!("kernel:pid[{}] sys_pread64: fd={}, count={}, offset={}", task.process().pid.0, fd, count, offset);
+        trace!("kernel:pid[{}] sys_pread64: fd={}, count={}, offset={}", task.getpid(), fd, count, offset);
         file.pread(offset, UserBuffer::new(translated_byte_buffer(token, buf, count))) as isize
     } else {
         EBADF.as_isize()
@@ -1434,18 +1423,18 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isiz
 pub fn sys_pwrite64(fd: usize, buf: *const u8, count: usize, offset: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
-    let proc = task.process();
-    let inner = proc.inner_exclusive_access();
-    if fd >= inner.fd_table.len() {
+    let files = current_files();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() {
         return EBADF.as_isize();
     }
-    if let Some(file) = &inner.fd_table[fd].file {
+    if let Some(file) = &inner.fds[fd].file {
         let file = file.clone();
         drop(inner);
         if !file.writable() {
             return EACCES.as_isize();
         }
-        trace!("kernel:pid[{}] sys_pwrite64: fd={}, count={}, offset={}", task.process().pid.0, fd, count, offset);
+        trace!("kernel:pid[{}] sys_pwrite64: fd={}, count={}, offset={}", task.getpid(), fd, count, offset);
         file.write_at(offset, UserBuffer::new(translated_byte_buffer(token, buf as *mut u8, count))) as isize
     } else {
         EBADF.as_isize()
@@ -1454,11 +1443,8 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, count: usize, offset: usize) -> i
 
 /// 修改权限模式
 pub fn sys_fchmodat(dirfd: isize, path_ptr: *const u8, mode: u32) -> isize {
-    let task = current_task().unwrap();
-    let process = task.process(); 
-    let mut inner = process.inner_exclusive_access();
-    let token = inner.get_user_token();
-    let euid = inner.euid;
+    let token = current_user_token();
+    let euid = current_euid();
     
     let path = {
         if let Some(s) = try_translated_str(token, path_ptr) {
@@ -1471,20 +1457,20 @@ pub fn sys_fchmodat(dirfd: isize, path_ptr: *const u8, mode: u32) -> isize {
     let base_dir = if path.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {
-        inner.cwd.clone()
+        current_pwd()
     } else {
-        if dirfd < 0 || (dirfd as usize) >= inner.fd_table.len() || inner.fd_table[dirfd as usize].file.is_none() {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if dirfd < 0 || (dirfd as usize) >= inner.fds.len() || inner.fds[dirfd as usize].file.is_none() {
             return EBADF.as_isize();
         }
         // 从 dirfd 对应的目录开始查找
-        if let Some(dentry) = inner.fd_table[dirfd as usize].file.as_ref().and_then(|f| f.get_dentry()) {
+        if let Some(dentry) = inner.fds[dirfd as usize].file.as_ref().and_then(|f| f.get_dentry()) {
             dentry
         } else {
             return EBADF.as_isize();
         }
     };
-    drop(inner);
-
     match base_dir.find_tree(path.as_str(), true) {
         Ok(dentry) => {
             let mut perm = dentry.inode.get_perm();
@@ -1515,16 +1501,15 @@ pub fn sys_fchmodat(dirfd: isize, path_ptr: *const u8, mode: u32) -> isize {
 /// 通过 fd 修改文件权限
 /// Linux: int fchmod(int fd, mode_t mode)
 pub fn sys_fchmod(fd: usize, mode: u32) -> isize {
-    let task = current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
-    let euid = inner.euid;
+    let euid = current_euid();
+    let files = current_files();
+    let inner = files.exclusive_access();
 
-    if fd >= inner.fd_table.len() || inner.fd_table[fd].file.is_none() {
+    if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
 
-    let file = inner.fd_table[fd].file.as_ref().unwrap().clone();
+    let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner);
 
     let dentry = match file.get_dentry() {
@@ -1552,11 +1537,9 @@ pub fn sys_fchmod(fd: usize, mode: u32) -> isize {
 /// 修改所有者/组
 pub fn sys_fchownat(dirfd: isize, path_ptr: *const u8, owner: u32, group: u32) -> isize {
     let task = current_task().unwrap();
-    let process = task.process(); 
-    let mut inner = process.inner_exclusive_access();
-    let token = inner.get_user_token();
-    let euid = inner.euid;
-    info!("pid[{}] sys_fchownat: dirfd={}, owner={}, group={}", task.process().pid.0, dirfd, owner, group);
+    let token = current_user_token();
+    let euid = current_euid();
+    info!("pid[{}] sys_fchownat: dirfd={}, owner={}, group={}", task.getpid(), dirfd, owner, group);
     let path = {
         if let Some(s) = try_translated_str(token, path_ptr) {
             s
@@ -1564,24 +1547,24 @@ pub fn sys_fchownat(dirfd: isize, path_ptr: *const u8, owner: u32, group: u32) -
             return EFAULT.as_isize();
         }
     };
-    info!("pid[{}] sys_fchownat: path '{}'", task.process().pid.0, path);
+    info!("pid[{}] sys_fchownat: path '{}'", task.getpid(), path);
 
     let base_dir = if path.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {
-        inner.cwd.clone()
+        current_pwd()
     } else {
-        if dirfd < 0 || (dirfd as usize) >= inner.fd_table.len() || inner.fd_table[dirfd as usize].file.is_none() {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if dirfd < 0 || (dirfd as usize) >= inner.fds.len() || inner.fds[dirfd as usize].file.is_none() {
             return EBADF.as_isize();
         }
-        if let Some(dentry) = inner.fd_table[dirfd as usize].file.as_ref().and_then(|f| f.get_dentry()) {
+        if let Some(dentry) = inner.fds[dirfd as usize].file.as_ref().and_then(|f| f.get_dentry()) {
             dentry
         } else {
             return EBADF.as_isize();
         }
     };
-    drop(inner);
-
     match base_dir.find_tree(path.as_str(), true) {
         Ok(dentry) => {
             let mut perm = dentry.inode.get_perm();
@@ -1623,15 +1606,14 @@ pub fn sys_fchownat(dirfd: isize, path_ptr: *const u8, owner: u32, group: u32) -
 pub fn sys_fallocate(fd: usize, mode: usize, offset: i64, len: i64) -> isize {
     const FALLOC_FL_KEEP_SIZE: usize = 0x01;
 
-    let task = current_task().unwrap();
-    let process = task.process();
-    let inner = process.inner_exclusive_access();
+    let files = current_files();
+    let inner = files.exclusive_access();
 
-    if fd >= inner.fd_table.len() {
+    if fd >= inner.fds.len() {
         return EBADF.as_isize();
     }
 
-    if let Some(file) = &inner.fd_table[fd].file {
+    if let Some(file) = &inner.fds[fd].file {
         if !file.writable() {
             return EBADF.as_isize();
         }
@@ -1716,8 +1698,7 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
     };
 
     let task = current_task().unwrap();
-    let proc = task.process();
-    let token = proc.inner_exclusive_access().get_user_token();
+    let token = current_user_token();
     let name_str = {
         if let Some(s) = try_translated_str(token, name) {
             s
@@ -1729,7 +1710,8 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
     // 创建 memfd 文件（只创建 inode + dentry，不映射 VPN）
     let file = crate::fs::memfd::create_memfd(&name_str, page_size);
 
-    let mut inner = proc.inner_exclusive_access();
+    let files = current_files();
+    let mut inner = files.exclusive_access();
     let fd = match inner.alloc_fd() {
         Some(fd) => fd,
         None => return EMFILE.as_isize(),
@@ -1737,7 +1719,7 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
     inner.set_fd(fd, file, if flags.contains(MemfdFlags::MFD_CLOEXEC) { FdFlags::CLOEXEC } else { FdFlags::empty() }, 0);
 
     trace!("kernel:pid[{}] sys_memfd_create: name='{}', page_size={:?}, fd={}",
-        task.process().pid.0, name_str, page_size, fd);
+        task.getpid(), name_str, page_size, fd);
     fd as isize
 }
 
@@ -1764,16 +1746,16 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
     let Some(task) = current_task() else {
         return ENOSYS.as_isize();
     };
-    let process = task.process();
     let token = current_user_token();
 
-    let inner = process.inner_exclusive_access();
-    if fd >= inner.fd_table.len() {
+    let files = current_files();
+    let inner = files.exclusive_access();
+    if fd >= inner.fds.len() {
         warn!("vmsplice target fd {} out of range", fd);
         return EBADF.as_isize();
     }
 
-    let fd_entry = &inner.fd_table[fd];
+    let fd_entry = &inner.fds[fd];
     let file = match fd_entry.file.as_ref() {
         Some(f) => f.clone(),
         None => {
@@ -1908,23 +1890,23 @@ pub fn sys_splice(fd_in: usize, off_in: *mut i64, fd_out: usize, off_out: *mut i
         Some(t) => t,
         None => return ENOSYS.as_isize(),
     };
-    let process = task.process();
     let token = current_user_token();
     drop(task);
 
-    let inner = process.inner_exclusive_access();
-    if fd_in >= inner.fd_table.len() || fd_out >= inner.fd_table.len() {
+    let files = current_files();
+    let inner = files.exclusive_access();
+    if fd_in >= inner.fds.len() || fd_out >= inner.fds.len() {
         return EBADF.as_isize();
     }
     //获取输入输出文件和状态
-    let fd_in_entry = &inner.fd_table[fd_in];
+    let fd_in_entry = &inner.fds[fd_in];
     let file_in = match fd_in_entry.file.as_ref() {
         Some(f) => f.clone(),
         None => return EBADF.as_isize(),
     };
     let fd_in_status = fd_in_entry.status;
 
-    let fd_out_entry = &inner.fd_table[fd_out];
+    let fd_out_entry = &inner.fds[fd_out];
     let file_out = match fd_out_entry.file.as_ref() {
         Some(f) => f.clone(),
         None => return EBADF.as_isize(),
@@ -2070,18 +2052,13 @@ pub fn sys_splice(fd_in: usize, off_in: *mut i64, fd_out: usize, off_out: *mut i
     total as isize
 }
 pub fn sys_userfaultfd(_flags: i32) -> isize {
-    let task = match current_task() {
-        Some(t) => t,
-        None => return ENOSYS.as_isize(),
-    };
-    let proc = task.process();
-    let mut inner = proc.inner_exclusive_access();
-
     // 需要 root 权限 (CAP_SYS_PTRACE)
-    if inner.euid != 0 {
+    if current_euid() != 0 {
         return EPERM.as_isize();
     }
 
+    let files = current_files();
+    let mut inner = files.exclusive_access();
     let fd = match inner.alloc_fd() {
         Some(fd) => fd,
         None => return EMFILE.as_isize(),
@@ -2092,7 +2069,6 @@ pub fn sys_userfaultfd(_flags: i32) -> isize {
 pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
-    let proc = task.process();
 
     let target_str = {
         if let Some(s) = try_translated_str(token, target) {
@@ -2111,19 +2087,20 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
     if linkpath_str.is_empty() || target_str.is_empty() {
         return ENOENT.as_isize();
     }
-    debug!("kernel:pid[{}] sys_symlinkat: target={}, linkpath={}", proc.pid.0, target_str, linkpath_str);
+    debug!("kernel:pid[{}] sys_symlinkat: target={}, linkpath={}", task.getpid(), target_str, linkpath_str);
 
     // 解析起始目录
     let start_dentry = if linkpath_str.starts_with('/') {
         ROOT_DENTRY.clone()
     } else if newdirfd == AT_FDCWD {
-        proc.inner_exclusive_access().cwd.clone()
+        current_pwd()
     } else {
-        let inner = proc.inner_exclusive_access();
-        if newdirfd < 0 || newdirfd as usize >= inner.fd_table.len() {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if newdirfd < 0 || newdirfd as usize >= inner.fds.len() {
             return EBADF.as_isize();
         }
-        if let Some(file) = &inner.fd_table[newdirfd as usize].file {
+        if let Some(file) = &inner.fds[newdirfd as usize].file {
             if let Some(dentry) = file.get_dentry() {
                 dentry
             } else {
