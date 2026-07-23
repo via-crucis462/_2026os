@@ -118,10 +118,10 @@ use super::super::super::{
     drivers::{pci, DEVICE_MANAGER}
 };
 lazy_static!(
-    /// SATA AHCI 控制器 MMIO 物理基址。
+    /// SATA AHCI 控制器 MMIO 物理基址
     ///
-    /// 需要保证首次访问在 `search_pci()` 完成之后。该值来自 U-Boot
-    /// 已配置的 BAR0；这里只读验证配置，不重新分配 BAR。
+    /// 需要保证首次访问在 `search_pci()` 完成之后
+    /// 该值来自 U-Boot 已配置的 BAR0；这里只读验证配置，不重新分配 BAR
     pub static ref SATA_AHCI_MMIO_PA: usize = {
         let dm = DEVICE_MANAGER.exclusive_access();
         let sata_block_pci_dev = dm.get_devices().iter()

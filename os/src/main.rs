@@ -189,6 +189,8 @@ fn main_init(hart_id: usize) {
         println!("searching pci...");
         drivers::search_pci();
         println!("done drivers");
+        // 打印ahci控制器信息
+        drivers::board::la2k1000::print_ahci_info();
 
     }
     //#[cfg(target_arch = "riscv64")]
