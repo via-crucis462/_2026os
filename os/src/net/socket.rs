@@ -128,6 +128,9 @@ impl Drop for TcpSocket {
     }
 }
 impl File for TcpSocket {
+    fn info_type(&self) {
+        println!("tcp socket");
+    }
     fn is_socket(&self) -> bool {
         true
     }
@@ -412,6 +415,9 @@ impl UdpSocket {
 }
 // 实现 File trait，使其能放进系统的 fd_table 中
 impl File for UdpSocket {
+    fn info_type(&self) {
+        println!("udp socket");
+    }
     fn is_socket(&self) -> bool { true }
     fn get_flags(&self) -> OpenFlags {
         *self.flags.lock()
@@ -594,6 +600,9 @@ impl UnixSocket {
 }
 
 impl File for UnixSocket {
+    fn info_type(&self) {
+        println!("unix socket");
+    }
     fn readable(&self) -> bool { true }
     fn writable(&self) -> bool { true }
 
@@ -806,6 +815,9 @@ impl RawSocket {
 }
 
 impl File for RawSocket {
+    fn info_type(&self) {
+        println!("raw socket");
+    }
     fn readable(&self) -> bool {
         let mut sockets = SOCKET_SET.exclusive_access();
         let socket = sockets.get_mut::<RawSocketSmol>(self.handle);

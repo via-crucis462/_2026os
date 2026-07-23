@@ -201,6 +201,9 @@ impl BpfMapFile {
 }
 
 impl File for BpfMapFile {
+    fn info_type(&self) {
+        println!("bpfmap");
+    }
     fn readable(&self) -> bool { false }
     fn writable(&self) -> bool { false }
 
@@ -371,6 +374,9 @@ impl BpfProgFile {
 }
 
 impl File for BpfProgFile {
+    fn info_type(&self) {
+        println!("bpfprog");
+    }
     fn readable(&self) -> bool { false }
     fn writable(&self) -> bool { false }
 

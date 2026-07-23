@@ -27,6 +27,7 @@ impl EpollFile {
 }
 
 impl File for EpollFile {
+    fn info_type(&self) { println!("epoll"); }
     fn readable(&self) -> bool { true }
     fn writable(&self) -> bool { false }
     fn read(&self, _buf: UserBuffer) -> usize { 0 }
@@ -66,6 +67,7 @@ impl EventFile {
 }
 
 impl File for EventFile {
+    fn info_type(&self) { println!("eventfd"); }
     fn readable(&self) -> bool { *self.count.lock() > 0 }
     fn writable(&self) -> bool { true }
     fn read(&self, _buf: UserBuffer) -> usize { 0 }

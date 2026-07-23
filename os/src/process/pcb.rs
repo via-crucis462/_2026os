@@ -62,6 +62,13 @@ pub struct FileDescriptorTable {
 impl FileDescriptorTable {
     pub const DEFAULT_LIMIT: usize = 1024;
 
+    pub fn empty() -> Self {
+        Self {
+            fds: Vec::new(),
+            next_fd: 0,
+        }
+    }
+
     pub fn new() -> Self {
         let mut fds = Vec::new();
         fds.push(FileDescriptor::new(Arc::new(Stdin), FdFlags::empty(), 0));

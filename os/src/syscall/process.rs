@@ -316,6 +316,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
 
     // 退出进程  // 先放掉锁，避免后续迭代时死锁
     task.inner_exclusive_access().exit_code = exit_code;
+    drop(task);
 
     info!("[EXIT_GROUP] PID {} tasks cleanup done. Calling exit_current_and_run_next...", pid);
     // 正常的退出流程
@@ -1857,7 +1858,6 @@ const SIGCHLD_NUM: i32 = 17;
 
 /// 等待子进程退出
 pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
-    //warn!("[wait4] Called with pid={}, options={:#x}", pid, options);
     loop {
         let task = current_task().unwrap();
         let proc = task.clone();
@@ -1949,11 +1949,11 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
             continue;
         }else{
             //从父进程的孩子列表里摘除这个僵尸子进程
-            if let Some(idx) = child_idx {
-                 proc_inner.children.remove(idx);
-            }else{
+            let child = if let Some(idx) = child_idx {
+                proc_inner.children.remove(idx)
+            } else {
                 panic!("sys_wait4: logic error, child_pid is set but child_idx is None?");
-            }
+            };
             //println!("[wait4] P{} collected Zombie P{} (code: {})", proc.getpid(), child_pid, exit_code);
             if exit_code_ptr as usize != 0 {
                 //warn!("[wait4] Writing exit code {} to user space for child P{}", exit_code, child_pid);
@@ -2079,14 +2079,10 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
             // 新增：检查是否被信号打断 
             let task_inner = task.inner_exclusive_access();
             let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
-            let unmaskable = task_inner.signals.bits() & ((1 << 8) | (1 << 18)); // SIGKILL(9), SIGSTOP(19)
-            drop(task_inner);
-
-            if pending != 0 || unmaskable != 0 {
                 info!("[wait4] Interrupted by signal! Returning EINTR.");
                 return -4; // -4 对应 EINTR (Interrupted system call)
             }
-
+            return child_pid as isize;
             let mut count = 0;
             loop{
                 // 继续睡眠等待，直到被调度器唤醒

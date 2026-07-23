@@ -853,6 +853,7 @@ impl TaskStruct {
             self.inner_exclusive_access().children.push(child.clone());
         }
         // 注册到全局 TID→TaskStruct 映射，并加入调度就绪队列
+        warn!("do_clone: adding child task with PID {} and TID {}", child.getpid(), child.gettid());
         add_task(child);
 
         // 返回子任务的 PID（父任务视角）
@@ -879,6 +880,13 @@ impl TaskStruct {
         inner.errno = 0;
         inner.state = TaskStatus::Zombie;
         inner.pending = Sigpending::new();
+        inner.mm.take();
+        let files = core::mem::replace(
+            &mut inner.files,
+            Arc::new(MPSafeCell::new(FileDescriptorTable::empty())),
+        );
+        drop(inner);
+        drop(files);
     }
 }
 pub struct TaskStructInner {
