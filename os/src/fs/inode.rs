@@ -105,6 +105,9 @@ impl OSInode {
 }
 
 impl File for OSInode {
+    fn info_type(&self) {
+        println!("osinode");
+    }
     fn readable(&self) -> bool { self.readable }
     fn writable(&self) -> bool { self.writable }
 

@@ -51,8 +51,11 @@ pub fn remove_process(pid: usize) {
             .map(|task| task.gettid())
             .collect::<alloc::vec::Vec<_>>()
     };
-    for tid in tids {
+    for &tid in &tids {
         remove_from_tid2task(tid);
+    }
+
+    for tid in tids.into_iter().chain(core::iter::once(pid)) {
         remove_task_from_all_local_queues_unlocked(tid);
         remove_task_from_global_pool_unlocked(tid);
     }

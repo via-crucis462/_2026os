@@ -21,6 +21,9 @@ struct NamedPipeDuplex {
 }
 
 impl File for NamedPipeDuplex {
+	fn info_type(&self) {
+		println!("namedpipduplex");
+	}
 	fn readable(&self) -> bool { true }
 	fn writable(&self) -> bool { true }
 	fn read(&self, buf: UserBuffer) -> usize { self.read_end.read(buf) }

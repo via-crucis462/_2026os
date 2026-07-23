@@ -114,6 +114,9 @@ impl StandardNetlinkSocket {
 // 实现抽象的 File 特征接口
 
 impl File for StandardNetlinkSocket {
+    fn info_type(&self) {
+        println!("netlink");
+    }
     fn readable(&self) -> bool { !self.rx_buffer.lock().is_empty() }
     fn writable(&self) -> bool { true }
 

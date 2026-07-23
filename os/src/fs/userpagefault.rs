@@ -60,6 +60,9 @@ pub struct UserPageFaultInfo {
     pub block: bool,
 }
 impl File for UserPageFaultInfo {
+    fn info_type(&self) {
+        println!("userpagefault");
+    }
     /// the file readable?
     fn readable(&self) -> bool {
         true

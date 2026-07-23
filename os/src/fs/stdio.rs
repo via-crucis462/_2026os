@@ -29,6 +29,9 @@ pub struct Stdout;
 /// stderr file for putting chars to console
 pub struct Stderr;
 impl File for Stdin {
+    fn info_type(&self) {
+        println!("stdin");
+    }
     fn readable(&self) -> bool {
         true
     }
@@ -72,7 +75,6 @@ impl File for Stdin {
             if let Some(ch) = normalize_console_char(c) {
                 break ch;
             }
-            
             suspend_current_and_run_next();
         }; // 注意这里的最后要加分号
 
@@ -127,6 +129,9 @@ impl File for Stdin {
 }
 
 impl File for Stdout {
+    fn info_type(&self) {
+        println!("stdout");
+    }
     fn readable(&self) -> bool {
         false
     }
@@ -172,6 +177,9 @@ impl File for Stdout {
 }
 
 impl File for Stderr {
+    fn info_type(&self) {
+        println!("stderr");
+    }
     fn readable(&self) -> bool {
         false
     }

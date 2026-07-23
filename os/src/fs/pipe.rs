@@ -169,6 +169,17 @@ pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
 }
 
 impl File for Pipe {
+    fn info_type(&self) {
+        if(self.readable && self.writable) {
+            println!("pipe (read/write)");
+        } else if self.readable {
+            println!("pipe (read)");
+        } else if self.writable {
+            println!("pipe (write)");
+        } else {
+            println!("pipe (closed)");
+        }
+    }
     fn readable(&self) -> bool {
         self.readable
     }
@@ -204,13 +215,55 @@ impl File for Pipe {
             let mut ring_buffer = self.buffer.exclusive_access();
             let loop_read = ring_buffer.available_read();
             if loop_read == 0 {
-                if ring_buffer.all_write_ends_closed() {
-                    return already_read;
-                }
-               //println!("[kernel] Pipe Read Empty: already_read={}, waiting...", already_read);
+                let current_pid = crate::task::current_task().unwrap().getpid();
+                let (writer_observed, writer_actual) = if let Some(writer) =
+                    ring_buffer.write_end.as_ref().and_then(|end| end.upgrade())
+                {
+                    let observed = Arc::strong_count(&writer);
+                    (observed, observed.saturating_sub(1))
+                } else {
+                    (0, 0)
+                };
+                let eof = ring_buffer.all_write_ends_closed();
                 drop(ring_buffer);
-                if check_pending_signal() {
-                    return already_read; 
+                warn!(
+                    "[pipe-read-empty] pid={} avail_read={} writer_observed={} writer_actual={} eof={}",
+                    current_pid,
+                    loop_read,
+                    writer_observed,
+                    writer_actual,
+                    eof,
+                );
+
+                if writer_actual > 0 {
+                    let task = crate::task::current_task().unwrap();
+                    let files = task.inner_exclusive_access().files.clone();
+                    let files = files.exclusive_access();
+                    for (fd, desc) in files.fds.iter().enumerate() {
+                        let Some(file) = &desc.file else {
+                            continue;
+                        };
+                        let Some(pipe) = file.as_any().downcast_ref::<Pipe>() else {
+                            continue;
+                        };
+                        if Arc::ptr_eq(&pipe.buffer, &self.buffer) {
+                            println!(
+                                "[pipe-read-empty] pid={} self-fd={} readable={} writable={} flags={:?} status={:#x} buffer={:p}",
+                                current_pid,
+                                fd,
+                                pipe.readable,
+                                pipe.writable,
+                                desc.flags,
+                                desc.status,
+                                Arc::as_ptr(&pipe.buffer),
+                            );
+                        }
+                    }
+                }
+
+                if eof {
+                    warn!("[pipe-read-empty] pid={} sees EOF", current_pid);
+                    return already_read;
                 }
                 suspend_current_and_run_next();
                 continue;

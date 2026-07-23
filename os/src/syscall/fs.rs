@@ -130,6 +130,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         return EBADF.as_isize(); // 注意引入正确的 EBADF 路径
     }
     let file = inner.fds[fd].file.as_ref().unwrap().clone();
+    //file.info_type();
     let status = inner.fds[fd].status;
         drop(inner);
         let is_sock = file.is_socket();
@@ -176,6 +177,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
 }
 
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
+    warn!("kernel:pid[{}] sys_read, aim fd = {}, buf = {:#x}, len = {}", current_task().unwrap().getpid(), fd, buf as usize, len);
     let token = current_user_token();
     let files = current_files();
     let inner = files.exclusive_access();
@@ -199,6 +201,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
         if (status & (O_NONBLOCK | O_NDELAY)) != 0 && !file.ready_to_read() {
             return EAGAIN.as_isize();
         }
+        //file.info_type();
         file.read(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
     } else {
         EBADF.as_isize() // 文件描述符无效
@@ -636,6 +639,7 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
         return EBADF.as_isize();
     }
     let file = inner.fds[fd].file.as_ref().unwrap().clone();
+    //file.info_type();
     let status = inner.fds[fd].status;
     let token = current_user_token();
     drop(inner);

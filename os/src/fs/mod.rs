@@ -41,6 +41,8 @@ use crate::mm::PhysPageNum;
 
 /// trait File for all file types
 pub trait File: Send + Sync {
+    /// info name
+    fn info_type(&self);
     /// the file readable?
     fn readable(&self) -> bool;
     /// the file writable?
