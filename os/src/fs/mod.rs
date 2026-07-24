@@ -318,10 +318,9 @@ pub trait VfsInode: Send + Sync {
             let page_addr = ppn.0 << PAGE_SIZE_BITS;
             // 检查是否对齐，防止传入的 frame 是大页
             assert!(page_addr % page_size.size() == 0, "Shared page address not aligned to its size");
-            // 将物理页转换为缓冲区
-            let buffer = unsafe { 
-                core::slice::from_raw_parts_mut(page_addr as *mut u8, page_size.size())
-            };
+            // 普通 RAM 必须始终通过 cached 别名访问。FrameTracker::new
+            // 也会通过该别名清零，不能再用裸物理地址写入。
+            let buffer = page.frame.get_bytes_array();
             // 从底层存储读取文件数据到缓存页（必须用 raw_read_at 绕过缓存，
             // 否则当 read_at 本身依赖页缓存时会形成循环调用）
             self.raw_read_at(page_offset * page_size.size(), buffer);

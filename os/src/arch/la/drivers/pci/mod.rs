@@ -74,7 +74,7 @@ impl CSpaceAccessMethod {
         match self {
             CSpaceAccessMethod::MemoryMapped => {
                 // 改为窗口映射后的地址
-                let addr = (addr | UNCHACHED_KERNEL_BASE) as *const u32;
+                let addr = (addr | UNCACHED_KERNEL_BASE) as *const u32;
                 addr.read_volatile()
                 }
         }
@@ -100,7 +100,7 @@ impl CSpaceAccessMethod {
         let addr = loc.encode() + (offset as usize);
         match self {
             CSpaceAccessMethod::MemoryMapped => {
-                let addr = (addr | UNCHACHED_KERNEL_BASE) as *mut u32;
+                let addr = (addr | UNCACHED_KERNEL_BASE) as *mut u32;
                 addr.write_volatile(val);
             }
         }

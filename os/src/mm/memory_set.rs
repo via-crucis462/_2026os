@@ -59,7 +59,8 @@ impl MemorySet {
     #[cfg(target_arch = "loongarch64")]
     fn flush_tlb_after_mapping_change() {
         unsafe {
-            // 映射关系发生变化后，失效陈旧 TLB 项。
+            // 先保证页表写入对重填路径可见，再失效陈旧 TLB 项。
+            asm!("dbar 0");
             asm!("invtlb 0, $r0, $r0");
             asm!("dbar 0");
         }

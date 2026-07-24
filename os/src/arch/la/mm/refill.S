@@ -1,6 +1,5 @@
     .section .text
     .globl tlb_refill_handler
-    .globl csr_info
     # TLB 重填例外入口地址[11:0]位。只读恒为 0，写被忽略
     # 需要 4KB 对齐
     .align 12

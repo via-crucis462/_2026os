@@ -15,7 +15,7 @@ pub static MISC_AFTER_WRITE: AtomicUsize = AtomicUsize::new(0);
 // 摘自手册：当CSR.CRMD的DA=0且PG=1时，处理器核的MMU处于映射地址翻译模式。具体又分为直接映射
 // 地址翻译模式（简称“直接映射模式”）和页表映射地址翻译模式（简称“页表映射模式”）两种。
 // 0x1设置特权级plv0，0x10设置缓存开启
-const DMW0_VAL: usize = UNCHACHED_KERNEL_BASE | 0x1;
+const DMW0_VAL: usize = UNCACHED_KERNEL_BASE | 0x1;
 const DMW1_VAL: usize = CACHED_KERNEL_BASE | 0x11;//0b10001
 //const DMW1_VAL: usize = KERNEL_BASE | 0x1; //暂时不启用缓存
 const DMW2_VAL: usize = 0 | 0x1;
@@ -63,6 +63,9 @@ pub fn la_kernel_init_mem() {
         asm!("csrrd {}, 0x0", out(reg) t);
         t |= 1 << 4;
         t &= !(1 << 3);
+        // TLB 重填会进入 DA=1状态，此时页表 load 的缓存属性来自 DATM。
+        // 设为可缓存，需要内核始终用缓存地址访问页表，否则会出现重填时缓存不一致
+        t = (t & !(0b11 << 7)) | (1 << 7);
         asm!("csrwr {crmd}, 0x0", crmd = inout(reg) t => _);
 
         // 需要注意，2k1000的misc寄存器的ALCL位虽然是0，但实际上不支持非对齐访存
@@ -96,11 +99,17 @@ fn init_tlb() {
         // 清空TLB
         asm!("invtlb 0, $r0, $r0");
     }
-    let cfg01:usize;
-    unsafe{
-        asm!("cpucfg {}, {}", out(reg) cfg01, in(reg) 0x1);
+}
+
+/// Configure the refill page size after early driver initialization and after
+/// invalidating stale entries, immediately before entering user space.
+pub fn prepare_user_tlb() {
+    let mut tlbrehi: usize;
+    unsafe {
+        asm!("csrrd {value}, 0x8e", value = out(reg) tlbrehi);
+        tlbrehi = (tlbrehi & !0x3f) | PAGE_SIZE_BITS;
+        asm!("csrwr {value}, 0x8e", value = inout(reg) tlbrehi => _);
     }
-   debug!("[kernel] cfg01: 0x{:x}", cfg01);
 }
 
 pub fn flush_tlb_for_asid(_asid: usize) {
@@ -108,6 +117,7 @@ pub fn flush_tlb_for_asid(_asid: usize) {
         // Diagnostic fallback: invalidate every cached translation after a
         // mapping change. The ASID-targeted invalidation left a stale invalid
         // entry for a lazily mapped user-stack page on 2K1000.
+        asm!("dbar 0");
         asm!("invtlb 0, $r0, $r0");
         asm!("dbar 0");
     }

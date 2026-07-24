@@ -11,7 +11,7 @@ use spin::Mutex;
 
 use crate::{
     arch::{
-        config::{PAGE_SIZE, SATA_AHCI_MMIO_PA, UNCHACHED_KERNEL_BASE},
+        config::{PAGE_SIZE, SATA_AHCI_MMIO_PA, UNCACHED_KERNEL_BASE},
         drivers::dma::{DmaBuffer, QUEUE_FRAMES},
         timer::get_time_ms,
     }, ext4fs::BLOCK_SZ, mm::PhysAddr
@@ -740,7 +740,7 @@ impl AHCIController {
         }
     }
     pub const fn windowed_base_addr(&self) -> usize {
-        self.base_addr | UNCHACHED_KERNEL_BASE
+        self.base_addr | UNCACHED_KERNEL_BASE
     }
     pub fn reg_read(&self, reg: AHCIReg) -> u32 {
         let reg_addr = self.windowed_base_addr() + reg as usize;
@@ -928,7 +928,7 @@ impl AHCIController {
         // 端口可能被重新初始化，旧的命令、FIS 和数据不能继续交给 HBA
         unsafe {
             core::ptr::write_bytes(
-                (dma_pa.0 | UNCHACHED_KERNEL_BASE) as *mut u8,
+                (dma_pa.get_uncached_addr()) as *mut u8,
                 0,
                 PORT_DMA_SIZE,
             );
@@ -948,7 +948,7 @@ impl AHCIController {
         };
         // 将命令头写入 DMA 区域
         let command_header_va =
-            (layout.command_list.0 | UNCHACHED_KERNEL_BASE) as *mut AHCICommandHeader;
+            (layout.command_list.0 | UNCACHED_KERNEL_BASE) as *mut AHCICommandHeader;
         unsafe {
             core::ptr::write_volatile(command_header_va, command_header);
         }
@@ -1059,7 +1059,7 @@ impl AHCIController {
         if direction == ATADataDirection::D2H {
             unsafe {
                 core::ptr::write_bytes(
-                    (layout.data_buffer.0 | UNCHACHED_KERNEL_BASE) as *mut u8,
+                    (layout.data_buffer.0 | UNCACHED_KERNEL_BASE) as *mut u8,
                     0,
                     transfer_bytes,
                 );
@@ -1068,11 +1068,11 @@ impl AHCIController {
         // 将命令表和命令头写入 DMA 区域
         unsafe {
             core::ptr::write_volatile(
-                (layout.command_table.0 | UNCHACHED_KERNEL_BASE) as *mut AHCICommandTable,
+                (layout.command_table.0 | UNCACHED_KERNEL_BASE) as *mut AHCICommandTable,
                 command_table,
             );
             core::ptr::write_volatile(
-                (layout.command_list.0 | UNCHACHED_KERNEL_BASE) as *mut AHCICommandHeader,
+                (layout.command_list.0 | UNCACHED_KERNEL_BASE) as *mut AHCICommandHeader,
                 command_header,
             );
         }
@@ -1108,7 +1108,7 @@ impl AHCIController {
                 }
                 let command_header = unsafe {
                     core::ptr::read_volatile(
-                        (layout.command_list.0 | UNCHACHED_KERNEL_BASE)
+                        (layout.command_list.0 | UNCACHED_KERNEL_BASE)
                             as *const AHCICommandHeader,
                     )
                 };
@@ -1220,7 +1220,7 @@ impl AHCIController {
         let mut raw_identify = [0u8; 512];
         unsafe {
             core::ptr::copy_nonoverlapping(
-                (layout.data_buffer.0 | UNCHACHED_KERNEL_BASE) as *const u8,
+                (layout.data_buffer.0 | UNCACHED_KERNEL_BASE) as *const u8,
                 raw_identify.as_mut_ptr(),
                 raw_identify.len(),
             );
@@ -1305,7 +1305,7 @@ impl AHCIController {
         )?;
         unsafe {
             core::ptr::copy_nonoverlapping(
-                (layout.data_buffer.0 | UNCHACHED_KERNEL_BASE) as *const u8,
+                (layout.data_buffer.0 | UNCACHED_KERNEL_BASE) as *const u8,
                 buffer.as_mut_ptr(),
                 transfer_bytes,
             );
@@ -1327,7 +1327,7 @@ impl AHCIController {
         unsafe {
             core::ptr::copy_nonoverlapping(
                 buffer.as_ptr(),
-                (layout.data_buffer.0 | UNCHACHED_KERNEL_BASE) as *mut u8,
+                (layout.data_buffer.0 | UNCACHED_KERNEL_BASE) as *mut u8,
                 transfer_bytes,
             );
         }

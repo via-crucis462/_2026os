@@ -150,6 +150,13 @@ pub fn run_tasks() {
                 processor.take_current()
             };
             if let Some(prev_task) = prev_task {
+                /*
+                trace!(
+                    "[kernel] run_tasks: task pid={} tid={} returned to idle context",
+                    prev_task.getpid(),
+                    prev_task.gettid()
+                );
+                */
                 let _dispatch = crate::task::lock_dispatch();
                 let mut prev_inner = prev_task.inner_exclusive_access();
                 let status = prev_inner.task_status;
@@ -179,7 +186,7 @@ pub fn run_tasks() {
             unsafe {
                 asm!("wfi");
             }
-            //trace!("no tasks available in hart {}", hart_id);
+            trace!("no tasks available in hart {}", hart_id);
         }
     }
 }

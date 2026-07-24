@@ -11,14 +11,14 @@ struct UartSbi {
     base_addr: usize,
 }
 
-pub const UART_BASE: usize = UNCHACHED_KERNEL_BASE | super::config::UART_PHYS;
+pub const UART_BASE: usize = UNCACHED_KERNEL_BASE | super::config::UART_PHYS;
 
 /// UART data-register address used by the stackless TLB-refill diagnostic.
 #[no_mangle]
 pub static tlb_refill_debug_uart: usize = UART_BASE;
 
 // ACPI GED寄存器基址，用于电源管理
-pub const ACPI_GED_BASE: usize = UNCHACHED_KERNEL_BASE | 0x100e001c;
+pub const ACPI_GED_BASE: usize = UNCACHED_KERNEL_BASE | 0x100e001c;
 
 lazy_static! {
     static ref UART_SBI: MPSafeCell<UartSbi> = 

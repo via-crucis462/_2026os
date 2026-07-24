@@ -6,23 +6,10 @@
 .macro LOAD_GP n
     ld.d $r\n, $sp, \n*8
 .endm
-.macro RESTORE_DEBUG stage
-    # s0/s1 are restored from TrapContext before ertn, so they can preserve
-    # the restore arguments across the diagnostic call.
-    move $s0, $a0
-    move $s1, $a1
-    li.d $a0, \stage
-    move $a1, $s0
-    move $a2, $s1
-    bl debug_restore
-    move $a0, $s0
-    move $a1, $s1
-.endm
     .section .text.trampoline
     .globl __alltraps
     .globl __restore
     .globl __call_sig_rt
-    .globl csr_info 
     .align 2
 
 __alltraps:
@@ -54,18 +41,15 @@ __alltraps:
     st.d $t2, $sp, 8*3
 
     move $a0, $sp
-    # bl debug_user_trap_entry
     bl trap_handler
 
 # a0: trap_cx_ptr, a1: user_satp
 __restore:
-    # RESTORE_DEBUG 1
     ///一系列csr设置
     la.global $t0, tlb_refill_handler
     csrwr $t0, 0x88 # 设置tlb重填异常处理函数
     move $t0, $a1
     csrwr $t0, 0x19 # 设置低半部为用户根页表
-    # RESTORE_DEBUG 2
     la.global $t0, __alltraps
     csrwr $t0, 0xc # 设置例外入口地址
     ///......

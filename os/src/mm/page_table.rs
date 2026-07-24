@@ -240,7 +240,7 @@ impl PageTable {
             let aligned_pa: PhysAddr = pte.ppn().into();
             assert!(aligned_pa.actual_aligned(size), "translate_va: pa 0x{:x} is not aligned to page size 0x{:x}", aligned_pa.0, size.size());
             let offset = va.actual_page_offset(size);
-            let aligned_pa_usize: usize = aligned_pa.into();
+            let aligned_pa_usize: usize = aligned_pa.get_cached_addr();
             (aligned_pa_usize + offset).into()
         })
     }
@@ -251,7 +251,7 @@ impl PageTable {
     }
     #[cfg(target_arch = "loongarch64")]
     pub fn token(&self) -> usize {
-        PhysAddr::from(self.root_ppn).into()
+        PhysAddr::from(self.root_ppn).0 // 
     }
 }
 
@@ -548,7 +548,7 @@ pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
         let pa = page_table
             .translate_va(start_va)
             .unwrap();
-        let start = pa.0;
+        let start = pa.get_cached_addr();
         let end = start + len;
         for (idx, addr) in (start..end).enumerate() {
             data[idx] = unsafe { *(addr as *const u8) };
@@ -560,7 +560,7 @@ pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
             let Some(pa) = page_table.translate_va(va) else {
                 return None;
             };
-            data[idx] = unsafe { *(pa.0 as *const u8) };
+            data[idx] = unsafe { *(pa.get_cached_addr() as *const u8) };
         }
     }
     Some(unsafe { core::ptr::read(data.as_ptr() as *const T) })
@@ -581,7 +581,7 @@ pub fn try_translated_write<T>(token: usize, ptr: *mut T, value: T) -> bool {
         let pa = page_table
             .translate_va(start_va)
             .unwrap();
-        let start = pa.0;
+        let start = pa.get_cached_addr();
         let end = start + len;
         for (idx, addr) in (start..end).enumerate() {
             unsafe { *(addr as *mut u8) = data[idx] };
@@ -593,7 +593,7 @@ pub fn try_translated_write<T>(token: usize, ptr: *mut T, value: T) -> bool {
             let Some(pa) = page_table.translate_va(va) else {
                 return false;
             };
-            unsafe { *(pa.0 as *mut u8) = data[idx] };
+            unsafe { *(pa.get_cached_addr() as *mut u8) = data[idx] };
         }
     }
 

@@ -2,7 +2,7 @@
 
 pub use crate::timer::*;
 
-use crate::arch::config::UNCHACHED_KERNEL_BASE;
+use crate::arch::config::UNCACHED_KERNEL_BASE;
 use crate::process::manager::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
 use core::arch::asm;
 
@@ -20,7 +20,7 @@ const DEFAULT_TIMER_FREQUENCY: usize = 100_000_000;
 /// QEMU loongarch virt 平台上的 LS7A RTC 物理基地址。
 const LS7A_RTC_REG_BASE_PHYS: usize = 0x100D_0100;
 /// LoongArch 内核通过 uncached 直映窗口访问 MMIO。
-const LS7A_RTC_REG_BASE: usize = UNCHACHED_KERNEL_BASE | LS7A_RTC_REG_BASE_PHYS;
+const LS7A_RTC_REG_BASE: usize = UNCACHED_KERNEL_BASE | LS7A_RTC_REG_BASE_PHYS;
 
 const SYS_TOYREAD0: usize = 0x2C;
 const SYS_TOYREAD1: usize = 0x30;

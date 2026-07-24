@@ -462,7 +462,7 @@ pub fn trap_handler() -> ! {
             }
             #[cfg(board = "virt")]
             net_poll();
-            crate::mm::mmap::tick_sync();
+            // crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
         }
         _ => {
@@ -678,6 +678,7 @@ pub fn trap_return() -> ! {
         asm!("csrwr {}, 0x2", in(reg) euen);
     }
     flush_tlb_for_asid(id);
+    crate::arch::mm::prepare_user_tlb();
     // crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
     trace!("trap_return: going to user mode, satp = 0x{:x}", user_satp);
     extern "C" {
@@ -702,78 +703,6 @@ pub fn trap_return() -> ! {
             in("$a1") user_satp,
             options(noreturn)
         );
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn debug_print(){
-    error!("[kernel] debug_print called");
-}
-
-/// Diagnostic hook called from `__restore` before user registers are restored.
-#[no_mangle]
-pub extern "C" fn debug_restore(stage: usize, trap_cx: *const TrapContext, user_satp: usize) {
-    let (pgdl, eentry, asid): (usize, usize, usize);
-    unsafe {
-        asm!("csrrd {}, 0x19", out(reg) pgdl);
-        asm!("csrrd {}, 0xc", out(reg) eentry);
-        asm!("csrrd {}, 0x18", out(reg) asid);
-    }
-    let cx = unsafe { &*trap_cx };
-    error!(
-        "[kernel] __restore stage={} trap_cx=0x{:x} user_pgdl=0x{:x} csr_pgdl=0x{:x} asid=0x{:x} eentry=0x{:x} user_pc=0x{:x} user_sp=0x{:x}",
-        stage,
-        trap_cx as usize,
-        user_satp,
-        pgdl,
-        asid,
-        eentry,
-        cx.get_rt(),
-        cx.get_sp(),
-    );
-}
-
-static USER_TRAP_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-/// Diagnostic hook called after `__alltraps` has saved a user context.
-#[no_mangle]
-pub extern "C" fn debug_user_trap_entry(trap_cx: *const TrapContext) {
-    let count = USER_TRAP_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
-    if count >= 8 {
-        return;
-    }
-
-    let (estat, era, badv, badi): (usize, usize, usize, usize);
-    unsafe {
-        asm!("csrrd {}, 0x5", out(reg) estat);
-        asm!("csrrd {}, 0x6", out(reg) era);
-        asm!("csrrd {}, 0x7", out(reg) badv);
-        asm!("csrrd {}, 0x8", out(reg) badi);
-    }
-    let cx = unsafe { &*trap_cx };
-    error!(
-        "[kernel] __alltraps #{} trap_cx=0x{:x} estat=0x{:x} era=0x{:x} badv=0x{:x} badi=0x{:x} saved_pc=0x{:x} saved_sp=0x{:x}",
-        count + 1,
-        trap_cx as usize,
-        estat,
-        era,
-        badv,
-        badi,
-        cx.get_rt(),
-        cx.get_sp(),
-    );
-}
-
-#[no_mangle]
-pub  extern "C" fn csr_info(){
-    unsafe {
-        let mut csr: usize;
-        asm!("csrrd {}, 0x8C", out(reg) csr); // TLBRELO0?
-        error!("[kernel] csr_info: TLBRELO0 = 0x{:x}", csr );
-        //11001001001011000110010001
-        asm!("csrrd {}, 0x8D", out(reg) csr); // TLBRELO1?
-        //11001001001110000110010001
-        error!("[kernel] csr_info: TLBRELO1 = 0x{:x}", csr );
     }
 }
 

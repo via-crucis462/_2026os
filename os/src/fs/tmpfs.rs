@@ -148,8 +148,7 @@ impl super::VfsInode for TmpfsFileInode {
         // 如果 mmap 映射的页超出了当前文件大小，Linux 允许直接分配空白页给它
         let frame = frames.entry(page_offset).or_insert_with(|| {
             let f = frame_alloc(Page4K).unwrap();
-            let page_kvaddr = f.ppn.0 << 12;
-            unsafe { core::slice::from_raw_parts_mut(page_kvaddr as *mut u8, PAGE_SIZE).fill(0); }
+            f.get_bytes_array().fill(0);
             f
         });
         let page_cache = crate::mm::mmap::PageCache::new(frame.clone());

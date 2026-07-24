@@ -82,7 +82,7 @@ pub struct DmaBuffer {
 
 impl DmaBuffer {
     pub const fn uncached_ptr(&self) -> *mut u8 {
-        (self.phys_addr.0 | UNCHACHED_KERNEL_BASE) as *mut u8
+        (self.phys_addr.0 | UNCACHED_KERNEL_BASE) as *mut u8
     }
     pub const fn cached_ptr(&self) -> *mut u8 {
         (self.phys_addr.0 | CACHED_KERNEL_BASE) as *mut u8

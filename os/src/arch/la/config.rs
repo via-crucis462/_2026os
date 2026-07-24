@@ -7,7 +7,7 @@ pub use super::mm::info::*;
 
 
 /// kernel address space
-pub const UNCHACHED_KERNEL_BASE: usize = 0x8000_0000_0000_0000;
+pub const UNCACHED_KERNEL_BASE: usize = 0x8000_0000_0000_0000;
 pub const CACHED_KERNEL_BASE: usize = 0x9000_0000_0000_0000;
 /// 可能的映射窗口掩码
 pub const WINDOW_MASK: usize = 0xF000_0000_0000_0000;
