@@ -1,6 +1,5 @@
 pub mod la2k1000;
 pub mod lavirt;
-pub mod rvvirt;
 
 #[cfg(board = "2k1000")]
 pub use la2k1000::*;

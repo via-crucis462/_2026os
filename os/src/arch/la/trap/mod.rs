@@ -237,21 +237,6 @@ fn set_kernel_trap_entry() {
     }
 }
 
-/// 插入__all_trap的地址
-/// 当发生trap时，硬件会切换权限级，这时窗口映射生效
-/// 直接访问0x9开始物理地址即可
-
-/*fn set_user_trap_entry() {
-    let target = __alltraps as *const () as usize;
-    let mut trap: usize = target;
-    unsafe {
-        asm!(
-            "csrwr {trap},0xc",
-            trap = inout(reg) trap,
-        );
-    }
-}*/
-
 /// enable timer interrupt in supervisor mode
 /// 可能有问题，后续修复
 pub fn enable_timer_interrupt() {
@@ -401,7 +386,7 @@ fn debug_dump_brk_snapshot(tag: &str, cx: &TrapContext, token: usize) {
 pub fn trap_handler() -> ! {
     // 设置内核态异常入口，防止嵌套中断时重入 __alltraps 破坏上下文
     set_kernel_trap_entry();
-    //println!("[kernel] called trap_handler");
+    trace!("[kernel] called trap_handler");
     let estat :usize;
     let era :usize;
     let badv :usize;
@@ -431,7 +416,7 @@ pub fn trap_handler() -> ! {
         Cause::Syscall => {
             let mut cx = current_trap_cx();
             let syscall_id = cx.r[11];
-            //println!("[kernel] trap_handler: syscall_id={}, pid={}, tid={}, hart_id={}, era=0x{:x} , ra=0x{:x}, sp=0x{:x}", syscall_id, current_task().unwrap().getpid(), current_tid(), get_hart_id(), cx.get_rt(), cx.r[1], cx.r[2]);
+            trace!("[kernel] trap_handler: syscall_id={}, pid={}, tid={}, hart_id={}, era=0x{:x} , ra=0x{:x}, sp=0x{:x}", syscall_id, current_task().unwrap().getpid(), current_tid(), get_hart_id(), cx.get_rt(), cx.r[1], cx.r[2]);
             let should_trace = is_brk_process() && matches!(syscall_id, SYS_WRITE | SYS_BRK);
             if should_trace {
                  //debug_dump_brk_snapshot("before_syscall", cx, current_user_token());
@@ -481,6 +466,16 @@ pub fn trap_handler() -> ! {
             suspend_current_and_run_next();
         }
         _ => {
+            debug!("[trap] unhandled trap: hart_id={}, estat=0x{:x}, ecode={}(0x{:x}), esubcode=0x{:x}, era=0x{:x}, badv=0x{:x}, badi=0x{:x}",
+                get_hart_id(),
+                estat,
+                ecode_name,
+                ecode,
+                esubcode,
+                era,
+                badv,
+                badi
+            );
             if let Some(task) = current_task() {
                 let proc = task.process();
                 let mut inner = proc.inner_exclusive_access();
@@ -656,8 +651,7 @@ pub fn trap_handler() -> ! {
 /// return to user space
 /// 参考riscv的实现，修改内存相关
 pub fn trap_return() -> ! {
-    //set_user_trap_entry();
-    // 直接用物理地址
+    trace!("[kernel] trap_return: returning to user space");
     handle_signals();
     let term_signal = {
         let task = current_task().unwrap();
@@ -671,6 +665,8 @@ pub fn trap_return() -> ! {
     if term_signal != 0 {
         exit_current_and_run_next(-term_signal);
     }
+
+    // 直接用物理地址
     let trap_cx_ptr = current_trap_cx() as *mut TrapContext;
     let user_satp = current_user_token();
     let id = current_user_asid();
@@ -682,8 +678,8 @@ pub fn trap_return() -> ! {
         asm!("csrwr {}, 0x2", in(reg) euen);
     }
     flush_tlb_for_asid(id);
-//  crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
-    //info!("trap_return: going to user mode, satp = 0x{:x}", user_satp);
+    // crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
+    trace!("trap_return: going to user mode, satp = 0x{:x}", user_satp);
     extern "C" {
         fn __alltraps();
         fn __restore();
@@ -712,6 +708,60 @@ pub fn trap_return() -> ! {
 #[no_mangle]
 pub extern "C" fn debug_print(){
     error!("[kernel] debug_print called");
+}
+
+/// Diagnostic hook called from `__restore` before user registers are restored.
+#[no_mangle]
+pub extern "C" fn debug_restore(stage: usize, trap_cx: *const TrapContext, user_satp: usize) {
+    let (pgdl, eentry, asid): (usize, usize, usize);
+    unsafe {
+        asm!("csrrd {}, 0x19", out(reg) pgdl);
+        asm!("csrrd {}, 0xc", out(reg) eentry);
+        asm!("csrrd {}, 0x18", out(reg) asid);
+    }
+    let cx = unsafe { &*trap_cx };
+    error!(
+        "[kernel] __restore stage={} trap_cx=0x{:x} user_pgdl=0x{:x} csr_pgdl=0x{:x} asid=0x{:x} eentry=0x{:x} user_pc=0x{:x} user_sp=0x{:x}",
+        stage,
+        trap_cx as usize,
+        user_satp,
+        pgdl,
+        asid,
+        eentry,
+        cx.get_rt(),
+        cx.get_sp(),
+    );
+}
+
+static USER_TRAP_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Diagnostic hook called after `__alltraps` has saved a user context.
+#[no_mangle]
+pub extern "C" fn debug_user_trap_entry(trap_cx: *const TrapContext) {
+    let count = USER_TRAP_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
+    if count >= 8 {
+        return;
+    }
+
+    let (estat, era, badv, badi): (usize, usize, usize, usize);
+    unsafe {
+        asm!("csrrd {}, 0x5", out(reg) estat);
+        asm!("csrrd {}, 0x6", out(reg) era);
+        asm!("csrrd {}, 0x7", out(reg) badv);
+        asm!("csrrd {}, 0x8", out(reg) badi);
+    }
+    let cx = unsafe { &*trap_cx };
+    error!(
+        "[kernel] __alltraps #{} trap_cx=0x{:x} estat=0x{:x} era=0x{:x} badv=0x{:x} badi=0x{:x} saved_pc=0x{:x} saved_sp=0x{:x}",
+        count + 1,
+        trap_cx as usize,
+        estat,
+        era,
+        badv,
+        badi,
+        cx.get_rt(),
+        cx.get_sp(),
+    );
 }
 
 #[no_mangle]

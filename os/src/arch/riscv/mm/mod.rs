@@ -1,4 +1,5 @@
 pub mod pte;
+pub mod info;
 
 use core::arch::asm;
 

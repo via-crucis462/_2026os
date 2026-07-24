@@ -65,10 +65,8 @@ pub fn la_kernel_init_mem() {
         t &= !(1 << 3);
         asm!("csrwr {crmd}, 0x0", crmd = inout(reg) t => _);
 
-        // 关闭全部特权级的访存地址对齐检查（CSR.MISC ALCL0~ALCL3，位 12~15）
-        // 2K1000 实机默认开启对齐检查，而 Rust core::fmt 的 format_args!
-        // 在 .rodata 中生成的元数据可能出现非对齐地址，导致 ALE 异常。
-        // 若 LA264 硬件不支持非对齐访存，这些位只读恒为 1，写入无效。
+        // 需要注意，2k1000的misc寄存器的ALCL位虽然是0，但实际上不支持非对齐访存
+        // 下面还是保留设置
         let mut misc: usize;
         asm!("csrrd {}, 0x3", out(reg) misc);
         let misc_old = misc;
@@ -89,7 +87,7 @@ fn init_tlb() {
     unsafe {
         asm!("csrwr {pwcl}, 0x1c", pwcl = inout(reg) PWCL_VAL => _); // PWCL
         asm!("csrwr {pwch}, 0x1d", pwch = inout(reg) PWCH_VAL => _); // PWCH
-        // 写入页大小        
+        // 写入页大小
         asm!("csrwr {pgsz}, 0x1e", pgsz = inout(reg) PAGE_SIZE_BITS => _); // STLBPS
         asm!(
             "csrwr {tlbrfl}, 0x88",
@@ -105,12 +103,12 @@ fn init_tlb() {
    debug!("[kernel] cfg01: 0x{:x}", cfg01);
 }
 
-pub fn flush_tlb_for_asid(asid: usize) {
+pub fn flush_tlb_for_asid(_asid: usize) {
     unsafe {
-        asm!(
-            "invtlb 0x4, {asid}, $r0",
-            asid = in(reg) asid,
-        );
+        // Diagnostic fallback: invalidate every cached translation after a
+        // mapping change. The ASID-targeted invalidation left a stale invalid
+        // entry for a lazily mapped user-stack page on 2K1000.
+        asm!("invtlb 0, $r0, $r0");
         asm!("dbar 0");
     }
 }
@@ -132,4 +130,3 @@ global_asm!(include_str!("refill.S"));
 extern  "C" {
     pub fn tlb_refill_handler();
 }
-

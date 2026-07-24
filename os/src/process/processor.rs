@@ -77,13 +77,22 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 pub fn run_tasks() {
     //println!("run_tasks: current hart id={}", get_hart_id());
     //let mut counter: usize = 0;
-        let hart_id = get_hart_id();
-        info!("[kernel] Hello from hart {}!", hart_id);
+    let hart_id = get_hart_id();
+    info!("[kernel] Hello from hart {}! idle task starting...", hart_id);
+    info!("[kernel] run_tasks: scheduler loop entered; fetching first runnable task");
+    let mut reported_idle = false;
     loop {
         //counter += 1;
         //println!("run_tasks counter: {}", counter);
         let hart_id = get_hart_id();
         if let Some(task) = fetch_task() {
+            reported_idle = false;
+            info!(
+                "[kernel] run_tasks: selected pid={} tid={} on hart {}",
+                task.getpid(),
+                task.gettid(),
+                hart_id
+            );
             let mut processor = current_processor();
             if (task.process().inner_exclusive_access().on_main_hart &&
                 hart_id != MAIN_HART_ID.load(Ordering::Acquire)) {
@@ -122,6 +131,12 @@ pub fn run_tasks() {
                 .map(|task| task.inner_exclusive_access().sched_policy)
                 .unwrap_or(SCHED_OTHER);
             crate::arch::timer::set_next_trigger(sched_policy);
+            info!(
+                "[kernel] run_tasks: switching to pid={} tid={} (policy={})",
+                current_task().unwrap().getpid(),
+                current_task().unwrap().gettid(),
+                sched_policy
+            );
             //debug!("[kernel] hart {}, run_tasks: switching to tid={} of pid={}, main_hart={}", hart_id, current_task().unwrap().tid.0, current_task().unwrap().getpid(), MAIN_HART_ID.load(Ordering::Acquire));
             unsafe {
                 // 切换到下一个任务执行流
@@ -129,6 +144,7 @@ pub fn run_tasks() {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
             // suspend_current_and_run_next以及exit_current_and_run_next会跳到这里
+            info!("[kernel] run_tasks: returned from task context");
             let prev_task = {
                 let mut processor = current_processor();
                 processor.take_current()
@@ -150,6 +166,10 @@ pub fn run_tasks() {
                 // 如果 status 是 Zombie 或 Blocked，什么都不做，自然销毁或等别人唤醒
             }
         } else {
+            if !reported_idle {
+                info!("[kernel] run_tasks: no runnable task; entering idle");
+                reported_idle = true;
+            }
             crate::arch::timer::set_next_trigger(SCHED_OTHER);
             #[cfg(target_arch = "loongarch64")]
             unsafe {
