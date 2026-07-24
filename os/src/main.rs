@@ -187,12 +187,19 @@ fn main_init(hart_id: usize) {
     arch::trap::init();
     #[cfg(target_arch = "loongarch64")]
     {
+        use crate::ext4fs::block_device_test;
+
         println!("searching pci...");
+        // 枚举pci设备
         drivers::search_pci();
         println!("done drivers");
         // 打印ahci控制器信息
         drivers::board::la2k1000::print_ahci_info();
-
+        #[cfg(false)]
+        unsafe {
+            // 测试block device，会破坏磁盘数据，仅供测试
+            block_device_test();
+        }
     }
     //#[cfg(target_arch = "riscv64")]
     #[cfg(board = "virt")]
@@ -207,11 +214,10 @@ fn main_init(hart_id: usize) {
     task::add_initproc();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger(task::manager::SCHED_OTHER);
-    init_other_hart(hart_id);
+    // init_other_hart(hart_id);
     println!("main_init done, run tasks...");
     task::run_tasks();
 }
-
 
 #[cfg(target_arch = "riscv64")]
 fn init_other_hart(hart_id: usize) {

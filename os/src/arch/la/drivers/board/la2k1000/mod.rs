@@ -38,10 +38,10 @@ pub const BLOCK_SZ: usize = 4096;
 use crate::drivers::block::block_cache::get_block_cache;
 impl BlockDevice for SataBlock {
     fn raw_read_block(&self, block_id: usize, buf: &mut [u8]) {
-
+        self.read_block(block_id as u64, buf);
     }
     fn raw_write_block(&self, block_id: usize, buf: &[u8]) {
-
+        self.write_block(block_id as u64, buf);
     }
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
         let cache = get_block_cache(block_id, BLOCK_DEVICE.clone());
@@ -63,15 +63,16 @@ impl BlockDevice for SataBlock {
 /// Test the block device
 pub unsafe fn block_device_test() {
     let mut block_device = BLOCK_DEVICE.as_ref();
-    let mut write_buffer = [0u8; 512];
-    let mut read_buffer = [0u8; 512];
+    let mut write_buffer = [0u8; 4096];
+    let mut read_buffer = [0u8; 4096];
     for i in 0..512 {
         for byte in write_buffer.iter_mut() {
             *byte = i as u8;
         }
-        block_device.write_block(i as usize, &write_buffer);
-        block_device.read_block(i as usize, &mut read_buffer);
+        let wres = block_device.write_block(i as u64, &write_buffer);
+        let rres = block_device.read_block(i as u64, &mut read_buffer);
+        trace!("Block {}: write_result={:?}, read_result={:?}", i, wres, rres);
         assert_eq!(write_buffer, read_buffer);
     }
-    println!("block device test passed!");
+    info!("block device test passed!");
 }

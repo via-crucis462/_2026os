@@ -2,7 +2,7 @@
 //! 各枚举定义了 AHCI 控制器和端口的寄存器偏移
 //! 寄存器偏移的具体值参考 AHCI 规范和 llm 工具
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::{
     hint::spin_loop,
     sync::atomic::{fence, Ordering},
@@ -14,11 +14,25 @@ use crate::{
         config::{PAGE_SIZE, SATA_AHCI_MMIO_PA, UNCHACHED_KERNEL_BASE},
         drivers::dma::{DmaBuffer, QUEUE_FRAMES},
         timer::get_time_ms,
-    },
-    mm::PhysAddr,
+    }, ext4fs::BLOCK_SZ, mm::PhysAddr
 };
 use lazy_static::lazy_static;
 
+
+
+lazy_static! {
+    /// AHCI 控制器实例
+    pub static ref AHCI_CONTROLLER: Mutex<AHCIController> = Mutex::new(
+        AHCIController::new(*SATA_AHCI_MMIO_PA)
+    );
+}
+
+lazy_static! {
+    /// 全局唯一 SATA 块设备实例
+    pub static ref SATA_BLOCK: Arc<SataBlock> = {
+        Arc::new(SataBlock::new())
+    };
+}
 
 
 /// SATA 块设备
@@ -27,6 +41,8 @@ pub struct SataBlock {
     ctl: &'static Mutex<AHCIController>,
     /// 当前块设备对应的 AHCI 端口
     port: AHCIPort,
+    /// 当前端口的逻辑扇区大小，单位字节
+    sector_size: u32,
     // 此锁暂时未使用
     _lock: spin::Mutex<()>,
 }
@@ -37,30 +53,64 @@ impl SataBlock {
             .lock()
             .find_first_sata_disk()
             .expect("No SATA disk found");
-        let block = SataBlock {
+        let mut block = SataBlock {
             ctl: &AHCI_CONTROLLER,
             port,
+            sector_size: 0,
             _lock: spin::Mutex::new(())
         };
         assert!(block.init(), "Failed to initialize SATA port {}", port.0);
         block
     }
     pub fn new_with_port(port: AHCIPort) -> Self {
-        SataBlock {
+        let mut block = SataBlock {
             ctl: &AHCI_CONTROLLER,
             port,
+            sector_size: 0,
             _lock: spin::Mutex::new(())
+        };
+        assert!(block.init(), "Failed to initialize SATA port {}", port.0);
+        block
+    }
+    pub fn init(&mut self) -> bool {
+        let mut ctl = self.ctl.lock();
+        // 初始化端口，返回是否成功
+        if !ctl.init_port(self.port){
+            return false;
+        }
+        // 更新逻辑扇区大小
+        if let Some(sector_size) = ctl.get_port_sector_size(self.port) {
+            self.sector_size = sector_size;
+            true
+        } else {
+            false
         }
     }
-    pub fn init(&self) -> bool {
+    /// 读/写取指定块的数据，返回是否成功
+    /// 块号以内核逻辑块为单位
+    /// 需要内核保证首次调用前先完成初始化
+    /// 
+    /// 读
+    pub fn read_block(&self, block_id: u64, buffer: &mut [u8]) -> bool {
         let mut ctl = self.ctl.lock();
-        ctl.init_port(self.port)
+        match ctl.read_sectors(self.port, block_id * (BLOCK_SZ as u64 / self.sector_size as u64), 8, buffer) {
+            Ok(_) => true,
+            Err(info) => {
+                println!("Error reading block {}: {:?}", block_id, info);
+                false
+            },
+        }
     }
-    pub fn read_block(){
-
-    }
-    pub fn write_block(){
-
+    /// 写
+    pub fn write_block(&self, block_id: u64, buffer: &[u8]) -> bool {
+        let mut ctl = self.ctl.lock();
+        match ctl.write_sectors(self.port, block_id * (BLOCK_SZ as u64 / self.sector_size as u64), 8, buffer) {
+            Ok(_) => true,
+            Err(info) => {
+                println!("Error reading block {}: {:?}", block_id, info);
+                false
+            },
+        }
     }
 }
 
@@ -76,20 +126,50 @@ const COMMAND_LIST_OFFSET: usize = 0x0000;
 const RECEIVED_FIS_OFFSET: usize = 0x0400;
 const COMMAND_TABLE_OFFSET: usize = 0x0500;
 const DATA_BUFFER_OFFSET: usize = 0x1000;
+const DATA_BUFFER_SIZE: usize = PORT_DMA_SIZE - DATA_BUFFER_OFFSET;
+const COMMAND_SLOT: usize = 0;
+const COMMAND_SLOT_MASK: u32 = 1 << COMMAND_SLOT;
+const ATA_COMMAND_TIMEOUT_MS: usize = 5000;
 // PxCMD 寄存器位
 const PXCMD_ST: u32 = 1 << 0;
 const PXCMD_FRE: u32 = 1 << 4;
 const PXCMD_FR: u32 = 1 << 14;
 const PXCMD_CR: u32 = 1 << 15;
-// --- 其他杂项定义 ---
+// PRDT 最大传输字节数，单位为字节
 const PRDT_MAX_BYTE_COUNT: usize = 1 << 22;
+// PRDT 完成后请求端口中断位
 const PRDT_INTERRUPT_ON_COMPLETION: u32 = 1 << 31;
 // Host to Device，从控制器到外设
 const FIS_TYPE_REGISTER_H2D: u8 = 0x27;
+// Device to Host，从外设到控制器
 const FIS_REGISTER_H2D_COMMAND: u8 = 1 << 7;
+// LBA 模式标志位
+// 置1 表示让磁盘把 FIS 中的 lba0..lba5 按 LBA 地址解释
+// 置0 表示旧 CHS 模式，按机械硬盘的 柱面/磁头/扇区 解释
 const ATA_DEVICE_LBA: u8 = 1 << 6;
+// LBA48
 const ATA_LBA48_LIMIT: u64 = 1 << 48;
+// LBA48 模式下每个命令最多传输的扇区数
 const ATA_LBA48_MAX_SECTORS_PER_COMMAND: u32 = 1 << 16;
+// ATA 命令码
+const ATA_COMMAND_IDENTIFY_DEVICE: u8 = 0xEC;   // 获取设备标识
+const ATA_COMMAND_READ_DMA_EXT: u8 = 0x25;      // 读取 DMA 扩展
+const ATA_COMMAND_WRITE_DMA_EXT: u8 = 0x35;     // 写入 DMA 扩展
+// FIS 长度，以 DWORD 为单位，固定为 5
+const AHCI_COMMAND_FIS_DWORDS: u16 = 5;
+// Header.flags 中的 W 位，表示数据方向，1 表示写到设备，0 表示从设备读取
+const AHCI_COMMAND_HEADER_WRITE: u16 = 1 << 6;
+// IS 寄存器命令错误掩码
+const PXIS_COMMAND_ERROR_MASK: u32 = (1 << 30)
+    | (1 << 29)
+    | (1 << 28)
+    | (1 << 27)
+    | (1 << 26)
+    | (1 << 24);
+const ATA_STATUS_ERR: u32 = 1 << 0; // 错误标志，命令执行失败
+const ATA_STATUS_DRQ: u32 = 1 << 3; // 请求数据传输阶段标志
+const ATA_STATUS_DF: u32 = 1 << 5;  // 设备故障标志，命令执行失败
+const ATA_STATUS_BSY: u32 = 1 << 7; // 设备忙标志，正在处理命令
 
 /// AHCI Command Header
 ///
@@ -207,7 +287,7 @@ impl AHCIRegisterH2DFIS {
     /// LBA48 即 48 位逻辑块寻址模式
     ///
     /// 构造读写磁盘的请求
-    /// 
+    ///
     /// lba：起始ATA/SATA 协议逻辑块号
     /// - 这里的 Block 实际上就是 Sector
     /// sector_count：每个块的扇区数，最大为 65536
@@ -300,7 +380,43 @@ impl AHCIPRDTEntry {
     }
 }
 
+// 确认布局符合预期
 const _: () = assert!(core::mem::size_of::<AHCIPRDTEntry>() == 16);
+
+/// slot 0 使用的 AHCI Command Table
+///
+/// CFIS 从偏移 0x00 开始，PRDT 从偏移 0x80 开始
+/// 当前实现只使用一个 PRDT Entry，因此结构体大小为 0x90
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AHCICommandTable {
+    /// Command FIS 的前 20 B
+    command_fis: AHCIRegisterH2DFIS,
+    /// CFIS 区域剩余空间，使整个 CFIS 区域达到 64 B
+    command_fis_reserved: [u8; 44],
+    /// ATAPI Command 区域，普通 ATA 磁盘保持为 0
+    atapi_command: [u8; 16],
+    /// 偏移 0x50-0x7f 的保留区域
+    reserved: [u8; 48],
+    /// 从偏移 0x80 开始的 PRDT，当前只使用一个物理连续数据区域
+    prdt: [AHCIPRDTEntry; 1],
+}
+
+// 确认布局符合预期
+const _: () = assert!(core::mem::size_of::<AHCICommandTable>() == 0x90);
+const _: () = assert!(core::mem::offset_of!(AHCICommandTable, prdt) == 0x80);
+const _: () = assert!(COMMAND_TABLE_OFFSET % 128 == 0);
+const _: () = assert!(
+    COMMAND_TABLE_OFFSET + core::mem::size_of::<AHCICommandTable>() <= DATA_BUFFER_OFFSET
+);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ATADataDirection {
+    // Device to Host
+    D2H,
+    // Host to Device
+    H2D,
+}
 
 /// 单个端口所使用的 DMA 区域布局
 ///
@@ -337,19 +453,6 @@ impl AHCIPortDmaLayout {
             data_buffer: PhysAddr(base.0 + DATA_BUFFER_OFFSET),
         }
     }
-}
-
-lazy_static! {
-    /// AHCI 控制器实例
-    pub static ref AHCI_CONTROLLER: Mutex<AHCIController> = Mutex::new(
-        AHCIController::new(*SATA_AHCI_MMIO_PA)
-    );
-}
-
-lazy_static! {
-    pub static ref SATA_BLOCK: Arc<SataBlock> = {
-        Arc::new(SataBlock::new())
-    };
 }
 
 /// AHCI HBA 全局寄存器，相对控制器 MMIO 基址的 32 位偏移
@@ -572,6 +675,20 @@ impl TryFrom<u32> for AHCIDevType {
     }
 }
 
+/// IDENTIFY DEVICE 返回的磁盘信息
+#[derive(Debug, Clone)]
+pub struct ATAIdentifyInfo {
+    pub serial_number: String,
+    pub firmware_revision: String,
+    pub model_number: String,
+    /// 磁盘包含的逻辑扇区总数
+    pub logical_sector_count: u64,
+    /// 每个逻辑扇区的字节数
+    pub logical_sector_size: u32,
+    pub supports_dma: bool,
+    pub supports_lba48: bool,
+}
+
 #[derive(Debug)]
 pub struct AHCIError {
     /// 发生错误时的端口寄存器快照
@@ -579,6 +696,24 @@ pub struct AHCIError {
     /// 数组下标为寄存器相对端口基址的字节偏移除以 4
     /// 未在 AHCIPortReg::ALL 中列出的保留位置保持为 0
     pub regs: [u32; 0x44 / 4],
+}
+
+/// ATA 命令构造、提交或执行阶段的错误
+#[derive(Debug)]
+pub enum AHCICommandError {
+    InvalidArgument(&'static str),
+    PortNotInitialized,
+    Unsupported(&'static str),
+    Timeout {
+        phase: &'static str,
+        state: AHCIError,
+    },
+    DeviceError(AHCIError),
+    ShortTransfer {
+        expected: usize,
+        actual: usize,
+        state: AHCIError,
+    },
 }
 
 
@@ -591,6 +726,8 @@ pub struct AHCIController {
     dma_buffers: Vec<DmaBuffer>,
     /// 每个端口对应的 DMA 区域物理基址，用于复用已分配的端口内存
     port_dma_bases: [Option<PhysAddr>; AHCI_MAX_PORTS],
+    /// 每个端口通过 IDENTIFY DEVICE 读取的设备信息
+    identify_info: [Option<ATAIdentifyInfo>; AHCI_MAX_PORTS],
 }
 
 impl AHCIController {
@@ -599,6 +736,7 @@ impl AHCIController {
             base_addr,
             dma_buffers: Vec::new(),
             port_dma_bases: [None; AHCI_MAX_PORTS],
+            identify_info: core::array::from_fn(|_| None),
         }
     }
     pub const fn windowed_base_addr(&self) -> usize {
@@ -828,16 +966,406 @@ impl AHCIController {
             (layout.received_fis.0 >> 32) as u32,
         );
     }
+    /// 错误时调用，读取端口寄存器状态，返回 AHCIError
+    fn command_error_state(&self, port: AHCIPort) -> AHCIError {
+        AHCIError {
+            regs: self.port_regs_read(port),
+        }
+    }
+    /// 获取端口的 DMA 区域布局
+    fn port_dma_layout(
+        &self,
+        port: AHCIPort,
+    ) -> Result<AHCIPortDmaLayout, AHCICommandError> {
+        let port_index = usize::try_from(port.0)
+            .ok()
+            .filter(|&index| index < AHCI_MAX_PORTS)
+            .ok_or(AHCICommandError::InvalidArgument("AHCI port is out of range"))?;
+        self.port_dma_bases[port_index]
+            .map(AHCIPortDmaLayout::from_base)
+            .ok_or(AHCICommandError::PortNotInitialized)
+    }
+    /// 等待 ATA 命令完成，检查错误状态
+    ///
+    /// 确保 slot 0 空闲且 ATA Task File 不处于 BSY/DRQ 状态
+    fn wait_command_ready(&self, port: AHCIPort) -> Result<(), AHCICommandError> {
+        let start_ms = get_time_ms();
+        loop {
+            let ci = self.port_reg_read(port, AHCIPortReg::Ci);
+            let sact = self.port_reg_read(port, AHCIPortReg::Sact);
+            let tfd = self.port_reg_read(port, AHCIPortReg::Tfd);
+            if ci == 0
+                && sact == 0
+                && tfd & (ATA_STATUS_BSY | ATA_STATUS_DRQ) == 0
+            {
+                return Ok(());
+            }
+            if get_time_ms().saturating_sub(start_ms) >= ATA_COMMAND_TIMEOUT_MS {
+                return Err(AHCICommandError::Timeout {
+                    phase: "waiting for slot 0 and ATA device ready",
+                    state: self.command_error_state(port),
+                });
+            }
+            spin_loop();
+        }
+    }
+    /// 发送 ATA 命令，返回 DMA 布局或错误
+    ///
+    /// 等待命令完成，检查错误状态后才返回
+    fn issue_ata_command(
+        &self,
+        port: AHCIPort,
+        fis: AHCIRegisterH2DFIS,
+        direction: ATADataDirection,
+        transfer_bytes: usize,
+    ) -> Result<AHCIPortDmaLayout, AHCICommandError> {
+        if transfer_bytes == 0 || transfer_bytes > DATA_BUFFER_SIZE {
+            return Err(AHCICommandError::InvalidArgument(
+                "ATA transfer does not fit in the port data buffer",
+            ));
+        }
+        let layout = self.port_dma_layout(port)?;
+        let cmd = self.port_reg_read(port, AHCIPortReg::Cmd);
+        if cmd & (PXCMD_ST | PXCMD_FRE) != (PXCMD_ST | PXCMD_FRE) {
+            return Err(AHCICommandError::PortNotInitialized);
+        }
+        self.wait_command_ready(port)?;
+        // 构造 PRDT，Command Table 和 Command Header，写入相应 DMA 区域
+        let prd = AHCIPRDTEntry::new(layout.data_buffer, transfer_bytes, false).ok_or(
+            AHCICommandError::InvalidArgument("invalid PRDT address or transfer length"),
+        )?;
+        let command_table = AHCICommandTable {
+            command_fis: fis,
+            command_fis_reserved: [0; 44],
+            atapi_command: [0; 16],
+            reserved: [0; 48],
+            prdt: [prd],
+        };
+        let header_flags = AHCI_COMMAND_FIS_DWORDS
+            | if direction == ATADataDirection::H2D {
+                AHCI_COMMAND_HEADER_WRITE
+            } else {
+                0
+            };
+        let command_header = AHCICommandHeader {
+            flags: header_flags,
+            prdt_length: 1,
+            prd_byte_count: 0,
+            command_table_base: layout.command_table.0 as u32,
+            command_table_base_upper: (layout.command_table.0 >> 32) as u32,
+            reserved: [0; 4],
+        };
+        // 读操作先清空数据区域，误用上一次命令残留的数据
+        if direction == ATADataDirection::D2H {
+            unsafe {
+                core::ptr::write_bytes(
+                    (layout.data_buffer.0 | UNCHACHED_KERNEL_BASE) as *mut u8,
+                    0,
+                    transfer_bytes,
+                );
+            }
+        }
+        // 将命令表和命令头写入 DMA 区域
+        unsafe {
+            core::ptr::write_volatile(
+                (layout.command_table.0 | UNCHACHED_KERNEL_BASE) as *mut AHCICommandTable,
+                command_table,
+            );
+            core::ptr::write_volatile(
+                (layout.command_list.0 | UNCHACHED_KERNEL_BASE) as *mut AHCICommandHeader,
+                command_header,
+            );
+        }
+        // 向设备发送请求并轮询等待至完成
+        // 清除上一条命令的状态，再确保描述符和写数据先于 PxCI 对 HBA 可见
+        self.port_reg_write(port, AHCIPortReg::Is, u32::MAX);
+        self.port_reg_write(port, AHCIPortReg::Serr, u32::MAX);
+        fence(Ordering::SeqCst);
+        // 通知设备执行 slot 0 的命令
+        self.port_reg_write(port, AHCIPortReg::Ci, COMMAND_SLOT_MASK);
+        // 等待
+        let start_ms = get_time_ms();
+        loop {
+            let interrupt_status = self.port_reg_read(port, AHCIPortReg::Is);
+            if interrupt_status & PXIS_COMMAND_ERROR_MASK != 0 {
+                let state = self.command_error_state(port);
+                let serr = self.port_reg_read(port, AHCIPortReg::Serr);
+                self.port_reg_write(port, AHCIPortReg::Is, interrupt_status);
+                self.port_reg_write(port, AHCIPortReg::Serr, serr);
+                return Err(AHCICommandError::DeviceError(state));
+            }
+            // slot 0 命令已完成，DMA 传输完成
+            // 现在 DMA 区域的数据已经写入磁盘或从磁盘读取完成
+            if self.port_reg_read(port, AHCIPortReg::Ci) & COMMAND_SLOT_MASK == 0 {
+                fence(Ordering::SeqCst);
+                let tfd = self.port_reg_read(port, AHCIPortReg::Tfd);
+                let serr = self.port_reg_read(port, AHCIPortReg::Serr);
+                if tfd & (ATA_STATUS_ERR | ATA_STATUS_DF) != 0 || serr != 0 {
+                    let state = self.command_error_state(port);
+                    self.port_reg_write(port, AHCIPortReg::Is, interrupt_status);
+                    self.port_reg_write(port, AHCIPortReg::Serr, serr);
+                    return Err(AHCICommandError::DeviceError(state));
+                }
+                let command_header = unsafe {
+                    core::ptr::read_volatile(
+                        (layout.command_list.0 | UNCHACHED_KERNEL_BASE)
+                            as *const AHCICommandHeader,
+                    )
+                };
+                if command_header.prd_byte_count as usize != transfer_bytes {
+                    let state = self.command_error_state(port);
+                    self.port_reg_write(port, AHCIPortReg::Is, interrupt_status);
+                    return Err(AHCICommandError::ShortTransfer {
+                        expected: transfer_bytes,
+                        actual: command_header.prd_byte_count as usize,
+                        state,
+                    });
+                }
+                self.port_reg_write(port, AHCIPortReg::Is, interrupt_status);
+                return Ok(layout);
+            }
+            // 超时处理
+            if get_time_ms().saturating_sub(start_ms) >= ATA_COMMAND_TIMEOUT_MS {
+                return Err(AHCICommandError::Timeout {
+                    phase: "waiting for PxCI slot 0 completion",
+                    state: self.command_error_state(port),
+                });
+            }
+            spin_loop();
+        }
+    }
+    /// 获取标识信息中指定位置的单个词（16 位）
+    fn identify_word(data: &[u8; 512], word_index: usize) -> u16 {
+        u16::from_le_bytes([data[word_index * 2], data[word_index * 2 + 1]])
+    }
+    /// 按词获取标识信息中的字符串
+    fn identify_string(data: &[u8; 512], first_word: usize, word_count: usize) -> String {
+        let mut bytes = Vec::with_capacity(word_count * 2);
+        for word_index in first_word..first_word + word_count {
+            let word = Self::identify_word(data, word_index);
+            bytes.push((word >> 8) as u8);
+            bytes.push(word as u8);
+        }
+        while matches!(bytes.last(), Some(b' ' | 0)) {
+            bytes.pop();
+        }
+        for byte in bytes.iter_mut() {
+            if !byte.is_ascii_graphic() && *byte != b' ' {
+                *byte = b'?';
+            }
+        }
+        String::from_utf8(bytes).unwrap_or_default()
+    }
+    /// 分词标识信息，返回结构体
+    fn parse_identify_data(data: &[u8; 512]) -> Result<ATAIdentifyInfo, AHCICommandError> {
+        let supports_dma = Self::identify_word(data, 49) & (1 << 8) != 0;
+        let command_set_support = Self::identify_word(data, 83);
+        let supports_lba48 = command_set_support & 0xC000 == 0x4000
+            && command_set_support & (1 << 10) != 0;
+        let logical_sector_count = if supports_lba48 {
+            (Self::identify_word(data, 100) as u64)
+                | ((Self::identify_word(data, 101) as u64) << 16)
+                | ((Self::identify_word(data, 102) as u64) << 32)
+                | ((Self::identify_word(data, 103) as u64) << 48)
+        } else {
+            (Self::identify_word(data, 60) as u64)
+                | ((Self::identify_word(data, 61) as u64) << 16)
+        };
+        if logical_sector_count == 0 {
+            return Err(AHCICommandError::InvalidArgument(
+                "IDENTIFY DEVICE returned zero logical sectors",
+            ));
+        }
+        let sector_size_info = Self::identify_word(data, 106);
+        let logical_sector_size = if sector_size_info & 0xD000 == 0x5000 {
+            let words_per_sector = (Self::identify_word(data, 117) as u32)
+                | ((Self::identify_word(data, 118) as u32) << 16);
+            words_per_sector.checked_mul(2).filter(|&size| size >= 512).ok_or(
+                AHCICommandError::InvalidArgument(
+                    "IDENTIFY DEVICE returned an invalid logical sector size",
+                ),
+            )?
+        } else {
+            512
+        };
+
+        Ok(ATAIdentifyInfo {
+            serial_number: Self::identify_string(data, 10, 10),
+            firmware_revision: Self::identify_string(data, 23, 4),
+            model_number: Self::identify_string(data, 27, 20),
+            logical_sector_count,
+            logical_sector_size,
+            supports_dma,
+            supports_lba48,
+        })
+    }
+
+    /// 识别设备
+    /// 发送 IDENTIFY DEVICE 并保存该端口的磁盘信息
+    pub fn identify_device(
+        &mut self,
+        port: AHCIPort,
+    ) -> Result<ATAIdentifyInfo, AHCICommandError> {
+        let port_index = usize::try_from(port.0)
+            .ok()
+            .filter(|&index| index < AHCI_MAX_PORTS)
+            .ok_or(AHCICommandError::InvalidArgument("AHCI port is out of range"))?;
+        let fis = AHCIRegisterH2DFIS::new(ATA_COMMAND_IDENTIFY_DEVICE);
+        let layout = self.issue_ata_command(
+            port,
+            fis,
+            ATADataDirection::D2H,
+            512,
+        )?;
+        let mut raw_identify = [0u8; 512];
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                (layout.data_buffer.0 | UNCHACHED_KERNEL_BASE) as *const u8,
+                raw_identify.as_mut_ptr(),
+                raw_identify.len(),
+            );
+        }
+        let info = Self::parse_identify_data(&raw_identify)?;
+        self.identify_info[port_index] = Some(info.clone());
+        Ok(info)
+    }
+    /// 获取指定端口磁盘信息，未识别过返回 None
+    pub fn identify_info(&self, port: AHCIPort) -> Option<&ATAIdentifyInfo> {
+        let port_index = usize::try_from(port.0).ok()?;
+        self.identify_info.get(port_index)?.as_ref()
+    }
+    /// 发送 IO 请求
+    fn validate_io_request(
+        &self,
+        port: AHCIPort,
+        lba: u64,
+        sector_count: u32,
+        buffer_len: usize,
+    ) -> Result<usize, AHCICommandError> {
+        let info = self
+            .identify_info(port)
+            .ok_or(AHCICommandError::Unsupported(
+                "IDENTIFY DEVICE must complete before disk I/O",
+            ))?;
+        if !info.supports_dma {
+            return Err(AHCICommandError::Unsupported(
+                "the SATA disk does not report DMA support",
+            ));
+        }
+        if !info.supports_lba48 {
+            return Err(AHCICommandError::Unsupported(
+                "the SATA disk does not report LBA48 support",
+            ));
+        }
+        if sector_count == 0 || sector_count > ATA_LBA48_MAX_SECTORS_PER_COMMAND {
+            return Err(AHCICommandError::InvalidArgument(
+                "invalid LBA48 sector count",
+            ));
+        }
+        let end_lba = lba
+            .checked_add(sector_count as u64)
+            .ok_or(AHCICommandError::InvalidArgument("LBA range overflow"))?;
+        if end_lba > info.logical_sector_count {
+            return Err(AHCICommandError::InvalidArgument(
+                "disk request exceeds IDENTIFY DEVICE capacity",
+            ));
+        }
+        let transfer_bytes = (sector_count as usize)
+            .checked_mul(info.logical_sector_size as usize)
+            .ok_or(AHCICommandError::InvalidArgument(
+                "disk request byte count overflow",
+            ))?;
+        if transfer_bytes > DATA_BUFFER_SIZE || buffer_len != transfer_bytes {
+            return Err(AHCICommandError::InvalidArgument(
+                "buffer length must equal the request size and fit in 4 KiB",
+            ));
+        }
+        Ok(transfer_bytes)
+    }
+    /// 使用 READ DMA EXT 读取连续逻辑扇区
+    pub fn read_sectors(
+        &mut self,
+        port: AHCIPort,
+        lba: u64,
+        sector_count: u32,
+        buffer: &mut [u8],
+    ) -> Result<(), AHCICommandError> {
+        let transfer_bytes = self.validate_io_request(port, lba, sector_count, buffer.len())?;
+        let fis = AHCIRegisterH2DFIS::new_lba48(
+            ATA_COMMAND_READ_DMA_EXT,
+            lba,
+            sector_count,
+        )
+        .ok_or(AHCICommandError::InvalidArgument("invalid LBA48 read request"))?;
+        let layout = self.issue_ata_command(
+            port,
+            fis,
+            ATADataDirection::D2H,
+            transfer_bytes,
+        )?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                (layout.data_buffer.0 | UNCHACHED_KERNEL_BASE) as *const u8,
+                buffer.as_mut_ptr(),
+                transfer_bytes,
+            );
+        }
+        Ok(())
+    }
+    /// 使用 WRITE DMA EXT 写入连续逻辑扇区
+    pub fn write_sectors(
+        &mut self,
+        port: AHCIPort,
+        lba: u64,
+        sector_count: u32,
+        buffer: &[u8],
+    ) -> Result<(), AHCICommandError> {
+        let transfer_bytes = self.validate_io_request(port, lba, sector_count, buffer.len())?;
+        let layout = self.port_dma_layout(port)?;
+        // 共享 data buffer 可能仍被失败后未完成的命令使用，覆盖前必须确认端口空闲
+        self.wait_command_ready(port)?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                buffer.as_ptr(),
+                (layout.data_buffer.0 | UNCHACHED_KERNEL_BASE) as *mut u8,
+                transfer_bytes,
+            );
+        }
+        let fis = AHCIRegisterH2DFIS::new_lba48(
+            ATA_COMMAND_WRITE_DMA_EXT,
+            lba,
+            sector_count,
+        )
+        .ok_or(AHCICommandError::InvalidArgument("invalid LBA48 write request"))?;
+        self.issue_ata_command(
+            port,
+            fis,
+            ATADataDirection::H2D,
+            transfer_bytes,
+        )?;
+        Ok(())
+    }
     /// 初始化端口，返回是否成功
+    /// 停止引擎、清除状态、分配 DMA 区域、启动引擎并 IDENTIFY DEVICE
     pub fn init_port(&mut self, port: AHCIPort) -> bool {
         let Some(port_index) = self.validate_sata_port(port) else {
             return false;
         };
+        self.identify_info[port_index] = None;
         info!("Port {} is a SATA ATA disk. Initializing...", port.0);
 
         // 清除 U-Boot 的遗留状态，改用内核管理的 DMA 区域
         if let Err(err) = self.stop_port_engine(port) {
             error!("Failed to stop AHCI port {}: {:?}", port.0, err.regs);
+            return false;
+        }
+        let pending_ci = self.port_reg_read(port, AHCIPortReg::Ci);
+        let pending_sact = self.port_reg_read(port, AHCIPortReg::Sact);
+        if pending_ci != 0 || pending_sact != 0 {
+            error!(
+                "AHCI port {} still has pending commands after stopping: PxCI=0x{:08x}, PxSACT=0x{:08x}",
+                port.0, pending_ci, pending_sact
+            );
             return false;
         }
         self.clear_port_status(port);
@@ -859,25 +1387,66 @@ impl AHCIController {
             layout.command_table.0,
             layout.data_buffer.0
         );
+        let identify = match self.identify_device(port) {
+            Ok(info) => info,
+            Err(err) => {
+                error!("IDENTIFY DEVICE failed on AHCI port {}: {:?}", port.0, err);
+                return false;
+            }
+        };
+        info!(
+            "SATA disk on port {}: model={}, serial={}, firmware={}, sectors={}, sector_size={}, DMA={}, LBA48={}",
+            port.0,
+            identify.model_number,
+            identify.serial_number,
+            identify.firmware_revision,
+            identify.logical_sector_count,
+            identify.logical_sector_size,
+            identify.supports_dma,
+            identify.supports_lba48
+        );
         true
+    }
+
+    /// 判断指定端口是否连接了可用的 SATA ATA 磁盘
+    pub fn is_usable_sata_disk(&self, port_num: u32) -> bool {
+        if port_num >= AHCI_MAX_PORTS as u32 {
+            return false;
+        }
+        let ports_implemented = self.reg_read(AHCIReg::HbaPi);
+        // 端口已实现
+        if ports_implemented & (1 << port_num) == 0 {
+            return false;
+        }
+        let port = AHCIPort(port_num as isize);
+        // 设备处于活动态并且建立了通信
+        let ssts = self.port_reg_read(port, AHCIPortReg::Ssts);
+        if ssts & 0xF != 3 || (ssts >> 8) & 0xF != 1 {
+            return false;
+        }
+        // 签名为 ATA
+        let sig = self.port_reg_read(port, AHCIPortReg::Sig);
+        if sig != AHCIDevType::Ata as u32 {
+            return false;
+        }
+        true
+    }
+    /// 获取指定端口的逻辑扇区大小，单位字节
+    pub fn get_port_sector_size(&self, port: AHCIPort) -> Option<u32> {
+        let port_num = port.0 as u32;
+        if port_num >= AHCI_MAX_PORTS as u32 {
+            return None;
+        }
+        let info = self.identify_info(port)?;
+        Some(info.logical_sector_size)
     }
     /// 查找第一个已连接的 SATA 磁盘端口，返回端口
     pub fn find_first_sata_disk(&self) -> Option<AHCIPort> {
         let hba_cap = self.reg_read(AHCIReg::HbaCap);
         let port_count = (hba_cap & 0x1F) + 1;
-        let ports_implemented = self.reg_read(AHCIReg::HbaPi);
         for port_num in 0..port_count {
-            if ports_implemented & (1 << port_num) == 0 {
-                continue;
-            }
-            let port = AHCIPort(port_num as isize);
-            let ssts = self.port_reg_read(port, AHCIPortReg::Ssts);
-            if ssts & 0xF != 3 || (ssts >> 8) & 0xF != 1 {
-                continue;
-            }
-            let sig = self.port_reg_read(port, AHCIPortReg::Sig);
-            if sig == AHCIDevType::Ata as u32 {
-                return Some(port);
+            if self.is_usable_sata_disk(port_num) {
+                return Some(AHCIPort(port_num as isize));
             }
         }
         None
@@ -886,27 +1455,11 @@ impl AHCIController {
     pub fn list_sata_disks(&self) {
         let hba_cap = self.reg_read(AHCIReg::HbaCap);
         let port_count = (hba_cap & 0x1F) + 1;
-        let ports_implemented = self.reg_read(AHCIReg::HbaPi);
         for port_num in 0..port_count {
-            if ports_implemented & (1 << port_num) == 0 {
-                continue;
-            }
-            let port = AHCIPort(port_num as isize);
-            let ssts = self.port_reg_read(port, AHCIPortReg::Ssts);
-            if ssts & 0xF != 3 || (ssts >> 8) & 0xF != 1 {
-                continue;
-            }
-            let sig = self.port_reg_read(port, AHCIPortReg::Sig);
-            if sig == AHCIDevType::Ata as u32 {
+            if self.is_usable_sata_disk(port_num) {
                 println!("Found SATA disk at port {}", port_num);
             }
         }
-    }
-    pub fn read(){
-
-    }
-    pub fn write(){
-
     }
 }
 

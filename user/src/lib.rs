@@ -51,6 +51,7 @@ pub extern "C" fn _start(argc: usize, argv: usize) -> ! {
         HEAP.lock()
             .init(HEAP_SPACE.as_ptr() as usize, USER_HEAP_SIZE);
     }
+    println!("[user] _start: BSS and heap initialized (argc={})", argc);
     let mut v: Vec<&'static str> = Vec::new();
     for i in 0..argc {
         let str_start =
@@ -65,7 +66,10 @@ pub extern "C" fn _start(argc: usize, argv: usize) -> ! {
             .unwrap(),
         );
     }
-    exit(main(argc, v.as_slice()));
+    println!("[user] _start: argv parsed; entering main");
+    let exit_code = main(argc, v.as_slice());
+    println!("[user] _start: main returned {}; exiting", exit_code);
+    exit(exit_code);
 }
 
 #[linkage = "weak"]

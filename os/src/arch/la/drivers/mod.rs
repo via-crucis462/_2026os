@@ -54,7 +54,7 @@ impl DeviceManager {
     /// 列出设备
     pub fn list(&self) {
         for device in &self.devices {
-            println!("PCI Device: vendor_id=0x{:x}, device_id=0x{:x}, class=0x{:x}, subclass=0x{:x}",
+            info!("PCI Device: vendor_id=0x{:x}, device_id=0x{:x}, class=0x{:x}, subclass=0x{:x}",
                 device.id.vendor_id as u32, device.id.device_id as u32, device.id.class as u32, device.id.subclass as u32);
             info!("Location: bus={} dev={} func={}", device.loc.bus as u32, device.loc.device as u32, device.loc.function as u32);
         }

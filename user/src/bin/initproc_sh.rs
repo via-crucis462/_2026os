@@ -32,7 +32,7 @@ fn run_shell(_cmd: &str) -> i32 {
             core::ptr::null(),
         ];
 
-        exec("/init/busybox\0", argv);
+        exec("/musl/busybox\0", argv);
         // exec only returns on error
         exit(-1);
     } else if forked > 0 {
