@@ -4,7 +4,7 @@ use crate::process::processor::current_user_asid;
 mod context;
 
 use crate::{KERNEL_STACK_SIZE, PAGE_SIZE, get_hart_id};
-use crate::mm::{PageTable, VirtAddr};
+use crate::mm::{translated_read, translated_write, PageTable, VirtAddr};
 use crate::syscall::syscall;
 use crate::arch::timer::get_time_ms;
 use crate::arch::mm::flush_tlb_for_asid;
@@ -41,7 +41,7 @@ pub fn get_uboot_trap_handler_from_csr() {
 pub fn set_uboot_trap_handler_to_csr() {
     let eentry = UBOOT_TRAP_HANDLER.load(Ordering::SeqCst);
     if eentry == 0 { return; }
-    unsafe { asm!("csrwr {}, 0xc", in(reg) eentry); }
+    unsafe { asm!("csrwr {}, 0xc", inout(reg) eentry => _); }
 }
 
 /// 内核态trap处理入口，由 __k_alltraps 调用
@@ -68,78 +68,10 @@ pub extern "C" fn k_trap_handler(trap_cx: *mut TrapContext) {
     let ecode = (estat >> 16) & 0x3f;
 
     match ecode {
-        0x9 => { // ALE — 未对齐访存
-
-            // FIX ME：如果只保存rd rj rk，可以大幅提高性能
-            // 现在通过一个完整trap处理
-            
-            let era = cx.get_rt();
-            let bad_ins = unsafe { *(era as *const u32) };
-            let rd = (bad_ins & 0x1F) as usize;
-            let opcode_10 = bad_ins >> 22;
-
-            // 下面这部分当前是LLM批量实现版本，可能有优化空间
-            match opcode_10 {
-                // si12 类型: ld.h/w/d, st.h/w/d, ld.hu/wu
-                0x0A1 | 0x0A2 | 0x0A3 | 0x0A5 | 0x0A6 | 0x0A7 | 0x0A9 | 0x0AA => {
-                    let rj = ((bad_ins >> 5) & 0x1F) as usize;
-                    let si12 = (bad_ins >> 10) & 0xFFF;
-                    let si12_ext = ((si12 & 0xFFF) as i64) << 52 >> 52;
-                    let vaddr = (cx.r[rj] as i64).wrapping_add(si12_ext) as usize;
-                    // 诊断：对比硬件 badv
-                    if vaddr != badv {
-                        panic!("[ALE] si12 vaddr mismatch: vaddr=0x{:x}, badv=0x{:x}, rj={}, cx.r[rj]=0x{:x}, si12_ext=0x{:x}",
-                            vaddr, badv, rj, cx.r[rj], si12_ext);
-                    }
-                    match opcode_10 {
-                        0x0A1 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u16).read_unaligned() } as i16 as i64 as usize; } }       // LD.H
-                        0x0A2 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u32).read_unaligned() } as i32 as i64 as usize; } }       // LD.W
-                        0x0A3 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u64).read_unaligned() } as usize; } }                     // LD.D
-                        0x0A5 => { let v = if rd != 0 { cx.r[rd] as u16 } else { 0 }; unsafe { (vaddr as *mut u16).write_unaligned(v); } } // ST.H
-                        0x0A6 => { let v = if rd != 0 { cx.r[rd] as u32 } else { 0 }; unsafe { (vaddr as *mut u32).write_unaligned(v); } } // ST.W
-                        0x0A7 => { let v = if rd != 0 { cx.r[rd] as u64 } else { 0 }; unsafe { (vaddr as *mut u64).write_unaligned(v); } } // ST.D
-                        0x0A9 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u16).read_unaligned() } as usize; } }                      // LD.HU
-                        0x0AA => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u32).read_unaligned() } as usize; } }                      // LD.WU
-                        _ => {}
-                    }
-                    // 绕过触发trap的指令
-                    cx.set_rt(era + 4);
-                }
-                0x0A0 | 0x0A4 | 0x0A8 => { // 字节访存永远不应触发 ALE
-                    panic!("[kernel] ALE on byte access: badv=0x{:x}, era=0x{:x}", badv, era);
-                }
-                // rk 类型: ldx/stx, opcode 在 bits 31-16
-                _ => {
-                    let opcode_16 = bad_ins >> 16;
-                    match opcode_16 {
-                        0x3804 | 0x3808 | 0x380C | 0x3814 | 0x3818 | 0x381C | 0x3824 | 0x3828 => {
-                            let rj = ((bad_ins >> 5) & 0x1F) as usize;
-                            let rk = ((bad_ins >> 10) & 0x1F) as usize;
-                            let vaddr = cx.r[rj].wrapping_add(cx.r[rk]);
-                            match opcode_16 {
-                                0x3804 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u16).read_unaligned() } as i16 as i64 as usize; } }       // LDX.H
-                                0x3808 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u32).read_unaligned() } as i32 as i64 as usize; } }       // LDX.W
-                                0x380C => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u64).read_unaligned() } as usize; } }                     // LDX.D
-                                0x3814 => { let v = if rd != 0 { cx.r[rd] as u16 } else { 0 }; unsafe { (vaddr as *mut u16).write_unaligned(v); } } // STX.H
-                                0x3818 => { let v = if rd != 0 { cx.r[rd] as u32 } else { 0 }; unsafe { (vaddr as *mut u32).write_unaligned(v); } } // STX.W
-                                0x381C => { let v = if rd != 0 { cx.r[rd] as u64 } else { 0 }; unsafe { (vaddr as *mut u64).write_unaligned(v); } } // STX.D
-                                0x3824 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u16).read_unaligned() } as usize; } }                      // LDX.HU
-                                0x3828 => { if rd != 0 { cx.r[rd] = unsafe { (vaddr as *const u32).read_unaligned() } as usize; } }                      // LDX.WU
-                                _ => {}
-                            }
-                            cx.set_rt(era + 4);
-                        }
-                        0x3800 | 0x3810 | 0x3820 => {
-                            panic!("[kernel] ALE on byte access (rk): badv=0x{:x}, era=0x{:x}", badv, era);
-                        }
-                        _ => {
-                            panic!("[kernel] unhandled ALE (rk): bad_ins=0x{:08x}, opcode_16=0x{:04x}, era=0x{:x}, badv=0x{:x}",
-                                bad_ins, opcode_16, era, badv);
-                        }
-                    }
-                }
-            }
-        }
+        0x9 => handle_ale(cx, badv, false).unwrap_or_else(|reason| {
+            panic!("[kernel] ALE emulation failed: reason={}, era=0x{:x}, badv=0x{:x}",
+                reason, cx.get_rt(), badv);
+        }),
         _ => {
             panic!("[kernel] unhandled kernel trap: ecode=0x{:x}, era=0x{:x}, badv=0x{:x}",
                 ecode, cx.get_rt(), badv);
@@ -242,10 +174,10 @@ fn set_kernel_trap_entry() {
 pub fn enable_timer_interrupt() {
     crate::arch::timer::init_board_freq();
     unsafe {
-        asm!("csrwr {}, 0x44", in(reg) 1);// 清除定时器中断
+        asm!("csrwr {}, 0x44", inout(reg) 1 => _);// 清除定时器中断
         let mut ecfg: usize;
         asm!("csrrd {}, 0x4", out(reg) ecfg);
-        asm!("csrwr {}, 0x4", in(reg) ecfg | (1 << 11)); // 使能定时器中断
+        asm!("csrwr {}, 0x4", inout(reg) ecfg | (1 << 11) => _); // 使能定时器中断
         // 与riscv侧思路一致：这里只打开中断源，不在内核态全局开中断位。
         // 内核态保持IE关闭，可避免空闲内核代码被时钟中断打入trap_from_kernel。
     }
@@ -378,6 +310,192 @@ fn debug_dump_brk_snapshot(tag: &str, cx: &TrapContext, token: usize) {
     debug_dump_user_stack_window(tag, token, cx.r[3], 24);
 }
 
+/// 从 era 获取异常的指令
+fn read_faulting_instruction(era: usize, user_token: Option<usize>) -> u32 {
+    match user_token {
+        Some(token) => translated_read(token, era as *const u32),
+        None => unsafe { (era as *const u32).read_volatile() },
+    }
+}
+
+fn read_ale<T: Copy>(vaddr: usize, user_token: Option<usize>) -> T {
+    match user_token {
+        Some(token) => translated_read(token, vaddr as *const T),
+        None => unsafe { (vaddr as *const T).read_unaligned() },
+    }
+}
+
+fn write_ale<T>(vaddr: usize, value: T, user_token: Option<usize>) {
+    match user_token {
+        Some(token) => translated_write(token, vaddr as *mut T, value),
+        None => unsafe { (vaddr as *mut T).write_unaligned(value) },
+    }
+}
+
+/// 处理 ALE 未对齐访存异常
+/// 参考了往期比赛的一个队伍：https://gitlab.eduxiji.net/educg-group-26011-2376549/T202410699992496-312
+/// 具体操作码参考 LoongArch64 架构手册，借由 CodeX 批量实现，具体指令操作在内核态经过了逐项单独测试验证
+/// 用户态行为还待进一步验证，但目前没有问题
+fn handle_ale(cx: &mut TrapContext, badv: usize, is_user: bool) -> Result<(), &'static str> {
+    let era = cx.get_rt();
+    let user_token = is_user.then(current_user_token);
+    let bad_ins = read_faulting_instruction(era, user_token);
+    let rd = (bad_ins & 0x1F) as usize;
+    let opcode_8 = bad_ins >> 24;
+    let opcode_10 = bad_ins >> 22;
+
+    match opcode_8 {
+        // ldptr/stptr 使用 si14 << 2 的有符号字节偏移。
+        0x24 | 0x25 | 0x26 | 0x27 => {
+            let rj = ((bad_ins >> 5) & 0x1F) as usize;
+            let si14 = (bad_ins >> 10) & 0x3FFF;
+            let si14_ext = ((si14 & 0x3FFF) as i64) << 50 >> 50;
+            let vaddr = (cx.r[rj] as i64).wrapping_add(si14_ext << 2) as usize;
+            if vaddr != badv {
+                return Err("ldptr/stptr badv mismatch");
+            }
+            match opcode_8 {
+                0x24 => {
+                    if rd != 0 {
+                        cx.r[rd] = read_ale::<u32>(vaddr, user_token) as i32 as i64 as usize;
+                    }
+                }
+                0x25 => {
+                    let value = if rd != 0 { cx.r[rd] as u32 } else { 0 };
+                    write_ale(vaddr, value, user_token);
+                }
+                0x26 => {
+                    if rd != 0 {
+                        cx.r[rd] = read_ale::<u64>(vaddr, user_token) as usize;
+                    }
+                }
+                0x27 => {
+                    let value = if rd != 0 { cx.r[rd] as u64 } else { 0 };
+                    write_ale(vaddr, value, user_token);
+                }
+                _ => unreachable!(),
+            }
+            cx.set_rt(era + 4);
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    match opcode_10 {
+        // si12 类型: ld.h/w/d, st.h/w/d, ld.hu/wu
+        0x0A1 | 0x0A2 | 0x0A3 | 0x0A5 | 0x0A6 | 0x0A7 | 0x0A9 | 0x0AA => {
+            let rj = ((bad_ins >> 5) & 0x1F) as usize;
+            let si12 = (bad_ins >> 10) & 0xFFF;
+            let si12_ext = ((si12 & 0xFFF) as i64) << 52 >> 52;
+            let vaddr = (cx.r[rj] as i64).wrapping_add(si12_ext) as usize;
+            if vaddr != badv {
+                return Err("si12 badv mismatch");
+            }
+            match opcode_10 {
+                0x0A1 => {
+                    if rd != 0 {
+                        cx.r[rd] = read_ale::<u16>(vaddr, user_token) as i16 as i64 as usize;
+                    }
+                }
+                0x0A2 => {
+                    if rd != 0 {
+                        cx.r[rd] = read_ale::<u32>(vaddr, user_token) as i32 as i64 as usize;
+                    }
+                }
+                0x0A3 => {
+                    if rd != 0 {
+                        cx.r[rd] = read_ale::<u64>(vaddr, user_token) as usize;
+                    }
+                }
+                0x0A5 => {
+                    let value = if rd != 0 { cx.r[rd] as u16 } else { 0 };
+                    write_ale(vaddr, value, user_token);
+                }
+                0x0A6 => {
+                    let value = if rd != 0 { cx.r[rd] as u32 } else { 0 };
+                    write_ale(vaddr, value, user_token);
+                }
+                0x0A7 => {
+                    let value = if rd != 0 { cx.r[rd] as u64 } else { 0 };
+                    write_ale(vaddr, value, user_token);
+                }
+                0x0A9 => {
+                    if rd != 0 {
+                        cx.r[rd] = read_ale::<u16>(vaddr, user_token) as usize;
+                    }
+                }
+                0x0AA => {
+                    if rd != 0 {
+                        cx.r[rd] = read_ale::<u32>(vaddr, user_token) as usize;
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        0x0A0 | 0x0A4 | 0x0A8 => return Err("ALE on byte access"),
+        _ => {
+            let opcode_16 = bad_ins >> 16;
+            match opcode_16 {
+                0x3804 | 0x3808 | 0x380C | 0x3814 | 0x3818 | 0x381C | 0x3824 | 0x3828 => {
+                    let rj = ((bad_ins >> 5) & 0x1F) as usize;
+                    let rk = ((bad_ins >> 10) & 0x1F) as usize;
+                    let vaddr = cx.r[rj].wrapping_add(cx.r[rk]);
+                    if vaddr != badv {
+                        return Err("rk badv mismatch");
+                    }
+                    match opcode_16 {
+                        0x3804 => {
+                            if rd != 0 {
+                                cx.r[rd] = read_ale::<u16>(vaddr, user_token)
+                                    as i16 as i64 as usize;
+                            }
+                        }
+                        0x3808 => {
+                            if rd != 0 {
+                                cx.r[rd] = read_ale::<u32>(vaddr, user_token)
+                                    as i32 as i64 as usize;
+                            }
+                        }
+                        0x380C => {
+                            if rd != 0 {
+                                cx.r[rd] = read_ale::<u64>(vaddr, user_token) as usize;
+                            }
+                        }
+                        0x3814 => {
+                            let value = if rd != 0 { cx.r[rd] as u16 } else { 0 };
+                            write_ale(vaddr, value, user_token);
+                        }
+                        0x3818 => {
+                            let value = if rd != 0 { cx.r[rd] as u32 } else { 0 };
+                            write_ale(vaddr, value, user_token);
+                        }
+                        0x381C => {
+                            let value = if rd != 0 { cx.r[rd] as u64 } else { 0 };
+                            write_ale(vaddr, value, user_token);
+                        }
+                        0x3824 => {
+                            if rd != 0 {
+                                cx.r[rd] = read_ale::<u16>(vaddr, user_token) as usize;
+                            }
+                        }
+                        0x3828 => {
+                            if rd != 0 {
+                                cx.r[rd] = read_ale::<u32>(vaddr, user_token) as usize;
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                0x3800 | 0x3810 | 0x3820 => return Err("ALE on byte access (rk)"),
+                _ => return Err("unsupported ALE instruction"),
+            }
+        }
+    }
+
+    cx.set_rt(era + 4);
+    Ok(())
+}
+
 /// trap handler
 /// 从riscv的trap handler改写
 /// 参考https://www.loongson.cn/uploads/images/2023041918133323805.%E9%BE%99%E8%8A%AF%E6%9E%B6%E6%9E%84%E5%8F%82%E8%80%83%E6%89%8B%E5%86%8C%E5%8D%B7%E4%B8%80_r1p03.pdf
@@ -441,7 +559,7 @@ pub fn trap_handler() -> ! {
         }
         Cause::TimeInterrupt => {
             unsafe {
-                asm!("csrwr {}, 0x44", in(reg) 1);// 清除定时器中断
+                asm!("csrwr {}, 0x44", inout(reg) 1 => _);// 清除定时器中断
             }
             let current_ms = get_time_ms();
             let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
@@ -466,6 +584,25 @@ pub fn trap_handler() -> ! {
             suspend_current_and_run_next();
         }
         _ => {
+            if ecode == 0x9 {
+                let cx = current_trap_cx();
+                match handle_ale(cx, badv, true) {
+                    Ok(()) => {
+                        trap_return();
+                    }
+                    Err(reason) => {
+                        debug!(
+                            "[trap] user ALE emulation failed: reason={}, hart_id={}, estat=0x{:x}, era=0x{:x}, badv=0x{:x}, badi=0x{:x}",
+                            reason,
+                            get_hart_id(),
+                            estat,
+                            era,
+                            badv,
+                            badi
+                        );
+                    }
+                }
+            }
             debug!("[trap] unhandled trap: hart_id={}, estat=0x{:x}, ecode={}(0x{:x}), esubcode=0x{:x}, era=0x{:x}, badv=0x{:x}, badi=0x{:x}",
                 get_hart_id(),
                 estat,
@@ -675,9 +812,10 @@ pub fn trap_return() -> ! {
         let mut euen: usize;
         asm!("csrrd {}, 0x2", out(reg) euen);
         euen |= 0x1;
-        asm!("csrwr {}, 0x2", in(reg) euen);
+        asm!("csrwr {}, 0x2", inout(reg) euen => _);
     }
-    flush_tlb_for_asid(id);
+    crate::mm::MemorySet::flush_tlb_after_mapping_change();
+
     crate::arch::mm::prepare_user_tlb();
     // crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
     trace!("trap_return: going to user mode, satp = 0x{:x}", user_satp);
@@ -694,7 +832,7 @@ pub fn trap_return() -> ! {
     //println!("[kernel] calling __restore, address: 0x{:x}", restore);
 
     unsafe {
-        asm!("csrwr {}, 0x18", in(reg) id); // 设置asid为pid
+        asm!("csrwr {}, 0x18", inout(reg) id => _); // 设置asid为pid
         asm!(
             "dbar 0", // 相当于sfence.vma
             "jr {restore}",
