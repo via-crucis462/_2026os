@@ -247,7 +247,7 @@ pub(crate) fn restore_signal_context(task_inner: &mut TaskControlBlockInner) -> 
 
 /// Make current task suspended and switch to the next task
 pub fn suspend_current_and_run_next() {
-    //debug!("[kernel] suspend_current_and_run_next");
+    debug!("[kernel] suspend_current_and_run_next() called");
     // There must be an application running.
     let task = current_task().unwrap();
 

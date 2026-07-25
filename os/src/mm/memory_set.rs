@@ -57,7 +57,7 @@ pub struct MemorySet {
 
 impl MemorySet {
     #[cfg(target_arch = "loongarch64")]
-    fn flush_tlb_after_mapping_change() {
+    pub fn flush_tlb_after_mapping_change() {
         unsafe {
             // 先保证页表写入对重填路径可见，再失效陈旧 TLB 项。
             asm!("dbar 0");
@@ -835,7 +835,7 @@ impl MemorySet {
     pub fn activate(&self) {
         let pgdl = self.page_table.token();
         unsafe {
-            asm!("csrwr {pgdl}, 0x19", pgdl = in(reg) pgdl);
+            asm!("csrwr {pgdl}, 0x19", pgdl = inout(reg) pgdl => _);
             asm!("dbar 0");
         }
     }
@@ -858,6 +858,7 @@ impl MemorySet {
     pub fn set_pte_dirty(&mut self, vpn: VirtPageNum) -> bool {
         if let Some((pte, _)) = self.page_table.find_pte(vpn) {
             pte.set_dirty();
+            Self::flush_tlb_after_mapping_change();
             true
         } else {
             false

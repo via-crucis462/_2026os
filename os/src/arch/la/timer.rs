@@ -140,7 +140,7 @@ pub fn set_next_trigger(policy: isize) {
     let ticks = ticks.max(1);
     let tcfg = (ticks << 2) | 0b01;
     unsafe {
-        asm!("csrwr {}, 0x44", in(reg) 1usize);
-        asm!("csrwr {}, 0x41", in(reg) tcfg);
+        asm!("csrwr {}, 0x44", inout(reg) 1usize => _);
+        asm!("csrwr {}, 0x41", inout(reg) tcfg => _);
     }
 }

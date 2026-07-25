@@ -563,7 +563,7 @@ pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
             data[idx] = unsafe { *(pa.get_cached_addr() as *const u8) };
         }
     }
-    Some(unsafe { core::ptr::read(data.as_ptr() as *const T) })
+    Some(unsafe { core::ptr::read_unaligned(data.as_ptr() as *const T) })
 }
 
 /// 将用户空间的T写入给定地址

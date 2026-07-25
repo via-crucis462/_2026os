@@ -169,6 +169,14 @@ pub fn run_tasks() {
                     // 调用了wait函数
                     prev_task.inner_exclusive_access().task_status = TaskStatus::Blocked;
                     // println!("SET BLOCKED: tid={} of pid={} done", prev_task.tid.0, prev_task.getpid());
+                } else {
+                    // 其他状态不需要处理，直接销毁
+                    debug!(
+                        "[kernel] run_tasks: prev_task pid={} tid={} status={}, cleaning up",
+                        prev_task.getpid(),
+                        prev_task.gettid(),
+                        prev_task.inner_exclusive_access().task_status
+                    );
                 }
                 // 如果 status 是 Zombie 或 Blocked，什么都不做，自然销毁或等别人唤醒
             }
