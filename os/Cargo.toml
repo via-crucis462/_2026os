@@ -28,7 +28,7 @@ riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
 
 [profile.dev]
 opt-level = 2
-debug = 2
+debug = 1
 
 [profile.dev.package."*"]
 opt-level = 2

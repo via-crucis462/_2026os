@@ -129,7 +129,7 @@ test-la-2k1000: build-user-la copy-user-la build-la copy-la
 	-rtc base=utc \
 	| tee kernel_output.log
 
-# debug-rv: MODE = debug
+debug-rv: MODE = debug
 debug-rv: build-user-rv copy-user-rv build-rv copy-rv
 	@rm -f kernel_output.log
 	@qemu-system-riscv64 -machine virt \

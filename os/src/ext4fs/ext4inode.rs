@@ -351,27 +351,6 @@ impl Ext4Inode {
                 }
             };
 
-            // 从内核堆上分配一个临时函数调用栈，避免内核栈溢出
-            const TEMP_STACK_SIZE: usize = 65536; // 64KB
-            // 不清0，避免初始化开销
-            let mut temp_stack: Vec<u8> = Vec::with_capacity(TEMP_STACK_SIZE);
-            unsafe { temp_stack.set_len(TEMP_STACK_SIZE); }
-            let stack_bottom = temp_stack.as_ptr() as usize + TEMP_STACK_SIZE;
-
-            // 每次函数调用后调用这个闭包检查栈是否溢出
-            let temp_stack_check = || {
-                let sp: usize;
-                unsafe {
-                    #[cfg(target_arch = "riscv64")]
-                    asm!("mv {}, sp", out(reg) sp);
-                    #[cfg(target_arch = "loongarch64")]
-                    asm!("move {}, $sp", out(reg) sp);
-                }
-                if sp > stack_bottom || sp < temp_stack.as_ptr() as usize {
-                    panic!("temp_stack_alloc: stack overflow");
-                }
-            };
-
             // 递归处理插入逻辑
             // 返回值: Option<(分裂产生的新块的物理块号, 新块的第一个逻辑块号)>
             // Option表示子节点是否发生了分裂
@@ -381,7 +360,6 @@ impl Ext4Inode {
             // 类似页表 page 和 entry 的关系。
             fn add_extent_in_tree (
                 ext4_inode: &Ext4Inode,
-                temp_stack_check: &dyn Fn(),
                 write_back_block: &dyn Fn(u32, *const u8, usize),
                 find_aim: &dyn Fn(&[u8], u16, u32) -> Option<*mut u8>,
                 logical_block_id: u32, 
@@ -389,8 +367,6 @@ impl Ext4Inode {
                 current_block_phys: u32, // 当前节点的物理块号，0=in-inode
                 current_data_ptr: *mut u8,
             ) -> Option<(u32, u32)> {
-
-                temp_stack_check();
 
                 let header = unsafe { &mut *(current_data_ptr as *mut Ext4ExtentHeader) };
                 let is_leaf = header.eh_depth == 0;
@@ -424,7 +400,6 @@ impl Ext4Inode {
 
                     let child_result = add_extent_in_tree(
                         ext4_inode,
-                        temp_stack_check,
                         write_back_block,
                         find_aim,
                         logical_block_id,
@@ -600,33 +575,10 @@ impl Ext4Inode {
                     None
                 }
             };
-
-            // 备份sp
-            let sp_back: usize;
-
-            // 切换栈指针
-            unsafe {
-                #[cfg(target_arch = "riscv64")]
-                asm!(
-                    "mv {}, sp", 
-                    "mv sp, {}", 
-                    out(reg) sp_back,
-                    in(reg) stack_bottom,
-                );
-                #[cfg(target_arch = "loongarch64")]
-                asm!(
-                    "move {}, $sp", 
-                    "move $sp, {}", 
-                    out(reg) sp_back,
-                    in(reg) stack_bottom,
-                );
-            }
-
             // 初始调用：从 inode 的 i_block 开始遍历 extent 树
             let current_data_ptr = disk_inode.i_block.as_mut_ptr();
             let result = add_extent_in_tree(
                 self,
-                &temp_stack_check,
                 &write_back_block,
                 &find_aim,
                 logical_block_id,
@@ -694,15 +646,6 @@ impl Ext4Inode {
                     idx_base.add(1).write_unaligned(idx1);
                 }
             }
-
-            // 恢复栈指针
-            unsafe {
-                #[cfg(target_arch = "riscv64")]
-                asm!("mv sp, {}", in(reg) sp_back);
-                #[cfg(target_arch = "loongarch64")]
-                asm!("move $sp, {}", in(reg) sp_back);
-            }
-
 
            Some(physical_block_id)
         };

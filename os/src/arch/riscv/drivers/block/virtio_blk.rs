@@ -131,9 +131,11 @@ impl BlockDevice for VirtIOBlock {
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
         assert!(buf.len() <= BLOCK_SZ);
+        // println!("write_block: block_id = {}, buf.len() = {}", block_id, buf.len());
         let cache = get_block_cache(block_id, BLOCK_DEVICE.clone());
         cache.lock().modify(0, |block_data: &mut [u8; BLOCK_SZ]| {
             block_data[..buf.len()].copy_from_slice(buf);
         });
+        // println!("write_block done: block_id = {}, buf.len() = {} done", block_id, buf.len());
     }
 }
