@@ -6,4 +6,4 @@ pub use crate::arch::drivers::*;
 pub mod block_cache;
 pub mod block_dev;
 
-use crate::ext4fs::{BlockDevice, get_block_cache};
+use crate::ext4fs::{BlockDevice, get_block_cache, BLOCK_SZ};
