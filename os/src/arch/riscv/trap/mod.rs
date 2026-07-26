@@ -288,14 +288,15 @@ pub fn trap_handler() -> ! {
     
 }
 
-// 注意：不用VirtAddr包装，因为sv39要求高位符号扩展
+// The TrapContext lives on the real kernel stack. Its containing page is also
+// borrowed into the current user page table without PTE_U so the trampoline
+// can save registers before switching SATP.
 pub fn current_trap_cx_user_va() -> usize {
     current_task()
         .unwrap()
         .inner_exclusive_access()
-        .kernel_stack
-        .get_top()
-        - KERNEL_STACK_SIZE
+    .thread
+    .trap_ctx
 }
 
 pub fn trap_cx_va_by_tid(tid: usize) -> usize {
@@ -303,8 +304,7 @@ pub fn trap_cx_va_by_tid(tid: usize) -> usize {
 }
 
 pub fn trap_cx_va_by_kernel_stack(kernel_stack: &KernelStack) -> usize {
-    let kernel_stack_top = kernel_stack.get_top();
-    kernel_stack_top - KERNEL_STACK_SIZE
+    kernel_stack.position_for::<TrapContext>()
 }
 
 #[no_mangle]

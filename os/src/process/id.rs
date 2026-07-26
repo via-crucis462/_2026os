@@ -33,6 +33,7 @@ impl RecycleAllocator {
         if let Some(id) = self.recycled.pop() {
             id
         } else {
+            //println!("RecycleAllocator: alloc new id {}", self.current);
             self.current += 1;
             self.current - 1
         }
@@ -44,6 +45,7 @@ impl RecycleAllocator {
             "id {} has been deallocated!",
             id
         );
+        //println!("RecycleAllocator: dealloc id {}", id);
         self.recycled.push(id);
     }
 }
@@ -113,7 +115,7 @@ pub struct KernelStack(pub usize);
 pub fn kstack_alloc() -> KernelStack {
     let kstack_id = KSTACK_ALLOCATOR.exclusive_access().alloc();
     let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
-    debug!("kstack_alloc: allocated kernel stack {} with bottom {:#x} and top {:#x}", kstack_id, kstack_bottom, kstack_top);
+    warn!("kstack_alloc: allocated kernel stack {} with bottom {:#x} and top {:#x}", kstack_id, kstack_bottom, kstack_top);
     KERNEL_SPACE.exclusive_access().insert_framed_area(
         kstack_bottom.into(),
         kstack_top.into(),
@@ -135,18 +137,25 @@ impl Drop for KernelStack {
 }
 
 impl KernelStack {
-    /// Push a variable of type T into the top of the KernelStack and return its raw pointer
-    /// 为la64调整，rv64需要改回去，暂时不改
-    #[allow(unused)]
-    #[cfg(target_arch = "loongarch64")]
-    pub fn push_on_top<T>(&self, value: T) -> *mut T
+    /// Return the aligned address of an object reserved at the top of this
+    /// kernel stack. The kernel call stack grows below this object.
+    pub fn position_for<T>(&self) -> usize
     where
         T: Sized,
     {
         let kernel_stack_top = self.get_top();
         let size = core::mem::size_of::<T>();
         let align = core::mem::align_of::<T>();
-        let sp = (kernel_stack_top - size) & !(align - 1);
+        (kernel_stack_top - size) & !(align - 1)
+    }
+
+    /// Push a variable of type T into the top of the KernelStack and return its raw pointer.
+    #[allow(unused)]
+    pub fn push_on_top<T>(&self, value: T) -> *mut T
+    where
+        T: Sized,
+    {
+        let sp = self.position_for::<T>();
         let ptr_mut = sp as *mut T;
         //println!("push_on_top: kernel_stack_top={:#x}, size={}, align={}, sp={:#x}", kernel_stack_top, size, align, sp);
         unsafe {

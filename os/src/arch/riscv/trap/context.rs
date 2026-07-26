@@ -24,6 +24,23 @@ pub struct TrapContext {
 
 // 封装了对两平台名称不同寄存器的访问为同名接口
 impl TrapContext {
+    /// Empty context used while reserving the object at the top of a kernel stack.
+    pub fn new_bare() -> Self {
+        unsafe {
+            let mut sstatus = sstatus::read();
+            sstatus.set_spp(SPP::User);
+            Self {
+                x: [0; 32],
+                sstatus,
+                sepc: 0,
+                kernel_satp: 0,
+                kernel_sp: 0,
+                trap_handler: 0,
+                hart_id: 0,
+            }
+        }
+    }
+
     /// put the sp(stack pointer) into x\[2\] field of TrapContext
     pub fn set_sp(&mut self, sp: usize) {
         self.x[2] = sp;

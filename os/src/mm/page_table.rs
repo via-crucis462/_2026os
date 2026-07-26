@@ -3,7 +3,6 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::arch::config::PAGE_SIZE;
-use crate::arch::trap::{current_trap_cx_user_va, TrapContext};
 use crate::mm::MapArea;
 use crate::process::{current_task, current_user_token};
 
@@ -275,11 +274,7 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
                 let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
                     return Vec::new();
                 };
-                let trap_cx_va = current_trap_cx_user_va();
-                let Some(trap_cx_pa) = page_table.translate_va(VirtAddr::from(trap_cx_va)) else {
-                    return Vec::new();
-                };
-                let sp = trap_cx_pa.get_ref::<TrapContext>().get_sp();
+                let sp = crate::task::current_trap_cx().get_sp();
                 let mut memory = mm.exclusive_access();
                 if memory.handle_page_fault(start, sp) {
                     let (pte, size) = page_table.find_pte(vpn).unwrap();
@@ -368,15 +363,6 @@ pub fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
     let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
         return false;
     };
-    #[cfg(target_arch = "riscv64")]
-    let sp = {
-        let trap_cx_va = current_trap_cx_user_va();
-        let Some(trap_cx_pa) = page_table.translate_va(VirtAddr::from(trap_cx_va)) else {
-            return false;
-        };
-        trap_cx_pa.get_ref::<TrapContext>().get_sp()
-    };
-    #[cfg(target_arch = "loongarch64")]
     let sp = crate::task::current_trap_cx().get_sp();
     let result = mm
         .exclusive_access()
@@ -422,16 +408,6 @@ pub fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
     let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
         return false;
     };
-    #[cfg(target_arch = "riscv64")]
-    let sp = {
-        let trap_cx_va = current_trap_cx_user_va();
-        let Some(trap_cx_pa) = page_table.translate_va(VirtAddr::from(trap_cx_va)) else {
-            println!("prepare_user_write: failed to translate trap_cx_va {:#x}", trap_cx_va);
-            return false;
-        };
-        trap_cx_pa.get_ref::<TrapContext>().get_sp()
-    };
-    #[cfg(target_arch = "loongarch64")]
     let sp = crate::task::current_trap_cx().get_sp();
     let result = mm
         .exclusive_access()

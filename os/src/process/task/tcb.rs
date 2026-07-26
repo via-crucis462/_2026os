@@ -4,7 +4,7 @@ use super::{kstack_alloc, pid_alloc, tid_alloc, KernelStack, PidHandle, TIdHandl
 use crate::{
     arch::{
         timer::get_time_us,
-        trap::{trap_cx_va_by_kernel_stack, TrapContext, trap_handler},
+        trap::{TrapContext, trap_handler},
     },
     fs::{open_file, Dentry, File, OpenFlags, ROOT_DENTRY,Stdin, Stdout},
     ipc::namespace::IPCNamespace,
@@ -83,6 +83,11 @@ impl TaskControlBlock {
         remove_from_tid2task(self.gettid());
 
         let mut inner = self.inner_exclusive_access();
+        #[cfg(target_arch = "riscv64")]
+        if let Some(mm) = inner.mm.as_ref() {
+            mm.exclusive_access()
+                .remove_trap_context_page(VirtAddr::from(inner.thread.trap_ctx));
+        }
         inner.exit_code = exit_code;
         inner.errno = 0;
         inner.task_status = TaskStatus::Zombie;
@@ -162,7 +167,7 @@ impl TaskControlBlock {
 
 #[deny(non_camel_case_types)]
 pub struct TaskStruct {
-    pub pid: Arc<PidHandle>,                // 全局唯一进程 ID
+    pub pid: Arc<PidHandle>,                // 全局唯一线程 ID
     pub tgid: Arc<PidHandle>,               // 线程组 ID，主线程 pid=tgid
     pub group_leader: Weak<TaskStruct>, // 线程组领头进程
     pub inner: MPSafeCell<TaskStructInner>, // 内部可变结构体
@@ -188,50 +193,17 @@ impl TaskStruct {
         //println!("[kernel] TaskControlBlock::new: allocated TID {}", tid_handle.0);
         let kernel_stack = kstack_alloc();
         
-        let trap_cx_va: VirtAddr;
-        let trap_cx_addr: usize;
-        let kernel_stack_top: usize;
+        let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
+        let kernel_stack_top = trap_cx_addr;
         let initial_user_sp = user_sp;
         #[cfg(target_arch = "riscv64")]{
-            // 异常上下文映射页，riscv会在进入跳板前将上下文压入用户地址空间，所以要在用户地址空间写入
-            // 将用户空间的上下文与内核栈唯一映射的原因是：这样可以为每一个线程分配唯一的上下文栈
-            // 什么？你说你问为什么不同的进程明明独立，但唯一标识符的异常上下文栈位置也一定不相同，这样做是不是有些粗糙
-            // 答案是确实粗糙
-            trap_cx_va = trap_cx_va_by_kernel_stack(&kernel_stack).into();
-            info!("TaskControlBlock::new: calculated trap_cx_va = {:#x}", trap_cx_va.0);
-            memory_set.push(
-                MapArea::new(
-                    trap_cx_va,
-                     VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
-                    MapType::Framed,
-                    MapPermission::R | MapPermission::W,
-                    PageSize::Page4K // 初始化进程默认用标准页
-                ),
-                None,
-                trap_cx_va.0,
-
-            );
-            trap_cx_addr = {
-                let trap_cx_ppn = memory_set
-                    .translate(trap_cx_va.into())
-                    .unwrap()
-                    .ppn();
-                let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
-                trap_cx_pa.into()
-            };
-
-            // 内核栈顶地址，即切换到内核任务流后内核执行栈的初始值（内核sp）
-            kernel_stack_top = kernel_stack.get_top();
-            //println!("TaskControlBlock::new: calculated trap_cx_addr = {:#x}, kernel_stack_top = {:#x}, user_sp = {:#x}", trap_cx_addr, kernel_stack_top, initial_user_sp);
-        }
-
-       
-        //info!("TaskControlBlock::new: translated trap_cx_addr = {:#x}", trap_cx_addr);
-        #[cfg(target_arch = "loongarch64")]{
-            // loongarch在进入跳板前会将上下文压入内核地址空间的内核栈，所以直接在内核栈上分配TrapContext即可
-            trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
-            // 由于loongarch会把异常上下文压入内核地址空间，所以会比riscv少一个trap_cx的映射页，因此内核栈顶地址即为trap_cx_addr
-            kernel_stack_top = trap_cx_addr;
+            let trap_cx_va = VirtAddr::from(trap_cx_addr);
+            let trap_cx_ppn = KERNEL_SPACE
+                .exclusive_access()
+                .translate(trap_cx_va.std_floor())
+                .expect("kernel TrapContext is not mapped")
+                .ppn();
+            memory_set.install_trap_context_page(trap_cx_va, trap_cx_ppn);
         }
 
         debug!("TaskControlBlock::new: kernel_stack_top={:#x}", kernel_stack.get_top());
@@ -364,26 +336,15 @@ impl TaskStruct {
 
         #[cfg(target_arch = "riscv64")]
         let (trap_cx_addr, kernel_stack_top) = {
-            let trap_cx_va: VirtAddr =
-                trap_cx_va_by_kernel_stack(&caller_task.inner_exclusive_access().kernel_stack)
-                    .into();
-            memory_set.push(
-                MapArea::new(
-                    trap_cx_va,
-                    VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
-                    MapType::Framed,
-                    MapPermission::R | MapPermission::W,
-                    PageSize::Page4K,
-                ),
-                None,
-                trap_cx_va.0,
-            );
-            let trap_cx_ppn = memory_set.translate(trap_cx_va.into()).unwrap().ppn();
-            let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
-            (
-                usize::from(trap_cx_pa),
-                caller_task.inner_exclusive_access().kernel_stack.get_top(),
-            )
+            let trap_cx_addr = caller_task.inner_exclusive_access().thread.trap_ctx;
+            let trap_cx_va = VirtAddr::from(trap_cx_addr);
+            let trap_cx_ppn = KERNEL_SPACE
+                .exclusive_access()
+                .translate(trap_cx_va.std_floor())
+                .expect("kernel TrapContext is not mapped")
+                .ppn();
+            memory_set.install_trap_context_page(trap_cx_va, trap_cx_ppn);
+            (trap_cx_addr, trap_cx_addr)
         };
 
         #[cfg(target_arch = "loongarch64")]
@@ -534,7 +495,16 @@ impl TaskStruct {
                 .collect::<Vec<_>>()
         };
         for sibling in sibling_tasks {
-            sibling.inner_exclusive_access().state = TaskStatus::Zombie;
+            let mut sibling_inner = sibling.inner_exclusive_access();
+            #[cfg(target_arch = "riscv64")]
+            if let Some(mm) = sibling_inner.mm.as_ref() {
+                mm.exclusive_access().remove_trap_context_page(VirtAddr::from(
+                    sibling_inner.thread.trap_ctx,
+                ));
+            }
+            sibling_inner.state = TaskStatus::Zombie;
+            sibling_inner.mm.take();
+            drop(sibling_inner);
             let _dispatch = lock_dispatch();
             remove_from_tid2task(sibling.gettid());
             remove_task_from_all_local_queues_unlocked(sibling.gettid());
@@ -567,6 +537,7 @@ impl TaskStruct {
         const CLONE_CHILD_CLEARTID: usize = 0x00200000;  // 子任务退出时清零 ctid 并 futex 唤醒
         const CLONE_CHILD_SETTID: usize = 0x01000000;    // 向子地址空间写入 TID
         const CLONE_THREAD: usize = 0x00010000;           // 创建线程（共享 tgid）
+        const CLONE_SYSVSEM: usize = 0x00040000;           // 共享 System V 信号量（todo）
 
         // ── 0. 判断是创建线程还是独立进程 ──
         let clone_thread = flags & CLONE_THREAD != 0;
@@ -691,40 +662,24 @@ impl TaskStruct {
             pid.clone()
         };
 
-        // ── 5. 分配内核栈，并映射 trap 上下文页 ──
+        // ── 5. 分配内核栈，并在栈顶保留 trap 上下文 ──
         let kernel_stack = kstack_alloc();
+        let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
+        let kernel_stack_top = trap_cx_addr;
 
-        // RISC-V：trap 上下文映射在用户地址空间中，通过 trap_cx_va 确定虚拟地址
+        // RISC-V 陷入时仍使用用户页表，因此只借用映射包含真实内核
+        // TrapContext 的栈顶页；物理页始终由 KernelStack 所有。
         #[cfg(target_arch = "riscv64")]
-        let (trap_cx_addr, kernel_stack_top) = {
-            let trap_cx_va: VirtAddr = trap_cx_va_by_kernel_stack(&kernel_stack).into();
-            let mut memory = child_mm.exclusive_access();
-            memory.push(
-                MapArea::new(
-                    trap_cx_va,
-                    VirtAddr::from(trap_cx_va.0 + KERNEL_STACK_SIZE),
-                    MapType::Framed,
-                    MapPermission::R | MapPermission::W,
-                    PageSize::Page4K,
-                ),
-                None,
-                trap_cx_va.0,
-            );
-            // 将虚拟地址翻译为物理地址，作为 trap_cx_addr
-            let trap_cx_addr = memory
-                .translate(trap_cx_va.into())
-                .unwrap()
+        {
+            let trap_cx_va = VirtAddr::from(trap_cx_addr);
+            let trap_cx_ppn = KERNEL_SPACE
+                .exclusive_access()
+                .translate(trap_cx_va.std_floor())
+                .expect("kernel TrapContext is not mapped")
                 .ppn();
-            let trap_cx_pa: PhysAddr = trap_cx_addr.into();
-            (usize::from(trap_cx_pa), kernel_stack.get_top())
-        };
-
-        // LoongArch：trap 上下文直接分配在内核栈顶部
-        #[cfg(target_arch = "loongarch64")]
-        let (trap_cx_addr, kernel_stack_top) = {
-            let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
-            (trap_cx_addr, trap_cx_addr)
-        };
+            let mut memory = child_mm.exclusive_access();
+            memory.install_trap_context_page(trap_cx_va, trap_cx_ppn);
+        }
 
         // ── 6. 构造子任务 TaskStruct ──
         let thread_group_leader = self.group_leader.clone();
@@ -876,6 +831,11 @@ impl TaskStruct {
         remove_from_tid2task(self.gettid());
 
         let mut inner = self.inner_exclusive_access();
+        #[cfg(target_arch = "riscv64")]
+        if let Some(mm) = inner.mm.as_ref() {
+            mm.exclusive_access()
+                .remove_trap_context_page(VirtAddr::from(inner.thread.trap_ctx));
+        }
         inner.exit_code = exit_code;
         inner.errno = 0;
         inner.state = TaskStatus::Zombie;
@@ -904,8 +864,8 @@ pub struct TaskStructInner {
     pub real_parent: Weak<TaskStruct>,  // 实际创建当前进程的父进程
     pub parent: Weak<TaskStruct>,       // 接收 SIGCHLD 信号的父进程
     pub children: Vec<Arc<TaskStruct>>,              // 子进程链表头
-    pub pgid: usize,
-    pub sid: usize,
+    pub pgid: usize,    //进程组id
+    pub sid: usize,     //会话id
 
     /* 3. 进程状态 */
     pub state: TaskStatus,        // 进程运行状态
