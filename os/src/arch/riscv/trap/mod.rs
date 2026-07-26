@@ -26,11 +26,15 @@ use crate::arch::timer::get_time_ms;
 use alloc::sync::Arc;
 
 use core::arch::{asm, global_asm};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use riscv::register::{scause, stval, stvec, sie};
 use scause::{Exception, Interrupt, Trap};
 use stvec::TrapMode;
 
 global_asm!(include_str!("trap.S"));
+
+const CLONE_COUNT_PRINT_INTERVAL_MS: usize = 1000;
+static LAST_CLONE_COUNT_PRINT_MS: AtomicUsize = AtomicUsize::new(0);
 
 /// Initialize trap handling
 pub fn init() {
@@ -98,6 +102,35 @@ pub fn trap_handler() -> ! {
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             let current_ms = get_time_ms();
+            //定时打印clone的子进程数量
+            /*let last_print_ms = LAST_CLONE_COUNT_PRINT_MS.load(Ordering::Relaxed);
+            if current_ms.saturating_sub(last_print_ms) >= CLONE_COUNT_PRINT_INTERVAL_MS
+                && LAST_CLONE_COUNT_PRINT_MS
+                    .compare_exchange(
+                        last_print_ms,
+                        current_ms,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                if let Some(current) = current_task() {
+                    let pid = current.getpid();
+                    let current_tid = current.gettid();
+                    let live_tasks = crate::task::manager::TID2TCB
+                        .exclusive_access()
+                        .values()
+                        .filter(|task| task.getpid() == pid)
+                        .count();
+                    println!(
+                        "[CLONE COUNT] pid={} current_tid={} live_tasks={} clone_children={}",
+                        pid,
+                        current_tid,
+                        live_tasks,
+                        live_tasks.saturating_sub(1)
+                    );
+                }
+            }*/
             let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
             for pid in expired_pids {
                 let tasks = crate::task::manager::TID2TCB

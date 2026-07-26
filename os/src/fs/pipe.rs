@@ -4,34 +4,72 @@ use crate::sync::MPSafeCell;
 use alloc::sync::{Arc, Weak};
 use crate::mm::{frame_alloc, FrameTracker}; 
 use crate::auth::{PermStat, FileMode};
-use crate::process::{SignalFlags, check_pending_signal, wake_up_task};
+use crate::process::{
+    block_current_and_run_next_if, check_pending_signal, wake_up_one, wake_up_task, SignalFlags,
+};
+use crate::sync::WaitQueue;
 use crate::syscall::errno::Errno;
 use core::any::Any;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use spin::Mutex;
 
-use crate::task::suspend_current_and_run_next;
+// lat_pipe performs one-byte writes for every half round trip.  Keep this
+// diagnostic sparse so it demonstrates forward progress without flooding the
+// serial console and changing the benchmark even more than necessary.
+const PIPE_PROGRESS_INTERVAL: usize = 1024;
+static PIPE_ONE_BYTE_WRITES: AtomicUsize = AtomicUsize::new(0);
+
+fn report_one_byte_write_progress(buffer: &Arc<MPSafeCell<PipeRingBuffer>>) {
+    let completed = PIPE_ONE_BYTE_WRITES.fetch_add(1, Ordering::Relaxed) + 1;
+    if completed % PIPE_PROGRESS_INTERVAL == 0 {
+        let task = crate::task::current_task().unwrap();
+        println!(
+            "[pipe-progress] pid={} tid={} successful_1byte_writes={} interval={} buffer={:p}",
+            task.getpid(),
+            task.gettid(),
+            completed,
+            PIPE_PROGRESS_INTERVAL,
+            Arc::as_ptr(buffer),
+        );
+    }
+}
 
 /// IPC pipe
 pub struct Pipe {
     readable: bool,
     writable: bool,
     buffer: Arc<MPSafeCell<PipeRingBuffer>>,
+    read_waiters: Arc<Mutex<WaitQueue>>,
+    write_waiters: Arc<Mutex<WaitQueue>>,
 }
 
 impl Pipe {
     /// create readable pipe
-    pub fn read_end_with_buffer(buffer: Arc<MPSafeCell<PipeRingBuffer>>) -> Self {
+    pub fn read_end_with_buffer(
+        buffer: Arc<MPSafeCell<PipeRingBuffer>>,
+        read_waiters: Arc<Mutex<WaitQueue>>,
+        write_waiters: Arc<Mutex<WaitQueue>>,
+    ) -> Self {
         Self {
             readable: true,
             writable: false,
             buffer,
+            read_waiters,
+            write_waiters,
         }
     }
     /// create writable pipe
-    pub fn write_end_with_buffer(buffer: Arc<MPSafeCell<PipeRingBuffer>>) -> Self {
+    pub fn write_end_with_buffer(
+        buffer: Arc<MPSafeCell<PipeRingBuffer>>,
+        read_waiters: Arc<Mutex<WaitQueue>>,
+        write_waiters: Arc<Mutex<WaitQueue>>,
+    ) -> Self {
         Self {
             readable: false,
             writable: true,
             buffer,
+            read_waiters,
+            write_waiters,
         }
     }
 
@@ -55,6 +93,23 @@ impl Pipe {
         }
 
         Some(Errno::EPIPE)
+    }
+
+    fn wake_all(queue: &Mutex<WaitQueue>) {
+        while wake_up_one(queue) {}
+    }
+}
+
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        // The last endpoint disappearing changes an empty read into EOF, or a
+        // full write into EPIPE. Wake everybody so they can observe it.
+        if self.readable {
+            Self::wake_all(&self.write_waiters);
+        }
+        if self.writable {
+            Self::wake_all(&self.read_waiters);
+        }
     }
 }
 
@@ -161,8 +216,18 @@ impl PipeRingBuffer {
 /// Return (read_end, write_end)
 pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
     let buffer = Arc::new(MPSafeCell::new(PipeRingBuffer::new()));
-    let read_end = Arc::new(Pipe::read_end_with_buffer(buffer.clone()));
-    let write_end = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
+    let read_waiters = Arc::new(Mutex::new(WaitQueue::new()));
+    let write_waiters = Arc::new(Mutex::new(WaitQueue::new()));
+    let read_end = Arc::new(Pipe::read_end_with_buffer(
+        buffer.clone(),
+        read_waiters.clone(),
+        write_waiters.clone(),
+    ));
+    let write_end = Arc::new(Pipe::write_end_with_buffer(
+        buffer.clone(),
+        read_waiters,
+        write_waiters,
+    ));
     buffer.exclusive_access().set_write_end(&write_end);
     buffer.exclusive_access().set_read_end(&read_end);
     (read_end, write_end)
@@ -215,57 +280,23 @@ impl File for Pipe {
             let mut ring_buffer = self.buffer.exclusive_access();
             let loop_read = ring_buffer.available_read();
             if loop_read == 0 {
-                let current_pid = crate::task::current_task().unwrap().getpid();
-                let (writer_observed, writer_actual) = if let Some(writer) =
-                    ring_buffer.write_end.as_ref().and_then(|end| end.upgrade())
-                {
-                    let observed = Arc::strong_count(&writer);
-                    (observed, observed.saturating_sub(1))
-                } else {
-                    (0, 0)
-                };
                 let eof = ring_buffer.all_write_ends_closed();
                 drop(ring_buffer);
-                warn!(
-                    "[pipe-read-empty] pid={} avail_read={} writer_observed={} writer_actual={} eof={}",
-                    current_pid,
-                    loop_read,
-                    writer_observed,
-                    writer_actual,
-                    eof,
-                );
-
-                if writer_actual > 0 {
-                    let task = crate::task::current_task().unwrap();
-                    let files = task.inner_exclusive_access().files.clone();
-                    let files = files.exclusive_access();
-                    for (fd, desc) in files.fds.iter().enumerate() {
-                        let Some(file) = &desc.file else {
-                            continue;
-                        };
-                        let Some(pipe) = file.as_any().downcast_ref::<Pipe>() else {
-                            continue;
-                        };
-                        if Arc::ptr_eq(&pipe.buffer, &self.buffer) {
-                            warn!(
-                                "[pipe-read-empty] pid={} self-fd={} readable={} writable={} flags={:?} status={:#x} buffer={:p}",
-                                current_pid,
-                                fd,
-                                pipe.readable,
-                                pipe.writable,
-                                desc.flags,
-                                desc.status,
-                                Arc::as_ptr(&pipe.buffer),
-                            );
-                        }
-                    }
-                }
-
                 if eof {
-                    warn!("[pipe-read-empty] pid={} sees EOF", current_pid);
                     return already_read;
                 }
-                suspend_current_and_run_next();
+
+                let blocked = block_current_and_run_next_if(&self.read_waiters, || {
+                    let ring_buffer = self.buffer.exclusive_access();
+                    ring_buffer.available_read() == 0 && !ring_buffer.all_write_ends_closed()
+                });
+                if blocked {
+                    let tid = crate::task::current_task().unwrap().gettid();
+                    self.read_waiters.lock().remove_by_tid(tid);
+                    if check_pending_signal() {
+                        return already_read;
+                    }
+                }
                 continue;
             }
             for _ in 0..loop_read {
@@ -279,13 +310,19 @@ impl File for Pipe {
                      //   println!("[kernel] Pipe Read Progress: {} / {}", already_read, want_to_read);
                     }
                     if already_read == want_to_read {
+                        drop(ring_buffer);
+                        wake_up_one(&self.write_waiters);
                         return want_to_read;
                     }
                 } else {
+                    drop(ring_buffer);
+                    wake_up_one(&self.write_waiters);
                     return already_read;
                 }
             }
             // 不阻塞，返回已经读到的字节数
+            drop(ring_buffer);
+            wake_up_one(&self.write_waiters);
             return already_read;
         }
     }
@@ -303,12 +340,22 @@ impl File for Pipe {
                     let _ = self.broken_pipe_error();
                     return already_write;
                 }
-              //  println!("[kernel] Pipe Write Full: already_write={}, waiting for consumer...", already_write);
                 drop(ring_buffer);
+                if already_write > 0 {
+                    wake_up_one(&self.read_waiters);
+                }
                 if check_pending_signal() {
                     return already_write;
                 }
-                suspend_current_and_run_next();
+
+                let blocked = block_current_and_run_next_if(&self.write_waiters, || {
+                    let ring_buffer = self.buffer.exclusive_access();
+                    ring_buffer.available_write() == 0 && !ring_buffer.all_read_ends_closed()
+                });
+                if blocked {
+                    let tid = crate::task::current_task().unwrap().gettid();
+                    self.write_waiters.lock().remove_by_tid(tid);
+                }
                 continue;
             }
             // write at most loop_write bytes
@@ -325,9 +372,16 @@ impl File for Pipe {
                   //      println!("[kernel] Pipe Write Progress: {} / {}", already_write, want_to_write);
                     }
                     if already_write == want_to_write {
+                        drop(ring_buffer);
+                        wake_up_one(&self.read_waiters);
+                        if want_to_write == 1 {
+                            //report_one_byte_write_progress(&self.buffer);
+                        }
                         return want_to_write;
                     }
                 } else {
+                    drop(ring_buffer);
+                    wake_up_one(&self.read_waiters);
                     return already_write;
                 }
             }
@@ -372,11 +426,21 @@ impl File for Pipe {
                     ring_buffer.write_byte(unsafe { *byte_ref });
                     already_write += 1;
                     if already_write == want_to_write {
+                        drop(ring_buffer);
+                        wake_up_one(&self.read_waiters);
                         return Ok(want_to_write);
                     }
                 } else {
+                    drop(ring_buffer);
+                    if already_write > 0 {
+                        wake_up_one(&self.read_waiters);
+                    }
                     return Ok(already_write);
                 }
+            }
+            drop(ring_buffer);
+            if already_write > 0 {
+                wake_up_one(&self.read_waiters);
             }
             return Ok(already_write);
         }
