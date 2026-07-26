@@ -480,6 +480,14 @@ pub fn sys_sendto(
     let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner);
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
+        // Linux/POSIX 允许未显式 bind 的 UDP socket 直接 sendto。此时内核需要
+        // 隐式分配一个本地临时端口，否则 smoltcp 会以 Unaddressable 拒绝发送。
+        if udp_socket.local_port.lock().is_none() {
+            let bind_ret = udp_socket.bind(alloc_ephemeral_port());
+            if bind_ret < 0 {
+                return bind_ret;
+            }
+        }
         // 1. 从用户空间拷贝出发送数据
         let mut data = vec![0u8; len];
         let user_buf = UserBuffer::new(translated_byte_buffer(token, buf, len));
@@ -511,6 +519,11 @@ pub fn sys_sendto(
                 // 挂起当前任务，切换到其他任务
                 suspend_current_and_run_next(); 
                 continue;
+            }
+            if ret >= 0 {
+                // send_slice 只把数据放入 smoltcp 的发送队列；立即轮询一次，
+                // 让回环数据在随后 recvfrom 前进入接收 socket。
+                net_poll();
             }
             return ret;
         }
@@ -558,10 +571,14 @@ pub fn sys_recvfrom(
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         let mut data = vec![0u8; len];
         let timeout_opt = *udp_socket.recv_timeout.lock();
-        let deadline_ms = timeout_opt.map(|duration| {
-            crate::timer::get_time_ms() + duration.as_millis() as usize
+        let deadline_us = timeout_opt.map(|duration| {
+            crate::arch::timer::get_time_us()
+                .saturating_add(duration.as_micros().min(usize::MAX as u128) as usize)
         });
         loop {
+            // smoltcp 依靠显式 poll 推动收发。必须先 poll、再检查接收队列和
+            // 超时，否则 1us 之类的短超时会在回环包被分发前直接返回 EAGAIN。
+            net_poll();
             if let Some((read_len, src_ep)) = udp_socket.recvfrom(&mut data) {
                 // 把数据拷贝回用户的 buf
                 if read_len > 0 {
@@ -607,18 +624,10 @@ pub fn sys_recvfrom(
                 if is_nonblocking {
                     return Errno::EAGAIN.as_isize(); 
                 }
-                if let Some(deadline) = deadline_ms {
-                    if crate::timer::get_time_ms() >= deadline {
+                if let Some(deadline) = deadline_us {
+                    if crate::arch::timer::get_time_us() >= deadline {
                         return crate::syscall::errno::Errno::EAGAIN.as_isize(); 
                     }
-                }
-                net_poll(); 
-                let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-                let smol_socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(udp_socket.handle);
-                let can_recv = smol_socket.can_recv();
-                drop(sockets);
-                if can_recv {
-                continue; 
                 }
                 crate::timer::check_timer_cooperative();
                 let task = crate::task::current_task().unwrap();
