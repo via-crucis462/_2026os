@@ -191,6 +191,10 @@ impl PhysAddr {
         self.0 | crate::CACHED_KERNEL_BASE
     }
     #[cfg(target_arch = "riscv64")]
+    /// 获取内核态地址值
+    /// 
+    /// 规定为内核自身内存访问使用
+    /// 
     /// 仅为了统一接口，riscv64不需要做任何处理
     pub fn get_cached_addr(&self) -> usize {
         self.0
@@ -201,6 +205,10 @@ impl PhysAddr {
         self.0 | crate::UNCACHED_KERNEL_BASE
     }
     #[cfg(target_arch = "riscv64")]
+    /// 获取内核态地址值
+    ///
+    /// 规定为设备访问时使用
+    /// 
     /// 仅为了统一接口，riscv64不需要做任何处理
     pub fn get_uncached_addr(&self) -> usize {
         self.0

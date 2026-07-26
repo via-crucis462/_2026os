@@ -38,7 +38,7 @@ pub const CPU_CORE_NUM: usize = 4;
 #[cfg(board = "2k1000")]
 pub const CPU_CORE_NUM: usize = 2;
 
-/// 为pci设备预留的内存空间大小
+/// 为 DMA 设备预留的内存空间大小
 pub const DMA_SIZE: usize = 0x100_0000; // 16MB
 
 #[cfg(board = "virt")]

@@ -10,10 +10,9 @@ use spin::Mutex;
 use crate::{
     arch::{
         config::{PAGE_SIZE, SATA_AHCI_MMIO_PA, UNCACHED_KERNEL_BASE},
-        drivers::dma::{DmaBuffer, QUEUE_FRAMES},
         dma_barriar,
         timer::get_time_ms,
-    }, ext4fs::BLOCK_SZ, mm::PhysAddr
+    }, drivers::dma::{DmaBuffer, DMA_MEMORY}, ext4fs::BLOCK_SZ, mm::PhysAddr
 };
 use lazy_static::lazy_static;
 
@@ -958,7 +957,7 @@ impl AHCIController {
     }
     // 分配 DMA 缓冲区，返回首地址（物理地址）
     pub fn alloc_dma_buffer(&mut self, pages: usize) -> Option<PhysAddr> {
-        let dma_buf = QUEUE_FRAMES.exclusive_access().alloc(pages)?;
+        let dma_buf = DMA_MEMORY.exclusive_access().alloc(pages)?;
         let phys_addr = dma_buf.phys_addr();
         unsafe {
             core::ptr::write_bytes(dma_buf.uncached_ptr(), 0, pages * PAGE_SIZE);

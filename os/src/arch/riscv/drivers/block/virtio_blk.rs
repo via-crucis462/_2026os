@@ -1,14 +1,13 @@
 use core::ptr::NonNull;
 
-use super::BlockDevice;
-use crate::{BLOCK_MMIO_SIZE, MMIO_SLOT_SIZE};
+use super::{BlockDevice, BLOCK_DEVICE};
+use crate::MMIO_SLOT_SIZE;
 use crate::mm::{
-    frame_alloc, frame_dealloc, kernel_token, FrameTracker, PageTable, PhysAddr, PhysPageNum,
-    StepByOne, VirtAddr,
+    kernel_token, PageTable, PhysAddr, VirtAddr,
 };
+use crate::drivers::dma::DMA_MEMORY;
+use crate::ext4fs::{get_block_cache, BLOCK_SZ};
 use crate::sync::MPSafeCell;
-use alloc::vec::Vec;
-use lazy_static::*;
 use virtio_drivers::{Hal, transport::mmio::{MmioTransport, VirtIOHeader}, BufferDirection, PhysAddr as VirtioPhysAddr};
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::Transport;
@@ -20,11 +19,6 @@ const VIRTIO0: usize = 0x10001000;
 pub struct VirtIOBlock{
     pub inner: MPSafeCell<VirtIOBlk<VirtioHal, MmioTransport<'static>>>
 }
-
-lazy_static! {
-    static ref QUEUE_FRAMES: MPSafeCell<Vec<FrameTracker>> = MPSafeCell::new(Vec::new());
-}
-
 
 impl VirtIOBlock {
     #[allow(unused)]
@@ -70,38 +64,76 @@ impl VirtIOBlock {
 pub struct VirtioHal;
 
 unsafe impl Hal for VirtioHal {
-    fn dma_alloc(pages: usize, direction: BufferDirection) -> (VirtioPhysAddr, NonNull<u8>) {
-        let mut ppn_base = PhysPageNum(0);
-        for i in 0..pages {
-            let frame = frame_alloc(crate::mm::PageSize::Page4K).unwrap();
-            if i == 0 {
-                ppn_base = frame.ppn;
-            }
-            // 这里假设frame_alloc分配的物理页是连续的
-            // 可能有问题
-            assert_eq!(frame.ppn.0, ppn_base.0 + i);
-            QUEUE_FRAMES.exclusive_access().push(frame);
-        }
-        let pa: PhysAddr = ppn_base.into();
-        ((pa.0 as u64).into(), NonNull::new(pa.0 as *mut u8).unwrap())
+    fn dma_alloc(pages: usize, _direction: BufferDirection) -> (VirtioPhysAddr, NonNull<u8>) {
+        let buffer = DMA_MEMORY
+            .exclusive_access()
+            .alloc(pages)
+            .unwrap_or_else(|| panic!("virtio DMA region exhausted for {} pages", pages));
+        buffer.zero();
+        (
+            buffer.phys_addr().0 as VirtioPhysAddr,
+            NonNull::new(buffer.uncached_ptr()).expect("DMA address must not be zero"),
+        )
     }
 
-    unsafe fn dma_dealloc(pa: u64, va: NonNull<u8>, pages: usize) -> i32 {
-        let pa = PhysAddr::from(pa as usize);
-        let mut ppn_base: PhysPageNum = pa.into();
-        for _ in 0..pages {
-            frame_dealloc(ppn_base, crate::mm::PageSize::Page4K);
-            ppn_base.step();
-        }
-        0
+    unsafe fn dma_dealloc(paddr: VirtioPhysAddr, _vaddr: NonNull<u8>, pages: usize) -> i32 {
+        DMA_MEMORY
+            .exclusive_access()
+            .dealloc(PhysAddr::from(paddr as usize), pages)
+            .then_some(0)
+            .unwrap_or(-1)
     }
-    unsafe fn mmio_phys_to_virt(addr: u64, _size: usize) -> NonNull<u8> {
-        NonNull::new(addr as *mut u8).unwrap()
+
+    unsafe fn mmio_phys_to_virt(paddr: VirtioPhysAddr, _size: usize) -> NonNull<u8> {
+        NonNull::new(PhysAddr::from(paddr as usize).get_uncached_addr() as *mut u8).unwrap()
     }
-    unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection) -> VirtioPhysAddr {
-        buffer.as_ptr() as *const () as usize as VirtioPhysAddr
+
+    unsafe fn share(buffer: NonNull<[u8]>, _direction: BufferDirection) -> VirtioPhysAddr {
+        let vaddr = buffer.as_ptr() as *mut u8 as usize;
+        PageTable::from_token(kernel_token())
+            .translate_va(VirtAddr::from(vaddr))
+            .expect("virtio buffer is not mapped")
+            .0 as VirtioPhysAddr
     }
-    unsafe fn unshare(paddr: VirtioPhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection) {
-        
+
+    unsafe fn unshare(
+        _paddr: VirtioPhysAddr,
+        _buffer: NonNull<[u8]>,
+        _direction: BufferDirection,
+    ) {
+    }
+}
+
+impl BlockDevice for VirtIOBlock {
+    fn raw_read_block(&self, block_id: usize, buf: &mut [u8]) {
+        assert_eq!(buf.len(), BLOCK_SZ, "block buffer must be {} bytes", BLOCK_SZ);
+        self.inner
+            .exclusive_access()
+            .read_blocks(block_id * (BLOCK_SZ / 512), buf)
+            .expect("virtio block read failed");
+    }
+
+    fn raw_write_block(&self, block_id: usize, buf: &[u8]) {
+        assert_eq!(buf.len(), BLOCK_SZ, "block buffer must be {} bytes", BLOCK_SZ);
+        self.inner
+            .exclusive_access()
+            .write_blocks(block_id * (BLOCK_SZ / 512), buf)
+            .expect("virtio block write failed");
+    }
+
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
+        assert!(buf.len() <= BLOCK_SZ);
+        let cache = get_block_cache(block_id, BLOCK_DEVICE.clone());
+        let block = cache.lock();
+        let block_data: &[u8; BLOCK_SZ] = block.get_ref(0);
+        buf.copy_from_slice(&block_data[..buf.len()]);
+    }
+
+    fn write_block(&self, block_id: usize, buf: &[u8]) {
+        assert!(buf.len() <= BLOCK_SZ);
+        let cache = get_block_cache(block_id, BLOCK_DEVICE.clone());
+        cache.lock().modify(0, |block_data: &mut [u8; BLOCK_SZ]| {
+            block_data[..buf.len()].copy_from_slice(buf);
+        });
     }
 }

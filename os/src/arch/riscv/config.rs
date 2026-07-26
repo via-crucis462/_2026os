@@ -28,8 +28,8 @@ pub const MEMORY_BASE: usize = 0x8000_0000;
 pub const MEMORY_SIZE: usize = 1<<30; // 1GB,0x4000_0000
 /// the physical memory end
 pub const MEMORY_END: usize = MEMORY_BASE + MEMORY_SIZE; // 0xc000_0000
-/// 这里也定义一个
-pub const DMA_SIZE: usize = 0;
+/// Reserved contiguous memory for DMA-capable virtio devices.
+pub const DMA_SIZE: usize = 0x100_0000;
 
 
 /// virtio 设备单个槽位长度
@@ -39,7 +39,7 @@ pub const BLOCK_MMIO_SIZE: usize = MMIO_SLOT_SIZE * 8;
 /// The base address of control registers in Virtio_Block device
 pub const MMIO: &[(usize, usize)] = &[
     (0x10001000, BLOCK_MMIO_SIZE), // Virtio Block
-    (0x10_1000, 0x1000), // 🌟 新增：Goldfish RTC
+    (0x10_1000, 0x1000), // Goldfish RTC
 ];
 
 /// 和la同步这个量，不设值

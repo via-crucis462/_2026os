@@ -2,7 +2,6 @@
 
 pub mod board;
 pub mod pci;
-pub mod dma;
 pub use board::*;
 
 use alloc::vec::Vec;

@@ -156,7 +156,7 @@ impl ProcessControlBlock {
                     .unwrap()
                     .ppn();
                 let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
-                trap_cx_pa.into()
+                trap_cx_pa.get_cached_addr()
             };
 
             // 内核栈顶地址，即切换到内核任务流后内核执行栈的初始值（内核sp）
@@ -305,7 +305,7 @@ impl ProcessControlBlock {
             trap_cx_addr = {
                 let trap_cx_ppn = memory_set.translate(trap_cx_va.into()).unwrap().ppn();
                 let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
-                trap_cx_pa.into()
+                trap_cx_pa.get_cached_addr()
             };
             kernel_stack_top = caller_task.kernel_stack.get_top();
         }
@@ -549,7 +549,7 @@ impl ProcessControlBlock {
                 .unwrap()
                 .ppn();
             let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
-            let trap_cx_addr: usize = trap_cx_pa.into();
+            let trap_cx_addr: usize = trap_cx_pa.get_cached_addr();
             trap_cx_addr
             };
         }
@@ -695,7 +695,7 @@ impl ProcessControlBlock {
                     .unwrap()
                     .ppn();
                 let trap_cx_pa: PhysAddr = trap_cx_ppn.into();
-                trap_cx_pa.into()
+                trap_cx_pa.get_cached_addr()
             };
         }
 

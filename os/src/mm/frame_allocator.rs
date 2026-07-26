@@ -236,10 +236,7 @@ pub fn init_frame_allocator() {
         fn ekernel();
     }
     // 为DMA预留空间
-    #[cfg(target_arch = "loongarch64")]
     let frame_start = ekernel as *const() as usize + DMA_SIZE;
-    #[cfg(target_arch = "riscv64")]
-    let frame_start = ekernel as *const() as usize;
     
     FRAME_ALLOCATOR.exclusive_access().init(
         PhysAddr::from(frame_start).std_ceil(),
