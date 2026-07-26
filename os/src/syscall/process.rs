@@ -1761,10 +1761,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     }
     if !hwaddr_exists {
         // 没有 MAC 地址后增加
-        #[cfg(target_arch = "loongarch64")]
-        let mac = crate::drivers::block::NET_DEVICE.get_mac_address();
-        #[cfg(target_arch = "riscv64")]
-        let mac = crate::drivers::block::NET_DEVICE.0.exclusive_access().mac();
+        let mac = crate::arch::drivers::NET_DEVICE.get_mac_address();
         let real_mac_str = alloc::format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]

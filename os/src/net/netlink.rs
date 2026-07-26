@@ -169,10 +169,7 @@ fn write(&self, buf: UserBuffer) -> usize {
                 real_flags |= 0x1000;        // IFF_LOWER_UP
 
                 let real_index = 2; 
-                #[cfg(target_arch = "riscv64")]
-                let real_mac = crate::net::NET_DEVICE.0.exclusive_access().mac();
-                #[cfg(target_arch = "loongarch64")]
-                let real_mac = crate::net::NET_DEVICE.get_mac_address();
+                let real_mac = crate::arch::drivers::NET_DEVICE.get_mac_address();
 
                 let mut packet = LinkReplyPacket {
                     nl_hdr: NlMsgHdr { 

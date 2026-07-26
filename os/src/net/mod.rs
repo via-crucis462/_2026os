@@ -9,7 +9,7 @@ use lazy_static::lazy_static;
 use crate::sync::MPSafeCell;
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address};
-use crate::drivers::block::NET_DEVICE;
+use crate::arch::drivers::NET_DEVICE;
 use crate::process::wake_up_one;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -57,13 +57,26 @@ impl Device for VirtioNetDevice {
     let mut driver = NET_DEVICE.0.exclusive_access();
        if driver.can_recv() {
             #[cfg(target_arch = "riscv64")] {
-                let mut buf = vec![0u8; 2048];
-                if let Ok(len) = driver.recv(&mut buf) {
-                    buf.truncate(len); 
-                    return Some((RxToken { buffer: buf }, TxToken));
-                }   
+                if let Ok(rx_buf) = driver.receive() {
+                    let buffer = rx_buf.packet().to_vec();
+                    driver
+                        .recycle_rx_buffer(rx_buf)
+                        .expect("Failed to recycle network receive buffer");
+                    return Some((RxToken { buffer }, TxToken));
+                }
             }
-            #[cfg(target_arch = "loongarch64")] {
+            #[cfg(all(target_arch = "loongarch64", board = "virt"))]
+            {
+                if let Ok(rx_buf) = driver.receive() {
+                    let buffer = rx_buf.packet().to_vec();
+                    driver
+                        .recycle_rx_buffer(rx_buf)
+                        .expect("Failed to recycle network receive buffer");
+                    return Some((RxToken { buffer }, TxToken));
+                }
+            }
+            #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+            {
                 if let Ok(buf) = driver.receive() {
                     return Some((RxToken { buffer: buf.as_bytes().to_vec() }, TxToken));
                 }
@@ -105,10 +118,10 @@ impl phy::TxToken for TxToken {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let mut buffer = vec![0u8; len];
-        let result = f(&mut buffer); 
         let mut driver = NET_DEVICE.0.exclusive_access();
-        driver.send(&buffer).expect("Failed to send network packet");
+        let mut tx_buf = driver.new_tx_buffer(len);
+        let result = f(tx_buf.packet_mut());
+        driver.send(tx_buf).expect("Failed to send network packet");
         
         result
     }
@@ -162,11 +175,7 @@ lazy_static! {
     };
     pub static ref NET_IFACE: MPSafeCell<Interface> = {
 
-        #[cfg(target_arch = "riscv64")]
-        let mac = NET_DEVICE.0.exclusive_access().mac();
-
-        #[cfg(target_arch = "loongarch64")]
-        let mac = NET_DEVICE.0.exclusive_access().mac_address();
+        let mac = NET_DEVICE.get_mac_address();
         
         let mac_addr = EthernetAddress::from_bytes(&mac);
         let mut config = Config::new(HardwareAddress::Ethernet(mac_addr));

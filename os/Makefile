@@ -38,6 +38,7 @@ LA_FS_IMG := ../fs_img/la64_ext4.img
 
 # KERNEL ENTRY
 KERNEL_ENTRY_PA := 0x80200000
+RV_LINKER := src/arch/riscv/linker.ld
 
 # Binutils
 OBJDUMP := rust-objdump --arch-name=riscv64
@@ -59,7 +60,7 @@ $(KERNEL_BIN): kernel
 
 kernel:
 	@echo Platform: $(BOARD)
-	@LOG=$(LOG) INITPROC=$(INITPROC) cargo build --target riscv64gc-unknown-none-elf $(MODE_ARG) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=""
+	@RUSTFLAGS="-Clink-arg=-T$(RV_LINKER)" LOG=$(LOG) INITPROC=$(INITPROC) cargo build --target riscv64gc-unknown-none-elf $(MODE_ARG) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=""
 
 clean:
 	@cargo clean
