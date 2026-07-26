@@ -240,20 +240,29 @@ use crate::{fs::Stat, task::{SignalAction, current_task}};
 const PATH_MAX_LEN: usize = 256;
 
 pub(crate) fn normalize_leading_dot_path(path: String) -> String {
-    if !path.starts_with('.') {
-        return path;
-    }
-    let cwd = current_task().unwrap().process().inner_exclusive_access().cwd.get_full_path();
     if path == "." {
-        return cwd;
+        return current_task()
+            .unwrap()
+            .process()
+            .inner_exclusive_access()
+            .cwd
+            .get_full_path();
     }
     if let Some(rest) = path.strip_prefix("./") {
+        let cwd = current_task()
+            .unwrap()
+            .process()
+            .inner_exclusive_access()
+            .cwd
+            .get_full_path();
         if cwd.ends_with('/') {
             return alloc::format!("{}{}", cwd, rest);
         }
         return alloc::format!("{}/{}", cwd, rest);
     }
-    path.replacen('.', cwd.as_str(), 1)
+    // "..", "../..." and dot-prefixed names are meaningful paths, not a
+    // spelling of the current directory. Let Dentry::find_tree resolve them.
+    path
 }
 
 
