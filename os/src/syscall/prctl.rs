@@ -44,7 +44,7 @@ const EINVAL: isize = 22;
 
 pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
     // todo：实现真正的多用户，权限机制和多线程
-    trace!("kernel:pid[{}] sys_prctl option={}", current_task().unwrap().process().pid.0, option);
+    trace!("kernel:pid[{}] sys_prctl option={}", current_task().unwrap().getpid(), option);
     match option {
         PR_SETNAME => {
             // 将名称写入当前线程的 comm 字段。

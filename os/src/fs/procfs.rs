@@ -12,13 +12,13 @@ use crate::process::TaskStatus;
 use crate::fs::ino::get_next_ino;
 
 fn get_task(pid: usize) -> Option<Arc<crate::task::TaskStruct>> {
-    crate::task::manager::TID2TCB
+    crate::process::registry::TID2TCB
         .exclusive_access()
         .values()
         .find(|task| task.getpid() == pid && task.gettid() == pid)
         .cloned()
         .or_else(|| {
-            crate::task::manager::TID2TCB
+            crate::process::registry::TID2TCB
                 .exclusive_access()
                 .values()
                 .find(|task| task.getpid() == pid)
@@ -27,7 +27,7 @@ fn get_task(pid: usize) -> Option<Arc<crate::task::TaskStruct>> {
 }
 
 fn list_process_ids() -> alloc::vec::Vec<usize> {
-    let mut pids = crate::task::manager::TID2TCB
+    let mut pids = crate::process::registry::TID2TCB
         .exclusive_access()
         .values()
         .map(|task| task.getpid())

@@ -16,7 +16,7 @@ use super::*;
 /// 参数检查由sys_mmap完成
 pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: usize) -> isize {
     info!("kernel:pid[{}] sys_mmap called with start={:#x}, len={:#x}, prot={:#x}, flags={:#x}, fd={}, off={:#x}", 
-        current_task().unwrap().process().pid.0, start, len, port, flags, fd, off);
+        current_task().unwrap().getpid(), start, len, port, flags, fd, off);
 
     // MAP_SHARED_VALIDATE (0x03): 等同于 MAP_SHARED 但需要校验所有 flag 位已知
     // 必须在 from_bits_truncate 之前检查，因为 truncate 会丢弃未知位
@@ -130,14 +130,15 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: u
 
 pub fn sys_munmap(start: usize, len: usize) -> isize {
     let task = current_task().unwrap();
-    let process = task.process();
+    // let task = current_task().unwrap();
+    // let pid = task.getpid();
     
     // 参数检查：地址必须页对齐，长度不能为0，且映射区域不能超过用户空间上限
     if start + len >= USER_APP_MAX_SIZE || start % PAGE_SIZE != 0 || len == 0 {
         return EINVAL.as_isize();
     }
 
-    trace!("kernel:pid[{}] sys_munmap NOT COMPLITED", process.pid.0);
+    trace!("kernel:pid[{}] sys_munmap NOT COMPLITED", task.getpid());
     if let Ok(_) = mmap::do_munmap(start,len) {
         0
     } else {

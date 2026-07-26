@@ -46,8 +46,8 @@ fn msgget_flags_from(msgflg: usize) -> (MsgGetFlags, u16) {
 pub fn sys_msgget(key: u32, msgflg: usize) -> isize {
     let (flags, mode) = msgget_flags_from(msgflg);
     let (uid, gid) = {
-        let proc = current_task().unwrap().process();
-        let inner = proc.inner_exclusive_access();
+        let task = current_task().unwrap();
+        let inner = task.inner_exclusive_access();
         let cred = inner.cred.exclusive_access();
         (cred.euid(), cred.egid())
     };
@@ -78,11 +78,11 @@ pub fn sys_msgget(key: u32, msgflg: usize) -> isize {
 /// 向指定id的消息队列发送消息
 /// msgp：用户空间地址，msgsz：大小，msgflg：标志
 pub fn sys_msgsnd(msqid: usize, msgp: usize, msgsz: usize, msgflg: usize) -> isize {
-    let pid = current_task().unwrap().process().pid.0;
+    let task = current_task().unwrap();
+    let pid = task.getpid();
     let token = current_user_token();
     let (uid, gid) = {
-        let proc = current_task().unwrap().process();
-        let inner = proc.inner_exclusive_access();
+        let inner = task.inner_exclusive_access();
         let cred = inner.cred.exclusive_access();
         (cred.euid(), cred.egid())
     };
@@ -140,11 +140,11 @@ pub fn sys_msgsnd(msqid: usize, msgp: usize, msgsz: usize, msgflg: usize) -> isi
 /// 从指定id的消息队列接收消息
 /// msgp：消息指针，msgsz：消息大小，msgtyp：类型，msgflg：标志
 pub fn sys_msgrcv(msqid: usize, msgp: usize, msgsz: usize, msgtyp: isize, msgflg: usize) -> isize {
-    let pid = current_task().unwrap().process().pid.0;
+    let task = current_task().unwrap();
+    let pid = task.getpid();
     let token = current_user_token();
     let (uid, gid) = {
-        let proc = current_task().unwrap().process();
-        let inner = proc.inner_exclusive_access();
+        let inner = task.inner_exclusive_access();
         let cred = inner.cred.exclusive_access();
         (cred.euid(), cred.egid())
     };
@@ -197,8 +197,8 @@ pub fn sys_msgrcv(msqid: usize, msgp: usize, msgsz: usize, msgtyp: isize, msgflg
 pub fn sys_msgctl(msqid: u32, cmd: usize, buf: usize) -> isize {
     let token = current_user_token();
     let (uid, gid) = {
-        let proc = current_task().unwrap().process();
-        let inner = proc.inner_exclusive_access();
+        let task = current_task().unwrap();
+        let inner = task.inner_exclusive_access();
         let cred = inner.cred.exclusive_access();
         (cred.euid(), cred.egid())
     };
@@ -298,8 +298,8 @@ pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
     let ipc_flags = ShmFlags::from_bits_truncate(flags & !0o777);
 
     let (uid, gid) = {
-        let proc = current_task().unwrap().process();
-        let inner = proc.inner_exclusive_access();
+        let task = current_task().unwrap();
+        let inner = task.inner_exclusive_access();
         let cred = inner.cred.exclusive_access();
         (cred.euid(), cred.egid())
     };
@@ -309,7 +309,7 @@ pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
         if !ipc_flags.contains(ShmFlags::IPC_CREAT) {
             return EINVAL.as_isize();
         }
-        let cpid = current_task().unwrap().process().pid.0;
+        let cpid = current_task().unwrap().getpid();
         let ns = current_ipc_namespace();
         let mut ns_lckd = ns.lock();
         let shm = ns_lckd.shm_manager().create_shm(size, key, mode, cpid, uid, gid);
@@ -348,7 +348,7 @@ pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
     if size == 0 || size > SHM_SIZE_LIMIT {
         return EINVAL.as_isize();
     }
-    let cpid = current_task().unwrap().process().pid.0;
+    let cpid = current_task().unwrap().getpid();
     let shm = ns_lckd.shm_manager().create_shm(size, key, mode, cpid, uid, gid);
     shm.get_id() as isize
 }
@@ -357,8 +357,8 @@ pub fn sys_shmctl(shmid: u32, cmd: usize, buf: usize) -> isize {
     use crate::ipc::shm::ShmidDs;
     let token = current_user_token();
     let (uid, gid) = {
-        let proc = current_task().unwrap().process();
-        let inner = proc.inner_exclusive_access();
+        let task = current_task().unwrap();
+        let inner = task.inner_exclusive_access();
         let cred = inner.cred.exclusive_access();
         (cred.euid(), cred.egid())
     };
@@ -392,7 +392,7 @@ pub fn sys_shmctl(shmid: u32, cmd: usize, buf: usize) -> isize {
                 return EACCES.as_isize();
             }
             shm.set_perm_fields(ds.shm_perm.uid, ds.shm_perm.gid, ds.shm_perm.mode);
-            shm.set_lpid(current_task().unwrap().process().pid.0);
+            shm.set_lpid(current_task().unwrap().getpid());
             0
         }
         IPC_RMID => {
@@ -408,7 +408,8 @@ pub fn sys_shmctl(shmid: u32, cmd: usize, buf: usize) -> isize {
 
 /// 分离共享内存段
 pub fn sys_shmdt(shmaddr: usize) -> isize {
-    let pid = current_task().unwrap().process().pid.0;
+    let task = current_task().unwrap();
+    let pid = task.getpid();
     info!("kernel:pid[{}] sys_shmdt: addr={:#x}", pid, shmaddr);
 
     if shmaddr == 0 || shmaddr % crate::PAGE_SIZE != 0 {
@@ -451,7 +452,7 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: i32) -> isize {
     const SHM_RND: i32 = 0o20000;
 
     info!("kernel:pid[{}] sys_shmat: shmid={}, addr={:#x}, flg={:#o}",
-        current_task().unwrap().process().pid.0, shmid, shmaddr, shmflg);
+        current_task().unwrap().getpid(), shmid, shmaddr, shmflg);
 
     // 获取共享内存段
     let ns = current_ipc_namespace();
@@ -466,8 +467,8 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: i32) -> isize {
 
     // 权限检查
     let (uid, gid) = {
-        let proc = current_task().unwrap().process();
-        let inner = proc.inner_exclusive_access();
+        let task = current_task().unwrap();
+        let inner = task.inner_exclusive_access();
         let cred = inner.cred.exclusive_access();
         (cred.euid(), cred.egid())
     };
@@ -518,7 +519,7 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: i32) -> isize {
     ns_lckd.shm_manager().record_attach(shmid as u32, mapped_addr);
     // 更新附加计数
     shm.inc_nattch();
-    shm.set_lpid(current_task().unwrap().process().pid.0);
+    shm.set_lpid(current_task().unwrap().getpid());
 
     mapped_addr as isize
 }

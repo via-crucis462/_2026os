@@ -97,7 +97,7 @@ pub fn check_timer_cooperative() {
     
     for pid in expired_pids {
         if let Some(process) = crate::task::get_process(pid) {
-            let tasks = crate::task::manager::TID2TCB
+            let tasks = crate::process::registry::TID2TCB
                 .exclusive_access()
                 .values()
                 .filter(|task| task.gettgid() == process.gettgid())

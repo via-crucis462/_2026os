@@ -5,7 +5,7 @@
 #![allow(missing_docs)]
 
 use bitflags::*;
-use crate::{mm::{FrameTracker, MapArea, PhysPageNum, UserBuffer, frame_alloc}, task::processor::*};
+use crate::{mm::{FrameTracker, MapArea, PhysPageNum, UserBuffer, frame_alloc}, process::scheduler::processor::*};
 use alloc::{
     collections::BTreeMap,
     sync::{Arc, Weak},
@@ -537,9 +537,9 @@ pub fn free_up_mem_space(std_pages: usize) -> usize {
     }
 
     if freed < std_pages {
-        println!("free_up_mem_space: only freed {} pages, requested {}", freed, std_pages);
+        /*println!("free_up_mem_space: only freed {} pages, requested {}", freed, std_pages);
         println!("remaining page num: {:?}", man.lru_queue.lock().exists.keys().collect::<Vec<_>>().len());
-        println!("remaining page(in map) num: {:?}", man.page_cache_map.lock().len());
+        println!("remaining page(in map) num: {:?}", man.page_cache_map.lock().len());*/
 
     }
 

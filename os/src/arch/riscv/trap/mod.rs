@@ -117,7 +117,7 @@ pub fn trap_handler() -> ! {
                 if let Some(current) = current_task() {
                     let pid = current.getpid();
                     let current_tid = current.gettid();
-                    let live_tasks = crate::task::manager::TID2TCB
+                    let live_tasks = crate::process::registry::TID2TCB
                         .exclusive_access()
                         .values()
                         .filter(|task| task.getpid() == pid)
@@ -133,7 +133,7 @@ pub fn trap_handler() -> ! {
             }*/
             let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
             for pid in expired_pids {
-                let tasks = crate::task::manager::TID2TCB
+                let tasks = crate::process::registry::TID2TCB
                     .exclusive_access()
                     .values()
                     .filter(|task| task.getpid() == pid)
@@ -347,7 +347,7 @@ pub fn trap_return() -> ! {
     let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
     
     for pid in expired_pids {
-        let tasks = crate::task::manager::TID2TCB
+        let tasks = crate::process::registry::TID2TCB
             .exclusive_access()
             .values()
             .filter(|task| task.getpid() == pid)

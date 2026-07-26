@@ -17,9 +17,9 @@ use spin::Mutex;
 use crate::sync::WaitQueue;
 use smoltcp::iface::SocketHandle;
 use alloc::collections::VecDeque;
-use crate::process::task::taskstatus::TaskStatus;
+use crate::process::task::status::TaskStatus;
 use alloc::format;
-use crate::process::manager::TID2TCB;
+use crate::process::registry::TID2TCB;
 
 pub struct VirtioNetDevice;
 

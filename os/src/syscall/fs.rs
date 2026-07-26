@@ -1289,7 +1289,6 @@ pub fn sys_mount(source: *const u8, target: *const u8, filesystemtype: *const u8
             return EFAULT.as_isize();
         }
     };
-    debug!("kernel:pid[{}] sys_mount: source={}, target={}, filesystemtype={}, mountflags={}", current_task().unwrap().process().pid.0, source_str, target_str, filesystemtype_str, mountflags);
     return 0; // 目前仅支持 ext4 文件系统的挂载
 }
 
@@ -1298,7 +1297,6 @@ pub fn sys_umount(target: *const u8) -> isize {
     let target_str = normalize_leading_dot_path(
         if let Some(s) = try_translated_str(token, target) { s } else { return EFAULT.as_isize(); }
     );
-    debug!("kernel:pid[{}] sys_umount: target={}", current_task().unwrap().process().pid.0, target_str);
     return 0;
 }
 
@@ -1314,7 +1312,6 @@ pub fn sys_fremovexattr(_fd: isize, _name: *const u8) -> isize {
             return EFAULT.as_isize();
         }
     };
-    debug!("kernel:pid[{}] sys_fremovexattr: fd={}, name={}", current_task().unwrap().process().pid.0, _fd, name_str);
     return 0; // 目前不支持扩展属性，直接返回成功
 }
 
@@ -1330,7 +1327,6 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usiz
     const AT_SYMLINK_NOFOLLOW: usize = 0x100;
     const AT_EMPTY_PATH: usize = 0x1000;
     let follow_links = (flags & AT_SYMLINK_NOFOLLOW) == 0;
-    trace!("kernel:pid[{}] sys_fstatat dirfd={} path={} follow={}", current_task().unwrap().process().pid.0, dirfd, path_str, follow_links);
 
     let cwd = current_pwd();
     //空路径查找文件描述符
@@ -2151,14 +2147,12 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
 /// 
 /// TODO: 完全实现 fsync 语义
 pub fn sys_fsync(_fd: usize) -> isize {
-    info!("kernel:pid[{}] sys_fsync: fd={}", current_task().unwrap().process().pid.0, _fd);
     crate::mm::mmap::sync_shared_page_cache();
     0
 }
 
 /// sync: 将所有文件系统缓存同步到磁盘
 pub fn sys_sync() -> isize {
-    info!("kernel:pid[{}] sys_sync called", current_task().unwrap().process().pid.0);
     crate::mm::mmap::sync_shared_page_cache();
     crate::drivers::block::block_cache::block_cache_sync_all();
     0
