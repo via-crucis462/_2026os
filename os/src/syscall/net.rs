@@ -700,7 +700,7 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
         return crate::syscall::errno::Errno::EAFNOSUPPORT.as_isize();
     }
     // 3. 寻找空闲 FD
-    let fd = match inner.alloc_fd() {
+    let fd = match inner.alloc_fd(task.nofile_limit()) {
         Some(fd) => fd,
         None => return Errno::EMFILE.as_isize(),
     };
@@ -766,11 +766,12 @@ pub fn sys_socketpair(domain: usize, socket_type: usize, protocol: usize, sv: *m
         _ => return Errno::EPROTOTYPE.as_isize(),
     };
 
-    let left_fd = match inner.alloc_fd() {
+    let nofile_limit = task.nofile_limit();
+    let left_fd = match inner.alloc_fd(nofile_limit) {
         Some(fd) => fd,
         None => return Errno::EMFILE.as_isize(),
     };
-    let right_fd = match inner.alloc_fd() {
+    let right_fd = match inner.alloc_fd(nofile_limit) {
         Some(fd) => fd,
         None => {
             inner.clear_fd(left_fd);
@@ -973,7 +974,7 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
             }
         }
         let mut inner = files.exclusive_access();
-        let new_fd = match inner.alloc_fd() {
+        let new_fd = match inner.alloc_fd(task.nofile_limit()) {
             Some(idx) => idx,
             None => return crate::syscall::errno::Errno::EMFILE.as_isize(), 
         };

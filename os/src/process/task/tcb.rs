@@ -823,6 +823,12 @@ impl TaskStruct {
     pub fn gettid(&self) -> usize {
         self.pid.0
     }
+    /// 返回线程组共享的 RLIMIT_NOFILE 软限制。
+    pub fn nofile_limit(&self) -> usize {
+        let signal = self.inner_exclusive_access().signal.clone();
+        let limit = signal.exclusive_access().rlimits().nofile.rlim_cur;
+        limit
+    }
     pub fn get_policy_and_priority(&self) -> (isize, i32) {
         let inner = self.inner_exclusive_access();
         (inner.sched_policy, inner.sched_priority)

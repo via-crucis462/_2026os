@@ -2927,7 +2927,7 @@ pub fn sys_eventfd2(initval: u32, _flags: i32) -> isize {
     let task = current_task().unwrap();
     let files = task.inner_exclusive_access().files.clone();
     let mut files = files.exclusive_access();
-    let Some(fd) = files.alloc_fd() else {
+    let Some(fd) = files.alloc_fd(task.nofile_limit()) else {
         return EMFILE.as_isize();
     };
     files.set_fd(
@@ -2944,7 +2944,7 @@ pub fn sys_epoll_create1(_flags: i32) -> isize {
     let task = current_task().unwrap();
     let files = task.inner_exclusive_access().files.clone();
     let mut files = files.exclusive_access();
-    let Some(fd) = files.alloc_fd() else {
+    let Some(fd) = files.alloc_fd(task.nofile_limit()) else {
         return EMFILE.as_isize();
     };
     files.set_fd(
@@ -4376,7 +4376,9 @@ pub fn sys_prlimit64(
             }
             if !new_limit.is_null() {
                 let new = translated_read(token, new_limit);
-                if new.cur_lmt > signal.rlimits().nofile.rlim_max {
+                if new.cur_lmt > new.max_lmt
+                    || new.max_lmt > signal.rlimits().nofile.rlim_max
+                {
                     return EINVAL.as_isize();
                 }
                 signal.rlimits_mut().nofile.rlim_cur = new.cur_lmt;

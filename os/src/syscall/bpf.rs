@@ -452,7 +452,7 @@ fn install_bpf_fd(file: Arc<dyn File + Send + Sync>) -> Result<isize, Errno> {
     let task = current_task().unwrap();
     let files = task.inner_exclusive_access().files.clone();
     let mut files = files.exclusive_access();
-    let fd = files.alloc_fd().ok_or(Errno::EMFILE)?;
+    let fd = files.alloc_fd(task.nofile_limit()).ok_or(Errno::EMFILE)?;
     files.set_fd(fd, file, FdFlags::empty(), 0);
     Ok(fd as isize)
 }
