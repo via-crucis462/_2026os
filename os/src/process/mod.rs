@@ -310,6 +310,30 @@ pub fn block_current_and_run_next(queue: &Mutex<WaitQueue>) {
     schedule(task_cx_ptr);
 }
 
+/// 在等待队列锁保护下重新检查阻塞条件，避免“检查条件”和“加入等待队列”
+/// 之间发生唤醒而造成永久睡眠。返回值表示当前任务是否实际阻塞过。
+pub fn block_current_and_run_next_if<F>(queue: &Mutex<WaitQueue>, should_block: F) -> bool
+where
+    F: FnOnce() -> bool,
+{
+    let mut guard = queue.lock();
+    if !should_block() {
+        return false;
+    }
+
+    let task = current_task().unwrap();
+    let task_cx_ptr = {
+        let mut task_inner = task.inner_exclusive_access();
+        let ptr = &mut task_inner.thread.task_ctx as *mut TaskContext;
+        task_inner.state = TaskStatus::BlockSaving;
+        ptr
+    };
+    guard.push_back(task);
+    drop(guard);
+    schedule(task_cx_ptr);
+    true
+}
+
 // 从等待队列中唤醒一个线程到全局池
 // 返回队列是否非空（即是否真的唤醒了一个线程）
 pub fn wake_up_one(mut queue: &Mutex<WaitQueue>) -> bool {
@@ -730,12 +754,14 @@ fn set_sig_ret(trap_ctx: &mut TrapContext) {
 pub fn check_pending_signal() -> bool {
     let task = current_task().unwrap();
     let task_inner = task.inner_exclusive_access();
-    let raw_signals = task_inner.pending.flags();
+    let thread_pending = task_inner.pending.flags();
+    let shared_pending = task_inner.signal.exclusive_access().pending_flags();
+    let raw_signals = thread_pending | shared_pending;
     let pending = raw_signals.bits() & !(
         task_inner.blocked.bits() & 
         !(SignalFlags::SIGKILL | SignalFlags::SIGSTOP).bits()
     );
-    pending!= 0
+    pending != 0
 }
 
 /* rcore的实现修改而来，目前不被调用了，留作参考

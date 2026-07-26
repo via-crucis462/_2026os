@@ -226,5 +226,5 @@ pub fn create_memfd(name: &str, page_size: PageSize) -> Arc<OSInode> {
     let vfs_inode: Arc<dyn VfsInode> = Arc::new(MemFdInode::new(page_size));
     // 将 memfd 挂载到 hugepages dentry 下，给它一个目录树位置
     let dentry = HUGEPAGES_DENTRY.insert(name.into(), vfs_inode.clone());
-    Arc::new(OSInode::new(readable, writable, vfs_inode, dentry))
+    Arc::new(OSInode::new(readable, writable, false, vfs_inode, dentry))
 }

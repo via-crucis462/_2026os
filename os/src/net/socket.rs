@@ -387,7 +387,12 @@ impl UdpSocket {
         }
         match socket.send_slice(buf, remote_ep) {
             Ok(_) => buf.len() as isize,
-            Err(_) => crate::syscall::errno::Errno::ECONNREFUSED.as_isize(),
+            Err(udp::SendError::BufferFull) => {
+                crate::syscall::errno::Errno::EAGAIN.as_isize()
+            }
+            Err(udp::SendError::Unaddressable) => {
+                crate::syscall::errno::Errno::EDESTADDRREQ.as_isize()
+            }
         }
     }
     /// 处理 UdpMetadata，提取真实 Endpoint

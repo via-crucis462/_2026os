@@ -6,7 +6,6 @@ use super::{StepByOne, VPNRange};
 use super::id::*;
 #[allow(unused)]
 use crate::arch::config::*;
-use crate::arch::trap::current_trap_cx_user_va;
 use crate::mm::{get_free_frames, mmap};
 use crate::sync::MPSafeCell;
 use crate::syscall::errno::Errno;
@@ -56,6 +55,48 @@ pub struct MemorySet {
 }
 
 impl MemorySet {
+    /// Map one page owned by the kernel into this address space for trap entry.
+    ///
+    /// The mapping is supervisor-only and does not own `ppn`; the corresponding
+    /// kernel stack remains the sole owner of the physical frame.
+    #[cfg(target_arch = "riscv64")]
+    pub fn install_trap_context_page(&mut self, va: VirtAddr, ppn: PhysPageNum) {
+        let vpn = va.std_floor();
+        self.page_table.map(
+            vpn,
+            ppn,
+            PTEFlags::R | PTEFlags::W,
+            PageSize::Page4K,
+        );
+        self.areas.push(MapArea::new(
+            VirtAddr::from(vpn),
+            VirtAddr::from((vpn.0 + 1) * PAGE_SIZE),
+            MapType::BorrowedKernel,
+            MapPermission::R | MapPermission::W,
+            PageSize::Page4K,
+        ));
+        unsafe {
+            asm!("sfence.vma {va}, {asid}", va = in(reg) va.0, asid = in(reg) self.asid());
+        }
+    }
+
+    /// Remove a borrowed trap-context mapping without freeing its kernel-owned
+    /// physical frame.
+    #[cfg(target_arch = "riscv64")]
+    pub fn remove_trap_context_page(&mut self, va: VirtAddr) {
+        let vpn = va.std_floor();
+        if self.page_table.translate(vpn).is_some() {
+            self.page_table.unmap(vpn);
+        }
+        self.areas.retain(|area| {
+            area.map_type != MapType::BorrowedKernel
+                || area.vpn_range.get_start() != vpn
+        });
+        unsafe {
+            asm!("sfence.vma {va}, {asid}", va = in(reg) va.0, asid = in(reg) self.asid());
+        }
+    }
+
     #[cfg(target_arch = "loongarch64")]
     fn flush_tlb_after_mapping_change() {
         unsafe {
@@ -669,6 +710,11 @@ impl MemorySet {
         // copy data sections/trap_context/user_stack
         for idx in 0..user_space.areas.len() {
             let map_type = user_space.areas[idx].map_type;
+            // TrapContext belongs to a task's KernelStack. A forked task gets
+            // its own borrowed mapping after its kernel stack is allocated.
+            if map_type == MapType::BorrowedKernel {
+                continue;
+            }
             let map_perm = user_space.areas[idx].map_perm;
             let is_shared = user_space.areas[idx].is_shared;
             let page_size = user_space.areas[idx].page_size;
@@ -1649,6 +1695,12 @@ impl MapArea {
             MapType::Identical => {
                 page_table.unmap(vpn);
             }
+            // BorrowedKernel contains no FrameTracker; only remove its PTE.
+            MapType::BorrowedKernel => {
+                if page_table.translate(vpn).is_some() {
+                    page_table.unmap(vpn);
+                }
+            }
             MapType::Guard => {}
         }
     }
@@ -1682,6 +1734,10 @@ impl MapArea {
                 ppn = frame.ppn;
                 self.data_frames.insert(vpn, frame);
             }
+            // Borrowed mappings must be installed with an explicit kernel-owned PPN.
+            MapType::BorrowedKernel => {
+                return;
+            }
             MapType::Guard => {
                 return;
             }
@@ -1711,6 +1767,11 @@ impl MapArea {
             }
             MapType::Identical => {
                 page_table.unmap(vpn);
+            }
+            MapType::BorrowedKernel => {
+                if page_table.translate(vpn).is_some() {
+                    page_table.unmap(vpn);
+                }
             }
             MapType::Guard => {}
         }
@@ -1826,6 +1887,8 @@ pub enum MapType {
     Identical,
     Framed,
     File,
+    //共享页表
+    BorrowedKernel,
     Guard,
 }
 

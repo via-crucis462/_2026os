@@ -57,7 +57,6 @@ bitflags::bitflags! {
 pub struct FileDescriptorTable {
     pub fds: Vec<FileDescriptor>,
     pub next_fd: usize, // 下一个可用的文件描述符
-    //待填充
 }
 impl FileDescriptorTable {
     pub const DEFAULT_LIMIT: usize = 1024;
@@ -80,12 +79,14 @@ impl FileDescriptorTable {
         }
     }
 
-    pub fn alloc_fd(&mut self) -> Option<usize> {
-        if let Some(fd) = (0..self.fds.len()).find(|fd| self.fds[*fd].is_available()) {
+    pub fn alloc_fd(&mut self, nofile_limit: usize) -> Option<usize> {
+        let effective_limit = nofile_limit.min(Self::DEFAULT_LIMIT);
+        let search_end = self.fds.len().min(effective_limit);
+        if let Some(fd) = (0..search_end).find(|fd| self.fds[*fd].is_available()) {
             self.fds[fd] = FileDescriptor::reserved();
             return Some(fd);
         }
-        if self.fds.len() >= Self::DEFAULT_LIMIT {
+        if self.fds.len() >= effective_limit {
             return None;
         }
         let fd = self.fds.len();
@@ -93,8 +94,8 @@ impl FileDescriptorTable {
         Some(fd)
     }
 
-    pub fn ensure_slots(&mut self, target_len: usize) -> bool {
-        if target_len > Self::DEFAULT_LIMIT {
+    pub fn ensure_slots(&mut self, target_len: usize, nofile_limit: usize) -> bool {
+        if target_len > nofile_limit.min(Self::DEFAULT_LIMIT) {
             return false;
         }
         while self.fds.len() < target_len {
@@ -110,7 +111,7 @@ impl FileDescriptorTable {
         flags: FdFlags,
         status: usize,
     ) {
-        let _ = self.ensure_slots(fd + 1);
+        debug_assert!(fd < self.fds.len());
         self.fds[fd] = FileDescriptor::new(file, flags, status);
     }
 

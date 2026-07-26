@@ -1453,18 +1453,19 @@ pub fn sys_clone3(uargs: *const CloneArgs, size: usize) -> isize {
         sys_clone(clone_flags, stack, args.parent_tid as usize, args.child_tid as usize, args.tls as usize)
     }
 }
-const CLONE_VM: usize = 0x00000100;
-const CLONE_FS: usize = 0x00000200;
-const CLONE_FILES: usize = 0x00000400;
-const CLONE_SIGHAND: usize = 0x00000800;
+const CLONE_VM: usize = 0x00000100;              // 共享地址空间
+const CLONE_FS: usize = 0x00000200;              // 共享 fs_struct（根目录/工作目录）
+const CLONE_FILES: usize = 0x00000400;           // 共享文件描述符表
+const CLONE_SIGHAND: usize = 0x00000800;         // 共享信号处理函数表
+const CLONE_SETTLS: usize = 0x00080000;          // 设置子任务 TLS 指针
+const CLONE_PARENT_SETTID: usize = 0x00100000;   // 向父地址空间写入子 TID
+const CLONE_CHILD_CLEARTID: usize = 0x00200000;  // 子任务退出时清零 ctid 并 futex 唤醒
+const CLONE_CHILD_SETTID: usize = 0x01000000;    // 向子地址空间写入 TID
+const CLONE_THREAD: usize = 0x00010000;           // 创建线程（共享 tgid）
+const CLONE_SYSVSEM: usize = 0x00040000;           // 共享 System V 信号量（todo）
 const CLONE_PIDFD: usize = 0x00001000;
-const CLONE_THREAD: usize = 0x00010000;
-const CLONE_NEWNS: usize = 0x00020000;
-const CLONE_SYSVSEM: usize = 0x00040000;
-const CLONE_SETTLS: usize = 0x00080000;
-const CLONE_PARENT_SETTID: usize = 0x00100000;
-const CLONE_CHILD_CLEARTID: usize = 0x00200000;
-const CLONE_CHILD_SETTID: usize = 0x01000000;
+const CLONE_NEWNS: usize = 0x00020000; // 创建新的 mount namespace
+const CLONE_DETACHED: usize = 0x00400000; // 历史标志：父进程不关心子进程退出信号（已废弃但仍可能出现）
 pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usize) -> isize {
     #[cfg(target_arch = "riscv64")]
     let (tls, ctid) = (arg3, arg4);
@@ -1481,7 +1482,8 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usi
         | CLONE_SETTLS
         | CLONE_PARENT_SETTID
         | CLONE_CHILD_CLEARTID
-        | CLONE_CHILD_SETTID;
+        | CLONE_CHILD_SETTID
+        | CLONE_DETACHED;
 
     if flags & !SUPPORTED_FLAGS != 0 {
         println!("sys_clone: unsupported flags {:#x}", flags);
@@ -2925,7 +2927,7 @@ pub fn sys_eventfd2(initval: u32, _flags: i32) -> isize {
     let task = current_task().unwrap();
     let files = task.inner_exclusive_access().files.clone();
     let mut files = files.exclusive_access();
-    let Some(fd) = files.alloc_fd() else {
+    let Some(fd) = files.alloc_fd(task.nofile_limit()) else {
         return EMFILE.as_isize();
     };
     files.set_fd(
@@ -2942,7 +2944,7 @@ pub fn sys_epoll_create1(_flags: i32) -> isize {
     let task = current_task().unwrap();
     let files = task.inner_exclusive_access().files.clone();
     let mut files = files.exclusive_access();
-    let Some(fd) = files.alloc_fd() else {
+    let Some(fd) = files.alloc_fd(task.nofile_limit()) else {
         return EMFILE.as_isize();
     };
     files.set_fd(
@@ -4374,7 +4376,9 @@ pub fn sys_prlimit64(
             }
             if !new_limit.is_null() {
                 let new = translated_read(token, new_limit);
-                if new.cur_lmt > signal.rlimits().nofile.rlim_max {
+                if new.cur_lmt > new.max_lmt
+                    || new.max_lmt > signal.rlimits().nofile.rlim_max
+                {
                     return EINVAL.as_isize();
                 }
                 signal.rlimits_mut().nofile.rlim_cur = new.cur_lmt;

@@ -40,6 +40,10 @@ fn current_files() -> Arc<crate::sync::MPSafeCell<crate::process::FileDescriptor
     current_task().unwrap().inner_exclusive_access().files.clone()
 }
 
+fn current_nofile_limit() -> usize {
+    current_task().unwrap().nofile_limit()
+}
+
 fn current_pwd() -> Arc<Dentry> {
     let fs = current_task().unwrap().inner_exclusive_access().fs.clone();
     let pwd = fs.exclusive_access().get_pwd();
@@ -114,7 +118,7 @@ pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
 }
 
 fn ensure_fd_slots(files: &mut crate::process::FileDescriptorTable, target_len: usize) -> bool {
-    files.ensure_slots(target_len)
+    files.ensure_slots(target_len, current_nofile_limit())
 }
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
@@ -315,13 +319,14 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
         let anon_file = Arc::new(OSInode::new(
         readable,
         writable,
+        false,
         anon_vfs_inode,
         anon_dentry,
         ));
 
         let files = current_files();
         let mut inner = files.exclusive_access();
-        let fd = match inner.alloc_fd() {
+        let fd = match inner.alloc_fd(current_nofile_limit()) {
             Some(fd) => fd,
             None => return EMFILE.as_isize(),
         };
@@ -347,7 +352,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
         };
         let files = current_files();
         let mut inner = files.exclusive_access();
-        let fd = match inner.alloc_fd() {
+        let fd = match inner.alloc_fd(current_nofile_limit()) {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
@@ -506,13 +511,13 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
           return EFAULT.as_isize();
     }
     let (pipe_read, pipe_write) = make_pipe();
-    let read_fd = match inner.alloc_fd() {
+    let read_fd = match inner.alloc_fd(current_nofile_limit()) {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
     warn!("kernel:pid[{}] sys_pipe: allocated read_fd={}", task.getpid(), read_fd);
     inner.set_fd(read_fd, pipe_read, FdFlags::empty(), 0);
-    let write_fd = match inner.alloc_fd() {
+    let write_fd = match inner.alloc_fd(current_nofile_limit()) {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
@@ -545,7 +550,7 @@ pub fn sys_dup(fd: usize) -> isize {
     if inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
-    let new_fd =match inner.alloc_fd() {
+    let new_fd =match inner.alloc_fd(current_nofile_limit()) {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
@@ -576,7 +581,7 @@ pub fn sys_dup2(fd: usize, new_fd: usize) -> isize {
     }
     
     // 不能超过限制
-    if new_fd >= crate::process::FileDescriptorTable::DEFAULT_LIMIT {
+    if new_fd >= current_nofile_limit().min(crate::process::FileDescriptorTable::DEFAULT_LIMIT) {
         return EBADF.as_isize();
     }
 
@@ -947,7 +952,9 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
                 return EBADF.as_isize();
             }
             // 防溢出
-            if arg >= crate::process::FileDescriptorTable::DEFAULT_LIMIT {
+            let nofile_limit = current_nofile_limit()
+                .min(crate::process::FileDescriptorTable::DEFAULT_LIMIT);
+            if arg >= nofile_limit {
                 return EBADF.as_isize();
             }
             let mut new_fd = arg;
@@ -958,7 +965,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
                 new_fd += 1;
             }
             // 再次检查
-            if new_fd >= crate::process::FileDescriptorTable::DEFAULT_LIMIT {
+            if new_fd >= nofile_limit {
                 return EBADF.as_isize();
             }
             if !ensure_fd_slots(&mut inner, new_fd + 1) {
@@ -1716,7 +1723,7 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
 
     let files = current_files();
     let mut inner = files.exclusive_access();
-    let fd = match inner.alloc_fd() {
+    let fd = match inner.alloc_fd(current_nofile_limit()) {
         Some(fd) => fd,
         None => return EMFILE.as_isize(),
     };
@@ -2063,7 +2070,7 @@ pub fn sys_userfaultfd(_flags: i32) -> isize {
 
     let files = current_files();
     let mut inner = files.exclusive_access();
-    let fd = match inner.alloc_fd() {
+    let fd = match inner.alloc_fd(current_nofile_limit()) {
         Some(fd) => fd,
         None => return EMFILE.as_isize(),
     };
