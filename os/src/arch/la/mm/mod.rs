@@ -68,19 +68,22 @@ pub fn la_kernel_init_mem() {
         t = (t & !(0b11 << 7)) | (1 << 7);
         asm!("csrwr {crmd}, 0x0", crmd = inout(reg) t => _);
 
-        // 需要注意，2k1000的misc寄存器的ALCL位虽然是0，但实际上不支持非对齐访存
-        // 下面还是保留设置
-        let mut misc: usize;
-        asm!("csrrd {}, 0x3", out(reg) misc);
-        let misc_old = misc;
-        misc &= !(0b1111 << 12); // 清除 ALCL0~ALCL3（位 12~15）
-        asm!("csrwr {misc}, 0x3", misc = inout(reg) misc => _);
-        // 回读验证：若 ALCL 位仍为 1，说明硬件不支持非对齐访存
-        let mut misc_after: usize;
-        asm!("csrrd {}, 0x3", out(reg) misc_after);
-        // 将 misc_old/misc_after 存入全局变量供后续打印诊断
-        crate::arch::la::mm::MISC_BEFORE_WRITE.store(misc_old, core::sync::atomic::Ordering::Relaxed);
-        crate::arch::la::mm::MISC_AFTER_WRITE.store(misc_after, core::sync::atomic::Ordering::Relaxed);
+        #[cfg(board = "2k1000")]
+        {
+            // 需要注意，2k1000的misc寄存器的ALCL位虽然是0，但实际上不支持非对齐访存
+            // 下面还是保留设置
+            let mut misc: usize;
+            asm!("csrrd {}, 0x3", out(reg) misc);
+            let misc_old = misc;
+            misc &= !(0b1111 << 12); // 清除 ALCL0~ALCL3（位 12~15）
+            asm!("csrwr {misc}, 0x3", misc = inout(reg) misc => _);
+            // 回读验证：若 ALCL 位仍为 1，说明硬件不支持非对齐访存
+            let mut misc_after: usize;
+            asm!("csrrd {}, 0x3", out(reg) misc_after);
+            // 将 misc_old/misc_after 存入全局变量供后续打印诊断
+            crate::arch::la::mm::MISC_BEFORE_WRITE.store(misc_old, core::sync::atomic::Ordering::Relaxed);
+            crate::arch::la::mm::MISC_AFTER_WRITE.store(misc_after, core::sync::atomic::Ordering::Relaxed);
+        }
     }
     init_tlb();
 }

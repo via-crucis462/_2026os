@@ -2,9 +2,9 @@ use super::virtio_blk::VirtioHal;
 use crate::sync::MPSafeCell;
 use alloc::sync::Arc;
 use lazy_static::*;
-use virtio_drivers_la::device::net::VirtIONet;
-use virtio_drivers_la::transport::pci::PciTransport;
-use virtio_drivers_la::transport::Transport;
+use virtio_drivers::device::net::VirtIONet;
+use virtio_drivers::transport::pci::PciTransport;
+use virtio_drivers::transport::Transport;
 // 网卡驱动的外包装
 pub struct VirtIONetWrapper(
     pub MPSafeCell<VirtIONet<VirtioHal, PciTransport, 256>>, 

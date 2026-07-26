@@ -2,22 +2,25 @@
 
 # ![allow(unused)] // 目前还有一些未使用的函数和变量
 use super::BlockDevice;
-use crate::arch::config::UNCHACHED_KERNEL_BASE;
-use crate::mm::address::VPNRange;
+use crate::arch::config::UNCACHED_KERNEL_BASE;
+use crate::mm::address::{SimpleRange, VPNRange};
 use crate::mm::{
     FrameTracker, KERNEL_SPACE, MapArea, PageTable, PhysAddr, PhysPageNum, StepByOne, VirtAddr, frame_alloc, frame_dealloc, kernel_token
 };
 use crate::sync::MPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
-use virtio_drivers_la::transport::{self, Transport};
 use core::cell::RefMut;
 use core::iter::Rev;
 use core::ptr::NonNull;
-use virtio_drivers_la::{Hal, BufferDirection, PhysAddr as VirtioPhysAddr};
-use virtio_drivers_la::transport::pci::PciTransport;
-use virtio_drivers_la::device::blk::VirtIOBlk;
 use crate::arch::config::*;
+use crate::ext4fs::dma::QUEUE_FRAMES;
+
+
+use virtio_drivers::{Hal, BufferDirection, PhysAddr as VirtioPhysAddr};
+use virtio_drivers::transport::pci::PciTransport;
+use virtio_drivers::device::blk::VirtIOBlk;
+use virtio_drivers::transport::{self, Transport};
 
 /// VirtIOBlock device driver strcuture for virtio_blk device
 /// 已修改，新增transport接口
@@ -54,7 +57,7 @@ unsafe impl Hal for VirtioHal {
         // 目前的实现很暴力，后续可以优化算法
         let mut current_ppn = manager.start_ppn;
         while current_ppn.0 + pages <= end_ppn.0 {
-            let range = VPNRange::new(
+            let range = SimpleRange::<PhysPageNum>::new(
                 current_ppn.0.into(),
                 (current_ppn.0 + pages).into()
             );
@@ -67,7 +70,7 @@ unsafe impl Hal for VirtioHal {
                 return (
                     paddr.0 as VirtioPhysAddr,
                     // 使用窗口映射后地址
-                    NonNull::new((paddr.0 | UNCHACHED_KERNEL_BASE) as *mut u8).unwrap()
+                    NonNull::new((paddr.0 | UNCACHED_KERNEL_BASE) as *mut u8).unwrap()
                 );
             }
             current_ppn = PhysPageNum(current_ppn.0 + pages);
@@ -97,10 +100,10 @@ unsafe impl Hal for VirtioHal {
         NonNull::new(va as *mut u8).unwrap()
     }
     // 暂时直接返回
-    unsafe fn share(buffer: core::ptr::NonNull<[u8]>, _direction: virtio_drivers_la::BufferDirection) -> virtio_drivers_la::PhysAddr {
-        (buffer.as_ptr() as *const() as usize  & 0x00FF_FFFF_FFFF_FFFF) as virtio_drivers_la::PhysAddr
+    unsafe fn share(buffer: core::ptr::NonNull<[u8]>, _direction: virtio_drivers::BufferDirection) -> virtio_drivers::PhysAddr {
+        (buffer.as_ptr() as *const() as usize  & 0x00FF_FFFF_FFFF_FFFF) as virtio_drivers::PhysAddr
     }
-    unsafe fn unshare(_paddr: VirtioPhysAddr, _buffer: core::ptr::NonNull<[u8]>, _direction: virtio_drivers_la::BufferDirection) {
+    unsafe fn unshare(_paddr: VirtioPhysAddr, _buffer: core::ptr::NonNull<[u8]>, _direction: virtio_drivers::BufferDirection) {
         // do nothing
         // 未实现
     }

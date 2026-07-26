@@ -25,8 +25,8 @@ use crate::mm::PhysAddr;
 const BASE_ADDR: usize = PCI_CONFIG_SPACE_BASE;
 use lazy_static::lazy_static;
 use crate::sync::MPSafeCell;
-use virtio_drivers_la::transport::pci::{PciTransport, bus::ConfigurationAccess};
-use virtio_drivers_la::transport::pci::bus::{DeviceFunction, PciRoot};
+use virtio_drivers::transport::pci::{PciTransport, bus::ConfigurationAccess};
+use virtio_drivers::transport::pci::bus::{DeviceFunction, PciRoot};
 
 lazy_static!(
     // 维护当前已分配的MMIO地址

@@ -20,14 +20,11 @@ spin = "0.9.8"
 log = "0.4"
 xmas-elf = "0.7.0"
 zerocopy = { version = "0.8", features = ["derive"] }
+# pci = "0.0.1" # 已经导入项目中并按规范复制许可证等
+virtio-drivers = { package = "virtio-drivers", version = "0.12.0" } # 重命名以避免冲突
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
-virtio-drivers = { git = "https://github.com/rcore-os/virtio-drivers", rev = "4ee80e5" }
-
-[target.'cfg(target_arch = "loongarch64")'.dependencies]
-# pci = "0.0.1" # 已经导入项目中并按规范复制许可证等
-virtio-drivers-la = { package = "virtio-drivers", version = "0.12.0" } # 重命名以避免冲突
 
 [profile.dev]
 opt-level = 2

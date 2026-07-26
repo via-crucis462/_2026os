@@ -183,8 +183,7 @@ dependencies = [
  "riscv",
  "smoltcp",
  "spin 0.9.8",
- "virtio-drivers 0.1.0",
- "virtio-drivers 0.12.0",
+ "virtio-drivers",
  "xmas-elf",
  "zerocopy",
 ]
@@ -394,16 +393,6 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "virtio-drivers"
-version = "0.1.0"
-source = "git+https://github.com/rcore-os/virtio-drivers?rev=4ee80e5#4ee80e50babd681869f428ee026167bc12dc6856"
-dependencies = [
- "bitflags 1.3.2",
- "log",
- "volatile",
-]
-
-[[package]]
-name = "virtio-drivers"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7a6012590bf8cc11f57abb1b5a8470e2366353bf352386b48650a87b5538204"
@@ -416,12 +405,6 @@ dependencies = [
  "thiserror",
  "zerocopy",
 ]
-
-[[package]]
-name = "volatile"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8e76fae08f03f96e166d2dfda232190638c10e0383841252416f9cfe2ae60e6"
 
 [[package]]
 name = "xmas-elf"

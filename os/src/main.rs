@@ -187,18 +187,17 @@ fn main_init(hart_id: usize) {
     arch::trap::init();
     #[cfg(target_arch = "loongarch64")]
     {
-        use crate::ext4fs::block_device_test;
-
         println!("searching pci...");
         // 枚举pci设备
         drivers::search_pci();
         println!("done drivers");
         // 打印ahci控制器信息
+        #[cfg(board = "2k1000")]
         drivers::board::la2k1000::print_ahci_info();
         #[cfg(false)]
         unsafe {
             // 测试block device，会破坏磁盘数据，仅供测试
-            block_device_test();
+            crate::ext4fs::block_device_test();
         }
     }
     //#[cfg(target_arch = "riscv64")]
