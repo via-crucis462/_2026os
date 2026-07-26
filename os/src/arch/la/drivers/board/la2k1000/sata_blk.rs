@@ -3,16 +3,15 @@
 //! 寄存器偏移的具体值参考 AHCI 规范和 llm 工具
 
 use alloc::{string::String, sync::Arc, vec::Vec};
-use core::{
-    hint::spin_loop,
-    sync::atomic::{fence, Ordering},
-};
+use zerocopy::BE;
+use core::hint::spin_loop;
 use spin::Mutex;
 
 use crate::{
     arch::{
         config::{PAGE_SIZE, SATA_AHCI_MMIO_PA, UNCACHED_KERNEL_BASE},
         drivers::dma::{DmaBuffer, QUEUE_FRAMES},
+        dma_barriar,
         timer::get_time_ms,
     }, ext4fs::BLOCK_SZ, mm::PhysAddr
 };
@@ -49,17 +48,27 @@ pub struct SataBlock {
 
 impl SataBlock {
     pub fn new() -> Self {
-        let port = AHCI_CONTROLLER
-            .lock()
-            .find_first_sata_disk()
-            .expect("No SATA disk found");
+        let Some(port) = AHCI_CONTROLLER.lock().find_first_sata_disk() else {
+            error!("No SATA disk found; halting without syncing disks");
+            loop {
+                spin_loop();
+            }
+        };
         let mut block = SataBlock {
             ctl: &AHCI_CONTROLLER,
             port,
             sector_size: 0,
             _lock: spin::Mutex::new(())
         };
-        assert!(block.init(), "Failed to initialize SATA port {}", port.0);
+        if !block.init() {
+            error!(
+                "Failed to initialize SATA port {}; halting without syncing disks",
+                port.0
+            );
+            loop {
+                spin_loop();
+            }
+        }
         block
     }
     pub fn new_with_port(port: AHCIPort) -> Self {
@@ -69,7 +78,15 @@ impl SataBlock {
             sector_size: 0,
             _lock: spin::Mutex::new(())
         };
-        assert!(block.init(), "Failed to initialize SATA port {}", port.0);
+        if !block.init() {
+            error!(
+                "Failed to initialize SATA port {}; halting without syncing disks",
+                port.0
+            );
+            loop {
+                spin_loop();
+            }
+        }
         block
     }
     pub fn init(&mut self) -> bool {
@@ -103,6 +120,7 @@ impl SataBlock {
     }
     /// 写
     pub fn write_block(&self, block_id: u64, buffer: &[u8]) -> bool {
+        debug!("Writing SATA block {} with buffer length {}", block_id, buffer.len());
         let mut ctl = self.ctl.lock();
         match ctl.write_sectors(self.port, block_id * (BLOCK_SZ as u64 / self.sector_size as u64), 8, buffer) {
             Ok(_) => true,
@@ -130,6 +148,7 @@ const DATA_BUFFER_SIZE: usize = PORT_DMA_SIZE - DATA_BUFFER_OFFSET;
 const COMMAND_SLOT: usize = 0;
 const COMMAND_SLOT_MASK: u32 = 1 << COMMAND_SLOT;
 const ATA_COMMAND_TIMEOUT_MS: usize = 5000;
+const DMA_COMPLETION_GRACE_MS: usize = 10;
 // PxCMD 寄存器位
 const PXCMD_ST: u32 = 1 << 0;
 const PXCMD_FRE: u32 = 1 << 4;
@@ -159,6 +178,8 @@ const ATA_COMMAND_WRITE_DMA_EXT: u8 = 0x35;     // 写入 DMA 扩展
 const AHCI_COMMAND_FIS_DWORDS: u16 = 5;
 // Header.flags 中的 W 位，表示数据方向，1 表示写到设备，0 表示从设备读取
 const AHCI_COMMAND_HEADER_WRITE: u16 = 1 << 6;
+const PXIS_DHRS: u32 = 1 << 0;
+const PXIS_DPS: u32 = 1 << 5;
 // IS 寄存器命令错误掩码
 const PXIS_COMMAND_ERROR_MASK: u32 = (1 << 30)
     | (1 << 29)
@@ -171,12 +192,26 @@ const ATA_STATUS_DRQ: u32 = 1 << 3; // 请求数据传输阶段标志
 const ATA_STATUS_DF: u32 = 1 << 5;  // 设备故障标志，命令执行失败
 const ATA_STATUS_BSY: u32 = 1 << 7; // 设备忙标志，正在处理命令
 
+fn debug_count_changed_dma_bytes(address: usize, len: usize, sentinel: u8) -> usize {
+    (0..len)
+        .filter(|&offset| unsafe {
+            core::ptr::read_volatile((address + offset) as *const u8) != sentinel
+        })
+        .count()
+}
+
+fn debug_read_dma_prefix(address: usize) -> [u8; 16] {
+    core::array::from_fn(|offset| unsafe {
+        core::ptr::read_volatile((address + offset) as *const u8)
+    })
+}
+
 /// AHCI Command Header
 ///
 /// 位于 PxCLB 指向的 Command List 中，每个端口最多包含 32 个命令槽
 /// 每个命令槽对应一个 32 B Command Header
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct AHCICommandHeader {
     /// DW0[15:0] 命令属性
     ///
@@ -220,7 +255,7 @@ const _: () = assert!(core::mem::size_of::<AHCICommandHeader>() == 32);
 /// 软件将该 FIS 放在 Command Table 的 CFIS 区域，HBA 据此生成 ATA 命令
 /// 结构固定为 20 B，因此 Command Header 的 CFL 应填写 5 DWORD
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct AHCIRegisterH2DFIS {
     /// Byte 0 FIS Type，Register H2D 固定为 0x27
     fis_type: u8,
@@ -328,7 +363,7 @@ const _: () = assert!(core::mem::size_of::<AHCIRegisterH2DFIS>() == 20);
 /// 位于 Command Table 的 0x80 + 16 B * PRD索引 处
 /// 一个 PRDT Entry 描述一段物理连续的 DMA 数据区域
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct AHCIPRDTEntry {
     /// DW0 Data Base Address
     ///
@@ -388,7 +423,7 @@ const _: () = assert!(core::mem::size_of::<AHCIPRDTEntry>() == 16);
 /// CFIS 从偏移 0x00 开始，PRDT 从偏移 0x80 开始
 /// 当前实现只使用一个 PRDT Entry，因此结构体大小为 0x90
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct AHCICommandTable {
     /// Command FIS 的前 20 B
     command_fis: AHCIRegisterH2DFIS,
@@ -512,7 +547,10 @@ impl AHCIPort {
     /// AHCI 规定端口寄存器区从 0x100 开始，每个端口占用 0x80 字节
     pub fn offset(&self) -> usize {
         if self.0 < 0 {
-            panic!("AHCI port is NOT initialized");
+            error!("AHCI port is not initialized; halting without syncing disks");
+            loop {
+                spin_loop();
+            }
         }
         (0x100 + (self.0 as usize) * 0x80)
     }
@@ -689,13 +727,36 @@ pub struct ATAIdentifyInfo {
     pub supports_lba48: bool,
 }
 
-#[derive(Debug)]
 pub struct AHCIError {
     /// 发生错误时的端口寄存器快照
     ///
     /// 数组下标为寄存器相对端口基址的字节偏移除以 4
     /// 未在 AHCIPortReg::ALL 中列出的保留位置保持为 0
     pub regs: [u32; 0x44 / 4],
+}
+
+impl core::fmt::Debug for AHCIError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut s = f.debug_struct("AHCIError");
+        s.field("regs", &DebugHexList(&self.regs));
+        s.finish()
+    }
+}
+
+/// 辅助类型，用于以 `0x...` 十六进制格式打印 u32 数组
+struct DebugHexList<'a>(&'a [u32]);
+
+impl core::fmt::Debug for DebugHexList<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("[")?;
+        for (i, val) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{:#x}", val)?;
+        }
+        f.write_str("]")
+    }
 }
 
 /// ATA 命令构造、提交或执行阶段的错误
@@ -744,21 +805,27 @@ impl AHCIController {
     }
     pub fn reg_read(&self, reg: AHCIReg) -> u32 {
         let reg_addr = self.windowed_base_addr() + reg as usize;
-        unsafe { core::ptr::read_volatile(reg_addr as *const u32) }
+        let value = unsafe { core::ptr::read_volatile(reg_addr as *const u32) };
+        dma_barriar();
+        value
     }
     pub fn reg_write(&self, reg: AHCIReg, value: u32) {
         let reg_addr = self.windowed_base_addr() + reg as usize;
-        unsafe { core::ptr::write_volatile(reg_addr as *mut u32, value) }
+        unsafe { core::ptr::write_volatile(reg_addr as *mut u32, value) };
+        dma_barriar();
     }
     pub fn port_reg_read(&self, port: AHCIPort, reg: AHCIPortReg) -> u32 {
         let port_base = self.windowed_base_addr() + port.offset();
         let reg_addr = port_base + reg as usize;
-        unsafe { core::ptr::read_volatile(reg_addr as *const u32) }
+        let value = unsafe { core::ptr::read_volatile(reg_addr as *const u32) };
+        dma_barriar();
+        value
     }
     pub fn port_reg_write(&self, port: AHCIPort, reg: AHCIPortReg, value: u32) {
         let port_base = self.windowed_base_addr() + port.offset();
         let reg_addr = port_base + reg as usize;
-        unsafe { core::ptr::write_volatile(reg_addr as *mut u32, value) }
+        unsafe { core::ptr::write_volatile(reg_addr as *mut u32, value) };
+        dma_barriar();
     }
     pub fn port_regs_read(&self, port: AHCIPort) -> [u32; 0x44 / 4] {
         let mut regs = [0u32; 0x44 / 4];
@@ -826,7 +893,7 @@ impl AHCIController {
     // 启动时必须先启动 FIS 接收引擎，再启动命令列表引擎
     fn start_port_engine(&self, port: AHCIPort) -> Result<(), AHCIError> {
         // 确保启动引擎前，命令列表和端口寄存器的写入对 HBA 可见
-        fence(Ordering::SeqCst);
+        dma_barriar();
 
         let cmd = self.port_reg_read(port, AHCIPortReg::Cmd);
         self.port_reg_write(port, AHCIPortReg::Cmd, cmd | PXCMD_FRE);
@@ -918,7 +985,15 @@ impl AHCIController {
         };
 
         // DMA 区域按页分配，同时满足 CLB 的 1 KiB 对齐要求
-        debug_assert_eq!(dma_pa.0 & (PAGE_SIZE - 1), 0);
+        if dma_pa.0 & (PAGE_SIZE - 1) != 0 {
+            error!(
+                "AHCI DMA buffer is not page aligned: address=0x{:x}; halting without syncing disks",
+                dma_pa.0
+            );
+            loop {
+                spin_loop();
+            }
+        }
         let supports_64bit = self.reg_read(AHCIReg::HbaCap) & (1 << 31) != 0;
         if !supports_64bit && dma_pa.0 >> 32 != 0 {
             error!("AHCI controller does not support the allocated 64-bit DMA address");
@@ -1019,6 +1094,25 @@ impl AHCIController {
         direction: ATADataDirection,
         transfer_bytes: usize,
     ) -> Result<AHCIPortDmaLayout, AHCICommandError> {
+        self.issue_ata_command_once(
+            port,
+            fis,
+            direction,
+            transfer_bytes,
+            true,
+            0xA5,
+        )
+    }
+
+    fn issue_ata_command_once(
+        &self,
+        port: AHCIPort,
+        fis: AHCIRegisterH2DFIS,
+        direction: ATADataDirection,
+        transfer_bytes: usize,
+        verify_short_read: bool,
+        read_sentinel: u8,
+    ) -> Result<AHCIPortDmaLayout, AHCICommandError> {
         if transfer_bytes == 0 || transfer_bytes > DATA_BUFFER_SIZE {
             return Err(AHCICommandError::InvalidArgument(
                 "ATA transfer does not fit in the port data buffer",
@@ -1030,8 +1124,12 @@ impl AHCIController {
             return Err(AHCICommandError::PortNotInitialized);
         }
         self.wait_command_ready(port)?;
+        // IOC/DPS 和互补哨兵重读是针对 READ DMA EXT 的诊断。
+        // IDENTIFY DEVICE 等命令仍按原来的 PxCI/PRDBC 路径完成。
+        let diagnostic_read = fis.command == ATA_COMMAND_READ_DMA_EXT
+            && direction == ATADataDirection::D2H;
         // 构造 PRDT，Command Table 和 Command Header，写入相应 DMA 区域
-        let prd = AHCIPRDTEntry::new(layout.data_buffer, transfer_bytes, false).ok_or(
+        let prd = AHCIPRDTEntry::new(layout.data_buffer, transfer_bytes, diagnostic_read).ok_or(
             AHCICommandError::InvalidArgument("invalid PRDT address or transfer length"),
         )?;
         let command_table = AHCICommandTable {
@@ -1055,12 +1153,12 @@ impl AHCIController {
             command_table_base_upper: (layout.command_table.0 >> 32) as u32,
             reserved: [0; 4],
         };
-        // 读操作先清空数据区域，误用上一次命令残留的数据
-        if direction == ATADataDirection::D2H {
+        // 使用明显的哨兵值，以观察 PxCI 清零后是否仍有 DMA 数据晚到。
+        if diagnostic_read {
             unsafe {
                 core::ptr::write_bytes(
                     (layout.data_buffer.0 | UNCACHED_KERNEL_BASE) as *mut u8,
-                    0,
+                    read_sentinel,
                     transfer_bytes,
                 );
             }
@@ -1076,13 +1174,62 @@ impl AHCIController {
                 command_header,
             );
         }
+        dma_barriar();
+        let after_cmd_write_h = unsafe {
+            core::ptr::read_volatile(
+                (layout.command_list.0 | UNCACHED_KERNEL_BASE) as *const AHCICommandHeader,
+            )
+        };
+        let after_cmd_write_t = unsafe {
+            core::ptr::read_volatile(
+                (layout.command_table.0 | UNCACHED_KERNEL_BASE) as *const AHCICommandTable,
+            )
+        };
+        // 不能要求写前后内容必须不同：连续重试同一个请求时，二者可能完全相同。
+        // 应验证写后 DMA 区域是否等于本次命令期望的描述符内容。
+        if after_cmd_write_h != command_header || after_cmd_write_t != command_table {
+            error!(
+                "AHCI command descriptor verification failed: port={}, command=0x{:02x}; halting without syncing disks",
+                port.0,
+                fis.command,
+            );
+            loop {
+                spin_loop();
+            }
+        }
+        dma_barriar();
         // 向设备发送请求并轮询等待至完成
         // 清除上一条命令的状态，再确保描述符和写数据先于 PxCI 对 HBA 可见
         self.port_reg_write(port, AHCIPortReg::Is, u32::MAX);
         self.port_reg_write(port, AHCIPortReg::Serr, u32::MAX);
-        fence(Ordering::SeqCst);
+        dma_barriar();
         // 通知设备执行 slot 0 的命令
         self.port_reg_write(port, AHCIPortReg::Ci, COMMAND_SLOT_MASK);
+
+        // 诊断命令提交时序：确认 PxCI 写入是否曾被软件观察到，以及 HBA
+        // 是否已经更新 PRDBC。这里的 MMIO 回读也会使前面的写入到达控制器。
+        let ci_after_issue = self.port_reg_read(port, AHCIPortReg::Ci);
+        let is_after_issue = self.port_reg_read(port, AHCIPortReg::Is);
+        let prdbc_after_issue = unsafe {
+            core::ptr::read_volatile(
+                (layout.command_list.0 | UNCACHED_KERNEL_BASE)
+                    as *const AHCICommandHeader,
+            )
+            .prd_byte_count
+        };
+        let mut saw_ci_active = ci_after_issue & COMMAND_SLOT_MASK != 0;
+        if !saw_ci_active && prdbc_after_issue == 0 {
+            debug!(
+                "AHCI command not observed active immediately after issue: port={}, command=0x{:02x}, PxCI=0x{:08x}, PxIS=0x{:08x}, PRDBC={}, expected={}",
+                port.0,
+                fis.command,
+                ci_after_issue,
+                is_after_issue,
+                prdbc_after_issue,
+                transfer_bytes,
+            );
+        }
+
         // 等待
         let start_ms = get_time_ms();
         loop {
@@ -1094,10 +1241,17 @@ impl AHCIController {
                 self.port_reg_write(port, AHCIPortReg::Serr, serr);
                 return Err(AHCICommandError::DeviceError(state));
             }
-            // slot 0 命令已完成，DMA 传输完成
-            // 现在 DMA 区域的数据已经写入磁盘或从磁盘读取完成
-            if self.port_reg_read(port, AHCIPortReg::Ci) & COMMAND_SLOT_MASK == 0 {
-                fence(Ordering::SeqCst);
+            // 对 READ DMA EXT，IOC 置于最后一个 PRD：DPS 表示 PRD 已处理完，
+            // DHRS 表示设备已返回命令完成 FIS。其他命令保留原来的 PxCI 判定。
+            let ci = self.port_reg_read(port, AHCIPortReg::Ci);
+            saw_ci_active |= ci & COMMAND_SLOT_MASK != 0;
+            let required_completion_status = PXIS_DPS | PXIS_DHRS;
+            if ci & COMMAND_SLOT_MASK == 0
+                && (!diagnostic_read
+                    || interrupt_status & required_completion_status
+                        == required_completion_status)
+            {
+                dma_barriar();
                 let tfd = self.port_reg_read(port, AHCIPortReg::Tfd);
                 let serr = self.port_reg_read(port, AHCIPortReg::Serr);
                 if tfd & (ATA_STATUS_ERR | ATA_STATUS_DF) != 0 || serr != 0 {
@@ -1106,13 +1260,157 @@ impl AHCIController {
                     self.port_reg_write(port, AHCIPortReg::Serr, serr);
                     return Err(AHCICommandError::DeviceError(state));
                 }
-                let command_header = unsafe {
+                let mut command_header = unsafe {
                     core::ptr::read_volatile(
                         (layout.command_list.0 | UNCACHED_KERNEL_BASE)
                             as *const AHCICommandHeader,
                     )
                 };
+                if diagnostic_read
+                    && command_header.prd_byte_count as usize != transfer_bytes
+                {
+                    let data_address = layout.data_buffer.0 | UNCACHED_KERNEL_BASE;
+                    let changed_immediately = debug_count_changed_dma_bytes(
+                        data_address,
+                        transfer_bytes,
+                        read_sentinel,
+                    );
+                    let initial_prdbc = command_header.prd_byte_count;
+                    let grace_start_ms = get_time_ms();
+
+                    while command_header.prd_byte_count as usize != transfer_bytes
+                        && get_time_ms().saturating_sub(grace_start_ms)
+                            < DMA_COMPLETION_GRACE_MS
+                    {
+                        dma_barriar();
+                        command_header = unsafe {
+                            core::ptr::read_volatile(
+                                (layout.command_list.0 | UNCACHED_KERNEL_BASE)
+                                    as *const AHCICommandHeader,
+                            )
+                        };
+                        spin_loop();
+                    }
+
+                    dma_barriar();
+                    let changed_after_grace = debug_count_changed_dma_bytes(
+                        data_address,
+                        transfer_bytes,
+                        read_sentinel,
+                    );
+                    let elapsed_ms = get_time_ms().saturating_sub(grace_start_ms);
+
+                    if command_header.prd_byte_count as usize == transfer_bytes {
+                        debug!(
+                            "AHCI DMA completion arrived late: port={}, command=0x{:02x}, initial_PRDBC={}, final_PRDBC={}, changed_immediately={}/{}, changed_after_grace={}/{}, elapsed_ms={}",
+                            port.0,
+                            fis.command,
+                            initial_prdbc,
+                            command_header.prd_byte_count,
+                            changed_immediately,
+                            transfer_bytes,
+                            changed_after_grace,
+                            transfer_bytes,
+                            elapsed_ms,
+                        );
+                    } else {
+                        debug!(
+                            "AHCI DMA grace period expired: port={}, command=0x{:02x}, initial_PRDBC={}, final_PRDBC={}, changed_immediately={}/{}, changed_after_grace={}/{}, elapsed_ms={}, data_prefix={:02x?}",
+                            port.0,
+                            fis.command,
+                            initial_prdbc,
+                            command_header.prd_byte_count,
+                            changed_immediately,
+                            transfer_bytes,
+                            changed_after_grace,
+                            transfer_bytes,
+                            elapsed_ms,
+                            debug_read_dma_prefix(data_address),
+                        );
+                    }
+                }
                 if command_header.prd_byte_count as usize != transfer_bytes {
+                    debug!(
+                        "AHCI short transfer diagnostics: port={}, command=0x{:02x}, saw_ci_active={}, initial_PxCI=0x{:08x}, initial_PxIS=0x{:08x}, initial_PRDBC={}, final_PxCI=0x{:08x}, final_PxIS=0x{:08x}, final_PRDBC={}, expected={}",
+                        port.0,
+                        fis.command,
+                        saw_ci_active,
+                        ci_after_issue,
+                        is_after_issue,
+                        prdbc_after_issue,
+                        ci,
+                        interrupt_status,
+                        command_header.prd_byte_count,
+                        transfer_bytes,
+                    );
+
+                    if diagnostic_read && verify_short_read {
+                        let data_address = layout.data_buffer.0 | UNCACHED_KERNEL_BASE;
+                        let mut first_read = Vec::with_capacity(transfer_bytes);
+                        for offset in 0..transfer_bytes {
+                            first_read.push(unsafe {
+                                core::ptr::read_volatile(
+                                    (data_address + offset) as *const u8,
+                                )
+                            });
+                        }
+
+                        // 清除第一条命令可能晚到的 DPS/DHRS，再以互补哨兵重读。
+                        let completed_status = self.port_reg_read(port, AHCIPortReg::Is);
+                        self.port_reg_write(port, AHCIPortReg::Is, completed_status);
+                        let second_layout = self.issue_ata_command_once(
+                            port,
+                            fis,
+                            direction,
+                            transfer_bytes,
+                            false,
+                            0x5A,
+                        )?;
+                        dma_barriar();
+
+                        let second_address =
+                            second_layout.data_buffer.0 | UNCACHED_KERNEL_BASE;
+                        let mismatched_bytes = first_read
+                            .iter()
+                            .enumerate()
+                            .filter(|&(offset, expected)| unsafe {
+                                core::ptr::read_volatile(
+                                    (second_address + offset) as *const u8,
+                                ) != *expected
+                            })
+                            .count();
+
+                        if mismatched_bytes != 0 {
+                            error!(
+                                "AHCI complementary-sentinel verification FAILED: port={}, command=0x{:02x}, mismatched_bytes={}/{}, first_prefix={:02x?}, second_prefix={:02x?}",
+                                port.0,
+                                fis.command,
+                                mismatched_bytes,
+                                transfer_bytes,
+                                &first_read[..core::cmp::min(16, transfer_bytes)],
+                                debug_read_dma_prefix(second_address),
+                            );
+                            loop {
+                                spin_loop();
+                            }
+                        }
+
+                        debug!(
+                            "AHCI complementary-sentinel verification passed: port={}, command=0x{:02x}, compared_bytes={}",
+                            port.0,
+                            fis.command,
+                            transfer_bytes,
+                        );
+                        return Ok(second_layout);
+                    }
+
+                    if diagnostic_read {
+                        // 临时兼容该 HBA 的 PRDBC 写回异常：完成位齐全、双读
+                        // 校验未启用且没有 ATA/SATA 错误时，继续使用 DMA 数据。
+                        self.port_reg_write(port, AHCIPortReg::Is, interrupt_status);
+                        return Ok(layout);
+                    }
+
                     let state = self.command_error_state(port);
                     self.port_reg_write(port, AHCIPortReg::Is, interrupt_status);
                     return Err(AHCICommandError::ShortTransfer {
@@ -1127,7 +1425,11 @@ impl AHCIController {
             // 超时处理
             if get_time_ms().saturating_sub(start_ms) >= ATA_COMMAND_TIMEOUT_MS {
                 return Err(AHCICommandError::Timeout {
-                    phase: "waiting for PxCI slot 0 completion",
+                    phase: if diagnostic_read {
+                        "waiting for PxCI clear with PxIS.DPS and PxIS.DHRS"
+                    } else {
+                        "waiting for PxCI slot 0 completion"
+                    },
                     state: self.command_error_state(port),
                 });
             }

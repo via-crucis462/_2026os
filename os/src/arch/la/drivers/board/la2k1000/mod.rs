@@ -38,10 +38,17 @@ pub const BLOCK_SZ: usize = 4096;
 use crate::drivers::block::block_cache::get_block_cache;
 impl BlockDevice for SataBlock {
     fn raw_read_block(&self, block_id: usize, buf: &mut [u8]) {
-        self.read_block(block_id as u64, buf);
+        if !self.read_block(block_id as u64, buf){
+            error!("read block {} failed, stop. buf.len() = {}", block_id, buf.len());
+            loop{}
+        }
     }
     fn raw_write_block(&self, block_id: usize, buf: &[u8]) {
-        self.write_block(block_id as u64, buf);
+        if !self.write_block(block_id as u64, buf){
+            error!("write block {} failed, stop. buf.len() = {}", block_id, buf.len());
+            loop{}
+        }
+
     }
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
         let cache = get_block_cache(block_id, BLOCK_DEVICE.clone());
@@ -72,7 +79,15 @@ pub unsafe fn block_device_test() {
         let wres = block_device.write_block(i as u64, &write_buffer);
         let rres = block_device.read_block(i as u64, &mut read_buffer);
         trace!("Block {}: write_result={:?}, read_result={:?}", i, wres, rres);
-        assert_eq!(write_buffer, read_buffer);
+        if write_buffer != read_buffer {
+            error!(
+                "block device test data mismatch at block {}; halting without syncing disks",
+                i
+            );
+            loop {
+                core::hint::spin_loop();
+            }
+        }
     }
     info!("block device test passed!");
 }
