@@ -3,7 +3,7 @@
 pub use crate::timer::*;
 
 use crate::arch::config::UNCHACHED_KERNEL_BASE;
-use crate::process::manager::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
+use crate::process::scheduler::runqueue::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
 use core::arch::asm;
 
 const DEFAULT_TIME_SLICE_MS: usize = 10;

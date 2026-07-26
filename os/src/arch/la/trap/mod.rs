@@ -1,6 +1,6 @@
 // 正在为la64重写
 // 参考https://godones.github.io/rCoreloongArch/app.html
-use crate::process::processor::current_user_asid;
+use crate::process::scheduler::processor::current_user_asid;
 mod context;
 
 use crate::{KERNEL_STACK_SIZE, PAGE_SIZE, get_hart_id};
@@ -343,7 +343,7 @@ pub fn trap_handler() -> ! {
             let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
             for pid in expired_pids {
                 if let Some(process) = crate::task::get_process(pid) {
-                    let tasks = crate::task::manager::TID2TCB
+                    let tasks = crate::process::registry::TID2TCB
                         .exclusive_access()
                         .values()
                         .filter(|task| task.gettgid() == process.gettgid())

@@ -2,7 +2,7 @@
 
 use crate::arch::config::CLOCK_FREQ;
 use crate::arch::sbi::set_timer;
-use crate::process::manager::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
+use crate::process::scheduler::runqueue::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
 
 use riscv::register::time;
 

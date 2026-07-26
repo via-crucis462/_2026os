@@ -16,7 +16,7 @@ use alloc::vec;
 use crate::syscall::EPOLL_CTL_DEL;
 use crate::syscall::EPOLL_CTL_ADD;
 use crate::syscall::EPOLL_CTL_MOD;
-use crate::process::manager::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_OTHER, SCHED_RR};
+use crate::process::scheduler::runqueue::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_OTHER, SCHED_RR};
 use crate::lazy_static;
 use spin::Mutex;
 use crate::sync::WaitQueue;
@@ -75,8 +75,7 @@ pub use crate::{
             MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_token, exit_current_and_run_next, suspend_current_and_run_next, 
                 TaskControlBlock
         },
-        clone::*,
-        manager::*
+        registry::*
     },
     syscall::errno::Errno
 };
@@ -291,7 +290,7 @@ pub fn sys_exit(exit_code: i32) -> ! {
 pub fn sys_exit_group(exit_code: i32) -> ! {
     let task = current_task().unwrap();
     let pid = task.getpid();
-    let tasks = crate::task::manager::TID2TCB
+    let tasks = crate::process::registry::TID2TCB
         .exclusive_access()
         .values()
         .filter(|thread| thread.getpid() == pid)
@@ -357,7 +356,7 @@ pub fn sys_chroot(path: usize) -> isize {
     match start.find_tree(&path_str, true) {
         Ok(root) => {
             let mut fs = fs.exclusive_access();
-            *fs = crate::task::task::task_fs::FsStruct::new(root.clone(), root);
+            *fs = crate::task::fs::FsStruct::new(root.clone(), root);
             0
         }
         Err(_) => ENOENT.as_isize(),
@@ -1741,7 +1740,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
                 args_vec = new_args;
                 app_inode = inode;
                 all_data = app_inode.read_all();
-                let current_proc = current_task().unwrap().process();
+                let current_proc = current_task().unwrap();
                 let inner = current_proc.inner_exclusive_access();
                 info!("[kernel] sys_exec: script detour success. Current process PID: {}, basic children count: {}", current_proc.getpid(), inner.children.len());
             } else {
@@ -1763,8 +1762,8 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             info!("[kernel] sys_exec: arg[{}] = '{}'", i, args_vec[i]);
         }
         // 真正开始替换进程空间
-        task.process().exec(
-            task,
+        task.do_exec(
+            task.clone(),
             all_data.as_slice(),
             args_vec,
             envs_vec,
@@ -2300,7 +2299,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
             // 进程定向信号写入 PCB pending，并唤醒该进程的全部线程；SIGKILL 额外强制整个线程组退出。
             let signal = proc.inner_exclusive_access().signal.clone();
             signal.exclusive_access().insert_pending(flag);
-            let target_tasks: Vec<Arc<TaskControlBlock>> = crate::task::manager::TID2TCB
+            let target_tasks: Vec<Arc<TaskControlBlock>> = crate::process::registry::TID2TCB
                 .exclusive_access()
                 .values()
                 .filter(|task| task.gettgid() == proc.gettgid())
@@ -2359,7 +2358,7 @@ pub fn sys_kill(pid: isize, signum: i32) -> isize {
                     let tgid = proc.gettgid();
                     drop(inner);
                     matched_tasks.extend(
-                        crate::task::manager::TID2TCB
+                        crate::process::registry::TID2TCB
                             .exclusive_access()
                             .values()
                             .filter(|task| task.gettgid() == tgid)
