@@ -284,7 +284,9 @@ pub fn file_name(path: &str) -> String {
 }
 
 pub fn create_file_in_dentry(parent: &Arc<Dentry>, name: String, mode: u32) -> Arc<Dentry> {
-    // 默认创建普通文件权限 0o100666
+    // open(O_CREAT) 传入的 mode 通常只包含权限位；inode 的 st_mode 还必须包含
+    // S_IFREG，否则 stat(2) 无法把它识别为普通文件，`test -f` 会失败。
+    let mode = (mode & 0o7777) | 0o100000;
     let vfs_inode = parent.inode.create_file(&name, mode)
         .expect("VFS: Failed to create file in disk");
     

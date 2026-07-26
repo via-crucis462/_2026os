@@ -319,6 +319,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
         let anon_file = Arc::new(OSInode::new(
         readable,
         writable,
+        false,
         anon_vfs_inode,
         anon_dentry,
         ));

@@ -247,7 +247,7 @@ impl File for Pipe {
                             continue;
                         };
                         if Arc::ptr_eq(&pipe.buffer, &self.buffer) {
-                            println!(
+                            warn!(
                                 "[pipe-read-empty] pid={} self-fd={} readable={} writable={} flags={:?} status={:#x} buffer={:p}",
                                 current_pid,
                                 fd,

@@ -20,6 +20,7 @@ use crate::mm::PhysPageNum;
 pub struct OSInode {
     readable: bool,
     writable: bool,
+    append: bool,
     inner: Mutex<OSInodeInner>,
     pub inode: Arc<dyn VfsInode>,   //实现了VfsInode trait的具体文件系统的inode
     pub dentry: Arc<Dentry>, 
@@ -71,10 +72,17 @@ fn append_dirent_record(
 }
 
 impl OSInode {
-    pub fn new(readable: bool, writable: bool, inode: Arc<dyn VfsInode>, dentry: Arc<Dentry>) -> Self {
+    pub fn new(
+        readable: bool,
+        writable: bool,
+        append: bool,
+        inode: Arc<dyn VfsInode>,
+        dentry: Arc<Dentry>,
+    ) -> Self {
         Self {
             readable,
             writable,
+            append,
             inner: Mutex::new(OSInodeInner { offset: 0, mounted_offset: 0 }),
             inode,
             dentry,
@@ -121,7 +129,13 @@ impl File for OSInode {
 
     fn write(&self, buf: UserBuffer) -> usize {
         let mut inner = self.inner.lock();
-        let offset = inner.offset;
+        // O_APPEND 要求每次 write 都从当时的文件末尾开始，而不是只在 open
+        // 时设置一次偏移；这样多个追加写入者也不会沿用过期偏移。
+        let offset = if self.append {
+            self.inode.get_size()
+        } else {
+            inner.offset
+        };
         let write_len = self.write_at(offset, buf);
         inner.offset += write_len;
         write_len
@@ -304,6 +318,8 @@ bitflags! {
         const RDWR = 1 << 1;
         /// create new file
         const CREATE = 1 << 6;
+        /// append each write at the current end of file
+        const APPEND = 1 << 10;
         
         /// truncate file size to 0
         const TRUNC = 1 << 9;
@@ -371,6 +387,7 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> O
         return Some(Arc::new(OSInode::new(
             readable,
             writable,
+            flags.contains(OpenFlags::APPEND),
             new_dentry.inode.clone(),
             new_dentry,
         )));
@@ -381,6 +398,7 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> O
     Some(Arc::new(OSInode::new(
         readable,
         writable,
+        flags.contains(OpenFlags::APPEND),
         target_dentry.inode.clone(),
         target_dentry,
     )))
@@ -441,6 +459,6 @@ lazy_static! {
     };
 
     pub static ref ROOT_INODE: Arc<OSInode> = {
-        Arc::new(OSInode::new(true, false, ROOT_VFS_INODE.clone(), ROOT_DENTRY.clone()))
+        Arc::new(OSInode::new(true, false, false, ROOT_VFS_INODE.clone(), ROOT_DENTRY.clone()))
     };
 }
