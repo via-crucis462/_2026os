@@ -1128,6 +1128,10 @@ impl AHCIController {
         // IDENTIFY DEVICE 等命令仍按原来的 PxCI/PRDBC 路径完成。
         let diagnostic_read = fis.command == ATA_COMMAND_READ_DMA_EXT
             && direction == ATADataDirection::D2H;
+        // 该 HBA 对读、写都可能遗漏 PRDBC 回写。写路径暂时仅接受完全未
+        // 回写（0）的情形；非零但不足的值仍按真实短传输处理。
+        let ignore_zero_prdbc_write = fis.command == ATA_COMMAND_WRITE_DMA_EXT
+            && direction == ATADataDirection::H2D;
         // 构造 PRDT，Command Table 和 Command Header，写入相应 DMA 区域
         let prd = AHCIPRDTEntry::new(layout.data_buffer, transfer_bytes, diagnostic_read).ok_or(
             AHCICommandError::InvalidArgument("invalid PRDT address or transfer length"),
@@ -1407,6 +1411,18 @@ impl AHCIController {
                     if diagnostic_read {
                         // 临时兼容该 HBA 的 PRDBC 写回异常：完成位齐全、双读
                         // 校验未启用且没有 ATA/SATA 错误时，继续使用 DMA 数据。
+                        self.port_reg_write(port, AHCIPortReg::Is, interrupt_status);
+                        return Ok(layout);
+                    }
+
+                    if ignore_zero_prdbc_write && command_header.prd_byte_count == 0 {
+                        debug!(
+                            "AHCI ignoring zero PRDBC for completed write: port={}, command=0x{:02x}, PxIS=0x{:08x}, expected={}",
+                            port.0,
+                            fis.command,
+                            interrupt_status,
+                            transfer_bytes,
+                        );
                         self.port_reg_write(port, AHCIPortReg::Is, interrupt_status);
                         return Ok(layout);
                     }
