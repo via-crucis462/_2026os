@@ -13,7 +13,7 @@ extern "C" {
     fn ekernel();
 }
 
-/// 维护DMA区域的内存的管理器，回收还没完全实现
+/// 维护DMA区域的内存的管理器
 /// 可保证分配的连续性
 /// 以标准页为单位，分配的页数由调用者指定
 pub struct DmaMemManager {

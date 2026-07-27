@@ -50,7 +50,6 @@ impl LA2k1000NetWrapper {
     }
 }
 
-/// LA2k1000NetDevice 的方法 —— 当前为桩实现，待后续对接真实硬件驱动
 impl LA2k1000NetDevice {
     /// 是否有待接收的包
     pub fn can_recv(&self) -> bool {
