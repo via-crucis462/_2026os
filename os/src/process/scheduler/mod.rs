@@ -27,4 +27,4 @@ pub use rt_rq::*;
 pub use idle_rq::*;
 
 /// 参与调度的 CPU 数量，与当前架构配置保持一致。
-pub const CPU_NUM: usize = 1;
+pub const CPU_NUM: usize = crate::arch::config::CPU_CORE_NUM;

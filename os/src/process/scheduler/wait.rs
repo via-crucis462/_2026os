@@ -79,9 +79,9 @@ where
 pub fn wake_up_one(queue: &Mutex<WaitQueue>) -> bool {
     if let Some(task) = queue.lock().pop_front() {
         while task.inner_exclusive_access().state == TaskStatus::BlockSaving {
-            println!("wake_up_one: task is still saving context");
+            //println!("wake_up_one: task is still saving context");
             core::hint::spin_loop();
-            println!("wake_up_one: rechecking task status...");
+            //println!("wake_up_one: rechecking task status...");
         }
 		wake_up_task(task);
         true
