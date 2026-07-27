@@ -53,9 +53,30 @@ pub fn exit_current_and_run_next(exit_code: i32){
 			(inner.parent.upgrade(), core::mem::take(&mut inner.children))
 		};
 		if let Some(parent) = parent {
-			{
-				let mut parent_inner = parent.inner_exclusive_access();
-				parent_inner.pending.insert(SignalFlags::SIGCHLD);
+			let (parent_tgid, signal) = {
+				let parent_inner = parent.inner_exclusive_access();
+				(parent.gettgid(), parent_inner.signal.clone())
+			};
+			signal.exclusive_access().insert_pending(SignalFlags::SIGCHLD);
+
+			// SIGCHLD is process-directed. Wake every eligible thread so one
+			// unblocked member can consume the shared pending signal.
+			let parent_threads: alloc::vec::Vec<_> = registry::TID2TCB
+				.exclusive_access()
+				.values()
+				.filter(|thread| thread.gettgid() == parent_tgid)
+				.cloned()
+				.collect();
+			for thread in parent_threads {
+				let mut inner = thread.inner_exclusive_access();
+				let deliverable = !inner.blocked.contains(SignalFlags::SIGCHLD);
+				if deliverable && matches!(inner.state, TaskStatus::Blocked) {
+					inner.signal_interrupted = true;
+				}
+				drop(inner);
+				if deliverable {
+					crate::process::wake_up_task(thread);
+				}
 			}
 			// wait4/waitid 的过滤条件各不相同，全部唤醒后由等待者重新检查。
 			crate::process::wake_child_exit_waiters(&parent);

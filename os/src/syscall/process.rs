@@ -1495,73 +1495,44 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usi
     let task = current_task().unwrap();
     task.do_clone(flags, stack, ptid, ctid, tls)
 }
-pub fn sys_pthread_create(thread: *mut usize, attr: *const usize, start_routine: usize, arg: usize) -> isize {
-    warn!("sys_pthread_create: thread={:#x}, attr={:#x}, start_routine={:#x}, arg={:#x}", thread as usize, attr as usize, start_routine, arg);
-    
-    let token = current_user_token();
-    let current_task = current_task().unwrap();
-    
-    // 1. 尝试从 attr 中读取用户指定的栈地址
-    // pthread_attr_t 布局 (musl): 
-    //   offset 0: __detach_state (4 bytes)
-    //   offset 4: __sched_policy (4 bytes)  
-    //   offset 8: __sched_priority (4 bytes)
-    //   offset 16: __stack (8 bytes on 64-bit)
-    //   offset 24: __stack_size (8 bytes)
-    let user_stack: Option<usize> = if attr as usize != 0 {
-        // 读取 __stack 字段 (offset 16 in pthread_attr_t)
-        let stack_ptr: usize = if let Some(val) = try_translated_read(token, unsafe { (attr as *const usize).add(2) }) {
-            val
-        } else {
-            0
-        };
-        if stack_ptr != 0 {
-            // 读取 __stack_size (offset 24)
-            let stack_size: usize = if let Some(val) = try_translated_read(token, unsafe { (attr as *const usize).add(3) }) {
-                val
-            } else {
-                0
-            };
-            if stack_size > 0 {
-                // 栈顶 = 栈底 + 栈大小 (栈向下增长)
-                Some(stack_ptr + stack_size)
-            } else {
-                Some(stack_ptr)
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    
-    // 2. 创建内核线程，共享父进程地址空间
-    let clone_flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
-    let new_tid = current_task.do_clone(clone_flags, user_stack.unwrap_or(0), 0, 0, 0);
-    if new_tid < 0 {
-        return new_tid;
-    }
-    let new_tid = new_tid as usize;
-    let Some(new_task) = tid2task(new_tid) else {
-        return ESRCH.as_isize();
-    };
-    
-    // 3. 设置新线程的入口点和参数
+/// Return the effective NUMA memory policy. This kernel currently exposes one
+/// memory node, so every address uses node 0 and the default policy.
+pub fn sys_get_mempolicy(
+    mode: *mut i32,
+    nodemask: *mut usize,
+    maxnode: usize,
+    _addr: usize,
+    flags: usize,
+) -> isize {
+    const MPOL_F_NODE: usize = 1;
+    const MPOL_F_ADDR: usize = 2;
+    const MPOL_F_MEMS_ALLOWED: usize = 4;
+    const VALID_FLAGS: usize = MPOL_F_NODE | MPOL_F_ADDR | MPOL_F_MEMS_ALLOWED;
+
+    if flags & !VALID_FLAGS != 0
+        || flags & MPOL_F_MEMS_ALLOWED != 0 && flags != MPOL_F_MEMS_ALLOWED
+        || flags & MPOL_F_NODE != 0 && mode.is_null()
     {
-        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
-        trap_cx.set_rt(start_routine);
-        trap_cx.set_a0(arg);
+        return EINVAL.as_isize();
     }
-    
-    // 4. 将 TID 写回用户空间
-    if thread as usize != 0 {
-        if !try_translated_write(token, thread, new_tid as usize) {
-            warn!("sys_pthread_create: failed to write TID to user space");
+
+    let token = current_user_token();
+    if !mode.is_null() && !try_translated_write(token, mode, 0i32) {
+        return EFAULT.as_isize();
+    }
+
+    if !nodemask.is_null() && maxnode != 0 {
+        let word_bits = usize::BITS as usize;
+        let words = maxnode.saturating_add(word_bits - 1) / word_bits;
+        for index in 0..words {
+            let value = if index == 0 { 1usize } else { 0usize };
+            if !try_translated_write(token, unsafe { nodemask.add(index) }, value) {
+                return EFAULT.as_isize();
+            }
         }
     }
-    
-    warn!("sys_pthread_create: created thread with TID {}", new_tid);
-    new_tid as isize
+
+    0
 }
 // path elf路径
 // args 参数数组，必须以0结尾
