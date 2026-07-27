@@ -9,11 +9,15 @@ fn main() {
     let board = env::var("BOARD").unwrap_or_else(|_| "virt".to_string());
 
     // 防止传入空字符串
-    let initproc = if initproc.is_empty() { "default".to_string() } else { initproc };
+    let initproc = if initproc.is_empty() {
+        "default".to_string()
+    } else {
+        initproc
+    };
 
     println!("cargo::rustc-check-cfg=cfg(initproc, values(\"default\", \"sh\", \"ltp\"))");
     println!("cargo::rustc-check-cfg=cfg(log_level, values(\"OFF\", \"ERROR\", \"WARN\", \"INFO\", \"DEBUG\", \"TRACE\"))");
-    println!("cargo::rustc-check-cfg=cfg(board, values(\"virt\", \"2k1000\"))");
+    println!("cargo::rustc-check-cfg=cfg(board, values(\"virt\", \"2k1000\", \"visionfive2\"))");
     println!("cargo::rustc-check-cfg=cfg(no_console_lock)");
 
     let no_console_lock = env::var("NO_CONSOLE_LOCK").unwrap_or_else(|_| "0".to_string());
@@ -24,7 +28,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../user/src/");
     println!("cargo:rerun-if-changed={}", TARGET_PATH);
     println!("cargo:rerun-if-env-changed=LOG");
-    println!("cargo:rerun-if-env-changed=INITPROC");
+    println!("cargo:rerun-if-env-changed=INIT");
     println!("cargo:rerun-if-env-changed=BOARD");
     println!("cargo:rerun-if-env-changed=NO_CONSOLE_LOCK");
     println!("cargo:rustc-env=LOG={}", log_level);

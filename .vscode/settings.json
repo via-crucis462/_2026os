@@ -10,6 +10,7 @@
     // 调整板卡
     "rust-analyzer.cargo.extraEnv": {
         "BOARD": "2k1000"
+        // "BOARD": "visionfive2"
         // "BOARD": "virt"
     },
     
@@ -25,5 +26,5 @@
     "rust-analyzer.linkedProjects": [
         "os/Cargo.toml",
         "user/Cargo.toml"
-    ]
+    ],
 }

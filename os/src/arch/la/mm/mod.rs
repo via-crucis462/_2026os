@@ -117,9 +117,6 @@ pub fn prepare_user_tlb() {
 
 pub fn flush_tlb_for_asid(_asid: usize) {
     unsafe {
-        // Diagnostic fallback: invalidate every cached translation after a
-        // mapping change. The ASID-targeted invalidation left a stale invalid
-        // entry for a lazily mapped user-stack page on 2K1000.
         asm!("dbar 0");
         asm!("invtlb 0, $r0, $r0");
         asm!("dbar 0");

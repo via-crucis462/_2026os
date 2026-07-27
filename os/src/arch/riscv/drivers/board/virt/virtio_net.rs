@@ -1,7 +1,8 @@
 use core::ptr::NonNull;
 
 use super::virtio_blk::VirtioHal;
-use crate::{sync::MPSafeCell, MMIO_SLOT_SIZE};
+use crate::sync::MPSafeCell;
+use crate::MMIO_SLOT_SIZE;
 use virtio_drivers::{
     device::net::VirtIONet,
     transport::{

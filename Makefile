@@ -8,7 +8,7 @@ RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
 # default, sh, ltp
 INIT ?= default
-# virt (qemu) or 2k1000 (real board)
+# virt, visionfive2, 2k1000
 BOARD ?= virt
 RV_ELF ?= os/target/riscv64gc-unknown-none-elf/$(MODE)/os
 LA_ELF ?= os/target/loongarch64-unknown-none/$(MODE)/os
@@ -46,6 +46,15 @@ prev-la:
 build: build-rv build-la
 build-rv:
 	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)
+ifeq ($(BOARD),visionfive2)
+	@echo "  -> Packing uImage for VisionFive2..."
+	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv-$(BOARD)
+	python3 boot/build_uimage_rv.py kernel-rv-$(BOARD) kernel-rv-$(BOARD).uImage
+	@echo "  -> Making binary for VisionFive2..."
+	rust-objcopy -O binary kernel-rv-$(BOARD) kernel-rv-$(BOARD).bin
+	mkdir -p $(TFTP_ROOT) && cp -f kernel-rv-$(BOARD).bin $(TFTP_ROOT)
+	mkdir -p $(TFTP_ROOT) && cp -f kernel-rv-$(BOARD).uImage $(TFTP_ROOT)
+endif
 build-la:
 	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD)
 ifeq ($(BOARD),2k1000)
@@ -67,6 +76,13 @@ build-user-la:
 copy: copy-rv  copy-user-rv copy-la  copy-user-la
 copy-rv:	
 	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv
+ifeq ($(BOARD),visionfive2)
+	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv-$(BOARD)
+	@echo "  -> Packing uImage for VisionFive2..."
+	python3 boot/build_uimage_rv.py kernel-rv-$(BOARD) kernel-rv-$(BOARD).uImage
+	@echo "  -> Making binary for VisionFive2..."
+	rust-objcopy -O binary kernel-rv-$(BOARD) kernel-rv-$(BOARD).bin
+endif
 copy-la:
 	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la-$(BOARD)
 ifeq ($(BOARD),2k1000)

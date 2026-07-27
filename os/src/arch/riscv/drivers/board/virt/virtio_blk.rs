@@ -1,12 +1,10 @@
 use core::ptr::NonNull;
 
-use super::{BlockDevice, BLOCK_DEVICE};
 use crate::MMIO_SLOT_SIZE;
 use crate::mm::{
     kernel_token, PageTable, PhysAddr, VirtAddr,
 };
 use crate::drivers::dma::DMA_MEMORY;
-use crate::ext4fs::{get_block_cache, BLOCK_SZ};
 use crate::sync::MPSafeCell;
 use virtio_drivers::{Hal, transport::mmio::{MmioTransport, VirtIOHeader}, BufferDirection, PhysAddr as VirtioPhysAddr};
 use virtio_drivers::device::blk::VirtIOBlk;
@@ -101,41 +99,5 @@ unsafe impl Hal for VirtioHal {
         _buffer: NonNull<[u8]>,
         _direction: BufferDirection,
     ) {
-    }
-}
-
-impl BlockDevice for VirtIOBlock {
-    fn raw_read_block(&self, block_id: usize, buf: &mut [u8]) {
-        assert_eq!(buf.len(), BLOCK_SZ, "block buffer must be {} bytes", BLOCK_SZ);
-        self.inner
-            .exclusive_access()
-            .read_blocks(block_id * (BLOCK_SZ / 512), buf)
-            .expect("virtio block read failed");
-    }
-
-    fn raw_write_block(&self, block_id: usize, buf: &[u8]) {
-        assert_eq!(buf.len(), BLOCK_SZ, "block buffer must be {} bytes", BLOCK_SZ);
-        self.inner
-            .exclusive_access()
-            .write_blocks(block_id * (BLOCK_SZ / 512), buf)
-            .expect("virtio block write failed");
-    }
-
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        assert!(buf.len() <= BLOCK_SZ);
-        let cache = get_block_cache(block_id, BLOCK_DEVICE.clone());
-        let block = cache.lock();
-        let block_data: &[u8; BLOCK_SZ] = block.get_ref(0);
-        buf.copy_from_slice(&block_data[..buf.len()]);
-    }
-
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
-        assert!(buf.len() <= BLOCK_SZ);
-        // println!("write_block: block_id = {}, buf.len() = {}", block_id, buf.len());
-        let cache = get_block_cache(block_id, BLOCK_DEVICE.clone());
-        cache.lock().modify(0, |block_data: &mut [u8; BLOCK_SZ]| {
-            block_data[..buf.len()].copy_from_slice(buf);
-        });
-        // println!("write_block done: block_id = {}, buf.len() = {} done", block_id, buf.len());
     }
 }

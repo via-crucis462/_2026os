@@ -6,8 +6,9 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-# [features]
-# default = []  # 默认启用架构
+[features]
+default = []
+board_vf2 = []
 # riscv = []    # RISC-V 支持
 # loongarch = [] # LoongArch 支持
 

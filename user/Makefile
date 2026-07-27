@@ -19,7 +19,7 @@ APP_DIR := src/bin
 TARGET_DIR := target/$(TARGET)/$(MODE)
 BUILD_DIR := build/$(ARCH)
 OBJDUMP := rust-objdump --arch-name=$(ARCH_NAME)
-OBJCOPY := rust-objcopy --binary-architecture=$(ARCH_NAME)
+OBJCOPY := rust-objcopy
 PY := python3
 
 ifeq ($(MODE), release)
