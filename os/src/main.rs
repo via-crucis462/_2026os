@@ -117,7 +117,7 @@ pub fn rust_main(hart_id: usize) -> ! {
         main_init(hart_id);
         panic!("Unreachable in rust_main!");
     } else {
-        info!("[kernel] Hello from hart {}!", hart_id);
+        println!("[kernel] Hello from hart {}!", hart_id);
         other_init();
         panic!("Unreachable in rust_main!");
     }

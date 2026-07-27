@@ -9,7 +9,8 @@ use crate::process::scheduler::runqueue::SCHED_IDLE;
 use crate::process::signal::{SigHand, Signal, Sigpending, SignalFlags};
 use crate::process::task::{
 	context::ThreadStruct, Cred, FileDescriptorTable, FsStruct, TaskContext,
-	TaskControlBlock, TaskStatus, TaskStruct, TaskStructInner,
+	SchedDlEntity, SchedEntity, SchedRtEntity, TaskControlBlock, TaskStatus,
+	TaskStruct, TaskStructInner,
 };
 use crate::process::{add_task, kstack_alloc, pid_alloc};
 use crate::sync::MPSafeCell;
@@ -80,6 +81,12 @@ impl TaskStruct {
 				errno: 0,
 				sched_policy: SCHED_IDLE, // initproc默认用SCHED_IDLE策略
 				sched_priority: 0,
+				prio: 120,
+				static_prio: 120,
+				normal_prio: 120,
+				se: SchedEntity::new(),
+				rt: SchedRtEntity::new(),
+				dl: SchedDlEntity::new(),
 				mm: Some(Arc::new(MPSafeCell::new(memory_set))),
 				fs: Arc::new(MPSafeCell::new(FsStruct::new(ROOT_DENTRY.clone(), ROOT_DENTRY.clone()))),
 				files: Arc::new(MPSafeCell::new(FileDescriptorTable::new())),
@@ -100,6 +107,12 @@ impl TaskStruct {
 				on_cpu: false,
 				on_rq: false,
 				cpu: 0,
+				cpus_allowed: if crate::arch::config::CPU_CORE_NUM >= usize::BITS as usize {
+					usize::MAX
+				} else {
+					(1usize << crate::arch::config::CPU_CORE_NUM) - 1
+				},
+				need_resched: false,
 				clear_child_tid: 0,
 				personality: 0,
 				locked_bytes: 0,

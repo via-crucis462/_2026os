@@ -53,7 +53,12 @@ pub fn exit_current_and_run_next(exit_code: i32){
 			(inner.parent.upgrade(), core::mem::take(&mut inner.children))
 		};
 		if let Some(parent) = parent {
-			parent.inner_exclusive_access().pending.insert(SignalFlags::SIGCHLD);
+			{
+				let mut parent_inner = parent.inner_exclusive_access();
+				parent_inner.pending.insert(SignalFlags::SIGCHLD);
+			}
+			// wait4/waitid 的过滤条件各不相同，全部唤醒后由等待者重新检查。
+			crate::process::wake_child_exit_waiters(&parent);
 		}
 		if !orphan_children.is_empty() {
 			for child in &orphan_children {

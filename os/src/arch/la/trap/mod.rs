@@ -280,6 +280,7 @@ fn debug_dump_brk_snapshot(tag: &str, cx: &TrapContext, token: usize) {
 /// 的111页和97页
 #[no_mangle]
 pub fn trap_handler() -> ! {
+    //println!("[kernel] trap_handler called CPU ID: {}", get_hart_id());
     // 设置内核态异常入口，防止嵌套中断时重入 __alltraps 破坏上下文
     set_kernel_trap_entry();
     //println!("[kernel] called trap_handler");

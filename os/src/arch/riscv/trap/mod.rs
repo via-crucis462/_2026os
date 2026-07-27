@@ -63,6 +63,7 @@ pub fn enable_timer_interrupt() {
 /// trap handler
 #[no_mangle]
 pub fn trap_handler() -> ! {
+    //println!("[kernel] trap_handler called CPU ID: {}", get_hart_id());
     trace!("[kernel] trap_handler: a trap from user space");
     let scause = riscv::register::scause::read();
     let sepc = riscv::register::sepc::read();

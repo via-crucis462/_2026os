@@ -1,7 +1,7 @@
 //! Constants in the kernel
 
 #[allow(unused)]
-pub const CPU_CORE_NUM: usize = 4;
+pub const CPU_CORE_NUM: usize = 8;
 
 /// page size : 4KB
 pub const PAGE_SIZE: usize = 0x1000;

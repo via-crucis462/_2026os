@@ -87,14 +87,22 @@ pub struct TaskStructInner {
     pub errno: i32,         // 进程错误码
 
     /* 4. 进程调度相关 */
-    /*pub sched_class: *const sched_class,  // 绑定的调度器类
-    pub se: sched_entity,     // CFS 完全公平调度实体
-    pub rt: sched_rt_entity,  // 实时调度实体
-    pub prio: i32,                  // 动态优先级
-    pub static_prio: i32,           // 静态优先级
-    pub normal_prio: i32,           // 普通优先级*/
+    /// 用户设置的调度策略，例如 SCHED_OTHER、SCHED_RR 或 SCHED_DEADLINE。
     pub sched_policy: isize,
+    /// 用户可见的实时优先级；普通策略为 0，实时策略为 1..=99。
     pub sched_priority: i32,
+    /// 调度器当前使用的动态优先级。
+    pub prio: i32,
+    /// 由 nice 或实时参数计算出的静态优先级。
+    pub static_prio: i32,
+    /// 不考虑临时优先级继承时的正常优先级。
+    pub normal_prio: i32,
+    /// 普通公平调度实体。
+    pub se: SchedEntity,
+    /// FIFO/RR 实时调度实体。
+    pub rt: SchedRtEntity,
+    /// Deadline/CBS 调度实体。
+    pub dl: SchedDlEntity,
 
     /* 5. 内存管理相关 */
     pub mm: Option<Arc<MPSafeCell<MemorySet>>>,       // 用户进程内存描述符
@@ -128,6 +136,10 @@ pub struct TaskStructInner {
     pub on_cpu: bool,
     pub on_rq: bool,
     pub cpu: usize,
+    /// 允许任务运行的 CPU 位图；第 N 位对应 CPU N。
+    pub cpus_allowed: usize,
+    /// 是否请求在安全调度点重新调度当前任务。
+    pub need_resched: bool,
 
     /*11 .线程退出清理地址 */
     pub clear_child_tid: usize, // 线程清理指针

@@ -66,7 +66,7 @@ pub const OFFSET_FOR_USER_APP: usize = 0;
 pub const USER_APP_BASE: usize = 0x1_2000_0000;
 pub const USER_STACK_TOP: usize = USER_APP_MAX_SIZE;
 
-pub const CPU_CORE_NUM: usize = 4;
+pub const CPU_CORE_NUM: usize = 8;
 
 /// sv39用户地址空间end
 pub const USER_APP_MAX_SIZE: usize = 1<<38;

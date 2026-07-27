@@ -1,7 +1,8 @@
 use bitflags::*;
 use alloc::vec::Vec;
-use alloc::sync::Weak;
+use alloc::sync::{Arc, Weak};
 use crate::process::task::{Rlimits, TaskControlBlock};
+use crate::sync::{MPSafeCell, WaitQueue};
 use super::{SignalAction, SignalActions};
 
 pub const MAX_SIG: usize = 64;
@@ -62,10 +63,12 @@ impl Sigpending {
 pub struct Signal {
     shared_pending: Sigpending, group_exit_state: i32, thread_num: usize,
     pub next_thread: Option<Weak<TaskControlBlock>>, rlimits: Rlimits,
+    /// 对应 Linux signal_struct.wait_chldexit，供 wait4/waitid 阻塞等待子进程状态变化。
+    pub wait_chldexit: Arc<MPSafeCell<WaitQueue>>,
 }
 impl Signal {
-    pub fn new() -> Self { Self { shared_pending: Sigpending::new(), group_exit_state: 0, thread_num: 1, next_thread: None, rlimits: Rlimits::new() } }
-    pub fn fork_from(parent: &Self) -> Self { Self { shared_pending: Sigpending::new(), group_exit_state: 0, thread_num: 1, next_thread: None, rlimits: parent.rlimits.clone() } }
+    pub fn new() -> Self { Self { shared_pending: Sigpending::new(), group_exit_state: 0, thread_num: 1, next_thread: None, rlimits: Rlimits::new(), wait_chldexit: Arc::new(MPSafeCell::new(WaitQueue::new())) } }
+    pub fn fork_from(parent: &Self) -> Self { Self { shared_pending: Sigpending::new(), group_exit_state: 0, thread_num: 1, next_thread: None, rlimits: parent.rlimits.clone(), wait_chldexit: Arc::new(MPSafeCell::new(WaitQueue::new())) } }
     pub fn add_thread(&mut self) { self.thread_num += 1; }
     pub fn insert_pending(&mut self, signal: SignalFlags) { self.shared_pending.insert(signal); }
     pub fn pending_flags(&self) -> SignalFlags { self.shared_pending.flags() }

@@ -5,7 +5,7 @@
 use core::{panic, result};
 use crate::net::SOCKET_SET;
 use core::sync::atomic::{AtomicI32, Ordering};
-use crate::process::block_current_and_run_next;
+use crate::process::{block_current_and_run_next, wait4_block_current, waitid_block_current};
 
 use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, USER_STACK_SIZE, get_hart_id};
@@ -17,6 +17,7 @@ use crate::syscall::EPOLL_CTL_DEL;
 use crate::syscall::EPOLL_CTL_ADD;
 use crate::syscall::EPOLL_CTL_MOD;
 use crate::process::scheduler::runqueue::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_OTHER, SCHED_RR};
+use crate::process::scheduler::futex::{get_futex_wait_queue, FUTEX_WAIT_QUEUES};
 use crate::lazy_static;
 use spin::Mutex;
 use crate::sync::WaitQueue;
@@ -36,15 +37,6 @@ pub static TIME_CACHE: Mutex<BTreeMap<u64, (i64, i64, i64, i64)>> = Mutex::new(B
 lazy_static! {
     /// 专门用于进程死等信号的全局等待队列
     pub static ref SIGNAL_WAIT_QUEUE: Mutex<WaitQueue> = Mutex::new(WaitQueue::new());
-    pub static ref FUTEX_WAIT_QUEUES: Mutex<BTreeMap<usize, Arc<Mutex<WaitQueue>>>> =
-        Mutex::new(BTreeMap::new());
-}
-fn get_futex_wait_queue(uaddr: usize) -> Arc<Mutex<WaitQueue>> {
-    let mut queues = FUTEX_WAIT_QUEUES.lock();
-    queues
-        .entry(uaddr)
-        .or_insert_with(|| Arc::new(Mutex::new(WaitQueue::new())))
-        .clone()
 }
 
 pub(crate) fn clear_child_tid_and_wake(token: usize, clear_child_tid: usize) {
@@ -1938,15 +1930,9 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
             if options & WNOHANG as usize != 0 {
                 return 0;
             }
-            //println!("[wait4] P{} has matching children but none are zombies, sleeping...", proc.getpid());
             drop(proc_inner);
-            drop(proc);
-            drop(task);
-            
-            suspend_current_and_run_next();
-            let current_task = current_task().unwrap();
-            let pid = current_task.getpid() as i32;
-            //println!("[wait4] parent pid :{} woke up, rechecking children...", pid);
+            // 队列锁内再次检查条件，随后原子地入队并切换，防止子进程退出唤醒发生在入队之前。
+            wait4_block_current(&proc, pid);
             continue;
         }else{
             //从父进程的孩子列表里摘除这个僵尸子进程
@@ -2219,9 +2205,7 @@ pub fn sys_waitid(idtype: i32, id: i32, infop: *mut SigInfo, options: i32) -> is
                 }
             }
             drop(proc_inner);
-            drop(proc);
-            drop(task);
-            suspend_current_and_run_next();
+            waitid_block_current(&proc, idtype, id);
             continue;
         }
 
@@ -3289,6 +3273,13 @@ pub fn sys_sched_setscheduler(pid: isize, policy: isize, param_ptr: *const Sched
     let mut inner = target_task.inner_exclusive_access();
     inner.sched_policy = policy;
     inner.sched_priority = param.sched_priority;
+    inner.static_prio = if matches!(policy, SCHED_FIFO | SCHED_RR) {
+        99 - param.sched_priority
+    } else {
+        120
+    };
+    inner.normal_prio = inner.static_prio;
+    inner.prio = inner.normal_prio;
     0
 }
 
@@ -3319,7 +3310,15 @@ pub fn sys_sched_setparam(pid: isize, param_ptr: *const SchedParam) -> isize {
         }
         _ => return EINVAL.as_isize(),
     }
-    target_task.inner_exclusive_access().sched_priority = param.sched_priority;
+    let mut inner = target_task.inner_exclusive_access();
+    inner.sched_priority = param.sched_priority;
+    inner.static_prio = if matches!(policy, SCHED_FIFO | SCHED_RR) {
+        99 - param.sched_priority
+    } else {
+        120
+    };
+    inner.normal_prio = inner.static_prio;
+    inner.prio = inner.normal_prio;
     0
 }
 
