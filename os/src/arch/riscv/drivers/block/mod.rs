@@ -2,19 +2,25 @@
 
 mod virtio_blk;
 pub mod virtio_net;
-pub use virtio_net::VirtIONetWrapper;
+#[cfg(feature = "board_vf2")]
+use crate::arch::drivers::net::DwMacWrapper;
+use crate::ext4fs::BlockDevice;
+use crate::sdcard;
+use alloc::sync::Arc;
+use lazy_static::*;
 pub use virtio_blk::VirtIOBlock;
 
-use alloc::sync::Arc;
-use crate::ext4fs::BlockDevice;
-use lazy_static::*;
+type BlockDeviceImpl = sdcard::SdBlockDevice;
 
-type BlockDeviceImpl = virtio_blk::VirtIOBlock;
+#[cfg(feature = "board_vf2")]
+type NetDeviceImpl = DwMacWrapper;
+#[cfg(not(feature = "board_vf2"))]
+type NetDeviceImpl = virtio_net::VirtIONetWrapper;
 
 lazy_static! {
     /// The global block device driver instance: BLOCK_DEVICE with BlockDevice trait
     pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = Arc::new(BlockDeviceImpl::new());
-    pub static ref NET_DEVICE: Arc<VirtIONetWrapper> = Arc::new(VirtIONetWrapper::new());
+    pub static ref NET_DEVICE: Arc<NetDeviceImpl> = Arc::new(NetDeviceImpl::new());
 }
 
 #[allow(unused)]

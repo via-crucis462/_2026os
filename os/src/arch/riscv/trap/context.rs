@@ -1,5 +1,5 @@
 //! Implementation of [`TrapContext`]
-use riscv::register::sstatus::{self, Sstatus, SPP, FS};
+use riscv::register::sstatus::{self, Sstatus, FS, SPP};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -20,7 +20,6 @@ pub struct TrapContext {
 
     pub hart_id: usize, // 保存当前线程所在核的id
 }
-
 
 // 封装了对两平台名称不同寄存器的访问为同名接口
 impl TrapContext {
@@ -68,12 +67,15 @@ impl TrapContext {
         trap_handler: usize,
     ) -> Self {
         unsafe {
-
             sstatus::set_fs(FS::Clean); 
 
             let mut sstatus = sstatus::read();
  
             sstatus.set_spp(SPP::User); 
+            // VF2 bring-up keeps asynchronous S-mode interrupts disabled.
+            // sret copies SPIE into SIE, so the initial user context must not
+            // inherit a stale SPIE value left by firmware.
+            sstatus.set_spie(false);
 
             let mut cx = Self {
                 x: [0; 32],

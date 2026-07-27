@@ -10,7 +10,7 @@ LOG ?= OFF
 # Initproc: default, busybox, ltp_tests
 INITPROC ?= default
 # BOARD
-BOARD := qemu
+BOARD ?= vf2
 SBI ?= rustsbi
 
 # 添加了新sbi启动选项, 以支持qemu8
@@ -37,7 +37,7 @@ endif
 LA_FS_IMG := ../fs_img/la64_ext4.img
 
 # KERNEL ENTRY
-KERNEL_ENTRY_PA := 0x80200000
+# KERNEL_ENTRY_PA := 0x80200000
 
 # Binutils
 OBJDUMP := rust-objdump --arch-name=riscv64
@@ -59,7 +59,7 @@ $(KERNEL_BIN): kernel
 
 kernel:
 	@echo Platform: $(BOARD)
-	@LOG=$(LOG) INITPROC=$(INITPROC) cargo build --target riscv64gc-unknown-none-elf $(MODE_ARG)
+	@LOG=$(LOG) INITPROC=$(INITPROC) cargo build --target riscv64gc-unknown-none-elf $(MODE_ARG) $(if $(filter vf2,$(BOARD)),--features board_vf2,)
 
 clean:
 	@cargo clean

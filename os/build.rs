@@ -4,10 +4,13 @@ static TARGET_PATH: &str = "../user/target/riscv64gc-unknown-none-elf/release/";
 
 fn main() {
     let log_level = env::var("LOG").unwrap_or_else(|_| "ERROR".to_string());
-    let initproc = env::var("INIT")
-        .unwrap_or_else(|_| "default".to_string());
+    let initproc = env::var("INITPROC").unwrap_or_else(|_| "default".to_string());
     // 防止传入空字符串
-    let initproc = if initproc.is_empty() { "default".to_string() } else { initproc };
+    let initproc = if initproc.is_empty() {
+        "default".to_string()
+    } else {
+        initproc
+    };
 
     println!("cargo::rustc-check-cfg=cfg(initproc, values(\"default\", \"sh\", \"ltp\"))");
     println!("cargo::rustc-check-cfg=cfg(log_level, values(\"OFF\", \"ERROR\", \"WARN\", \"INFO\", \"DEBUG\", \"TRACE\"))");

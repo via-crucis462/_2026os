@@ -568,11 +568,6 @@ fn main() -> i32 {
     }
     let fd = fd as usize;
 
-// mmap回盘测试
-#[cfg(true)]{
-    mmap_test();
-}
-
 // --- basic cases ---
 #[cfg(true)]
 {
@@ -691,94 +686,10 @@ sh /glibc/cyclictest_testcode.sh
     }
     // Init (PID 1) must never exit — otherwise the kernel panics.
     // Loop forever, reaping any zombie children.
-    let mut _status: i32 = 0;
-    while waitpid((-1isize) as usize, &mut _status) > 0 {
-        // Reap zombies
-    }
-    0
-}
-
-// 创建文件 → mmap(MAP_SHARED)写入 → munmap → read验证回盘正确
-fn mmap_test(){
-    const AT_FDCWD: isize = -100;
-    const MAP_SHARED: usize = 0x01;
-    const PROT_READ: usize  = 1;
-    const PROT_WRITE: usize = 2;
-    const PAGE_SIZE: usize  = 4096;
-
-    let path = "/musl/mmap_dump\0";
-    let test_data: &[u8] = b"HELLO_MMAP_WRITEBACK_0123456789_ABCDEF";
-    let data_len = test_data.len();
-
-    // 1. 创建文件，写入初始占位数据（让文件有大小，mmap 才能映射）
-    let fd = sys_openat(AT_FDCWD as usize, path, K_WRONLY | K_CREAT | K_TRUNC, 0o777);
-    if fd < 0 {
-        println!("mmap_dump: create file failed: {}", fd);
-    } else {
-        let fd = fd as usize;
-        let mut init_buf = [0u8; PAGE_SIZE];
-        let n = sys_write(fd, &init_buf);
-        println!("mmap_dump: wrote {} bytes to set file size", n);
-        sys_close(fd);
-
-        // 2. 打开文件用于 mmap（需要读写权限）
-        let fd2 = sys_openat(AT_FDCWD as usize, path, 2 /* O_RDWR */, 0);
-        if fd2 < 0 {
-            println!("mmap_dump: reopen for mmap failed: {}", fd2);
-        } else {
-            let fd2 = fd2 as usize;
-
-            // 3. mmap: MAP_SHARED, PROT_READ|PROT_WRITE
-            let addr = syscall6(
-                SYSCALL_MMAP,
-                [0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd2, 0],
-            );
-            if addr <= 0 {
-                println!("mmap_dump: mmap failed: {}", addr);
-            } else {
-                let addr = addr as usize;
-                println!("mmap_dump: mmap at {:#x}", addr);
-
-                // 4. 通过 mmap 指针直接写入测试数据
-                let dst = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, data_len) };
-                dst.copy_from_slice(test_data);
-                println!("mmap_dump: wrote '{}' via mmap",
-                    core::str::from_utf8(dst).unwrap_or("?"));
-
-                // 5. munmap
-                let ret = sys_munmap(addr, PAGE_SIZE);
-                println!("mmap_dump: munmap ret={}", ret);
-            }
-            sys_close(fd2);
-        }
-
-        // 6. 重新打开文件，读取验证回盘内容
-        let fd3 = sys_openat(AT_FDCWD as usize, path, 0 /* O_RDONLY */, 0);
-        if fd3 < 0 {
-            println!("mmap_dump: reopen for verify failed: {}", fd3);
-        } else {
-            let fd3 = fd3 as usize;
-            let mut read_buf = [0u8; 128];
-            let n = sys_read(fd3, &mut read_buf);
-            if n as usize >= data_len
-                && &read_buf[..data_len] == test_data
-            {
-                println!("mmap_dump: VERIFY OK - file content matches!");
-            } else {
-                println!("mmap_dump: VERIFY FAIL - read {} bytes, expected '{}', got '{:?}'",
-                    n,
-                    core::str::from_utf8(test_data).unwrap_or("?"),
-                    core::str::from_utf8(&read_buf[..core::cmp::min(n as usize, data_len)]).unwrap_or("?"));
-            }
-            sys_close(fd3);
-        }
-
-        // 7. 触发块缓存刷盘：重新打开并写入，迫使 LRU 淘汰前面 ext4 脏块
-        let fd4 = sys_openat(AT_FDCWD as usize, path, 2 /* O_RDWR */, 0);
-        if fd4 >= 0 {
-            sys_write(fd4 as usize, b"FLUSH");
-            sys_close(fd4 as usize);
-            println!("mmap_dump: flush done");
+    loop {
+        let mut status: i32 = 0;
+        if waitpid((-1isize) as usize, &mut status) < 0 {
+            yield_();
         }
     }
 }

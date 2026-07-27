@@ -6,10 +6,10 @@ pub use crate::arch::drivers::block::*;
 pub mod block_cache;
 pub mod block_dev;
 
-use crate::ext4fs::{BlockDevice, get_block_cache};
+use crate::ext4fs::{get_block_cache, BlockDevice};
 
 pub const BLOCK_SZ: usize = 4096;
-
+pub mod sdcard;
 impl BlockDevice for VirtIOBlock {
     fn raw_read_block(&self, block_id: usize, buf: &mut [u8]) {
         let len = buf.len();
@@ -17,19 +17,19 @@ impl BlockDevice for VirtIOBlock {
         const SECTOR_SIZE: usize = 512;
         // 4096 / 512 = 8
         let sectors = len / SECTOR_SIZE;
-        
+
         let mut driver = self.inner.exclusive_access();
-        
+
         let start_sector = block_id * sectors;
         // 滑动窗口说是
         for i in 0..sectors {
             let offset = i * SECTOR_SIZE;
             let sub_buf = &mut buf[offset..offset + SECTOR_SIZE];
-            #[cfg (target_arch = "loongarch64")]
+            #[cfg(target_arch = "loongarch64")]
             driver
                 .read_blocks(start_sector + i, sub_buf)
                 .expect("Error when reading VirtIOBlk");
-            #[cfg (target_arch = "riscv64")]
+            #[cfg(target_arch = "riscv64")]
             driver
                 .read_block(start_sector + i, sub_buf)
                 .expect("Error when reading VirtIOBlk");
@@ -40,18 +40,18 @@ impl BlockDevice for VirtIOBlock {
         let len = buf.len();
         const SECTOR_SIZE: usize = 512;
         let sectors = len / SECTOR_SIZE;
-        
+
         let mut driver = self.inner.exclusive_access();
         let start_sector = block_id * sectors;
 
         for i in 0..sectors {
             let offset = i * SECTOR_SIZE;
             let sub_buf = &buf[offset..offset + SECTOR_SIZE];
-            #[cfg (target_arch = "loongarch64")]
+            #[cfg(target_arch = "loongarch64")]
             driver
                 .write_blocks(start_sector + i, sub_buf)
                 .expect("Error when writing VirtIOBlk");
-            #[cfg (target_arch = "riscv64")]
+            #[cfg(target_arch = "riscv64")]
             driver
                 .write_block(start_sector + i, sub_buf)
                 .expect("Error when writing VirtIOBlk");
@@ -72,3 +72,4 @@ impl BlockDevice for VirtIOBlock {
         });
     }
 }
+

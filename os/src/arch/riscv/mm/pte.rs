@@ -44,4 +44,8 @@ impl PageTableEntry {
     pub fn executable(&self) -> bool {
         (self.flags() & PTEFlags::X) != PTEFlags::empty()
     }
+    /// Mark a writable leaf as dirty after a store page fault.
+    pub fn set_dirty(&mut self) {
+        self.bits |= PTEFlags::D.bits() as usize;
+    }
 }

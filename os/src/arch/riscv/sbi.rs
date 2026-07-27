@@ -2,8 +2,8 @@
 
 #![allow(unused)]
 
-use core::arch::asm;
 use crate::sync::MPSafeCell;
+use core::arch::asm;
 use lazy_static::*;
 
 // 如果用qemu8，下列需要修改
@@ -51,7 +51,6 @@ lazy_static! {
 pub fn sbi_call(which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
     SBI_CALLER.exclusive_access().call(which, arg0, arg1, arg2)
 }
-
 
 /// use sbi call to set timer
 pub fn set_timer(timer: usize) {

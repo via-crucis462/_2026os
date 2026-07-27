@@ -23,9 +23,9 @@ endif
 all: build-user copy-user build copy
 
 build-rv:
-	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)
+	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INITPROC=$(INIT)
 build-la:
-	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)
+	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INITPROC=$(INIT)
 
 build-user-rv:
 	cd user && $(MAKE) build ARCH=riscv64

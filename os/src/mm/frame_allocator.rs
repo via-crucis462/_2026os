@@ -240,10 +240,15 @@ pub fn init_frame_allocator() {
     let frame_start = ekernel as *const() as usize + DMA_SIZE;
     #[cfg(target_arch = "riscv64")]
     let frame_start = ekernel as *const() as usize;
+
+    #[cfg(all(target_arch = "riscv64", feature = "board_vf2"))]
+    let frame_end = frame_start + 32 * 1024 * 1024;
+    #[cfg(not(all(target_arch = "riscv64", feature = "board_vf2")))]
+    let frame_end = MEMORY_END;
     
     FRAME_ALLOCATOR.exclusive_access().init(
         PhysAddr::from(frame_start).std_ceil(),
-        PhysAddr::from(MEMORY_END).std_floor(),
+        PhysAddr::from(frame_end).std_floor(),
     );
 }
 

@@ -15,13 +15,12 @@ pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 32; // 128KB
 /// kernel heap size
 pub const KERNEL_HEAP_SIZE: usize = 0xC80_0000; // 200MB
 
-
 /// the virtual addr of trapoline
 pub const TRAMPOLINE: usize = usize::MAX - PAGE_SIZE + 1;
 /// the virtual addr of trap context
 pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
 /// clock frequency
-pub const CLOCK_FREQ: usize = 12500000;
+pub const CLOCK_FREQ: usize = 4000000;
 /// riscv qemu主要内存起始地址, 注意linker.ld需要与此同步
 pub const MEMORY_BASE: usize = 0x8000_0000;
 /// qemu memory size
@@ -32,10 +31,13 @@ pub const MEMORY_END: usize = MEMORY_BASE + MEMORY_SIZE; // 0xc000_0000
 pub const DMA_SIZE: usize = 0;
 /// The base address of control registers in Virtio_Block device
 pub const MMIO: &[(usize, usize)] = &[
-    (0x10001000, 0x8000), // Virtio Block
-    (0x10_1000, 0x1000), // 🌟 新增：Goldfish RTC
+    (0x1000_0000, 0x0001_0000),
+    (0x1302_0000, 0x0001_0000),
+    (0x1602_0000, 0x0001_0000),
+    (0x1603_0000, 0x0001_0000),
+    (0x1700_0000, 0x0001_0000),
+    (0x1701_0000, 0x0000_1000),
 ];
-
 /// 和la同步这个量，不设值
 pub const OFFSET_FOR_USER_APP: usize = 0;
 pub const USER_APP_BASE: usize = 0x4000_0000;
@@ -49,5 +51,6 @@ extern "C" {
 
 use lazy_static::lazy_static;
 lazy_static! {
-    pub static ref SIG_RT_ADDR: usize = __call_sig_rt as *const () as usize % PAGE_SIZE + USER_TRAMPOLINE;
+    pub static ref SIG_RT_ADDR: usize =
+        __call_sig_rt as *const () as usize % PAGE_SIZE + USER_TRAMPOLINE;
 }

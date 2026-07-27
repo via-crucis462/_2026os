@@ -2,7 +2,7 @@ use super::virtio_blk::VirtioHal;
 use crate::sync::MPSafeCell;
 use alloc::sync::Arc;
 use lazy_static::*;
-use virtio_drivers::{DeviceType, VirtIONet, VirtIOHeader};
+use virtio_drivers::{DeviceType, VirtIOHeader, VirtIONet};
 
 // 网卡驱动的外包装
 pub struct VirtIONetWrapper(pub MPSafeCell<VirtIONet<'static, VirtioHal>>);

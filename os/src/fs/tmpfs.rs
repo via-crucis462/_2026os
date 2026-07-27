@@ -1,24 +1,24 @@
+use super::{Stat, Statx, VfsInode};
+use crate::auth::{FileMode, PermStat};
+use crate::drivers::loopdev::*;
+use crate::fs::devfs::NullInode;
+use crate::fs::devfs::RtcInode;
+use crate::fs::devfs::TtyInode;
+use crate::fs::devfs::UrandomInode;
+use crate::fs::devfs::ZeroInode;
+use crate::fs::ino::get_next_ino;
+use crate::fs::Dentry;
+use crate::fs::ROOT_DENTRY;
+use crate::mm::frame_alloc;
+use crate::mm::PageSize::Page4K;
+use crate::mm::{user_buffer, PageSize};
+use crate::mm::{FrameTracker, PhysPageNum};
+use crate::syscall::fs::Statfs;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
-use spin::{Mutex, lazy};
-use crate::fs::ROOT_DENTRY;
-use crate::fs::Dentry;
-use crate::mm::{PageSize, user_buffer};
 use alloc::vec;
-use crate::fs::devfs::NullInode;
-use crate::fs::devfs::ZeroInode;
-use crate::fs::devfs::RtcInode;
-use crate::fs::devfs::TtyInode;
-use super::{VfsInode, Stat, Statx};
-use crate::syscall::fs::Statfs;
-use crate::auth::{PermStat, FileMode};
-use crate::drivers::loopdev::*;
-use crate::mm::{FrameTracker, PhysPageNum };
-use crate::mm::frame_alloc;
-use crate::mm::PageSize::Page4K;
-use crate::fs::ino::get_next_ino;
-use crate::fs::devfs::UrandomInode;
+use spin::{lazy, Mutex};
 
 use crate::PAGE_SIZE;
 
@@ -80,7 +80,8 @@ impl super::VfsInode for TmpfsFileInode {
             let bytes_to_read = core::cmp::min(read_len - buf_idx, PAGE_SIZE - page_inner_offset);
             
             if let Some(frame) = pages.get(&page_idx) {
-                let src = &frame.ppn.get_bytes_array()[page_inner_offset..page_inner_offset + bytes_to_read];
+                let src = &frame.ppn.get_bytes_array()
+                    [page_inner_offset..page_inner_offset + bytes_to_read];
                 buf[buf_idx..buf_idx + bytes_to_read].copy_from_slice(src);
             } else {
                 // 稀疏文件未分配页则填 0
@@ -109,10 +110,12 @@ impl super::VfsInode for TmpfsFileInode {
             
             // 如果这一页还没创建，直接调用内核页分配器占领一个物理页
             let frame = pages.entry(page_idx).or_insert_with(|| {
-                crate::mm::frame_alloc(Page4K).expect("[Tmpfs] Failed to allocate physical page frame")
+                crate::mm::frame_alloc(Page4K)
+                    .expect("[Tmpfs] Failed to allocate physical page frame")
             });
             
-            let dest = &mut frame.ppn.get_bytes_array()[page_inner_offset..page_inner_offset + bytes_to_write];
+            let dest = &mut frame.ppn.get_bytes_array()
+                [page_inner_offset..page_inner_offset + bytes_to_write];
             dest.copy_from_slice(&buf[buf_idx..buf_idx + bytes_to_write]);
             
             current_offset += bytes_to_write;
@@ -143,13 +146,18 @@ impl super::VfsInode for TmpfsFileInode {
         // 扩张：tmpfs 用惰性分配策略，跳过
         true
     }
-    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<Mutex<crate::mm::mmap::PageCache>>> {
+    fn get_shared_page(
+        &self,
+        page_offset: usize,
+    ) -> Option<Arc<Mutex<crate::mm::mmap::PageCache>>> {
         let mut frames = self.pages.lock();
         // 如果 mmap 映射的页超出了当前文件大小，Linux 允许直接分配空白页给它
         let frame = frames.entry(page_offset).or_insert_with(|| {
             let f = frame_alloc(Page4K).unwrap();
             let page_kvaddr = f.ppn.0 << 12;
-            unsafe { core::slice::from_raw_parts_mut(page_kvaddr as *mut u8, PAGE_SIZE).fill(0); }
+            unsafe {
+                core::slice::from_raw_parts_mut(page_kvaddr as *mut u8, PAGE_SIZE).fill(0);
+            }
             f
         });
         let page_cache = crate::mm::mmap::PageCache::new(frame.clone());
@@ -194,12 +202,24 @@ impl super::VfsInode for TmpfsFileInode {
         stat.mtime_nsec = mtime.tv_nsec as i64;
         0
     }
-    fn type_name(&self) -> &'static str { "TmpfsFileInode" }
-    fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
-    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
-    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
-    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
-    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
+    fn type_name(&self) -> &'static str {
+        "TmpfsFileInode"
+    }
+    fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> {
+        None
+    }
+    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> {
+        None
+    }
+    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> {
+        None
+    }
+    fn delete_dir_entry(&self, _name: &str) -> Option<u32> {
+        None
+    }
+    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize {
+        -1
+    }
 }
 
 /// 临时目录inode
@@ -250,10 +270,18 @@ fn tmpfs_dirent_type_from_mode(mode: u32) -> u8 {
 }
 
 impl super::VfsInode for TmpfsDirInode {
-    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
-    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
-    fn get_size(&self) -> usize { 0 }
-    fn ino(&self) -> u64 { self.stat.lock().ino }
+    fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize {
+        0
+    }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize {
+        0
+    }
+    fn get_size(&self) -> usize {
+        0
+    }
+    fn ino(&self) -> u64 {
+        self.stat.lock().ino
+    }
     
     fn get_stat(&self) -> super::Stat {
         *self.stat.lock()
@@ -294,17 +322,23 @@ impl super::VfsInode for TmpfsDirInode {
                     s
                 }),
             });
-            self.entries.lock().insert(name.to_string(), symlink_inode.clone());
+            self.entries
+                .lock()
+                .insert(name.to_string(), symlink_inode.clone());
             return Some(symlink_inode);
         }
        let new_file: Arc<dyn super::VfsInode> = Arc::new(TmpfsFileInode::new(mode));
-        self.entries.lock().insert(name.to_string(), new_file.clone());
+        self.entries
+            .lock()
+            .insert(name.to_string(), new_file.clone());
         Some(new_file)
     }
 
     fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn super::VfsInode>> {
         let new_dir: Arc<dyn super::VfsInode> = Arc::new(TmpfsDirInode::new(mode));
-        self.entries.lock().insert(name.to_string(), new_dir.clone());
+        self.entries
+            .lock()
+            .insert(name.to_string(), new_dir.clone());
         Some(new_dir)
     }
 
@@ -337,7 +371,8 @@ impl super::VfsInode for TmpfsDirInode {
             buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&d_off.to_ne_bytes());
             buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(d_reclen as u16).to_ne_bytes());
             buf[buf_offset + 18] = tmpfs_dirent_type_from_mode(stat.mode);
-            buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(&name_bytes[..name_len]);
+            buf[buf_offset + 19..buf_offset + 19 + name_len]
+                .copy_from_slice(&name_bytes[..name_len]);
             for byte in &mut buf[buf_offset + 19 + name_len..buf_offset + d_reclen] {
                 *byte = 0;
             }
@@ -353,9 +388,15 @@ impl super::VfsInode for TmpfsDirInode {
             f_type: 0x01021994, // Tmpfs 的魔数
             f_bsize: 4096,
             f_blocks: 0, // 内存文件系统，块数为 0 即可
-            f_bfree: 0, f_bavail: 0, f_files: 0, f_ffree: 0,
-            f_fsid: [0, 0], f_namelen: 255, f_frsize: 4096,
-            f_flags: 0, f_spare: [0; 4],
+            f_bfree: 0,
+            f_bavail: 0,
+            f_files: 0,
+            f_ffree: 0,
+            f_fsid: [0, 0],
+            f_namelen: 255,
+            f_frsize: 4096,
+            f_flags: 0,
+            f_spare: [0; 4],
         }
     }
     fn create_symlink(&self, name: &str, target: &str) -> Option<Arc<dyn VfsInode>> {
@@ -370,7 +411,9 @@ impl super::VfsInode for TmpfsDirInode {
                 s
             }),
         });
-        self.entries.lock().insert(name.to_string(), symlink_inode.clone());
+        self.entries
+            .lock()
+            .insert(name.to_string(), symlink_inode.clone());
         Some(symlink_inode)
     }
     fn set_time(&self, _atime: &super::TimeSpec, _mtime: &super::TimeSpec) -> isize {
@@ -383,15 +426,13 @@ impl super::VfsInode for TmpfsDirInode {
         stat.mtime_nsec = _mtime.tv_nsec as i64;
         0
     }
-    fn type_name(&self) -> &'static str { "TmpfsDirInode" }
+    fn type_name(&self) -> &'static str {
+        "TmpfsDirInode"
+    }
 }
 
 /// 通过 getdents 枚举目录项，将源目录下所有条目的 inode 映射到目标 lib/lib64
-fn populate_lib_from_dentries(
-    src: &Arc<Dentry>,
-    lib: &Arc<Dentry>,
-    lib64: &Arc<Dentry>,
-) {
+fn populate_lib_from_dentries(src: &Arc<Dentry>, lib: &Arc<Dentry>, lib64: &Arc<Dentry>) {
     let mut buf = vec![0u8; 4096];
     let mut offset: usize = 0;
     // 循环调用getdents枚举目录项
@@ -444,11 +485,18 @@ pub fn setup_oscomp_env() {
     
     // 2. 挂载 bin, sbin, usr 等虚拟目录
     let etc_dentry = root.mount_child("etc".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let passwd_content = "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
+    let passwd_content =
+        "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
     let group_content = "root:x:0:\nnobody:x:65534:\n";
     
-    etc_dentry.insert("passwd".to_string(), Arc::new(TmpfsFileInode::new_with_data(passwd_content.as_bytes())));
-    etc_dentry.insert("group".to_string(), Arc::new(TmpfsFileInode::new_with_data(group_content.as_bytes())));
+    etc_dentry.insert(
+        "passwd".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(passwd_content.as_bytes())),
+    );
+    etc_dentry.insert(
+        "group".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(group_content.as_bytes())),
+    );
 
     let var_dentry = root.mount_child("var".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     var_dentry.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
@@ -456,21 +504,35 @@ pub fn setup_oscomp_env() {
     let bin_dentry = root.mount_child("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let sbin_dentry = root.mount_child("sbin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let usr_dentry = root.mount_child("usr".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let usr_local_dentry = usr_dentry.insert("local".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let usr_local_bin_dentry = usr_local_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let usr_local_dentry =
+        usr_dentry.insert("local".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let usr_local_bin_dentry =
+        usr_local_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let usr_bin_dentry = usr_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let lib_dentry = root.mount_child("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let lib64_dentry = root.mount_child("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     
     // loop测例检查的文件
     let lib_modules = lib_dentry.insert("modules".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let lib_modules_rcore = lib_modules.insert("5.10.0-rcore".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    lib_modules_rcore.insert("modules.builtin".to_string(), Arc::new(TmpfsFileInode::new_with_data(b"kernel/drivers/block/loop.ko\n")));
-    lib_modules_rcore.insert("modules.dep".to_string(), Arc::new(TmpfsFileInode::new_with_data(b"")));
+    let lib_modules_rcore = lib_modules.insert(
+        "5.10.0-rcore".to_string(),
+        Arc::new(TmpfsDirInode::new(0o777)),
+    );
+    lib_modules_rcore.insert(
+        "modules.builtin".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(
+            b"kernel/drivers/block/loop.ko\n",
+        )),
+    );
+    lib_modules_rcore.insert(
+        "modules.dep".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(b"")),
+    );
     
     // loop测例检查的文件
     let sys_dentry = root.mount_child("sys".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let sys_module_dentry = sys_dentry.insert("module".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let sys_module_dentry =
+        sys_dentry.insert("module".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     sys_module_dentry.insert("loop".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
 
     // 3. 将 Busybox 和 libc 的真实 Inode 映射进虚拟目录
@@ -480,10 +542,10 @@ pub fn setup_oscomp_env() {
             let applets = [
                 "[", "basename", "cat", "chmod", "cp", "cut", "date", "dirname", "echo", "env",
                 "false", "grep", "head", "kill", "ln", "ls", "mkdir", "mv", "printf", "pwd", "rm",
-                "rmdir", "sed", "sh", "sleep", "sort", "tail", "test", "touch", "tr", "true", "uname",
-                "wc", "which", "xargs", "awk","cut",
-                "tr", "head", "tail", "sort", "uniq", "tee", "sleep", "id", "uname", 
-                "which", "find", "xargs", "chmod", "chown", "date", "printf", "clear","ps", "fgrep","mktemp"
+                "rmdir", "sed", "sh", "sleep", "sort", "tail", "test", "touch", "tr", "true",
+                "uname", "wc", "which", "xargs", "awk", "cut", "tr", "head", "tail", "sort",
+                "uniq", "tee", "sleep", "id", "uname", "which", "find", "xargs", "chmod", "chown",
+                "date", "printf", "clear", "ps", "fgrep", "mktemp",
             ];
             
             for app in applets {
@@ -513,7 +575,10 @@ pub fn setup_oscomp_env() {
         dev_dentry.insert("tty".to_string(), Arc::new(TtyInode::new()));
 
         // loop-control
-        dev_dentry.insert("loop-control".to_string(), Arc::new(LoopControlInode::new()));
+        dev_dentry.insert(
+            "loop-control".to_string(),
+            Arc::new(LoopControlInode::new()),
+        );
 
         // 挂载8个loop设备
         for i in 0..8 {
@@ -552,14 +617,15 @@ pub fn setup_oscomp_env() {
     info!("[VFS] Populated musl lib symlinks");
 
     // glibc
+    let user_lib64_dentry =
+        usr_dentry.mount_child("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let user_lib_dentry =
+        usr_dentry.mount_child("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let libc_node = root.find_tree("/glibc/lib", true).unwrap();
-    let user_lib64_dentry = usr_dentry.mount_child("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let user_lib_dentry = usr_dentry.mount_child("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     // 同时挂载到 /lib* 和 /usr/lib*
     populate_lib_from_dentries(&libc_node, &user_lib_dentry, &user_lib64_dentry);
     populate_lib_from_dentries(&libc_node, &lib_dentry, &lib64_dentry);
     info!("[VFS] Populated glibc lib symlinks");
-
 
     if let Ok(_) = root.find_tree("/dev/shm", true) {
         info!("DEBUG: /dev/shm path is VALID");
@@ -569,9 +635,18 @@ pub fn setup_oscomp_env() {
     mount_hugepages();
     //返回简单的“语言、国家、字符编码”的一套环境变量并挂载
     let locale_content = "#!/bin/sh\necho \"LANG=C\"\necho \"LC_ALL=C\"\n";
-    bin_dentry.insert( "locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
-    sbin_dentry.insert("locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
-    usr_bin_dentry.insert("locale".to_string(), Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())));
+    bin_dentry.insert(
+        "locale".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())),
+    );
+    sbin_dentry.insert(
+        "locale".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())),
+    );
+    usr_bin_dentry.insert(
+        "locale".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())),
+    );
     // rsh远程连接sh
     let fake_rsh = r#"#!/bin/sh
     if [ "$1" = "-n" ]; then
@@ -581,24 +656,53 @@ pub fn setup_oscomp_env() {
     fi
     exec /musl/busybox sh -c "$*"
     "#;
-    bin_dentry.insert("rsh".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())));
-    sbin_dentry.insert("rsh".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())));
-    usr_bin_dentry.insert("rsh".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())));
+    bin_dentry.insert(
+        "rsh".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())),
+    );
+    sbin_dentry.insert(
+        "rsh".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())),
+    );
+    usr_bin_dentry.insert(
+        "rsh".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())),
+    );
     //setkey命令
     let fake_setkey = "#!/bin/sh\nexit 0\n";
-    bin_dentry.insert("setkey".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_setkey.as_bytes())));
-    sbin_dentry.insert("setkey".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_setkey.as_bytes())));
+    bin_dentry.insert(
+        "setkey".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(fake_setkey.as_bytes())),
+    );
+    sbin_dentry.insert(
+        "setkey".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(fake_setkey.as_bytes())),
+    );
     info!("[VFS] setup_oscomp_env done.");
     // 伪造并转发 expr 命令给 busybox
     let fake_expr = "#!/bin/sh\nexec /musl/busybox expr \"$@\"\n";
-    bin_dentry.insert("expr".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())));
-    usr_bin_dentry.insert("expr".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())));
+    bin_dentry.insert(
+        "expr".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())),
+    );
+    usr_bin_dentry.insert(
+        "expr".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())),
+    );
 
      let fake_ip = "#!/bin/sh\nexec /musl/busybox ip \"$@\"\n";
-    sbin_dentry.insert("ip".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())));
-    bin_dentry.insert("ip".to_string(), Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())));
+    sbin_dentry.insert(
+        "ip".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())),
+    );
+    bin_dentry.insert(
+        "ip".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())),
+    );
     //处理一个绝对路径脚本
-    let symlink_inode: Arc<dyn super::VfsInode> = Arc::new(TmpfsFsSymbolicLinkInode::new("/musl/ltp/testcases".to_string()));
+    let symlink_inode: Arc<dyn super::VfsInode> = Arc::new(TmpfsFsSymbolicLinkInode::new(
+        "/musl/ltp/testcases".to_string(),
+    ));
     root.mount_child("testcases".to_string(), symlink_inode);
 }
 
@@ -620,7 +724,8 @@ fn mount_hugepages() -> Arc<super::Dentry> {
     } else {
         kernel_dentry.insert("mm".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
-    let hugepages_dentry = if let Ok(hugepages) = mm_dentry.find_tree("/sys/kernel/mm/hugepages", true) {
+    let hugepages_dentry =
+        if let Ok(hugepages) = mm_dentry.find_tree("/sys/kernel/mm/hugepages", true) {
         hugepages
     } else {
         mm_dentry.insert("hugepages".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
@@ -642,14 +747,20 @@ impl VfsInode for TmpfsFsSymbolicLinkInode {
         buf[..copy_len].copy_from_slice(&target_bytes[offset..offset + copy_len]);
         copy_len
     }
-    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
-    fn get_size(&self) -> usize { self.target.len() }
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize {
+        0
+    }
+    fn get_size(&self) -> usize {
+        self.target.len()
+    }
     fn get_stat(&self) -> super::Stat {
         let mut stat = *self.stat.lock();
         stat.size = self.target.len() as i64;
         stat
     }
-    fn get_statx(&self) -> super::Statx { super::stat_to_statx(self.get_stat()) }
+    fn get_statx(&self) -> super::Statx {
+        super::stat_to_statx(self.get_stat())
+    }
     fn get_perm(&self) -> PermStat {
         let stat = self.stat.lock();
         PermStat {
@@ -666,7 +777,10 @@ impl VfsInode for TmpfsFsSymbolicLinkInode {
         true
     }
     fn set_time(&self, atime: &super::TimeSpec, mtime: &super::TimeSpec) -> isize {
-        println!("VFS: set_time called on TmpfsFsSymbolicLinkInode, atime=({}, {}), mtime=({}, {})", atime.tv_sec, atime.tv_nsec, mtime.tv_sec, mtime.tv_nsec);
+        println!(
+            "VFS: set_time called on TmpfsFsSymbolicLinkInode, atime=({}, {}), mtime=({}, {})",
+            atime.tv_sec, atime.tv_nsec, mtime.tv_sec, mtime.tv_nsec
+        );
         let mut stat = self.stat.lock();
         stat.atime_sec = atime.tv_sec as i64;
         stat.atime_nsec = atime.tv_nsec as i64;
@@ -674,13 +788,27 @@ impl VfsInode for TmpfsFsSymbolicLinkInode {
         stat.mtime_nsec = mtime.tv_nsec as i64;
         0
     }
-    fn type_name(&self) -> &'static str { "TmpfsFsSymbolicLinkInode" }
-    fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> { None }
-    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
-    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> { None }
-    fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
-    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
-    fn ino(&self) -> u64 { self.stat.lock().ino }
+    fn type_name(&self) -> &'static str {
+        "TmpfsFsSymbolicLinkInode"
+    }
+    fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> {
+        None
+    }
+    fn create_file(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> {
+        None
+    }
+    fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn super::VfsInode>> {
+        None
+    }
+    fn delete_dir_entry(&self, _name: &str) -> Option<u32> {
+        None
+    }
+    fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize {
+        -1
+    }
+    fn ino(&self) -> u64 {
+        self.stat.lock().ino
+    }
 }
 impl TmpfsFsSymbolicLinkInode{
     fn new(target: String) -> Self {
