@@ -1,404 +1,239 @@
-//! Global and per-hart ready queue implementation.
+//! Linux 风格的每 CPU 总运行队列。
+//!
+//! 各调度类的内部数据结构分别位于 `stopRq.rs`、`deadlineRq`、
+//! `rtRq`、`cfsRq` 和 `itRq`；本文件只负责聚合及调度类顺序。
 
-use core::cmp::Ordering;
-
-use crate::{CPU_CORE_NUM, arch::timer::get_time_us, sync::MPSafeCell};
+use crate::process::scheduler::{CfsRq, DeadlineRq, IdleRq, RtRq, StopRq, CPU_NUM};
+use crate::process::{TaskControlBlock, TaskStatus};
+use crate::sync::{MPSafeCell, MPSafeGuard};
 use crate::get_hart_id;
-use crate::process::{TaskContext, TaskControlBlock, TaskStatus};
-use crate::process::registry::tid2task;
+use alloc::sync::Arc;
+use spin::lazy;
 use lazy_static::*;
-use alloc::{
-	collections::{BinaryHeap, VecDeque},
-	sync::Arc,
-	vec::Vec,
-};
 
 pub const SCHED_OTHER: isize = 0;
 pub const SCHED_FIFO: isize = 1;
 pub const SCHED_RR: isize = 2;
 pub const SCHED_BATCH: isize = 3;
 pub const SCHED_IDLE: isize = 5;
+pub const SCHED_DEADLINE: isize = 6;
 
-const LOCAL_QUEUE_LOW_WATERMARK: usize = 2;
-const LOCAL_QUEUE_REFILL_TARGET: usize = 4;
-
-lazy_static! {
-	pub static ref SCHEDULER: MPSafeCell<Scheduler> = MPSafeCell::new(Scheduler {
-		task_pool: TaskPool::new(),
-	});
-	pub static ref SCHED_DISPATCH_LOCK: MPSafeCell<()> = MPSafeCell::new(());
-	pub static ref TASK_MANAGERS: [MPSafeCell<TaskManager>; CPU_CORE_NUM] = {
-		core::array::from_fn(|_| MPSafeCell::new(TaskManager::new()))
-	};
+// 核的调度队列与核id
+pub struct Rq {
+	pub inner: MPSafeCell<Rqinner>,
+	pub cpu_id: usize,
 }
 
-pub fn lock_dispatch() -> crate::sync::MPSafeGuard<'static, ()> {
+lazy_static! {
+	/// 每 CPU 的运行队列数组，索引为 CPU ID。
+	pub static ref RQ_ARRAY: [Rq; CPU_NUM] = core::array::from_fn(|cpu_id| Rq::new(cpu_id));
+	/// 兼容退出和 exec 清理路径的全局队列操作串行锁。
+	static ref SCHED_DISPATCH_LOCK: MPSafeCell<()> = MPSafeCell::new(());
+}
+
+pub fn lock_dispatch() -> MPSafeGuard<'static, ()> {
 	SCHED_DISPATCH_LOCK.exclusive_access()
 }
 
-pub struct Scheduler {
-	pub task_pool: TaskPool,
-}
-
-impl Scheduler {
-	pub fn add_task(&mut self, task: Arc<TaskControlBlock>) {
-		self.task_pool.add_task(task);
-	}
-
-	pub fn get_pool(&mut self) -> &mut TaskPool {
-		&mut self.task_pool
-	}
-
-	pub fn auto_get_task(&mut self) -> VecDeque<Arc<TaskControlBlock>> {
-		let mut total_num = self.task_pool.count().saturating_add(1);
-		let mut list = VecDeque::new();
-		while let Some(task) = self.task_pool.take_a_task() {
-			list.push_back(task);
-			total_num -= 1;
-			if total_num == 0 {
-				break;
-			}
-		}
-		list
-	}
-
-	pub fn get_task_count(&self) -> usize {
-		let mut sum = 0;
-		for i in 0..CPU_CORE_NUM {
-			sum += TASK_MANAGERS[i].exclusive_access().task_count();
-		}
-		sum
+impl Rq {
+	pub fn inner_exclusive_access(&self) -> MPSafeGuard<'_, Rqinner> {
+        self.inner.exclusive_access()
+    }
+	pub fn new(cpu_id: usize) -> Self {
+		Self { inner: MPSafeCell::new(Rqinner::new()), cpu_id }
 	}
 }
-
-pub struct TaskPool {
-	deadline: BinaryHeap<PoolEntry>,
-	realtime: BinaryHeap<PoolEntry>,
-	fair: BinaryHeap<PoolEntry>,
-	idle: BinaryHeap<PoolEntry>,
-	enqueue_order: usize,
+/// 每 CPU 运行队列，对应 Linux `struct rq` 的调度类核心部分。
+/// 调度类优先级固定为 stop > deadline > rt > cfs > idle。
+pub struct Rqinner {
+	/// 最高优先级的每 CPU stop 调度类状态。
+	pub stop: MPSafeCell<StopRq>,
+	/// SCHED_DEADLINE 的每 CPU 运行队列。
+	pub deadline: MPSafeCell<DeadlineRq>,
+	/// 普通、批处理及 SCHED_IDLE 用户任务使用的 CFS 运行队列。
+	pub cfs: MPSafeCell<CfsRq>,
+	/// SCHED_FIFO 和 SCHED_RR 使用的实时运行队列。
+	pub rt: MPSafeCell<RtRq>,
+	/// 最低优先级的每 CPU idle 任务状态。
+	pub idle: MPSafeCell<IdleRq>,
+	/// 除 per-CPU idle 任务外的可运行任务总数。
+	pub nr_running: usize,
 }
 
-struct PoolEntry {
-	class: u8,
-	priority: i32,
-	order: usize,
-	task: Arc<TaskControlBlock>,
-}
-
-impl PartialEq for PoolEntry {
-	fn eq(&self, other: &Self) -> bool {
-		self.class == other.class
-			&& self.priority == other.priority
-			&& self.order == other.order
-			&& Arc::ptr_eq(&self.task, &other.task)
-	}
-}
-
-impl Eq for PoolEntry {}
-
-impl Ord for PoolEntry {
-	fn cmp(&self, other: &Self) -> Ordering {
-		let self_ptr = Arc::as_ptr(&self.task) as usize;
-		let other_ptr = Arc::as_ptr(&other.task) as usize;
-		self.class
-			.cmp(&other.class)
-			.then_with(|| self.priority.cmp(&other.priority))
-			.then_with(|| other.order.cmp(&self.order))
-			.then_with(|| self_ptr.cmp(&other_ptr))
-	}
-}
-
-impl PartialOrd for PoolEntry {
-	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-		Some(self.cmp(other))
-	}
-}
-
-pub(crate) fn task_sched_rank(task: &Arc<TaskControlBlock>) -> (u8, i32) {
-	let inner = task.inner_exclusive_access();
-	match inner.sched_policy {
-		SCHED_FIFO | SCHED_RR if inner.sched_priority > 0 => (2, inner.sched_priority),
-		SCHED_IDLE => (0, 0),
-		SCHED_BATCH => (1, 0),
-		_ => (1, 0),
-	}
-}
-
-impl TaskPool {
+impl Rqinner {
+	/// 创建五个调度类均为空的每 CPU 总运行队列。
 	pub fn new() -> Self {
 		Self {
-			deadline: BinaryHeap::new(),
-			realtime: BinaryHeap::new(),
-			fair: BinaryHeap::new(),
-			idle: BinaryHeap::new(),
-			enqueue_order: 0,
+			stop: MPSafeCell::new(StopRq::new()),
+			deadline: MPSafeCell::new(DeadlineRq::new()),
+			cfs: MPSafeCell::new(CfsRq::new()),
+			rt: MPSafeCell::new(RtRq::new()),
+			idle: MPSafeCell::new(IdleRq::new()),
+			nr_running: 0,
 		}
 	}
 
-	pub fn count(&self) -> usize {
-		self.deadline.len() + self.realtime.len() + self.fair.len() + self.idle.len()
-	}
-
-	pub fn remove_task(&mut self, tid: usize) {
-		self.deadline.retain(|entry| entry.task.gettid() != tid);
-		self.realtime.retain(|entry| entry.task.gettid() != tid);
-		self.fair.retain(|entry| entry.task.gettid() != tid);
-		self.idle.retain(|entry| entry.task.gettid() != tid);
+	/// 按 Linux 调度类优先级依次选择任务，且不执行出队。
+	///
+	/// 固定顺序为 stop → deadline → rt → cfs → idle。
+	pub fn pick_next_task(&self) -> Option<Arc<TaskControlBlock>> {
+		self.stop
+			.exclusive_access()
+			.pick_next()
+			.or_else(|| self.deadline.exclusive_access().pick_next())
+			.or_else(|| self.rt.exclusive_access().pick_next())
+			.or_else(|| self.cfs.exclusive_access().pick_next())
+			.or_else(|| self.idle.exclusive_access().pick_next())
 	}
 
 	pub fn add_task(&mut self, task: Arc<TaskControlBlock>) {
-		let tid = task.gettid();
-		if self.contains_task(tid) {
+		self.enqueue_task(task);
+	}
+
+	/// 按任务策略入队并更新本 CPU 的可运行任务计数。
+	pub fn enqueue_task(&mut self, task: Arc<TaskControlBlock>) {
+		if task.inner_exclusive_access().on_rq {
 			return;
 		}
-		let (class, priority) = task_sched_rank(&task);
-		let entry = PoolEntry {
-			class,
-			priority,
-			order: self.enqueue_order,
-			task,
+		self.nr_running += 1;
+		let (sched_policy, sched_priority, vruntime, load_weight, absolute_deadline) = {
+			let mut inner = task.inner_exclusive_access();
+			inner.on_rq = true;
+			inner.on_cpu = false;
+			(
+				inner.sched_policy,
+				inner.sched_priority,
+				inner.se.vruntime,
+				inner.se.load_weight,
+				inner.dl.absolute_deadline,
+			)
 		};
-		self.enqueue_order = self.enqueue_order.wrapping_add(1);
-		match class {
-			2 => self.realtime.push(entry),
-			0 => self.idle.push(entry),
-			_ => self.fair.push(entry),
+		// 根据调度策略将任务加入相应的调度类队列
+		match sched_policy {
+			SCHED_OTHER | SCHED_BATCH | SCHED_IDLE => {
+				self.cfs.exclusive_access().enqueue(task, vruntime, load_weight)
+			}
+			SCHED_FIFO | SCHED_RR => {
+				let priority = sched_priority.max(0) as usize;
+				self.rt.exclusive_access().enqueue(task, priority.min(99), sched_policy == SCHED_RR);
+			}
+			SCHED_DEADLINE => self.deadline.exclusive_access().enqueue(task, absolute_deadline),
+			_ => panic!("Unsupported scheduling policy"),
 		}
 	}
 
-	pub fn get_task(&mut self, tid: usize) -> Option<Arc<TaskControlBlock>> {
-		tid2task(tid)
+	/// 从最高可用普通调度类中移除一个任务。
+	pub(crate) fn pop_next_task(&mut self) -> Option<Arc<TaskControlBlock>> {
+		let task = self.deadline.exclusive_access().pop_next()
+			.or_else(|| self.rt.exclusive_access().pop_next())
+			.or_else(|| self.cfs.exclusive_access().pop_next());
+		if task.is_some() {
+			self.nr_running = self.nr_running.saturating_sub(1);
+		}
+		task
 	}
 
-	pub fn take_task(&mut self, tid: usize) -> Option<Arc<TaskControlBlock>> {
-		if let Some(task) = tid2task(tid) {
-			self.remove_task(tid);
-			Some(task)
+	/// 从本运行队列窃取任务，并把任务的归属 CPU 更新为目标 CPU。
+	pub fn steal_task(&mut self, target_cpu: usize) -> Option<Arc<TaskControlBlock>> {
+		let task = self.pop_next_task()?;
+		{
+			let mut inner = task.inner_exclusive_access();
+			let target_allowed = target_cpu < usize::BITS as usize
+				&& inner.cpus_allowed & (1usize << target_cpu) != 0;
+			if inner.on_main_hart || !target_allowed || !inner.rt.migratable {
+				drop(inner);
+				self.enqueue_task(Arc::clone(&task));
+				return None;
+			}
+			inner.cpu = target_cpu;
+			inner.on_rq = false;
+		}
+		Some(task)
+	}
+
+	/// 从本 CPU 的任一普通调度类队列中移除指定线程。
+	fn remove_task(&mut self, tid: usize) -> bool {
+		let task = self.deadline.exclusive_access().remove_task(tid)
+			.or_else(|| self.rt.exclusive_access().remove_task(tid))
+			.or_else(|| self.cfs.exclusive_access().remove_task(tid));
+		if let Some(task) = task {
+			self.nr_running = self.nr_running.saturating_sub(1);
+			task.inner_exclusive_access().on_rq = false;
+			true
 		} else {
-			None
+			false
 		}
 	}
-
-	pub fn take_a_task(&mut self) -> Option<Arc<TaskControlBlock>> {
-		self.deadline
-			.pop()
-			.or_else(|| self.realtime.pop())
-			.or_else(|| self.fair.pop())
-			.or_else(|| self.idle.pop())
-			.map(|entry| entry.task)
-	}
-
-	pub fn get_task_list(&self) -> VecDeque<Arc<TaskControlBlock>> {
-		self.deadline
-			.iter()
-			.chain(self.realtime.iter())
-			.chain(self.fair.iter())
-			.chain(self.idle.iter())
-			.map(|entry| Arc::clone(&entry.task))
-			.collect()
-	}
-
-	fn contains_task(&self, tid: usize) -> bool {
-		self.deadline
-			.iter()
-			.chain(self.realtime.iter())
-			.chain(self.fair.iter())
-			.chain(self.idle.iter())
-			.any(|entry| entry.task.gettid() == tid)
-	}
 }
 
-struct HeapInode {
-	priority: usize,
-	order: usize,
-	tcb: Arc<TaskControlBlock>,
+/// 将任务加入指定 CPU 的本地运行队列。
+pub fn enqueue_task_on_cpu(task: Arc<TaskControlBlock>, cpu_id: usize) {
+	let cpu_id = cpu_id.min(RQ_ARRAY.len().saturating_sub(1));
+	{
+		let mut inner = task.inner_exclusive_access();
+		inner.cpu = cpu_id;
+		inner.state = TaskStatus::Ready;
+		inner.on_cpu = false;
+	}
+	RQ_ARRAY[cpu_id].inner_exclusive_access().enqueue_task(task);
 }
 
-impl PartialEq for HeapInode {
-	fn eq(&self, other: &Self) -> bool {
-		self.priority == other.priority
-			&& self.order == other.order
-			&& Arc::ptr_eq(&self.tcb, &other.tcb)
-	}
+/// 将新创建的任务加入父任务所在 CPU 的本地运行队列。
+pub fn enqueue_new_task(task: Arc<TaskControlBlock>, parent_cpu: usize) {
+	enqueue_task_on_cpu(task, parent_cpu);
 }
 
-impl Eq for HeapInode {}
-
-impl Ord for HeapInode {
-	fn cmp(&self, other: &Self) -> Ordering {
-		let self_ptr = Arc::as_ptr(&self.tcb) as usize;
-		let other_ptr = Arc::as_ptr(&other.tcb) as usize;
-		self.priority
-			.cmp(&other.priority)
-			.then_with(|| other.order.cmp(&self.order))
-			.then_with(|| self_ptr.cmp(&other_ptr))
-	}
+/// 将任务加入其 TCB 当前记录的本地运行队列。
+pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
+	let cpu_id = task.inner_exclusive_access().cpu;
+	enqueue_task_on_cpu(task, cpu_id);
 }
 
-impl PartialOrd for HeapInode {
-	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-		Some(self.cmp(other))
-	}
+/// 兼容旧调用者；新框架不再需要全局 dispatch lock。
+pub(crate) fn add_task_into_pool_unlocked(task: Arc<TaskControlBlock>) {
+	add_task_into_pool(task);
 }
 
-pub struct TaskManager {
-	ready_queue: BinaryHeap<HeapInode>,
-	enqueue_order: usize,
-}
-
-impl TaskManager {
-	pub fn new() -> Self {
-		Self {
-			ready_queue: BinaryHeap::new(),
-			enqueue_order: 0,
-		}
-	}
-
-	pub fn add(&mut self, task: Arc<TaskControlBlock>) {
-		let tid = task.gettid();
-		if self.ready_queue.iter().any(|inode| inode.tcb.gettid() == tid) {
-			return;
-		}
-		let (class, priority) = task_sched_rank(&task);
-		let priority = (class as usize) * 100 + priority.max(0) as usize;
-		let order = self.enqueue_order;
-		self.enqueue_order = self.enqueue_order.wrapping_add(1);
-		self.ready_queue.push(HeapInode { priority, order, tcb: task });
-	}
-
-	pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-		self.ready_queue.pop().map(|inode| inode.tcb)
-	}
-
-	pub fn task_count(&self) -> usize {
-		self.ready_queue.len()
-	}
-
-	pub fn remove(&mut self, tid: usize) {
-		self.ready_queue.retain(|inode| inode.tcb.gettid() != tid);
-	}
-}
-
-pub fn get_current_task_manager() -> &'static MPSafeCell<TaskManager> {
-	&TASK_MANAGERS[get_hart_id()]
-}
-
-pub fn current_add_tasks() {
-	let mut manager = get_current_task_manager().exclusive_access();
-	if manager.task_count() >= LOCAL_QUEUE_LOW_WATERMARK {
-		return;
-	}
-	while manager.task_count() < LOCAL_QUEUE_REFILL_TARGET {
-		if let Some(task) = ask_for_task() {
-			manager.add(task);
-		} else {
+pub(crate) fn remove_task_from_all_local_queues_unlocked(tid: usize) {
+	for rq in RQ_ARRAY.iter() {
+		if rq.inner_exclusive_access().remove_task(tid) {
 			break;
 		}
 	}
 }
 
-pub fn add_task_in_current_hart(task: Arc<TaskControlBlock>) {
-	let _dispatch = lock_dispatch();
-	add_task_in_current_hart_unlocked(task);
-}
+/// 新框架没有全局任务池，保留为空操作以兼容迁移中的清理路径。
+pub(crate) fn remove_task_from_global_pool_unlocked(_tid: usize) {}
 
-pub(crate) fn add_task_in_current_hart_unlocked(task: Arc<TaskControlBlock>) {
-	remove_task_from_all_local_queues_unlocked(task.gettid());
-	remove_task_from_global_pool_unlocked(task.gettid());
-	get_current_task_manager().exclusive_access().add(task);
-}
-
-pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
-	let _dispatch = lock_dispatch();
-	current_add_tasks();
-	loop {
-		let task = get_current_task_manager().exclusive_access().fetch();
-		let Some(task) = task else {
-			return None;
-		};
-		let mut task_inner = task.inner_exclusive_access();
-		if task_inner.state != TaskStatus::Ready {
-			continue;
-		}
-		task_inner.state = TaskStatus::Running;
-		drop(task_inner);
-		remove_task_from_all_local_queues_unlocked(task.gettid());
-		remove_task_from_global_pool_unlocked(task.gettid());
-		return Some(task);
-	}
-}
-
-pub fn cores_fetch_task() {
-	for i in 0..CPU_CORE_NUM {
-		let mut manager = TASK_MANAGERS[i].exclusive_access();
-		let list = ask_for_tasks();
-		for task in list {
-			manager.add(task);
-		}
-	}
-}
-
-pub(crate) fn add_task_into_pool_unlocked(task: Arc<TaskControlBlock>) {
-	remove_task_from_all_local_queues_unlocked(task.gettid());
-	let mut scheduler = SCHEDULER.exclusive_access();
-	scheduler.get_pool().remove_task(task.gettid());
-	scheduler.get_pool().add_task(task);
-}
-
-pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
-	let _dispatch = lock_dispatch();
-	add_task_into_pool_unlocked(task);
-}
-
-pub(crate) fn remove_task_from_global_pool_unlocked(tid: usize) {
-	SCHEDULER.exclusive_access().get_pool().remove_task(tid);
-}
-
-pub fn remove_task_from_global_pool(tid: usize) {
-	let _dispatch = lock_dispatch();
-	remove_task_from_global_pool_unlocked(tid);
-}
-
-pub fn ask_for_task() -> Option<Arc<TaskControlBlock>> {
-	crate::process::scheduler::sleep::wake_expired_sleep_tasks();
-	SCHEDULER.exclusive_access().get_pool().take_a_task()
-}
-
-pub fn ask_for_tasks() -> VecDeque<Arc<TaskControlBlock>> {
-	let mut list = VecDeque::new();
-	if let Some(task) = ask_for_task() {
-		list.push_back(task);
-	}
-	list
-}
-
-pub fn get_task_count() -> usize {
-	let mut sum = 0usize;
-	for i in 0..CPU_CORE_NUM {
-		sum += TASK_MANAGERS[i].exclusive_access().task_count();
-	}
-	sum
-}
-
+/// 唤醒阻塞任务，并重新加入它原先所属 CPU 的运行队列。
 pub fn wake_up_task(task: Arc<TaskControlBlock>) {
-	trace!("[kernel] wake_up_task: pid={}", task.getpid());
-	let _dispatch = lock_dispatch();
-	let mut inner = task.inner_exclusive_access();
-	if matches!(inner.state, TaskStatus::Blocked) {
-		inner.state = TaskStatus::Ready;
-		drop(inner);
-		add_task_into_pool_unlocked(task);
+	let should_enqueue = {
+		let mut inner = task.inner_exclusive_access();
+		if matches!(inner.state, TaskStatus::Blocked) {
+			inner.state = TaskStatus::Ready;
+			true
+		} else {
+			false
+		}
+	};
+	if should_enqueue {
+		add_task_into_pool(task);
 	}
 }
 
-pub(crate) fn remove_task_from_all_local_queues_unlocked(tid: usize) {
-	for hart_id in 0..CPU_CORE_NUM {
-		TASK_MANAGERS[hart_id].exclusive_access().remove(tid);
+/// 从当前 CPU 自己的运行队列获取任务，不执行跨核窃取。
+pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
+	let cpu_id = get_hart_id();
+	let task = RQ_ARRAY[cpu_id]
+		.inner_exclusive_access()
+		.pop_next_task()?;
+	{
+		let mut inner = task.inner_exclusive_access();
+		inner.cpu = cpu_id;
+		inner.on_rq = false;
+		inner.on_cpu = true;
+		inner.state = TaskStatus::Running;
+		inner.need_resched = false;
 	}
-}
-
-pub fn remove_task_from_all_local_queues(tid: usize) {
-	let _dispatch = lock_dispatch();
-	remove_task_from_all_local_queues_unlocked(tid);
+	Some(task)
 }

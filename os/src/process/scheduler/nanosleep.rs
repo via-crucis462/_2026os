@@ -1,9 +1,11 @@
+//! Nanosleep 使用的按截止时间排序睡眠队列。
+
 use core::cmp::Ordering;
 
 use crate::arch::timer::get_time_us;
 use crate::process::{TaskContext, TaskControlBlock, TaskStatus};
-use crate::process::scheduler::processor::{schedule, take_current_task};
-use crate::process::scheduler::runqueue::SCHEDULER;
+use crate::process::scheduler::processor::{current_task, schedule};
+use crate::process::scheduler::runqueue::wake_up_task;
 use crate::sync::MPSafeCell;
 use alloc::{collections::BinaryHeap, sync::Arc};
 use lazy_static::*;
@@ -83,17 +85,17 @@ fn monotonic_now_ns() -> usize {
 }
 
 pub fn sleep_current_until(deadline_ns: usize) {
-	let task = take_current_task().unwrap();
+	let task = current_task().unwrap();
 	let task_cx_ptr = {
 		let mut inner = task.inner_exclusive_access();
 		let ptr = &mut inner.thread.task_ctx as *mut TaskContext;
-		inner.state = TaskStatus::Blocked;
+		inner.state = TaskStatus::BlockSaving;
 		ptr
 	};
 	SLEEP_QUEUE.exclusive_access().push(deadline_ns, task);
 	schedule(task_cx_ptr);
 }
-
+// 处理到期任务
 pub fn wake_expired_sleep_tasks() {
 	loop {
 		let task = {
@@ -104,11 +106,6 @@ pub fn wake_expired_sleep_tasks() {
 			break;
 		};
 
-		let mut inner = task.inner_exclusive_access();
-		if matches!(inner.state, TaskStatus::Blocked) {
-			inner.state = TaskStatus::Ready;
-			drop(inner);
-			SCHEDULER.exclusive_access().get_pool().add_task(task);
-		}
+		wake_up_task(task);
 	}
 }

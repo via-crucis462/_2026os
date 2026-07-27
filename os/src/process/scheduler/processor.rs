@@ -1,9 +1,11 @@
 //! Implementation of [`Processor`] and task context switching.
 
-use crate::process::scheduler::runqueue::{fetch_task, SCHED_OTHER};
+use crate::process::scheduler::idle_tasks;
+use crate::process::scheduler::nanosleep::wake_expired_sleep_tasks;
+use crate::process::scheduler::runqueue::{enqueue_task_on_cpu, fetch_task, SCHED_OTHER};
 use crate::process::{TaskContext, TaskControlBlock, TaskStatus};
+use crate::arch::timer::get_time_us;
 use crate::get_hart_id;
-use crate::MAIN_HART_ID;
 use crate::sync::*;
 use crate::arch::{
     trap::TrapContext,
@@ -13,7 +15,6 @@ use alloc::sync::Arc;
 use lazy_static::*;
 use core::arch::asm;
 use core::arch::global_asm;
-use core::sync::atomic::Ordering;
 
 #[cfg(target_arch = "riscv64")]
 global_asm!(include_str!("../../arch/riscv/task/switch.S"));
@@ -99,7 +100,21 @@ pub fn run_tasks() {
     info!("[kernel] Hello from hart {}!", hart_id);
     loop {
         let hart_id = get_hart_id();
-        if let Some(task) = fetch_task() {
+        // 先处理到期睡眠任务，再只从当前 CPU 的本地队列取任务。
+        wake_expired_sleep_tasks();
+        // 本地队列为空时，idle_task 才会从其他 CPU 窃取一个可迁移任务。
+        let next_task = fetch_task().or_else(|| idle_tasks(hart_id));
+        if let Some(task) = next_task {
+            {
+                let mut inner = task.inner_exclusive_access();
+                inner.cpu = hart_id;
+                inner.on_rq = false;
+                inner.on_cpu = true;
+                inner.state = TaskStatus::Running;
+                inner.need_resched = false;
+				// 使用单调微秒时钟记录本时间片起点；切回调度器时统一结算。
+				inner.se.exec_start = get_time_us() as u64;
+            }
             let mut processor = current_processor();
             #[cfg(target_arch = "loongarch64")]
             warn!(
@@ -109,27 +124,6 @@ pub fn run_tasks() {
                 task.gettid(),
                 task.inner_exclusive_access().state,
             );
-            if task.inner_exclusive_access().on_main_hart
-                && hart_id != MAIN_HART_ID.load(Ordering::Acquire)
-            {
-                let _dispatch = crate::task::lock_dispatch();
-                let mut task_inner = task.inner_exclusive_access();
-                task_inner.state = TaskStatus::Ready;
-                drop(task_inner);
-                info!("[kernel] run_tasks: task pid={} is on main hart, but current hart is {}, put it back into pool", task.getpid(), hart_id);
-                crate::task::add_task_into_pool_unlocked(task);
-                drop(processor);
-                crate::arch::timer::set_next_trigger(SCHED_OTHER);
-                #[cfg(target_arch = "riscv64")]
-                unsafe {
-                    asm!("wfi");
-                }
-                #[cfg(target_arch = "loongarch64")]
-                unsafe {
-                    asm!("idle 0");
-                }
-                continue;
-            }
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             let task_inner = task.inner_exclusive_access();
             let next_task_cx_ptr = &task_inner.thread.task_ctx as *const TaskContext;
@@ -159,12 +153,24 @@ pub fn run_tasks() {
                 processor.take_current()
             };
             if let Some(prev_task) = prev_task {
-                let _dispatch = crate::task::lock_dispatch();
-                let prev_inner = prev_task.inner_exclusive_access();
-                let status = prev_inner.state;
-                drop(prev_inner);
+				let (status, cpu_id) = {
+					let mut prev_inner = prev_task.inner_exclusive_access();
+                    let now = get_time_us() as u64;
+                    let delta_exec = now.saturating_sub(prev_inner.se.exec_start).max(1);
+                    prev_inner.se.prev_sum_exec_runtime = prev_inner.se.sum_exec_runtime;
+                    prev_inner.se.sum_exec_runtime = prev_inner.se.sum_exec_runtime
+                        .saturating_add(delta_exec);
+                    // nice=0 时 load_weight=1024，vruntime 与实际运行微秒数等速增长。
+                    let weight = prev_inner.se.load_weight.max(1);
+                    let delta_vruntime = delta_exec.saturating_mul(1024) / weight;
+                    prev_inner.se.vruntime = prev_inner.se.vruntime
+                        .saturating_add(delta_vruntime.max(1));
+                    prev_inner.se.exec_start = 0;
+					prev_inner.on_cpu = false;
+					(prev_inner.state, prev_inner.cpu)
+				};
                 if status == TaskStatus::Ready {
-                    crate::task::add_task_into_pool_unlocked(prev_task);
+					enqueue_task_on_cpu(prev_task, cpu_id);
                 } else if status == TaskStatus::BlockSaving {
                     prev_task.inner_exclusive_access().state = TaskStatus::Blocked;
                 }

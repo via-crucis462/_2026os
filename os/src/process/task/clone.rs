@@ -140,6 +140,21 @@ impl TaskStruct {
 		// 3h. 继承调度、信号掩码、凭据等属性
 		let sched_policy = parent_inner.sched_policy;
 		let sched_priority = parent_inner.sched_priority;
+		let prio = parent_inner.prio;
+		let static_prio = parent_inner.static_prio;
+		let normal_prio = parent_inner.normal_prio;
+		let mut se = parent_inner.se;
+		se.exec_start = 0;
+		se.sum_exec_runtime = 0;
+		se.prev_sum_exec_runtime = 0;
+		let mut rt = parent_inner.rt;
+		rt.time_slice = 0;
+		let mut dl = parent_inner.dl;
+		dl.remaining_runtime = dl.runtime;
+		dl.absolute_deadline = u64::MAX;
+		dl.throttled = false;
+		let cpus_allowed = parent_inner.cpus_allowed;
+		let parent_cpu = parent_inner.cpu;
 		let blocked = parent_inner.blocked;               // 信号阻塞掩码
 		let nsproxy = parent_inner.nsproxy.clone();       // 命名空间代理
 		let cred = parent_inner.cred.clone();              // 有效凭据
@@ -224,6 +239,12 @@ impl TaskStruct {
 					errno: 0,
 					sched_policy,
 					sched_priority,
+					prio,
+					static_prio,
+					normal_prio,
+					se,
+					rt,
+					dl,
 					mm: Some(child_mm),
 					fs: child_fs,
 					files: child_files,
@@ -243,7 +264,9 @@ impl TaskStruct {
 					start_boottime: get_time_us() as u64,
 					on_cpu: false,
 					on_rq: false,
-					cpu: 0,
+					cpu: parent_cpu,
+					cpus_allowed,
+					need_resched: false,
 					clear_child_tid: if flags & CLONE_CHILD_CLEARTID != 0 {
 						ctid  // 退出时清零此地址并 futex 唤醒
 					} else {

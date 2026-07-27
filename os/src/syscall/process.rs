@@ -17,6 +17,7 @@ use crate::syscall::EPOLL_CTL_DEL;
 use crate::syscall::EPOLL_CTL_ADD;
 use crate::syscall::EPOLL_CTL_MOD;
 use crate::process::scheduler::runqueue::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_OTHER, SCHED_RR};
+use crate::process::scheduler::futex::{get_futex_wait_queue, FUTEX_WAIT_QUEUES};
 use crate::lazy_static;
 use spin::Mutex;
 use crate::sync::WaitQueue;
@@ -36,15 +37,6 @@ pub static TIME_CACHE: Mutex<BTreeMap<u64, (i64, i64, i64, i64)>> = Mutex::new(B
 lazy_static! {
     /// 专门用于进程死等信号的全局等待队列
     pub static ref SIGNAL_WAIT_QUEUE: Mutex<WaitQueue> = Mutex::new(WaitQueue::new());
-    pub static ref FUTEX_WAIT_QUEUES: Mutex<BTreeMap<usize, Arc<Mutex<WaitQueue>>>> =
-        Mutex::new(BTreeMap::new());
-}
-fn get_futex_wait_queue(uaddr: usize) -> Arc<Mutex<WaitQueue>> {
-    let mut queues = FUTEX_WAIT_QUEUES.lock();
-    queues
-        .entry(uaddr)
-        .or_insert_with(|| Arc::new(Mutex::new(WaitQueue::new())))
-        .clone()
 }
 
 pub(crate) fn clear_child_tid_and_wake(token: usize, clear_child_tid: usize) {
@@ -3289,6 +3281,13 @@ pub fn sys_sched_setscheduler(pid: isize, policy: isize, param_ptr: *const Sched
     let mut inner = target_task.inner_exclusive_access();
     inner.sched_policy = policy;
     inner.sched_priority = param.sched_priority;
+    inner.static_prio = if matches!(policy, SCHED_FIFO | SCHED_RR) {
+        99 - param.sched_priority
+    } else {
+        120
+    };
+    inner.normal_prio = inner.static_prio;
+    inner.prio = inner.normal_prio;
     0
 }
 
@@ -3319,7 +3318,15 @@ pub fn sys_sched_setparam(pid: isize, param_ptr: *const SchedParam) -> isize {
         }
         _ => return EINVAL.as_isize(),
     }
-    target_task.inner_exclusive_access().sched_priority = param.sched_priority;
+    let mut inner = target_task.inner_exclusive_access();
+    inner.sched_priority = param.sched_priority;
+    inner.static_prio = if matches!(policy, SCHED_FIFO | SCHED_RR) {
+        99 - param.sched_priority
+    } else {
+        120
+    };
+    inner.normal_prio = inner.static_prio;
+    inner.prio = inner.normal_prio;
     0
 }
 

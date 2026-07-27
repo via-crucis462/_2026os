@@ -1,6 +1,6 @@
 use crate::process::{TaskContext, TaskStatus};
 use crate::process::scheduler::processor::{current_task, schedule};
-use crate::process::scheduler::runqueue::add_task_into_pool;
+use crate::process::scheduler::runqueue::wake_up_task;
 use crate::sync::WaitQueue;
 use spin::Mutex;
 
@@ -57,10 +57,7 @@ pub fn wake_up_one(queue: &Mutex<WaitQueue>) -> bool {
             core::hint::spin_loop();
             println!("wake_up_one: rechecking task status...");
         }
-        let mut task_inner = task.inner_exclusive_access();
-        task_inner.state = TaskStatus::Ready;
-        drop(task_inner);
-        add_task_into_pool(task);
+		wake_up_task(task);
         true
     } else {
         false

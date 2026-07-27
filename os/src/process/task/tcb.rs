@@ -16,6 +16,78 @@ use crate::process::signal::{Signal, SigHand, Sigpending};
 use alloc::{sync::{Arc, Weak}, vec::Vec};
 use crate::process::task::*;
 
+/// CFS 调度实体，对应 Linux `struct sched_entity` 的基础运行时字段。
+#[derive(Clone, Copy, Debug)]
+pub struct SchedEntity {
+    /// 当前实体的归一化虚拟运行时间。
+    pub vruntime: u64,
+    /// 最近一次被调度到 CPU 时的调度时钟。
+    pub exec_start: u64,
+    /// 实体累计执行时间。
+    pub sum_exec_runtime: u64,
+    /// 上一次调度统计时记录的累计执行时间。
+    pub prev_sum_exec_runtime: u64,
+    /// CFS 负载权重；普通 nice=0 任务默认使用 1024。
+    pub load_weight: u64,
+}
+
+impl SchedEntity {
+    pub const fn new() -> Self {
+        Self {
+            vruntime: 0,
+            exec_start: 0,
+            sum_exec_runtime: 0,
+            prev_sum_exec_runtime: 0,
+            load_weight: 1024,
+        }
+    }
+}
+
+/// 实时调度实体，对应 Linux `struct sched_rt_entity` 的基础字段。
+#[derive(Clone, Copy, Debug)]
+pub struct SchedRtEntity {
+    /// SCHED_RR 当前剩余时间片，单位由调度时钟统一定义。
+    pub time_slice: u64,
+    /// 任务是否允许加入 SMP 实时迁移队列。
+    pub migratable: bool,
+}
+
+impl SchedRtEntity {
+    pub const fn new() -> Self {
+        Self { time_slice: 0, migratable: true }
+    }
+}
+
+/// Deadline 调度实体，对应 Linux `struct sched_dl_entity` 的基础 CBS 参数。
+#[derive(Clone, Copy, Debug)]
+pub struct SchedDlEntity {
+    /// 每个周期允许消耗的运行时间。
+    pub runtime: u64,
+    /// 相对截止时间。
+    pub deadline: u64,
+    /// 任务周期。
+    pub period: u64,
+    /// 当前实例剩余运行时间。
+    pub remaining_runtime: u64,
+    /// 当前实例的绝对截止时间。
+    pub absolute_deadline: u64,
+    /// CBS runtime 耗尽后是否被限流。
+    pub throttled: bool,
+}
+
+impl SchedDlEntity {
+    pub const fn new() -> Self {
+        Self {
+            runtime: 0,
+            deadline: 0,
+            period: 0,
+            remaining_runtime: 0,
+            absolute_deadline: u64::MAX,
+            throttled: false,
+        }
+    }
+}
+
 #[deny(non_camel_case_types)]
 pub struct TaskStruct {
     pub pid: Arc<PidHandle>,                // 全局唯一线程 ID
@@ -87,14 +159,22 @@ pub struct TaskStructInner {
     pub errno: i32,         // 进程错误码
 
     /* 4. 进程调度相关 */
-    /*pub sched_class: *const sched_class,  // 绑定的调度器类
-    pub se: sched_entity,     // CFS 完全公平调度实体
-    pub rt: sched_rt_entity,  // 实时调度实体
-    pub prio: i32,                  // 动态优先级
-    pub static_prio: i32,           // 静态优先级
-    pub normal_prio: i32,           // 普通优先级*/
+    /// 用户设置的调度策略，例如 SCHED_OTHER、SCHED_RR 或 SCHED_DEADLINE。
     pub sched_policy: isize,
+    /// 用户可见的实时优先级；普通策略为 0，实时策略为 1..=99。
     pub sched_priority: i32,
+    /// 调度器当前使用的动态优先级。
+    pub prio: i32,
+    /// 由 nice 或实时参数计算出的静态优先级。
+    pub static_prio: i32,
+    /// 不考虑临时优先级继承时的正常优先级。
+    pub normal_prio: i32,
+    /// 普通公平调度实体。
+    pub se: SchedEntity,
+    /// FIFO/RR 实时调度实体。
+    pub rt: SchedRtEntity,
+    /// Deadline/CBS 调度实体。
+    pub dl: SchedDlEntity,
 
     /* 5. 内存管理相关 */
     pub mm: Option<Arc<MPSafeCell<MemorySet>>>,       // 用户进程内存描述符
@@ -128,6 +208,10 @@ pub struct TaskStructInner {
     pub on_cpu: bool,
     pub on_rq: bool,
     pub cpu: usize,
+    /// 允许任务运行的 CPU 位图；第 N 位对应 CPU N。
+    pub cpus_allowed: usize,
+    /// 是否请求在安全调度点重新调度当前任务。
+    pub need_resched: bool,
 
     /*11 .线程退出清理地址 */
     pub clear_child_tid: usize, // 线程清理指针
