@@ -8,6 +8,7 @@ pub mod files;
 pub mod clone;
 pub mod exec;
 pub mod exit;
+pub mod sched;
 
 pub use tcb::*;
 pub use context::*;
@@ -16,6 +17,7 @@ pub use cred::*;
 pub use fs::*;
 pub use limits::*;
 pub use files::*;
+pub use sched::*;
 
 // Explicit compatibility surface for legacy `crate::task::*` callers.
 pub use crate::process::{

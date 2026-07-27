@@ -5,7 +5,7 @@
 use core::{panic, result};
 use crate::net::SOCKET_SET;
 use core::sync::atomic::{AtomicI32, Ordering};
-use crate::process::block_current_and_run_next;
+use crate::process::{block_current_and_run_next, wait4_block_current, waitid_block_current};
 
 use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, USER_STACK_SIZE, get_hart_id};
@@ -1930,15 +1930,9 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
             if options & WNOHANG as usize != 0 {
                 return 0;
             }
-            //println!("[wait4] P{} has matching children but none are zombies, sleeping...", proc.getpid());
             drop(proc_inner);
-            drop(proc);
-            drop(task);
-            
-            suspend_current_and_run_next();
-            let current_task = current_task().unwrap();
-            let pid = current_task.getpid() as i32;
-            //println!("[wait4] parent pid :{} woke up, rechecking children...", pid);
+            // 队列锁内再次检查条件，随后原子地入队并切换，防止子进程退出唤醒发生在入队之前。
+            wait4_block_current(&proc, pid);
             continue;
         }else{
             //从父进程的孩子列表里摘除这个僵尸子进程
@@ -2211,9 +2205,7 @@ pub fn sys_waitid(idtype: i32, id: i32, infop: *mut SigInfo, options: i32) -> is
                 }
             }
             drop(proc_inner);
-            drop(proc);
-            drop(task);
-            suspend_current_and_run_next();
+            waitid_block_current(&proc, idtype, id);
             continue;
         }
 

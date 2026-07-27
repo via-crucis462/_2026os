@@ -116,28 +116,9 @@ pub fn run_tasks() {
 				inner.se.exec_start = get_time_us() as u64;
             }
             let mut processor = current_processor();
-            #[cfg(target_arch = "loongarch64")]
-            warn!(
-                "[la-sched] hart={} selected pid={} tid={} state={:?}",
-                hart_id,
-                task.getpid(),
-                task.gettid(),
-                task.inner_exclusive_access().state,
-            );
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             let task_inner = task.inner_exclusive_access();
             let next_task_cx_ptr = &task_inner.thread.task_ctx as *const TaskContext;
-            #[cfg(target_arch = "loongarch64")]
-            warn!(
-                "[la-sched] switch pid={} tid={} task_ra={:#x} task_sp={:#x} trap_ctx={:#x} user_era={:#x} user_sp={:#x}",
-                task.getpid(),
-                task.gettid(),
-                task_inner.thread.task_ctx.ra,
-                task_inner.thread.task_ctx.sp,
-                task_inner.thread.trap_ctx,
-                task_inner.get_trap_cx().get_rt(),
-                task_inner.get_trap_cx().get_sp(),
-            );
             drop(task_inner);
             processor.current = Some(task);
             drop(processor);

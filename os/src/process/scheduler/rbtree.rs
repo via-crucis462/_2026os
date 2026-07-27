@@ -34,6 +34,8 @@ pub(crate) struct RbRootCached<K, V> {
 	leftmost: Option<usize>,
 	/// 节点 arena；空槽用于表示已经移除的节点。
 	nodes: Vec<Option<RbNode<K, V>>>,
+	/// 已删除节点留下的空槽索引，后续插入优先复用，避免 arena 无限增长。
+	free_slots: Vec<usize>,
 	/// 当前树中有效节点数量。
 	len: usize,
 }
@@ -45,6 +47,7 @@ impl<K: Ord + Copy, V> RbRootCached<K, V> {
 			root: None,
 			leftmost: None,
 			nodes: Vec::new(),
+			free_slots: Vec::new(),
 			len: 0,
 		}
 	}
@@ -57,21 +60,24 @@ impl<K: Ord + Copy, V> RbRootCached<K, V> {
 	/// 以 O(1) 时间返回最左节点保存的值。
 	pub(crate) fn first(&self) -> Option<&V> {
 		self.leftmost
-			.and_then(|index| self.nodes[index].as_ref())
+			.and_then(|index| self.nodes.get(index))
+			.and_then(|slot| slot.as_ref())
 			.map(|node| &node.value)
 	}
 
 	/// 以 O(1) 时间返回最左节点的排序键。
 	pub(crate) fn first_key(&self) -> Option<K> {
 		self.leftmost
-			.and_then(|index| self.nodes[index].as_ref())
+			.and_then(|index| self.nodes.get(index))
+			.and_then(|slot| slot.as_ref())
 			.map(|node| node.key)
 	}
 
 	/// 返回节点颜色；空节点按红黑树规则视为黑色。
 	fn color(&self, index: Option<usize>) -> RbColor {
 		index
-			.and_then(|index| self.nodes[index].as_ref())
+			.and_then(|index| self.nodes.get(index))
+			.and_then(|slot| slot.as_ref())
 			.map_or(RbColor::Black, |node| node.color)
 	}
 
@@ -95,6 +101,46 @@ impl<K: Ord + Copy, V> RbRootCached<K, V> {
 		if let Some(index) = index {
 			self.nodes[index].as_mut().unwrap().parent = parent;
 		}
+	}
+
+	/// 更新节点颜色；空叶子不需要保存颜色。
+	fn set_color(&mut self, index: Option<usize>, color: RbColor) {
+		if let Some(index) = index {
+			self.nodes[index].as_mut().unwrap().color = color;
+		}
+	}
+
+	/// 返回可选节点的左孩子，空叶子的孩子仍为空。
+	fn left_of(&self, index: Option<usize>) -> Option<usize> {
+		index.and_then(|index| self.left(index))
+	}
+
+	/// 返回可选节点的右孩子，空叶子的孩子仍为空。
+	fn right_of(&self, index: Option<usize>) -> Option<usize> {
+		index.and_then(|index| self.right(index))
+	}
+
+	/// 返回以指定节点为根的子树中键最小的节点。
+	fn minimum(&self, mut node: usize) -> usize {
+		while let Some(left) = self.left(node) {
+			node = left;
+		}
+		node
+	}
+
+	/// 用 replacement 子树替换 node 子树，并维护根和父链接。
+	fn transplant(&mut self, node: usize, replacement: Option<usize>) {
+		let parent = self.parent(node);
+		if let Some(parent) = parent {
+			if self.left(parent) == Some(node) {
+				self.nodes[parent].as_mut().unwrap().left = replacement;
+			} else {
+				self.nodes[parent].as_mut().unwrap().right = replacement;
+			}
+		} else {
+			self.root = replacement;
+		}
+		self.set_parent(replacement, parent);
 	}
 
 	/// 以指定节点为轴执行标准红黑树左旋。
@@ -152,15 +198,23 @@ impl<K: Ord + Copy, V> RbRootCached<K, V> {
 				self.right(index)
 			};
 		}
-		let index = self.nodes.len();
-		self.nodes.push(Some(RbNode {
+		let node = RbNode {
 			key,
 			value,
 			parent,
 			left: None,
 			right: None,
 			color: RbColor::Red,
-		}));
+		};
+		let index = if let Some(index) = self.free_slots.pop() {
+			debug_assert!(self.nodes[index].is_none());
+			self.nodes[index] = Some(node);
+			index
+		} else {
+			let index = self.nodes.len();
+			self.nodes.push(Some(node));
+			index
+		};
 		if let Some(parent) = parent {
 			if key < self.nodes[parent].as_ref().unwrap().key {
 				self.nodes[parent].as_mut().unwrap().left = Some(index);
@@ -225,26 +279,134 @@ impl<K: Ord + Copy, V> RbRootCached<K, V> {
 		}
 	}
 
-	/// 暂用重建完成删除；后续调度热路径可替换为原地 erase/fixup。
-	pub(crate) fn remove(&mut self, key: K) -> Option<V> {
-		let mut entries = Vec::with_capacity(self.len.saturating_sub(1));
-		let mut removed = None;
-		for slot in self.nodes.drain(..) {
-			if let Some(node) = slot {
-				if removed.is_none() && node.key == key {
-					removed = Some(node.value);
+	/// 删除黑色节点后修复双黑路径，恢复红黑树的黑高和红色相邻约束。
+	///
+	/// `node` 可以是空叶子，因此额外传入其父节点；这对应指针实现中
+	/// 带 parent 信息的 NIL 节点。
+	fn delete_fixup(&mut self, mut node: Option<usize>, mut parent: Option<usize>) {
+		while node != self.root && self.color(node) == RbColor::Black {
+			let Some(parent_index) = parent else { break };
+			if node == self.left(parent_index) {
+				let mut sibling = self.right(parent_index);
+				if self.color(sibling) == RbColor::Red {
+					self.set_color(sibling, RbColor::Black);
+					self.set_color(Some(parent_index), RbColor::Red);
+					self.rotate_left(parent_index);
+					sibling = self.right(parent_index);
+				}
+
+				if self.color(self.left_of(sibling)) == RbColor::Black
+					&& self.color(self.right_of(sibling)) == RbColor::Black
+				{
+					self.set_color(sibling, RbColor::Red);
+					node = Some(parent_index);
+					parent = self.parent(parent_index);
 				} else {
-					entries.push((node.key, node.value));
+					if self.color(self.right_of(sibling)) == RbColor::Black {
+						self.set_color(self.left_of(sibling), RbColor::Black);
+						self.set_color(sibling, RbColor::Red);
+						if let Some(sibling_index) = sibling {
+							self.rotate_right(sibling_index);
+						}
+						sibling = self.right(parent_index);
+					}
+					self.set_color(sibling, self.color(Some(parent_index)));
+					self.set_color(Some(parent_index), RbColor::Black);
+					self.set_color(self.right_of(sibling), RbColor::Black);
+					self.rotate_left(parent_index);
+					node = self.root;
+					parent = None;
+				}
+			} else {
+				let mut sibling = self.left(parent_index);
+				if self.color(sibling) == RbColor::Red {
+					self.set_color(sibling, RbColor::Black);
+					self.set_color(Some(parent_index), RbColor::Red);
+					self.rotate_right(parent_index);
+					sibling = self.left(parent_index);
+				}
+
+				if self.color(self.right_of(sibling)) == RbColor::Black
+					&& self.color(self.left_of(sibling)) == RbColor::Black
+				{
+					self.set_color(sibling, RbColor::Red);
+					node = Some(parent_index);
+					parent = self.parent(parent_index);
+				} else {
+					if self.color(self.left_of(sibling)) == RbColor::Black {
+						self.set_color(self.right_of(sibling), RbColor::Black);
+						self.set_color(sibling, RbColor::Red);
+						if let Some(sibling_index) = sibling {
+							self.rotate_left(sibling_index);
+						}
+						sibling = self.left(parent_index);
+					}
+					self.set_color(sibling, self.color(Some(parent_index)));
+					self.set_color(Some(parent_index), RbColor::Black);
+					self.set_color(self.left_of(sibling), RbColor::Black);
+					self.rotate_right(parent_index);
+					node = self.root;
+					parent = None;
 				}
 			}
 		}
-		self.root = None;
-		self.leftmost = None;
-		self.len = 0;
-		for (key, value) in entries {
-			self.insert(key, value);
+		self.set_color(node, RbColor::Black);
+	}
+
+	/// 按键查找并原地删除节点，时间复杂度为 O(log n)。
+	pub(crate) fn remove(&mut self, key: K) -> Option<V> {
+		let mut cursor = self.root;
+		let target = loop {
+			let index = cursor?;
+			let node_key = self.nodes[index].as_ref().unwrap().key;
+			if key == node_key {
+				break index;
+			}
+			cursor = if key < node_key { self.left(index) } else { self.right(index) };
+		};
+
+		let mut moved = target;
+		let mut removed_color = self.color(Some(moved));
+		let replacement;
+		let replacement_parent;
+
+		if self.left(target).is_none() {
+			replacement = self.right(target);
+			replacement_parent = self.parent(target);
+			self.transplant(target, replacement);
+		} else if self.right(target).is_none() {
+			replacement = self.left(target);
+			replacement_parent = self.parent(target);
+			self.transplant(target, replacement);
+		} else {
+			moved = self.minimum(self.right(target).unwrap());
+			removed_color = self.color(Some(moved));
+			replacement = self.right(moved);
+			if self.parent(moved) == Some(target) {
+				replacement_parent = Some(moved);
+				self.set_parent(replacement, Some(moved));
+			} else {
+				replacement_parent = self.parent(moved);
+				self.transplant(moved, replacement);
+				let target_right = self.right(target);
+				self.nodes[moved].as_mut().unwrap().right = target_right;
+				self.set_parent(target_right, Some(moved));
+			}
+			self.transplant(target, Some(moved));
+			let target_left = self.left(target);
+			self.nodes[moved].as_mut().unwrap().left = target_left;
+			self.set_parent(target_left, Some(moved));
+			self.nodes[moved].as_mut().unwrap().color = self.color(Some(target));
 		}
-		removed
+
+		let removed = self.nodes[target].take().unwrap().value;
+		self.free_slots.push(target);
+		self.len = self.len.saturating_sub(1);
+		self.leftmost = self.root.map(|root| self.minimum(root));
+		if removed_color == RbColor::Black {
+			self.delete_fixup(replacement, replacement_parent);
+		}
+		Some(removed)
 	}
 
 	/// 移除并返回当前最左节点，即排序键最小的节点。

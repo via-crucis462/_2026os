@@ -14,6 +14,7 @@ pub mod id;
 pub mod registry;
 pub mod signal;
 pub mod init;
+pub mod child_wait;
 
 pub use scheduler::*;
 pub use id::{kstack_alloc, pid_alloc, tid_alloc, tid_from_pid, KernelStack, PidHandle};
@@ -55,8 +56,9 @@ pub use scheduler::processor::{
 };
 pub use scheduler::wait::{
     block_current_and_run_next, block_current_and_run_next_if,
-    suspend_current_and_run_next, wake_up_one,
+    suspend_current_and_run_next, wake_up_all, wake_up_one,
 };
+pub use child_wait::{wait4_block_current, waitid_block_current, wake_child_exit_waiters};
 
 // Make current task suspended and switch to the next task
 /*pub fn suspend_current_and_run_next() {
