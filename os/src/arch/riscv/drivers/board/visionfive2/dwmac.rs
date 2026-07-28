@@ -67,9 +67,11 @@ const MTL_TXQ0_OPERATION_MODE: usize = 0x0d00;
 const MTL_TXQ0_QUANTUM_WEIGHT: usize = 0x0d18;
 //控制接收队列 0
 const MTL_RXQ0_OPERATION_MODE: usize = 0x0d30;
-
+// DMA 总线配置寄存器
 const DMA_SYSBUS_MODE: usize = 0x1004;
+// DMA 通道 0 的通用控制寄存器
 const DMA_CH0_CONTROL: usize = 0x1100;
+// DMA 通道 0 的发送控制寄存器
 const DMA_CH0_TX_CONTROL: usize = 0x1104;
 const DMA_CH0_RX_CONTROL: usize = 0x1108;
 const DMA_CH0_TXDESC_LIST_HI: usize = 0x1110;
@@ -124,7 +126,7 @@ const DESC_RX_FIRST: u32 = 1 << 29;
 const RING_SIZE: usize = 4;
 const PACKET_BUFFER_SIZE: usize = 1600;
 const RAW_TEST_TIMEOUT_US: usize = 1_000_000;
-
+//DMADescriptor
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct DmaDesc {
@@ -153,7 +155,7 @@ static mut TX_RING: DescriptorRing = DescriptorRing([DmaDesc::ZERO; RING_SIZE]);
 static mut RX_RING: DescriptorRing = DescriptorRing([DmaDesc::ZERO; RING_SIZE]);
 static mut TX_BUFFERS: PacketBuffers = PacketBuffers([[0; PACKET_BUFFER_SIZE]; RING_SIZE]);
 static mut RX_BUFFERS: PacketBuffers = PacketBuffers([[0; PACKET_BUFFER_SIZE]; RING_SIZE]);
-
+//MDIO（Management Data Input/Output）是 MAC 和 PHY 之间的一条管理总线
 const MDIO_PA_SHIFT: u32 = 21;
 const MDIO_RDA_SHIFT: u32 = 16;
 const MDIO_CR_SHIFT: u32 = 8;
@@ -165,7 +167,7 @@ const MDIO_BUSY: u32 = 1;
 // U-Boot's JH7110 EQoS platform config selects the 250-300 MHz CSR range.
 const JH7110_MDIO_CR: u32 = 5;
 const MDIO_TIMEOUT_US: usize = 1_000_000;
-
+//MII是控制寄存器
 const MII_BMCR: u8 = 0;
 const MII_BMSR: u8 = 1;
 const MII_PHYSID1: u8 = 2;
@@ -206,6 +208,41 @@ impl DwMacWrapper {
     }
 }
 
+impl crate::drivers::net::EthernetDevice for DwMacWrapper {
+    fn mac_address(&self) -> [u8; 6] {
+        self.get_mac_address()
+    }
+
+    fn can_receive(&self) -> bool {
+        self.0.exclusive_access().can_recv()
+    }
+
+    fn can_transmit(&self) -> bool {
+        self.0.exclusive_access().can_send()
+    }
+
+    fn receive_frame(
+        &self,
+        buffer: &mut [u8],
+    ) -> Result<usize, crate::drivers::net::EthernetError> {
+        self.0.exclusive_access().recv(buffer).map_err(|error| match error {
+            DwMacError::Busy => crate::drivers::net::EthernetError::Busy,
+            DwMacError::BufferTooSmall => crate::drivers::net::EthernetError::BufferTooSmall,
+            _ => crate::drivers::net::EthernetError::Driver,
+        })
+    }
+
+    fn transmit_frame(
+        &self,
+        frame: &[u8],
+    ) -> Result<(), crate::drivers::net::EthernetError> {
+        self.0.exclusive_access().send(frame).map_err(|error| match error {
+            DwMacError::Busy => crate::drivers::net::EthernetError::Busy,
+            _ => crate::drivers::net::EthernetError::Driver,
+        })
+    }
+}
+
 pub struct Jh7110DwMac {
     base: usize,
 }
@@ -236,9 +273,8 @@ impl Jh7110DwMac {
     }
 
     #[inline]
+    //防止收发乱序
     fn dma_sync() {
-        // JH7110's U74 does not advertise Zicbom. Keep DMA memory isolated and
-        // ordered; raw tests below verify whether the interconnect is coherent.
         unsafe { core::arch::asm!("fence rw, rw", options(nostack, preserves_flags)) }
     }
 
@@ -493,7 +529,6 @@ impl Jh7110DwMac {
         Self::write_mmio(ptp_reg, Self::read_mmio(ptp_reg) | CLOCK_ENABLE);
         Self::write_mmio(gtxc_reg, Self::read_mmio(gtxc_reg) | CLOCK_ENABLE);
 
-        // Linux deasserts by clearing the corresponding assert bits after clocks run.
         Self::write_mmio(
             reset_assert_reg,
             Self::read_mmio(reset_assert_reg) & !reset_mask,
