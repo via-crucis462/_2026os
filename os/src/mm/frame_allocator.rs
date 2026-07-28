@@ -237,8 +237,6 @@ pub fn init_frame_allocator() {
     }
     // 为DMA预留空间
     let frame_start = ekernel as *const() as usize + DMA_SIZE;
-    #[cfg(target_arch = "riscv64")]
-    let frame_start = ekernel as *const() as usize;
 
     #[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
     let frame_end = frame_start + 32 * 1024 * 1024;

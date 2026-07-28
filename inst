@@ -22,3 +22,6 @@ go 0x40200000
 setenv ethact ethernet@16040000; setenv ipaddr 192.168.1.101; setenv serverip 192.168.1.100; setenv netmask 255.255.255.0; tftpboot 0x40200000 kernel-rv.bin; go 0x40200000
 make build && sudo cp target/riscv64gc-unknown-none-elf/debug/os.bin /srv/tftp/kernel-rv.bin ; sudo ip addr add 192.168.1.100/24 dev enp3s0
 DiffviewOpen main...HEAD
+xz -dkfv sdcard-rv.img.xz
+BOARD=virt INIT=sh make test-rv
+BOARD=visionfive2 INIT=sh make rv

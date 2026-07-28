@@ -187,24 +187,9 @@ fn main_init(hart_id: usize) {
     fs::setup_oscomp_env();
     fs::list_apps();
     task::add_initproc();
-    arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger(task::manager::SCHED_OTHER);
+    arch::trap::enable_timer_interrupt();
     // init_other_hart(hart_id);
-
-    // 块设备读取测试：从 0 号块逐块读取到 1024 号块
-    {
-        use crate::drivers::block::block_dev::BlockDevice;
-        use crate::arch::drivers::BLOCK_DEVICE;
-        let mut buf = [0u8; crate::ext4fs::BLOCK_SZ];
-        let total = 1025;
-        for block_id in 0..total {
-            BLOCK_DEVICE.read_block(block_id, &mut buf);
-            if block_id % 128 == 0 {
-                println!("block read test: {}/{} blocks done", block_id, total);
-            }
-        }
-        println!("block read test: all {} blocks read successfully", total);
-    }
 
     println!("main_init done, run tasks...");
     task::run_tasks();
