@@ -60,3 +60,4 @@ glibc-2.3.5.tar.gz
 numactl-2.0.14
 user/user-*
 qemu-system-2k1000
+.neoconf.json
