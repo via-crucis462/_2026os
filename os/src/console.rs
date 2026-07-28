@@ -41,7 +41,7 @@ macro_rules! print {
 macro_rules! println {
     ($fmt: literal $(, $($arg: tt)+)?) => {
         #[allow(unreachable_code)]
-        #[cfg(board = "virt")]
+        #[cfg(any(board = "virt", board = "visionfive2"))]
         $crate::console::print(format_args!(concat!($fmt, "\n") $(, $($arg)+)?));
         #[cfg(board = "2k1000")]
         $crate::console::print(format_args!(concat!($fmt, "\r\n") $(, $($arg)+)?));
