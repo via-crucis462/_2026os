@@ -186,6 +186,7 @@ fn main_init(hart_id: usize) {
     fs::mount_procfs();
     fs::setup_oscomp_env();
     fs::list_apps();
+    MAIN_HART_ID.store(hart_id, Ordering::Release);
     task::add_initproc();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger(task::manager::SCHED_OTHER);
