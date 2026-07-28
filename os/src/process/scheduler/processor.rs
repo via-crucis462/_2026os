@@ -126,6 +126,18 @@ pub fn run_tasks() {
                 .map(|task| task.inner_exclusive_access().sched_policy)
                 .unwrap_or(SCHED_OTHER);
             crate::arch::timer::set_next_trigger(sched_policy);
+            // Kernel-stack virtual addresses are recycled. Another hart may have
+            // unmapped and remapped this task's stack while this hart still holds
+            // the old translation, so invalidate locally before using the new sp.
+            #[cfg(target_arch = "riscv64")]
+            unsafe {
+                asm!("sfence.vma x0, x0");
+            }
+            #[cfg(target_arch = "loongarch64")]
+            unsafe {
+                asm!("invtlb 0, $r0, $r0");
+                asm!("dbar 0");
+            }
             unsafe {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
