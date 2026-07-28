@@ -208,6 +208,41 @@ impl DwMacWrapper {
     }
 }
 
+impl crate::drivers::net::EthernetDevice for DwMacWrapper {
+    fn mac_address(&self) -> [u8; 6] {
+        self.get_mac_address()
+    }
+
+    fn can_receive(&self) -> bool {
+        self.0.exclusive_access().can_recv()
+    }
+
+    fn can_transmit(&self) -> bool {
+        self.0.exclusive_access().can_send()
+    }
+
+    fn receive_frame(
+        &self,
+        buffer: &mut [u8],
+    ) -> Result<usize, crate::drivers::net::EthernetError> {
+        self.0.exclusive_access().recv(buffer).map_err(|error| match error {
+            DwMacError::Busy => crate::drivers::net::EthernetError::Busy,
+            DwMacError::BufferTooSmall => crate::drivers::net::EthernetError::BufferTooSmall,
+            _ => crate::drivers::net::EthernetError::Driver,
+        })
+    }
+
+    fn transmit_frame(
+        &self,
+        frame: &[u8],
+    ) -> Result<(), crate::drivers::net::EthernetError> {
+        self.0.exclusive_access().send(frame).map_err(|error| match error {
+            DwMacError::Busy => crate::drivers::net::EthernetError::Busy,
+            _ => crate::drivers::net::EthernetError::Driver,
+        })
+    }
+}
+
 pub struct Jh7110DwMac {
     base: usize,
 }
@@ -494,7 +529,6 @@ impl Jh7110DwMac {
         Self::write_mmio(ptp_reg, Self::read_mmio(ptp_reg) | CLOCK_ENABLE);
         Self::write_mmio(gtxc_reg, Self::read_mmio(gtxc_reg) | CLOCK_ENABLE);
 
-        // Linux deasserts by clearing the corresponding assert bits after clocks run.
         Self::write_mmio(
             reset_assert_reg,
             Self::read_mmio(reset_assert_reg) & !reset_mask,

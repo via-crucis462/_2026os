@@ -1,6 +1,7 @@
 use core::ptr::NonNull;
 
 use super::virtio_blk::VirtioHal;
+use crate::drivers::net::{EthernetDevice, EthernetError};
 use crate::sync::MPSafeCell;
 use crate::MMIO_SLOT_SIZE;
 use virtio_drivers::{
@@ -55,5 +56,47 @@ impl VirtIONetWrapper {
 
     pub fn get_mac_address(&self) -> [u8; 6] {
         self.1
+    }
+}
+
+impl EthernetDevice for VirtIONetWrapper {
+    fn mac_address(&self) -> [u8; 6] {
+        self.get_mac_address()
+    }
+
+    fn can_receive(&self) -> bool {
+        self.0.exclusive_access().can_recv()
+    }
+
+    fn can_transmit(&self) -> bool {
+        self.0.exclusive_access().can_send()
+    }
+
+    fn receive_frame(&self, buffer: &mut [u8]) -> Result<usize, EthernetError> {
+        let mut driver = self.0.exclusive_access();
+        let rx_buf = driver.receive().map_err(|_| EthernetError::Busy)?;
+        let packet = rx_buf.packet();
+        if packet.len() > buffer.len() {
+            driver
+                .recycle_rx_buffer(rx_buf)
+                .map_err(|_| EthernetError::Driver)?;
+            return Err(EthernetError::BufferTooSmall);
+        }
+        let length = packet.len();
+        buffer[..length].copy_from_slice(packet);
+        driver
+            .recycle_rx_buffer(rx_buf)
+            .map_err(|_| EthernetError::Driver)?;
+        Ok(length)
+    }
+
+    fn transmit_frame(&self, frame: &[u8]) -> Result<(), EthernetError> {
+        let mut driver = self.0.exclusive_access();
+        if !driver.can_send() {
+            return Err(EthernetError::Busy);
+        }
+        let mut tx_buf = driver.new_tx_buffer(frame.len());
+        tx_buf.packet_mut().copy_from_slice(frame);
+        driver.send(tx_buf).map_err(|_| EthernetError::Driver)
     }
 }
