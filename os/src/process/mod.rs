@@ -333,7 +333,7 @@ pub const IDLE_PID: usize = 1;
 
 /// Exit the current 'Running' task and run the next task in task list.
 pub fn exit_current_and_run_next(exit_code: i32){
-    //println!("[K] PID {} is exiting with code {} ...", current_task().unwrap().process().pid.0, exit_code);
+    warn!("[K] PID {} is exiting with code {} ...", current_task().unwrap().process().pid.0, exit_code);
     let task = match current_task() {
         Some(t) => t,
         None => {

@@ -39,4 +39,6 @@ pub fn init() {
     frame_allocator::init_frame_allocator();
     #[cfg(target_arch = "riscv64")]
     KERNEL_SPACE.exclusive_access().activate();
+    #[cfg(target_arch = "loongarch64")]
+    lazy_static::initialize(&KERNEL_SPACE);
 }

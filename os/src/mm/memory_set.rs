@@ -628,25 +628,25 @@ impl MemorySet {
             None,
             heap_bottom,
         );
-
-        memory_set.brk_index = memory_set.areas.len() - 1; //初始化堆索引
-                                                           // map TrapContext
-                                                           // la64下不需要映射
-                                                           // 对于riscv，需要在创建进程时再映射
-                                                           /*
-                                                           #[cfg(target_arch = "riscv64")]
-                                                           debug!("MemorySet::from_elf: mapping TrapContext");
-                                                           #[cfg(target_arch = "riscv64")]
-                                                           memory_set.push(
-                                                               MapArea::new(
-                                                                   TRAP_CONTEXT_BASE.into(),
-                                                                   TRAMPOLINE.into(),
-                                                                   MapType::Framed,
-                                                                   MapPermission::R | MapPermission::W,
-                                                               ),
-                                                               None,
-                                                               TRAP_CONTEXT_BASE,
-                                                           ); */
+         //初始化堆索引
+        memory_set.brk_index = memory_set.areas.len() - 1;
+        // map TrapContext
+        // la64下不需要映射
+        // 对于riscv，需要在创建进程时再映射
+        /*
+        #[cfg(target_arch = "riscv64")]
+        debug!("MemorySet::from_elf: mapping TrapContext");
+        #[cfg(target_arch = "riscv64")]
+        memory_set.push(
+            MapArea::new(
+                TRAP_CONTEXT_BASE.into(),
+                TRAMPOLINE.into(),
+                MapType::Framed,
+                MapPermission::R | MapPermission::W,
+            ),
+            None,
+            TRAP_CONTEXT_BASE,
+        ); */
         debug!("MemorySet::from_elf: mapped all areas");
         Some((
             memory_set,

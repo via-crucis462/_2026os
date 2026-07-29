@@ -619,13 +619,22 @@ pub fn trap_handler() -> ! {
                 let sp = current_trap_cx().r[3];
                 let vpn = VirtAddr::from(badv).std_floor();
                 if ecode == 4 {
+                    warn!("PME fault");
+                    inner.memory_set.handle_cow_fault(badv);
                     if let Some(pte) = inner.memory_set.translate(vpn) {
                         if pte.is_valid() && pte.writable() && inner.memory_set.set_pte_dirty(vpn) {
                             drop(inner);
                             drop(proc);
                             drop(task);
                             trap_return();
+                        } else {
+                            warn!(
+                                "pte is not writable or cannot set dirty: vpn=0x{:x}, pte=0x{:x}",
+                                vpn.0, pte.bits
+                            );
                         }
+                    } else {
+                        warn!("pte not found for vpn=0x{:x}", vpn.0);
                     }
                 }
                 if inner.memory_set.handle_cow_fault(badv) {
@@ -816,7 +825,7 @@ pub fn trap_return() -> ! {
     }
     crate::mm::MemorySet::flush_tlb_after_mapping_change();
 
-    crate::arch::mm::prepare_user_tlb();
+    // crate::arch::mm::prepare_user_tlb();
     // crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
     trace!("trap_return: going to user mode, satp = 0x{:x}", user_satp);
     extern "C" {

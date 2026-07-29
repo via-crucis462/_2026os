@@ -218,7 +218,6 @@ impl PageTable {
     }
     #[allow(unused)]
     #[cfg(target_arch = "loongarch64")]
-
     pub fn map(
         &mut self,
         vpn: VirtPageNum,
@@ -634,7 +633,8 @@ pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
     // 页内快路径：保持原有低开销行为
     if start_va.std_page_offset() + len <= size.size() {
         let pa = page_table.translate_va(start_va).unwrap();
-        let start = pa.0;
+        // Physical RAM must be accessed through the LoongArch cached DMW window.
+        let start = pa.get_cached_addr();
         let end = start + len;
         for (idx, addr) in (start..end).enumerate() {
             data[idx] = unsafe { *(addr as *const u8) };
@@ -665,7 +665,8 @@ pub fn try_translated_write<T>(token: usize, ptr: *mut T, value: T) -> bool {
     // 页内快路径：保持原有低开销行为
     if start_va.std_page_offset() + len <= size.size() {
         let pa = page_table.translate_va(start_va).unwrap();
-        let start = pa.0;
+        // Physical RAM must be accessed through the LoongArch cached DMW window.
+        let start = pa.get_cached_addr();
         let end = start + len;
         for (idx, addr) in (start..end).enumerate() {
             unsafe { *(addr as *mut u8) = data[idx] };
