@@ -30,6 +30,9 @@ extern crate log;
 
 extern crate alloc;
 
+use core::arch::asm;
+use core::sync::atomic::Ordering;
+
 #[macro_use]
 mod console;
 pub mod arch;
@@ -39,38 +42,41 @@ pub mod fs;
 pub mod lang_items;
 pub mod logging;
 //#[cfg(target_arch = "riscv64")]
-pub mod net;
+pub mod auth;
+pub mod ipc;
 pub mod mm;
+pub mod net;
+pub mod process;
 pub mod sync;
 pub mod syscall;
-pub mod process;
-pub mod auth;
 pub mod timer;
-pub mod ipc;
+pub mod init;
 
 pub use arch::config::*;
 pub use process::task;
 
 #[allow(unused)]
 use crate::arch::sbi::*;
+use crate::arch::trap;
 use core::arch::global_asm;
 #[cfg(target_arch = "loongarch64")]
 #[allow(unused)]
 use crate::arch::la;
 
 pub use arch::timer::*;
+pub use arch::config;
+use crate::drivers::net::NET_DEVICE;
 
-use crate::arch::drivers::block::NET_DEVICE;
-
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize};
 use lazy_static::*;
 use spin::Mutex;
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(all(target_arch = "riscv64", not(board = "visionfive2")))]
 global_asm!(include_str!("arch/riscv/entry.asm"));
+#[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
+global_asm!(include_str!("arch/riscv/entry-visionfive2.asm"));
 #[cfg(target_arch = "loongarch64")]
 global_asm!(include_str!("arch/la/entry.asm"));
-
 
 #[link_section = ".data"]
 pub static MAIN_HART_INITED: AtomicBool = AtomicBool::new(false);
@@ -78,33 +84,32 @@ pub static MAIN_HART_INITED: AtomicBool = AtomicBool::new(false);
 #[link_section = ".data"]
 pub static MAIN_HART_ID: AtomicUsize = AtomicUsize::new(0);
 
-
-/// clear BSS segment
-/// 两种架构应该是统一的
+/// clear BSS segment 
 fn clear_bss() {
     extern "C" {
         fn sbss();
         fn ebss();
     }
     unsafe {
-        core::slice::from_raw_parts_mut(sbss as *const () as usize as *mut u8, ebss as *const () as usize - sbss as *const () as usize)
-            .fill(0);
+        core::slice::from_raw_parts_mut(
+            sbss as *const () as usize as *mut u8,
+            ebss as *const () as usize - sbss as *const () as usize,
+        )
+        .fill(0);
     }
 }
-
 
 extern "C" {
     fn _start();
 }
 
-
 #[no_mangle]
 /// the rust entry-point of os
 pub fn rust_main(hart_id: usize) -> ! {
     let is_main_hart = MAIN_HART_INITED.compare_exchange(
-        false, 
-        true, 
-        Ordering::Acquire, 
+        false,
+        true,
+        Ordering::Acquire,
         Ordering::Relaxed
     ).is_ok();
 
@@ -121,7 +126,7 @@ pub fn rust_main(hart_id: usize) -> ! {
         other_init();
         panic!("Unreachable in rust_main!");
     }
-    
+
 }
 
 /* la的main，单核版本，已弃用
@@ -138,48 +143,110 @@ pub fn rust_main() -> ! {
     info!("drivers::search_pci"); drivers::search_pci(); info!("done drivers");
     fs::mount_procfs();
     fs::mount_devfs();
-    fs::setup_oscomp_env(); 
+    fs::setup_oscomp_env();
     fs::list_apps();
     task::add_initproc();
     arch::trap::enable_timer_interrupt();
     task::run_tasks();
     panic!("Unreachable in rust_main!");
 }
- */ 
+*/
 
 fn main_init(hart_id: usize) {
+    println!("[kernel] main_init hart_id={}", hart_id);
+
     mm::init();
     #[cfg(target_arch = "riscv64")]
     mm::remap_test();
-    #[cfg(target_arch = "loongarch64")]
-    mem_test();
     arch::trap::init();
     #[cfg(target_arch = "loongarch64")]
     {
-        arch::timer::init_board_freq();
-        info!("searching pci...");
-        // 仅调试用，搜索，实例化并列出设备
-        // 和BLOCK是后续才实例化的
+        println!("searching pci...");
+        // 枚举pci设备
         drivers::search_pci();
-        info!("done drivers");
+        println!("done drivers");
+        // 打印ahci控制器信息
+        #[cfg(board = "2k1000")]
+        drivers::board::la2k1000::print_ahci_info();
+        #[cfg(false)]
+        unsafe {
+            // 测试block device，会破坏磁盘数据，仅供测试
+            crate::ext4fs::block_device_test();
+        }
     }
     //#[cfg(target_arch = "riscv64")]
     {
         lazy_static::initialize(&NET_DEVICE);
         lazy_static::initialize(&crate::net::NET_IFACE);
     }
-    fs::init_test_env(); 
+
+    fs::init_test_env();
     fs::mount_procfs();
-    fs::setup_oscomp_env(); 
+    fs::setup_oscomp_env();
     fs::list_apps();
+    MAIN_HART_ID.store(hart_id, Ordering::Release);
     task::add_initproc();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger(process::scheduler::runqueue::SCHED_OTHER);
+    #[cfg(board = "virt")]
     init_other_hart(hart_id);
     println!("main_init done, run tasks...");
     task::run_tasks();
 }
 
+/* 测试用
+fn main_init(hart_id: usize) -> ! {
+    println!("[init] memory");
+    mm::init();
+
+    #[cfg(target_arch = "riscv64")]
+    mm::remap_test();
+
+    println!("[init] traps");
+    arch::trap::init();
+
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        riscv::register::sstatus::clear_sie();
+    }
+
+    println!("[init] kernel interrupts disabled");
+    println!("[init] logical hart {}", hart_id);
+    println!("[sd] probing SDIO1");
+    probe();
+
+    println!("[net] probing JH7110 DWMAC0");
+    lazy_static::initialize(&crate::arch::drivers::block::NET_DEVICE);
+
+    println!("[fs] initializing SD block device");
+    lazy_static::initialize(&crate::drivers::BLOCK_DEVICE);
+    println!("[fs] loading ROOT_DENTRY");
+    lazy_static::initialize(&crate::fs::ROOT_DENTRY);
+    let root_ino = crate::fs::ROOT_DENTRY.inode.get_stat().ino;
+    assert_eq!(root_ino, 2, "[fs] ext4 root inode mismatch");
+    println!("[fs] root inode {} loaded", root_ino);
+
+    println!("[init] mounting in-memory filesystems");
+    fs::init_test_env();
+    fs::mount_procfs();
+
+    println!("[init] setting up userspace environment");
+    fs::setup_oscomp_env();
+    fs::list_apps();
+
+    println!("[init] adding init process");
+    task::add_initproc();
+
+    MAIN_HART_ID.store(hart_id, Ordering::Release);
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        riscv::register::sstatus::clear_sie();
+    }
+    println!("[init] interrupts remain disabled; entering scheduler");
+    task::run_tasks();
+    panic!("scheduler returned unexpectedly");
+}
+*/
 #[cfg(target_arch = "riscv64")]
 fn init_other_hart(hart_id: usize) {
     /*unsafe {
@@ -188,13 +255,14 @@ fn init_other_hart(hart_id: usize) {
         );
     }*/
     MAIN_HART_ID.store(hart_id, Ordering::Release);
-    for i in 0..hart_id  {
-        start_hart(i, _start as *const() as usize, 0);
+    for i in 0..hart_id {
+        start_hart(i, _start as *const () as usize, 0);
     }
-    for i in hart_id+1..CPU_CORE_NUM {
-        start_hart(i, _start as *const() as usize, 0);
+    for i in hart_id + 1..CPU_CORE_NUM {
+        start_hart(i, _start as *const () as usize, 0);
     }
 }
+
 
 #[cfg(target_arch = "loongarch64")]
 fn init_other_hart(hart_id: usize) {
@@ -202,8 +270,7 @@ fn init_other_hart(hart_id: usize) {
     if current_hart != hart_id {
         warn!(
             "[kernel][la] init_other_hart: arg_hart_id={} != tp_hart_id={}",
-            hart_id,
-            current_hart
+            hart_id, current_hart
         );
     }
     MAIN_HART_ID.store(current_hart, Ordering::Release);
@@ -215,7 +282,10 @@ fn init_other_hart(hart_id: usize) {
         //参考2025年RocketOS的实现，先把启动地址写入目标核的csr_mail，然后发ipi唤醒
         arch::la::ipi::csr_mail_send(start_addr as u64, i, 0);
         arch::la::ipi::send_ipi_single(i, 1);
-        info!("[kernel][la] wakeup hart {} with start={:#x}", i, start_addr);
+        info!(
+            "[kernel][la] wakeup hart {} with start={:#x}",
+            i, start_addr
+        );
     }
 }
 
@@ -231,7 +301,7 @@ fn other_init() {
     #[cfg(target_arch = "riscv64")]
     KERNEL_SPACE.exclusive_access().activate();
     #[cfg(target_arch = "loongarch64")]
-    la::mm::la_kernel_init_mem();// 设置映射窗口
+    la::mm::la_kernel_init_mem(); // 设置映射窗口
     arch::trap::init();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger(process::scheduler::runqueue::SCHED_OTHER);
@@ -243,7 +313,7 @@ fn other_init() {
 pub fn get_hart_id() -> usize {
     let hart_id: usize;
     unsafe {
-         asm!(
+        asm!(
             "csrrd {}, 0x20",
             out(reg) hart_id
         );
@@ -254,7 +324,7 @@ pub fn get_hart_id() -> usize {
 pub fn get_hart_id() -> usize {
     let hart_id: usize;
     unsafe {
-         asm!(
+        asm!(
             "mv {}, tp",
             out(reg) hart_id
         );
@@ -262,39 +332,14 @@ pub fn get_hart_id() -> usize {
     hart_id
 }
 
-#[allow(unused)]
-use core::arch::{asm};
 #[cfg(target_arch = "loongarch64")]
 #[no_mangle]
 pub fn debug_csr_info() {
-    let mut pgdl:usize= 0;
-    let mut crmd:usize= 0;
-    unsafe{
+    let mut pgdl: usize = 0;
+    let mut crmd: usize = 0;
+    unsafe {
         asm!("csrrd {}, 0x19", out(reg) pgdl);
         asm!("csrrd {}, 0x0", out(reg) crmd);
     }
-    debug!("pgdl: {:#x}, crmd: {:#b}", pgdl, crmd);
-}
-
-#[cfg(target_arch = "loongarch64")]
-pub fn mem_test() {
-    let aim1 = LOWRAM_BASE;
-    let aim2 = LOWRAM_END;
-    for addr in (aim1..aim2).step_by(8) {
-        unsafe {
-            let ptr = addr as *mut u64;
-            ptr.write_volatile(0x12345678_9abcdeff);
-            let val = ptr.read_volatile();
-            assert_eq!(val, 0x12345678_9abcdeff);
-        }
-    }
-    for addr in (aim1..aim2).step_by(8) {
-        unsafe {
-            let ptr = addr as *mut u64;
-            ptr.write_volatile(0);
-            let val = ptr.read_volatile();
-            assert_eq!(val, 0);
-        }
-    }
-    println!("mem_test passed!");
+    debug!("pgdl: 0x{:x}, crmd: 0b{:b}", pgdl, crmd);
 }

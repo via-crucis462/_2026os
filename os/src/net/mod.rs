@@ -1,31 +1,68 @@
 // os/src/net/mod.rs
-pub mod socket; 
 pub mod netlink;
+pub mod socket;
+use crate::drivers::net::NET_DEVICE;
+use crate::drivers::net::EthernetDevice;
+use crate::process::wake_up_one;
+use crate::process::TaskStatus;
+use crate::sync::MPSafeCell;
+use crate::sync::WaitQueue;
+use alloc::collections::BTreeMap;
+use alloc::collections::VecDeque;
+use alloc::format;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use lazy_static::lazy_static;
+use smoltcp::iface::SocketHandle;
+use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities};
 use smoltcp::time::Instant;
-use lazy_static::lazy_static;
-use crate::sync::MPSafeCell;
-use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address};
-use crate::drivers::block::NET_DEVICE;
-use crate::process::wake_up_one;
-use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
 use spin::Mutex;
-use crate::sync::WaitQueue;
-use smoltcp::iface::SocketHandle;
-use alloc::collections::VecDeque;
-use crate::process::task::status::TaskStatus;
-use alloc::format;
-use crate::process::registry::TID2TCB;
 
-pub struct VirtioNetDevice;
+/// 将底层驱动封装为 smoltcp 的网卡结构体
+pub struct SmoltcpDevice<'a, D: EthernetDevice> {
+    device: &'a D,
+}
+
+impl<'a, D: EthernetDevice> SmoltcpDevice<'a, D> {
+    pub fn new(device: &'a D) -> Self {
+        Self { device }
+    }
+}
 
 pub struct RxToken {
     buffer: Vec<u8>,
 }
+
+pub struct TxToken<'a, D: EthernetDevice> {
+    device: &'a D,
+}
+
+impl phy::RxToken for RxToken {
+    fn consume<R, F>(mut self, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        f(&mut self.buffer)
+    }
+}
+
+impl<'a, D: EthernetDevice> phy::TxToken for TxToken<'a, D> {
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        let mut buffer = vec![0u8; len];
+        let result = f(&mut buffer);
+        self.device
+            .transmit_frame(&buffer)
+            .expect("Failed to send network packet");
+        result
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct IoVec {
@@ -47,35 +84,40 @@ pub struct MsgHdr {
     pub msg_flags: i32,        // 接收标志位
     pub _pad2: i32,
 }
-pub struct TxToken;
 
-impl Device for VirtioNetDevice {
-    type RxToken<'a> = RxToken where Self: 'a;
-    type TxToken<'a> = TxToken where Self: 'a;
+impl<D: EthernetDevice> Device for SmoltcpDevice<'_, D> {
+    type RxToken<'a>
+        = RxToken
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = TxToken<'a, D>
+    where
+        Self: 'a;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-    let mut driver = NET_DEVICE.0.exclusive_access();
-       if driver.can_recv() {
-            #[cfg(target_arch = "riscv64")] {
-                let mut buf = vec![0u8; 2048];
-                if let Ok(len) = driver.recv(&mut buf) {
-                    buf.truncate(len); 
-                    return Some((RxToken { buffer: buf }, TxToken));
-                }   
-            }
-            #[cfg(target_arch = "loongarch64")] {
-                if let Ok(buf) = driver.receive() {
-                    return Some((RxToken { buffer: buf.as_bytes().to_vec() }, TxToken));
-                }
-            }
+        if !self.device.can_receive() {
+            return None;
+        }
+
+        let mut buffer = vec![0u8; 2048];
+        if let Ok(length) = self.device.receive_frame(&mut buffer) {
+            buffer.truncate(length);
+            return Some((
+                RxToken { buffer },
+                TxToken {
+                    device: self.device,
+                },
+            ));
         }
         None
     }
-  
+
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        let driver = NET_DEVICE.0.exclusive_access();
-        if driver.can_send() {
-            Some(TxToken)
+        if self.device.can_transmit() {
+            Some(TxToken {
+                device: self.device,
+            })
         } else {
             None
         }
@@ -90,42 +132,6 @@ impl Device for VirtioNetDevice {
     }
 }
 
-impl phy::RxToken for RxToken {
-    fn consume<R, F>(mut self, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        f(&mut self.buffer)
-    }
-}
-
-impl phy::TxToken for TxToken {
-    #[cfg(target_arch = "riscv64")]
-    fn consume<R, F>(self, len: usize, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        let mut buffer = vec![0u8; len];
-        let result = f(&mut buffer); 
-        let mut driver = NET_DEVICE.0.exclusive_access();
-        driver.send(&buffer).expect("Failed to send network packet");
-        
-        result
-    }
-
-    #[cfg(target_arch = "loongarch64")]
-    fn consume<R, F>(self, len: usize, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        let mut driver = NET_DEVICE.0.exclusive_access();
-        let mut tx_buf = driver.new_tx_buffer(len);
-        let result = f(tx_buf.packet_mut()); 
-        driver.send(tx_buf).expect("Failed to send network packet");
-        
-        result
-    }
-}
 pub struct SocketWaitQueue {
     pub rx_queue: Arc<MPSafeCell<WaitQueue>>, // 读操作阻塞
     pub tx_queue: Arc<MPSafeCell<WaitQueue>>, // 写操作阻塞
@@ -149,7 +155,7 @@ lazy_static! {
         // 给 lo 接口分配一个全零的虚拟 MAC 地址
         let dummy_mac = EthernetAddress::from_bytes(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
         let mut config = Config::new(HardwareAddress::Ethernet(dummy_mac));
-        
+
         let mut device = LOOPBACK_DEVICE.exclusive_access();
         let mut iface = Interface::new(config, &mut *device, Instant::from_millis(0));
 
@@ -162,16 +168,12 @@ lazy_static! {
     };
     pub static ref NET_IFACE: MPSafeCell<Interface> = {
 
-        #[cfg(target_arch = "riscv64")]
-        let mac = NET_DEVICE.0.exclusive_access().mac();
+        let mac = NET_DEVICE.mac_address();
 
-        #[cfg(target_arch = "loongarch64")]
-        let mac = NET_DEVICE.0.exclusive_access().mac_address();
-        
         let mac_addr = EthernetAddress::from_bytes(&mac);
         let mut config = Config::new(HardwareAddress::Ethernet(mac_addr));
-        config.random_seed = 0x1122334455667788; 
-        let mut device = VirtioNetDevice;
+        config.random_seed = 0x1122334455667788;
+        let mut device = SmoltcpDevice::new(NET_DEVICE.as_ref());
         let mut iface = Interface::new(config, &mut device, Instant::from_millis(0));
 
         let ip_addr = IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24);
@@ -184,10 +186,11 @@ lazy_static! {
 }
 
 pub fn net_poll() {
+    debug!("net_poll called");
     let mut eth_iface = NET_IFACE.exclusive_access();
     let mut lo_iface = LO_IFACE.exclusive_access();
     let mut sockets = SOCKET_SET.exclusive_access();
-    let mut eth_device = VirtioNetDevice;
+    let mut eth_device = SmoltcpDevice::new(NET_DEVICE.as_ref());
     let mut lo_device = LOOPBACK_DEVICE.exclusive_access();
     let mut state_changed = false;
     let mut loop_count = 0;
@@ -200,17 +203,17 @@ pub fn net_poll() {
         if lo_active || eth_active {
             state_changed = true;
         } else {
-            break; 
+            break;
         }
     }
-    
+
     let mut dead_handles = alloc::vec::Vec::new();
     let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
     for (handle, socket) in sockets.iter_mut() {
         let mut can_read = false;
         let mut can_write = false;
         match socket {
-            smoltcp::socket::Socket::Raw(raw_sock) => { 
+            smoltcp::socket::Socket::Raw(raw_sock) => {
                 can_read = raw_sock.can_recv();
                 can_write = raw_sock.can_send();
             }
@@ -224,7 +227,7 @@ pub fn net_poll() {
                 // 可写：发送缓冲区有空余空间
                 can_write = tcp_sock.can_send();
             }
-            smoltcp::socket::Socket::Udp(udp_sock) => { 
+            smoltcp::socket::Socket::Udp(udp_sock) => {
                 can_read = udp_sock.can_recv();
                 can_write = udp_sock.can_send();
             }
@@ -232,14 +235,14 @@ pub fn net_poll() {
         }
         if let Some(socket_wait) = queues.get(&handle) {
             if can_read {
-                    let has_waiting_task = {
-                        let rx_guard = socket_wait.rx_queue.exclusive_access();
-                        !rx_guard.is_empty()
-                    };
-                    if has_waiting_task {
-                        crate::task::wake_up_one(socket_wait.rx_queue.get_mutex());
-                    }
+                let has_waiting_task = {
+                    let rx_guard = socket_wait.rx_queue.exclusive_access();
+                    !rx_guard.is_empty()
+                };
+                if has_waiting_task {
+                    crate::task::wake_up_one(socket_wait.rx_queue.get_mutex());
                 }
+            }
             if can_write {
                 let has_waiting_task = {
                     let tx_guard = socket_wait.tx_queue.exclusive_access();
@@ -261,5 +264,10 @@ pub fn net_poll() {
     for handle in dead_handles {
         sockets.remove(handle);
     }
-    
+    debug!(
+        "net_poll finished, state_changed={}, loop_count={}, budget={}",
+        state_changed,
+        loop_count,
+        budget
+    );
 }

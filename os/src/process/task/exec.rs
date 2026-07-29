@@ -3,6 +3,8 @@
 use crate::arch::config::PAGE_SIZE;
 use crate::arch::timer::get_time_us;
 use crate::arch::trap::{trap_handler, TrapContext};
+#[cfg(target_arch = "riscv64")]
+use crate::drivers::net::EthernetDevice;
 use crate::fs::{open_file, File, OpenFlags};
 use crate::process::FdFlags;
 use crate::mm::{translated_write, KERNEL_SPACE, MemorySet, VirtAddr};
@@ -16,6 +18,7 @@ use crate::process::task::{TaskControlBlock, TaskStatus, TaskStruct};
 use crate::sync::MPSafeCell;
 use crate::syscall::errno::Errno;
 use alloc::{string::{String, ToString}, sync::Arc, vec, vec::Vec};
+
 
 impl TaskStruct {
 	pub fn do_exec(
@@ -54,10 +57,11 @@ impl TaskStruct {
 			envs.push("TERM=linux".to_string());
 		}
 		if !hwaddr_exists {
+			use crate::drivers::net::EthernetDevice;
 			#[cfg(target_arch = "loongarch64")]
-			let mac = crate::drivers::block::NET_DEVICE.get_mac_address();
+			let mac = crate::drivers::net::NET_DEVICE.mac_address();
 			#[cfg(target_arch = "riscv64")]
-			let mac = crate::drivers::block::NET_DEVICE.0.exclusive_access().mac();
+			let mac = crate::drivers::net::NET_DEVICE.mac_address();
 			let real_mac = alloc::format!(
 				"{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
 				mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]

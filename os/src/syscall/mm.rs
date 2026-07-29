@@ -113,7 +113,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: u
     // 手动刷新指令缓存
     unsafe { core::arch::asm!("ibar 0"); }
     
-    debug!("[kernel] sys_mmap: mapped addr={:#x} for start={:#x}, len={:#x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
+    debug!("[kernel] sys_mmap: mapped addr=0x{:x} for start=0x{:x}, len=0x{:x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
 
     // 处理 MAP_LOCKED：记录锁定的内存量（用于 /proc/self/status VmLck）
     // 目前是伪实现，只单纯记录，实际上没“阻止换出”

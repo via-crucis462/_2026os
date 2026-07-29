@@ -1,6 +1,6 @@
 [toolchain]
 profile = "minimal"
 # use the nightly version of the last stable toolchain, see <https://forge.rust-lang.org/>
-channel = "nightly-2026-01-01" # 尝试使用较新的nightly版本
+channel = "nightly-2026-01-01"
 targets = ["riscv64gc-unknown-none-elf", "loongarch64-unknown-none"]
 components = ["rust-src", "llvm-tools-preview", "rustfmt", "clippy", "rust-analyzer"]

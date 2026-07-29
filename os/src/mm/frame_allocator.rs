@@ -45,7 +45,7 @@ impl Clone for FrameTracker {
 
 impl Debug for FrameTracker {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("FrameTracker:PPN={:#x}", self.ppn.0))
+        f.write_fmt(format_args!("FrameTracker:PPN=0x{:x}", self.ppn.0))
     }
 }
 
@@ -206,7 +206,7 @@ impl FrameAllocator for StackFrameAllocator {
             PageSize::Page1G => self.recycled_giga.contains(&ppn_val),
         };
         if ppn_val >= self.end || already_freed {
-            panic!("Frame ppn={:#x} has not been allocated!", ppn_val);
+            panic!("Frame ppn=0x{:x} has not been allocated!", ppn_val);
         }           
         // 按页大小回收
         match page_size {
@@ -236,14 +236,16 @@ pub fn init_frame_allocator() {
         fn ekernel();
     }
     // 为DMA预留空间
-    #[cfg(target_arch = "loongarch64")]
     let frame_start = ekernel as *const() as usize + DMA_SIZE;
-    #[cfg(target_arch = "riscv64")]
-    let frame_start = ekernel as *const() as usize;
+
+    #[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
+    let frame_end = crate::arch::config::FRAME_ALLOC_END;
+    #[cfg(not(all(target_arch = "riscv64", board = "visionfive2")))]
+    let frame_end = MEMORY_END;
     
     FRAME_ALLOCATOR.exclusive_access().init(
         PhysAddr::from(frame_start).std_ceil(),
-        PhysAddr::from(MEMORY_END).std_floor(),
+        PhysAddr::from(frame_end).std_floor(),
     );
 }
 
@@ -317,8 +319,8 @@ fn frame_release_ref(ppn: PhysPageNum) -> usize {
     let mut ref_counts = FRAME_REF_COUNTS.exclusive_access();
     let counter = ref_counts
         .get_mut(&ppn.0)
-        .unwrap_or_else(|| panic!("Frame ppn={:#x} refcount missing", ppn.0));
-    assert!(*counter > 0, "Frame ppn={:#x} refcount underflow", ppn.0);
+        .unwrap_or_else(|| panic!("Frame ppn=0x{:x} refcount missing", ppn.0));
+    assert!(*counter > 0, "Frame ppn=0x{:x} refcount underflow", ppn.0);
     *counter -= 1;
     let remain = *counter;
     if remain == 0 {

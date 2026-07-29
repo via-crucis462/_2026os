@@ -13,6 +13,13 @@ const VPN_WIDTH: usize = VA_WIDTH - PAGE_SIZE_BITS;
 /// Definitions
 #[repr(C)]
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+/// 物理地址
+/// 
+/// 当需要用裸 usize 值时，特别规定：
+/// pa.0 代表物理地址的实际值
+/// --- 下列只针对龙芯，但 riscv 也保留接口并与la对齐 --
+/// pa.get_cached_addr() 代表带缓存窗口映射值（内核用指针访存应一律使用该值）
+/// pa.get_uncached_addr() 代表不可缓存窗口映射值
 pub struct PhysAddr(pub usize);
 
 /// Virtual Address
@@ -38,22 +45,22 @@ pub struct VirtPageNum(pub usize);
 
 impl Debug for VirtAddr {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("VA:{:#x}", self.0))
+        f.write_fmt(format_args!("VA:0x{:x}", self.0))
     }
 }
 impl Debug for VirtPageNum {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("VPN:{:#x}", self.0))
+        f.write_fmt(format_args!("VPN:0x{:x}", self.0))
     }
 }
 impl Debug for PhysAddr {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("PA:{:#x}", self.0))
+        f.write_fmt(format_args!("PA:0x{:x}", self.0))
     }
 }
 impl Debug for PhysPageNum {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("PPN:{:#x}", self.0))
+        f.write_fmt(format_args!("PPN:0x{:x}", self.0))
     }
 }
 
@@ -79,11 +86,6 @@ impl From<usize> for VirtAddr {
 impl From<usize> for VirtPageNum {
     fn from(v: usize) -> Self {
         Self(v & ((1 << VPN_WIDTH) - 1))
-    }
-}
-impl From<PhysAddr> for usize {
-    fn from(v: PhysAddr) -> Self {
-        v.0
     }
 }
 impl From<PhysPageNum> for usize {
@@ -147,11 +149,23 @@ impl From<VirtPageNum> for VirtAddr {
     }
 }
 impl PhysAddr {
+    /// Get the immutable reference of physical address
+    /// 用 cached 地址，不允许在访问硬件 mmio 等情况下使用
+    pub fn get_ref<T>(&self) -> &'static T {
+        unsafe { (self.get_cached_addr() as *const T).as_ref().unwrap() }
+    }
+    /// Get the mutable reference of physical address
+    /// 用 cached 地址，不允许在访问硬件mmio 等情况下使用
+    pub fn get_mut<T>(&self) -> &'static mut T {
+        unsafe { (self.get_cached_addr() as *mut T).as_mut().unwrap() }
+    }
     /// Get the (floor) physical page number
+    /// 向下取整
     pub fn std_floor(&self) -> PhysPageNum {
         PhysPageNum(self.0 / PAGE_SIZE)
     }
     /// Get the (ceil) physical page number
+    /// 向上取整
     pub fn std_ceil(&self) -> PhysPageNum {
         PhysPageNum((self.0  + PAGE_SIZE - 1) / PAGE_SIZE)
     }
@@ -170,6 +184,34 @@ impl PhysAddr {
     /// 考虑大页的对齐检查
     pub fn actual_aligned(&self, page_size: super::PageSize) -> bool {
         self.actual_page_offset(page_size) == 0
+    }
+    #[cfg(target_arch = "loongarch64")]
+    /// 获取可缓存窗口映射后的内核态地址值
+    pub fn get_cached_addr(&self) -> usize {
+        self.0 | crate::CACHED_KERNEL_BASE
+    }
+    #[cfg(target_arch = "riscv64")]
+    /// 获取内核态地址值
+    /// 
+    /// 规定为内核自身内存访问使用
+    /// 
+    /// 仅为了统一接口，riscv64不需要做任何处理
+    pub fn get_cached_addr(&self) -> usize {
+        self.0
+    }
+    #[cfg(target_arch = "loongarch64")]
+    /// 获取不可缓存窗口映射后的内核态地址值
+    pub fn get_uncached_addr(&self) -> usize {
+        self.0 | crate::UNCACHED_KERNEL_BASE
+    }
+    #[cfg(target_arch = "riscv64")]
+    /// 获取内核态地址值
+    ///
+    /// 规定为设备访问时使用
+    /// 
+    /// 仅为了统一接口，riscv64不需要做任何处理
+    pub fn get_uncached_addr(&self) -> usize {
+        self.0
     }
 }
 impl From<PhysAddr> for PhysPageNum {
@@ -198,34 +240,24 @@ impl VirtPageNum {
     }
 }
 
-impl PhysAddr {
-    /// Get the immutable reference of physical address
-    pub fn get_ref<T>(&self) -> &'static T {
-        unsafe { (self.0 as *const T).as_ref().unwrap() }
-    }
-    /// Get the mutable reference of physical address
-    pub fn get_mut<T>(&self) -> &'static mut T {
-        unsafe { (self.0 as *mut T).as_mut().unwrap() }
-    }
-}
 impl PhysPageNum {
     /// Get the reference of page table(array of ptes)
     /// pte 一定是按标准页组织的，因为一个9位页号对应页表占用一个标准页
     pub fn get_pte_array(&self) -> &'static mut [PageTableEntry] {
         let pa: PhysAddr = (*self).into();
-        unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut PageTableEntry, PAGE_SIZE>>3) }
+        unsafe { core::slice::from_raw_parts_mut(pa.get_cached_addr() as *mut PageTableEntry, PAGE_SIZE>>3) }
     }
     /// Get the reference of page(array of bytes)
     /// 以基本页为单位，返回该页页的字节数组
     pub fn get_bytes_array(&self) -> &'static mut [u8] {
         let pa: PhysAddr = (*self).into();
-        unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, PAGE_SIZE) }
+        unsafe { core::slice::from_raw_parts_mut(pa.get_cached_addr() as *mut u8, PAGE_SIZE) }
     }
     /// 支持大页的版本
     pub fn get_bytes_array_with_size(&self, page_size: super::PageSize) -> &'static mut [u8] {
         let pa: PhysAddr = (*self).into();
-        assert!(pa.actual_aligned(page_size), "physical address {:#x} is not aligned by page size {}!", pa.0, page_size.size());
-        unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, page_size.size()) }
+        assert!(pa.actual_aligned(page_size), "physical address 0x{:x} is not aligned by page size {}!", pa.0, page_size.size());
+        unsafe { core::slice::from_raw_parts_mut(pa.get_cached_addr() as *mut u8, page_size.size()) }
     }
     /// Get the mutable reference of physical address
     pub fn get_mut<T>(&self) -> &'static mut T {

@@ -1,6 +1,6 @@
 //! 虚拟文件系统的inode号管理
  
-use crate::drivers::BLOCK_DEVICE;
+use crate::drivers::block::BLOCK_DEVICE;
 use crate::ext4fs::superblock::{Ext4SuperBlockDisk, Ext4SuperBlock};
 
 use lazy_static::lazy_static;

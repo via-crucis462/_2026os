@@ -2,9 +2,10 @@
 
 pub use crate::timer::*;
 
-use crate::arch::config::UNCHACHED_KERNEL_BASE;
+use crate::arch::config::UNCACHED_KERNEL_BASE;
 use crate::process::scheduler::runqueue::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 const DEFAULT_TIME_SLICE_MS: usize = 10;
 const FIFO_TIME_SLICE_MS: usize = 50;
@@ -15,12 +16,12 @@ const MSEC_PER_SEC: usize = 1000;
 /// The number of microseconds per second
 const MICRO_PER_SEC: usize = 1_000_000;
 const NSEC_PER_SEC: u64 = 1_000_000_000;
-const DEFAULT_TIMER_FREQUENCY: usize = 100_000_000;
+const DEFAULT_TIMER_FREQUENCY: usize = crate::arch::config::CLOCK_FREQ;
 
 /// QEMU loongarch virt 平台上的 LS7A RTC 物理基地址。
 const LS7A_RTC_REG_BASE_PHYS: usize = 0x100D_0100;
 /// LoongArch 内核通过 uncached 直映窗口访问 MMIO。
-const LS7A_RTC_REG_BASE: usize = UNCHACHED_KERNEL_BASE | LS7A_RTC_REG_BASE_PHYS;
+const LS7A_RTC_REG_BASE: usize = UNCACHED_KERNEL_BASE | LS7A_RTC_REG_BASE_PHYS;
 
 const SYS_TOYREAD0: usize = 0x2C;
 const SYS_TOYREAD1: usize = 0x30;
@@ -28,14 +29,13 @@ const SYS_RTCCTRL: usize = 0x40;
 
 const RTC_CTRL_EO: u32 = 1 << 8;
 const RTC_CTRL_TOYEN: u32 = 1 << 11;
-// 全局只初始化一次，所以unsafe是安全的
-static mut TIMER_FREQUENCY: usize = 0;
+static TIMER_FREQUENCY: AtomicUsize = AtomicUsize::new(0);
 
 fn timer_frequency() -> usize {
-    let mut freq = unsafe { TIMER_FREQUENCY };
+    let mut freq = TIMER_FREQUENCY.load(Ordering::Acquire);
     if freq == 0 {
         init_board_freq();
-        freq = unsafe { TIMER_FREQUENCY };
+        freq = TIMER_FREQUENCY.load(Ordering::Acquire);
     }
     freq
 }
@@ -53,29 +53,66 @@ pub fn get_timer_ticks() -> usize {
     get_time()
 }
 
-/// 读取板载时钟频率，单位Hz
+/// 读取 Stable Counter 和核内定时器的频率，单位 Hz。
+///
+/// CPUCFG[4] 给出参考晶振频率，CPUCFG[5] 给出倍频、分频系数；
+/// 这一路时钟不随 NODE PLL 的 CPU 变频而改变。
 pub fn init_board_freq() {
-    let mut freq;
-    unsafe {
-        asm!("cpucfg {}, {}", out(reg) freq, in(reg) 0x4);
-        if freq == 0 {
-            println!("[timer] cpucfg returned zero frequency, using {} Hz", DEFAULT_TIMER_FREQUENCY);
-            freq = DEFAULT_TIMER_FREQUENCY;
-        }
-        TIMER_FREQUENCY = freq;
+    if TIMER_FREQUENCY.load(Ordering::Acquire) != 0 {
+        return;
     }
+
+    let (cc_freq, cc_cfg5): (usize, usize);
+    unsafe {
+        asm!("cpucfg {}, {}", out(reg) cc_freq, in(reg) 0x4);
+        asm!("cpucfg {}, {}", out(reg) cc_cfg5, in(reg) 0x5);
+    }
+
+    let cc_freq = (cc_freq as u32) as u64;
+    let cc_cfg5 = cc_cfg5 as u32;
+    let cc_mul = (cc_cfg5 & 0xffff) as u64;
+    let cc_div = (cc_cfg5 >> 16) as u64;
+    let freq = cc_freq
+        .checked_mul(cc_mul)
+        .and_then(|value| value.checked_div(cc_div))
+        .filter(|&value| value != 0 && value <= usize::MAX as u64)
+        .map(|value| value as usize)
+        .unwrap_or_else(|| {
+            println!(
+                "[timer] invalid CPUCFG clock values: freq={}, mul={}, div={}; using {} Hz",
+                cc_freq, cc_mul, cc_div, DEFAULT_TIMER_FREQUENCY
+            );
+            DEFAULT_TIMER_FREQUENCY
+        });
+
+    if TIMER_FREQUENCY
+        .compare_exchange(0, freq, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        println!(
+            "[timer] stable counter: {} Hz (cc_freq={}, cc_mul={}, cc_div={})",
+            freq, cc_freq, cc_mul, cc_div
+        );
+    }
+}
+
+fn ticks_to_time_units(ticks: usize, units_per_sec: usize) -> usize {
+    let freq = timer_frequency();
+    let secs = ticks / freq;
+    let subsec = ticks % freq;
+    let fraction = ((subsec as u128 * units_per_sec as u128) / freq as u128) as usize;
+
+    secs.saturating_mul(units_per_sec).saturating_add(fraction)
 }
 
 /// get current time in milliseconds
 pub fn get_time_ms() -> usize {
-    let time = get_time();
-    time * MSEC_PER_SEC / timer_frequency()
+    ticks_to_time_units(get_time(), MSEC_PER_SEC)
 }
 
 /// get current time in microseconds
 pub fn get_time_us() -> usize {
-    let time = get_time();
-    time * MICRO_PER_SEC / timer_frequency()
+    ticks_to_time_units(get_time(), MICRO_PER_SEC)
 }
 
 fn rtc_read_u32(offset: usize) -> u32 {
@@ -140,7 +177,7 @@ pub fn set_next_trigger(policy: isize) {
     let ticks = ticks.max(1);
     let tcfg = (ticks << 2) | 0b01;
     unsafe {
-        asm!("csrwr {}, 0x44", in(reg) 1usize);
-        asm!("csrwr {}, 0x41", in(reg) tcfg);
+        asm!("csrwr {}, 0x44", inout(reg) 1usize => _);
+        asm!("csrwr {}, 0x41", inout(reg) tcfg => _);
     }
 }

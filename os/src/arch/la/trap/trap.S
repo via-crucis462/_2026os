@@ -10,8 +10,8 @@
     .globl __alltraps
     .globl __restore
     .globl __call_sig_rt
-    .globl csr_info 
-    .align 4
+    .align 2
+
 __alltraps:
     # csrrw sp, sscratch, sp
     # 需要交换 sp 与 0x502(SAVE0) 寄存器的值
@@ -40,7 +40,7 @@ __alltraps:
     csrrd $t2, 0x502 #读出用户栈指针
     st.d $t2, $sp, 8*3
 
-
+    move $a0, $sp
     bl trap_handler
 
 # a0: trap_cx_ptr, a1: user_satp
@@ -51,7 +51,7 @@ __restore:
     move $t0, $a1
     csrwr $t0, 0x19 # 设置低半部为用户根页表
     la.global $t0, __alltraps
-    csrwr $t0, 0xc # 例外入口地址
+    csrwr $t0, 0xc # 设置例外入口地址
     ///......
 
     //清空tlb
@@ -88,3 +88,57 @@ __restore:
 __call_sig_rt:
     li.d $a7, 139
     syscall 0
+
+.section .text.ktrap
+    .globl __k_alltraps
+    .globl __k_restore
+    .align 2
+# 内核trap
+__k_alltraps:
+    # 在内核栈上分配 TrapContext: 34 * 8 = 272 字节
+    addi.d $sp, $sp, -272
+
+    # 保存zero，覆盖垃圾值
+    st.d $zero, $sp, 0*8
+    st.d $r1, $sp, 1*8
+    st.d $r2, $sp, 2*8
+    # 先保存所有通用寄存器
+    .set n, 4
+    .rept 28
+        SAVE_GP %n
+        .set n, n+1
+    .endr
+
+    # 保存压栈前的栈指针
+    addi.d $t2, $sp, 272
+    st.d $t2, $sp, 3*8
+
+    # 保存 PRMD 和 ERA
+    csrrd $t0, 0x1
+    csrrd $t1, 0x6
+    st.d $t0, $sp, 8*32
+    st.d $t1, $sp, 8*33
+
+    # 调用内核 trap 处理函数
+    move $a0, $sp
+    bl k_trap_handler
+    # 处理完毕后返回此处，自动往下执行进入 __k_restore
+__k_restore:
+    # 恢复 PRMD 和 ERA 到 CSR
+    ld.d $t0, $sp, 8*32
+    ld.d $t1, $sp, 8*33
+    csrwr $t0, 0x1
+    csrwr $t1, 0x6
+
+    # 恢复通用寄存器
+    ld.d $r1, $sp, 1*8
+    ld.d $r2, $sp, 2*8
+    .set n, 4
+    .rept 28
+        LOAD_GP %n
+        .set n, n+1
+    .endr
+
+    # 恢复 sp（释放栈）并 ertn
+    addi.d $sp, $sp, 272
+    ertn

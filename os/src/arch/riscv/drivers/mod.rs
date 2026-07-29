@@ -1,5 +1,6 @@
 //! block device driver
 
-pub mod block;
+pub mod board;
 
-pub use block::BLOCK_DEVICE;
+pub use board::BlockDeviceImpl;
+pub use board::NetDeviceImpl;

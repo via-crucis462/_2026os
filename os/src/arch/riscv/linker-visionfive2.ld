@@ -1,8 +1,6 @@
-# 本文件相比riscv版本仅OUTPUT_ARCH和BASE_ADDRESS不同,其他部分完全一样
-OUTPUT_ARCH(loongarch)
+OUTPUT_ARCH(riscv)
 ENTRY(_start)
-
-BASE_ADDRESS = 0x80000000;
+BASE_ADDRESS = 0x40200000;
 
 SECTIONS
 {
@@ -19,7 +17,7 @@ SECTIONS
         *(.text .text.*)
     }
 
-    . = ALIGN(4K);
+    . = ALIGN(2M);
     etext = .;
     srodata = .;
     .rodata : {
@@ -27,7 +25,7 @@ SECTIONS
         *(.srodata .srodata.*)
     }
 
-    . = ALIGN(4K);
+    . = ALIGN(2M);
     erodata = .;
     sdata = .;
     .data : {
@@ -35,7 +33,7 @@ SECTIONS
         *(.sdata .sdata.*)
     }
 
-    . = ALIGN(4K);
+    . = ALIGN(2M);
     edata = .;
     sbss_with_stack = .;
     .bss : {
@@ -45,7 +43,7 @@ SECTIONS
         *(.sbss .sbss.*)
     }
 
-    . = ALIGN(4K);
+    . = ALIGN(2M);
     ebss = .;
     ekernel = .;
 

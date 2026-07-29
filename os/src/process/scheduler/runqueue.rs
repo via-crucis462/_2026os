@@ -207,13 +207,24 @@ pub(crate) fn remove_task_from_global_pool_unlocked(_tid: usize) {}
 
 /// 唤醒阻塞任务，并重新加入它原先所属 CPU 的运行队列。
 pub fn wake_up_task(task: Arc<TaskControlBlock>) {
-	let should_enqueue = {
+	let should_enqueue = loop {
 		let mut inner = task.inner_exclusive_access();
 		if matches!(inner.state, TaskStatus::Blocked) {
 			inner.state = TaskStatus::Ready;
-			true
+			break true;
+		} else if inner.state == TaskStatus::BlockSaving {
+			// 原本实现没有 loop，直接返回 false ，似乎会把 BlockSaving 的任务给直接丢弃掉
+			// 添加一个 loop 以及调试信息
+			warn!(
+				"[kernel] wake_up_task: task {} is saving context, current state: {:?}",
+				task.getpid(), inner.state
+			);
 		} else {
-			false
+			warn!(
+				"[kernel] wake_up_task: task {} is not blocked, current state: {:?}",
+				task.getpid(), inner.state
+			);
+			break false;
 		}
 	};
 	if should_enqueue {

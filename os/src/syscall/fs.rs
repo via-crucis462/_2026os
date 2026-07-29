@@ -752,7 +752,7 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
             return EFAULT.as_isize();
         }
     };
-    //println!("kernel:pid[{}] sys_statx: dirfd={}, path={}, flags={:#x}, mask={:#x}", task.process().pid.0, dirfd, path_str, flags, mask);
+    //println!("kernel:pid[{}] sys_statx: dirfd={}, path={}, flags=0x{:x}, mask=0x{:x}", task.process().pid.0, dirfd, path_str, flags, mask);
     const AT_EMPTY_PATH: u32 = 0x1000;
     if path_str.is_empty() {
         if (flags & AT_EMPTY_PATH) == 0 {
@@ -1734,7 +1734,7 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
 }
 
 pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> isize {
-    //warn!("fd={}, iov={:?}, iovcnt={}, flags={:#x}", fd, iov, iovcnt, flags);
+    //warn!("fd={}, iov={:?}, iovcnt={}, flags=0x{:x}", fd, iov, iovcnt, flags);
     const IOV_MAX: usize = 1024;
     const IOV_BUF_MAX: usize = 1024 * 1024; // 1 MiB per iovec element
     const SPLICE_F_MOVE: u32 = 0x01;

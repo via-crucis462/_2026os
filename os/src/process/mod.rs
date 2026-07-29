@@ -29,7 +29,6 @@ use crate::{arch::trap, console::print};
 use registry::*;
 use crate::sync::*;
 
-/// 任务处理器，改为pub供外部调用
 #[allow(clippy::module_inception)]
 #[allow(unused)]
 use crate::fs::ROOT_DENTRY;
@@ -294,7 +293,7 @@ fn check_pending_signals() {
     let handling = task_inner.handling_sig;
 
     if signals != 0 {
-        info!("[PROBE 3.1] check_pending: signals={:#x}, mask={:#x}, handling_sig={}", signals, mask, handling);
+        info!("[PROBE 3.1] check_pending: signals=0x{:x}, mask=0x{:x}, handling_sig={}", signals, mask, handling);
     }
     drop(task_inner); 
 

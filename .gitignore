@@ -21,6 +21,8 @@ pushall.sh
 *.bak
 ci-user/
 # os/vendor/
+# 防止 sysroot 中的预编译 .rlib 被误提交
+deps/rust/nightly-2026-01-01-x86_64-unknown-linux-gnu/custom-sysroot/**/*.rlib
 fs_img/la*
 fs_img/riscv*
 fs_img/*.img
@@ -57,3 +59,6 @@ glibc-2.3.5
 glibc-2.3.5.tar.gz
 numactl-2.0.14
 user/user-*
+qemu-system-2k1000
+.neoconf.json
+__pycache__

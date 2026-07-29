@@ -25,8 +25,8 @@ use crate::mm::PhysAddr;
 const BASE_ADDR: usize = PCI_CONFIG_SPACE_BASE;
 use lazy_static::lazy_static;
 use crate::sync::MPSafeCell;
-use virtio_drivers_la::transport::pci::{PciTransport, bus::ConfigurationAccess};
-use virtio_drivers_la::transport::pci::bus::{DeviceFunction, PciRoot};
+use virtio_drivers::transport::pci::{PciTransport, bus::ConfigurationAccess};
+use virtio_drivers::transport::pci::bus::{DeviceFunction, PciRoot};
 
 lazy_static!(
     // 维护当前已分配的MMIO地址
@@ -74,21 +74,21 @@ impl CSpaceAccessMethod {
         match self {
             CSpaceAccessMethod::MemoryMapped => {
                 // 改为窗口映射后的地址
-                let addr = (addr | UNCHACHED_KERNEL_BASE) as *const u32;
+                let addr = (addr | UNCACHED_KERNEL_BASE) as *const u32;
                 addr.read_volatile()
                 }
         }
     }
     pub unsafe fn write8(self, loc: Location, offset: u16, val: u8) {
         let old = self.read32(loc, offset);
-        let dest = offset as usize & 0b11 << 3;
+        let dest = (offset as usize & 0b11) << 3;
         let mask = (0xFF << dest) as u32;
         self.write32(loc, offset, ((val as u32) << dest | (old & !mask)).to_le());
     }
     /// Converts val to little endian before writing.
     pub unsafe fn write16(self, loc: Location, offset: u16, val: u16) {
         let old = self.read32(loc, offset);
-        let dest = offset as usize & 0b10 << 3;
+        let dest = (offset as usize & 0b10) << 3;
         let mask = (0xFFFF << dest) as u32;
         self.write32(loc, offset, ((val as u32) << dest | (old & !mask)).to_le());
     }
@@ -100,7 +100,7 @@ impl CSpaceAccessMethod {
         let addr = loc.encode() + (offset as usize);
         match self {
             CSpaceAccessMethod::MemoryMapped => {
-                let addr = (addr | UNCHACHED_KERNEL_BASE) as *mut u32;
+                let addr = (addr | UNCACHED_KERNEL_BASE) as *mut u32;
                 addr.write_volatile(val);
             }
         }
@@ -124,6 +124,14 @@ impl Location {
             | ((self.device as usize) << 11)
             | ((self.function as usize) << 8)
     }
+    pub fn new(base_addr: usize, bus: u8, device: u8, function: u8) -> Self {
+        Location {
+            base_addr,
+            bus,
+            device,
+            function,
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -144,23 +152,50 @@ pub struct PCIDevice {
     pub id: Identifier,
     pub bars: [Option<BAR>; 6],
     pub cspace_access_method: CSpaceAccessMethod,
+    header_type: u8,
 }
 
+impl PCIDevice {
+    #[inline]
+    fn is_multifunction(&self) -> bool {
+        self.header_type & 0x80 != 0
+    }
+    #[inline]
+    pub fn get_bar(&self, index: usize) -> Option<BAR> {
+        if index < self.bars.len() {
+            self.bars[index]
+        } else {
+            None
+        }
+    }
+
+    /// Read the PCI command register without changing the firmware configuration.
+    #[inline]
+    pub fn command(&self) -> u16 {
+        unsafe { self.cspace_access_method.read16(self.loc, 0x04) }
+    }
+}
+
+/// 是否可通过预取读取：如果读取没有副作用（如显存），可预取以提升性能
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Prefetchable {
     Yes,
-    No
+    No,
 }
 
+/// BAR 地址宽度
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Type {
     Bits32,
-    Bits64
+    Bits64,
 }
 
+/// PCI Base Address Register（基址寄存器）
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum BAR {
+    /// 内存映射 I/O：(基址（从bar解析出的基址）, 大小, 可预取性, 地址宽度)
     Memory(u64, u32, Prefetchable, Type),
+    /// I/O 端口：(端口地址)
     IO(u32),
 }
 
@@ -188,6 +223,51 @@ impl BAR {
             (Some(BAR::IO(raw & !0x3)), idx as usize + 1)
         }
     }
+
+    /// Parse a BAR without the all-ones size probe.
+    ///
+    /// Board firmware owns the BAR assignments of integrated 2K1000 devices.
+    /// Reprogramming a BAR, even temporarily for size discovery, can disrupt an
+    /// active device, so the board path records an unknown length as zero.
+    /// 此处具体数值解析难度不高但较为繁琐，暂由 AI 生成，待验证。
+    pub unsafe fn decode_read_only(
+        loc: Location,
+        am: CSpaceAccessMethod,
+        idx: u16,
+    ) -> (Option<BAR>, usize) {
+        let raw = am.read32(loc, 16 + (idx << 2));
+        if raw & 1 != 0 {
+            return (Some(BAR::IO(raw & !0x3)), idx as usize + 1);
+        }
+
+        let prefetchable = if raw & 0b1000 == 0 {
+            Prefetchable::No
+        } else {
+            Prefetchable::Yes
+        };
+        match (raw & 0b110) >> 1 {
+            0b00 => (
+                Some(BAR::Memory(
+                    (raw & !0xF) as u64,
+                    0,
+                    prefetchable,
+                    Type::Bits32,
+                )),
+                idx as usize + 1,
+            ),
+            0b10 => (
+                Some(BAR::Memory(
+                    ((raw & !0xF) as u64)
+                        | ((am.read32(loc, 16 + ((idx + 1) << 2)) as u64) << 32),
+                    0,
+                    prefetchable,
+                    Type::Bits64,
+                )),
+                idx as usize + 2,
+            ),
+            _ => (None, idx as usize + 1),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -198,33 +278,45 @@ pub struct BusScan {
 
 impl BusScan {
     fn done(&self) -> bool {
+        // 2K1000 所有内部设备均在 bus 0 (手册表6-6), 不扫描其他总线避免真机总线异常
+        #[cfg(board = "2k1000")]
+        if self.loc.bus >= 1 {
+            println!("BusScan done: bus >= 1, stop scanning");
+            return true;
+        }
         if self.loc.bus == 255 && self.loc.device == 31 && self.loc.function == 7 {
             true
         } else {
             false
         }
     }
-    fn increment(&mut self) {
-        // TODO: Decide whether this is actually nicer than taking a u16 and incrementing until it
-        // wraps.
+    fn increment_device(&mut self) {
+        self.loc.function = 0;
+        if self.loc.device < 31 {
+            self.loc.device += 1;
+        } else {
+            self.loc.device = 0;
+            if self.loc.bus == 255 {
+                self.loc.device = 31;
+                self.loc.function = 7;
+            } else {
+                self.loc.bus += 1;
+            }
+        }
+    }
+
+    fn increment(&mut self, device: Option<&PCIDevice>) {
+        // 仅当func0表示该设备（device）是多功能（multifunction）时，才扫描其他功能（function）
+        if self.loc.function == 0 && !matches!(device, Some(dev) if dev.is_multifunction()) {
+            self.increment_device();
+            return;
+        }
+
         if self.loc.function < 7 {
             self.loc.function += 1;
-            return
+            return;
         } else {
-            self.loc.function = 0;
-            if self.loc.device < 31 {
-                self.loc.device += 1;
-                return;
-            } else {
-                self.loc.device = 0;
-                if self.loc.bus == 255 {
-                    self.loc.device = 31;
-                    self.loc.device = 7;
-                } else {
-                    self.loc.bus += 1;
-                    return;
-                }
-            }
+            self.increment_device();
         }
     }
 }
@@ -241,7 +333,7 @@ impl<'a> ::core::iter::Iterator for BusScan {
                 return ret;
             }
             ret = unsafe { probe_function(self.loc, self.am) };
-            self.increment();
+            self.increment(ret.as_ref());
             if ret.is_some() {
                 return ret;
             }
@@ -249,6 +341,7 @@ impl<'a> ::core::iter::Iterator for BusScan {
     }
 }
 
+// 从位置扫描得到pci设备对象
 pub unsafe fn probe_function(loc: Location, am: CSpaceAccessMethod) -> Option<PCIDevice> {
     // FIXME: it'd be more efficient to use read32 and decode separately.
     let vid = am.read16(loc, 0);
@@ -266,16 +359,19 @@ pub unsafe fn probe_function(loc: Location, am: CSpaceAccessMethod) -> Option<PC
         class: class,
         subclass: subclass,
     };
-    let hdrty = am.read8( loc, 14);
+    let header_type = am.read8(loc, 14);
     let mut bars = [None, None, None, None, None, None];
-    let max = match hdrty {
+    let max = match header_type & 0x7F { // 最高位是多功能标志位，低7位是类型
         0 => 6,
         1 => 2,
         _ => 0,
     };
     let mut i = 0;
     while i < max {
-        let (bar, next) = BAR::decode( loc, am, i as u16);
+        #[cfg(board = "2k1000")]
+        let (bar, next) = BAR::decode_read_only(loc, am, i as u16);
+        #[cfg(not(board = "2k1000"))]
+        let (bar, next) = BAR::decode(loc, am, i as u16);
         bars[i] = bar;
         i = next;
     }
@@ -284,6 +380,7 @@ pub unsafe fn probe_function(loc: Location, am: CSpaceAccessMethod) -> Option<PC
         id: id,
         bars: bars,
         cspace_access_method: am,
+        header_type,
     })
 }
 
@@ -293,10 +390,11 @@ pub fn scan_bus(am: CSpaceAccessMethod) -> BusScan {
 
 
 use crate::drivers::{DeviceType};
-use super::block::VirtioHal;
+#[cfg(board = "virt")]
+use super::VirtioHal;
 use alloc::boxed::Box;
 
-
+#[cfg(board = "virt")]
 pub fn scan_and_init_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTransport> {
     //! bug: root会被泄露到堆中，可能会有问题
     //! 如果不使用这样的方式，此函数会有生命周期问题，不过目前的实现能跑
@@ -304,7 +402,7 @@ pub fn scan_and_init_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTran
     // 调用库中的扫描函数扫描第一个块设备
     for dev in scan_bus(am) {
         // 调试用，输出信息
-        info!("found a device: bus={:#x} dev={:#x} func={:#x}", 
+        info!("found a device: bus=0x{:x} dev=0x{:x} func=0x{:x}", 
             dev.loc.bus,
             dev.loc.device,
             dev.loc.function
@@ -324,14 +422,14 @@ pub fn scan_and_init_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTran
             },
             // _ => continue,
         }
-        info!("found a target device, info: vendor_id={:#x}, device_id={:#x}, class={:#x}, subclass={:#x}",
-            dev.id.vendor_id, dev.id.device_id, dev.id.class, dev.id.subclass);
+        info!("found a target device, info: vendor_id=0x{:x}, device_id=0x{:x}, class=0x{:x}, subclass=0x{:x}",
+            dev.id.vendor_id as u32, dev.id.device_id as u32, dev.id.class as u32, dev.id.subclass as u32);
         // 初始化bar
         for (idx, obar) in dev.bars.iter().enumerate() {
             if let Some(bar) = obar {
                 match bar {
                     BAR::Memory(_base, len, prefetchable, ty) => {
-                        debug!("BAR{}: type Memory at {:#x}, length {:#x}, {:?}, {:?}",
+                        debug!("BAR{}: type Memory at 0x{:x}, length 0x{:x}, {:?}, {:?}",
                             idx, _base, len, prefetchable, ty
                         );
                         // 分配MMIO地址
@@ -359,7 +457,7 @@ pub fn scan_and_init_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTran
                         }
                     }
                     BAR::IO(port) => {
-                        debug!("BAR{}: type IO at {:#x}", idx, port);
+                        debug!("BAR{}: type IO at 0x{:x}", idx, port);
                     }
                 }
             }
@@ -375,7 +473,7 @@ pub fn scan_and_init_pci_device_to_trans(dev_type: DeviceType) -> Option<PciTran
         let r_oot = Box::new(root);
         // 注：将生命周期暴力改为static（会泄露内存），不过暂时不会有问题，因为不会反复调用
         let ref_root  = Box::leak(r_oot);
-        info!("creating transport for device: bus={:#x} dev={:#x} func={:#x}", 
+        info!("creating transport for device: bus=0x{:x} dev=0x{:x} func=0x{:x}", 
             dev.loc.bus,
             dev.loc.device,
             dev.loc.function
@@ -430,5 +528,3 @@ pub fn loc_to_func(loc: Location) -> DeviceFunction {
         function: loc.function,
     }
 }
-
-

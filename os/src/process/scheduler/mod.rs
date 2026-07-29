@@ -4,15 +4,10 @@ pub mod wait;
 pub mod futex;
 pub mod nanosleep;
 pub(crate) mod rbtree;
-#[path = "stopRq.rs"]
 pub mod stop_rq;
-#[path = "deadlineRq"]
 pub mod deadline_rq;
-#[path = "cfsRq"]
 pub mod cfs_rq;
-#[path = "rtRq"]
 pub mod rt_rq;
-#[path = "itRq"]
 pub mod idle_rq;
 
 pub use runqueue::*;

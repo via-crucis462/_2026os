@@ -69,7 +69,7 @@ impl TrapContext {
         _trap_handler: usize,
     ) -> Self {
         debug!(
-            "app_init_context: entry={:#x}, sp={:#x}", 
+            "app_init_context: entry=0x{:x}, sp=0x{:x}", 
             entry, sp
         );
         // app启动需设置特权级为用户态，也就是plv=3

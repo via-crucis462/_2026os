@@ -5,6 +5,14 @@
     // For Rust Analyzer plugin users:
     "rust-analyzer.cargo.target": "riscv64gc-unknown-none-elf",
     // "rust-analyzer.cargo.target": "loongarch64-unknown-none",
+
+
+    // 调整板卡
+    "rust-analyzer.cargo.extraEnv": {
+        // "BOARD": "2k1000"
+        // "BOARD": "visionfive2"
+        "BOARD": "virt"
+    },
     
     // 删除了废弃的 rust-analyzer.checkOnSave.allTargets
     "rust-analyzer.check.allTargets": false,
@@ -15,13 +23,8 @@
     "search.useIgnoreFiles": false,
     "search.useGlobalIgnoreFiles": false,
     
-    // 如果需要启用特定开发板特性（比如 qemu），可以取消下面这几行的注释
-    // "rust-analyzer.cargo.features": [
-    //     "board_qemu"
-    // ],
-    
     "rust-analyzer.linkedProjects": [
         "os/Cargo.toml",
         "user/Cargo.toml"
-    ]
+    ],
 }

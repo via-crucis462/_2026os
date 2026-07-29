@@ -8,9 +8,9 @@ ARCH ?= riscv64
 # Log level: ERROR, WARN, INFO, DEBUG, TRACE, OFF
 LOG ?= OFF
 # Initproc: default, busybox, ltp_tests
-INITPROC ?= default
+INIT ?= default
 # BOARD
-BOARD := qemu
+BOARD ?= vf2
 SBI ?= rustsbi
 
 # 添加了新sbi启动选项, 以支持qemu8
@@ -37,7 +37,7 @@ endif
 LA_FS_IMG := ../fs_img/la64_ext4.img
 
 # KERNEL ENTRY
-KERNEL_ENTRY_PA := 0x80200000
+# KERNEL_ENTRY_PA := 0x80200000
 
 # Binutils
 OBJDUMP := rust-objdump --arch-name=riscv64
@@ -57,9 +57,14 @@ endif
 $(KERNEL_BIN): kernel
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
 
+RV_LINKER := src/arch/riscv/linker-virt.ld
+ifeq ($(BOARD),visionfive2)
+	RV_LINKER := src/arch/riscv/linker-visionfive2.ld
+endif
+
 kernel:
 	@echo Platform: $(BOARD)
-	@LOG=$(LOG) INITPROC=$(INITPROC) cargo build --target riscv64gc-unknown-none-elf $(MODE_ARG)
+	@RUSTFLAGS="-Clink-arg=-T$(RV_LINKER) -Cforce-frame-pointers=yes" LOG=$(LOG) INIT=$(INIT) cargo build --target riscv64gc-unknown-none-elf $(MODE_ARG) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=""
 
 clean:
 	@cargo clean
@@ -100,12 +105,20 @@ ifeq ($(OFFLINE),)
 	rustup component add llvm-tools-preview
 endif
 
+# BOARD: qemu (default) or 2k1000
+BOARD ?= qemu
+
+LA_LINKER := src/arch/la/linker-virt.ld
+ifeq ($(BOARD),2k1000)
+    LA_LINKER := src/arch/la/linker-2k1000.ld
+endif
+
 $(LA_KERNEL_BIN): kernel-la
 	@rust-objcopy --binary-architecture=loongarch64 $(LA_KERNEL_ELF) --strip-all -O binary $@
 
 kernel-la:
-	@echo Building for loongarch64...
-	@LOG=$(LOG) INITPROC=$(INITPROC) cargo build --target loongarch64-unknown-none $(MODE_ARG)
+	@echo Building for loongarch64, BOARD=$(BOARD)...
+	@RUSTFLAGS="-Clink-arg=-T$(LA_LINKER) -Cforce-frame-pointers=yes -Ctarget-feature=-ual" LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD) cargo build --target loongarch64-unknown-none $(MODE_ARG) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=""
 
 build-la: env-la kernel-la
 

@@ -16,6 +16,7 @@ pub use block_cache::{block_cache_sync_all, get_block_cache};
 pub use ext4::Ext4FS;
 pub use crate::ext4fs::ext4inode::{Ext4InodeDisk, Ext4Inode};
 
+pub const BLOCK_SZ: usize = 4096;
 
 /// 下面三个辅助函数基于以前显式访问块缓存时的实现修改而来，
 /// 保留的目的是不大幅改动上层代码的同时，让所有块设备访问都经过块缓存

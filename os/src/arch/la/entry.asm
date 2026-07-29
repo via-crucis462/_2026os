@@ -3,7 +3,8 @@
     .equ BOOT_HARTS, 8
     .section .text.entry
     .globl _start
-    .align 4
+    .align 8
+
 _start:
     csrrd $tp, 0x20 # CSR_CPUNUM = 0x20
     la.global $sp, boot_stack_top
@@ -16,6 +17,7 @@ _start:
 
     .section .bss.stack
     .globl boot_stack_lower_bound
+    .align 8
 boot_stack_lower_bound:
     .space BOOT_STACK_SIZE * BOOT_HARTS
     .globl boot_stack_top

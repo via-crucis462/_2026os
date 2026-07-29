@@ -26,6 +26,12 @@ ifeq ($(MODE), release)
 	MODE_ARG := --release
 endif
 
+ifeq ($(ARCH), loongarch64)
+	CARGO_BUILD := RUSTFLAGS="-Clink-arg=-Tsrc/linker-la.ld -Ctarget-feature=-ual" cargo build --target $(TARGET) $(MODE_ARG) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=""
+else
+	CARGO_BUILD := cargo build --target $(TARGET) $(MODE_ARG)
+endif
+
 BASE ?= 0
 CHAPTER = 7
 TEST ?= $(CHAPTER)
@@ -51,7 +57,7 @@ binary:
 	@echo $(ELFS)
 	@rustup target add $(TARGET)
 	@if [ ${CHAPTER} -gt 3 ]; then \
-		cargo build --target $(TARGET) $(MODE_ARG) ;\
+		$(CARGO_BUILD) ;\
 	else \
 		CHAPTER=$(CHAPTER) python3 build.py ;\
 	fi
