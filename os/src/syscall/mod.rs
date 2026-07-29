@@ -306,7 +306,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         inner.info_map_areas();
     }*/
     warn!("[K] hart[{}] PID{} , called syscall {}", get_hart_id(), current_task().unwrap().pid.0, syscall_id);
-    warn!("[K] syscall args: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}", args[0], args[1], args[2], args[3], args[4], args[5]);
+    //warn!("[K] syscall args: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}", args[0], args[1], args[2], args[3], args[4], args[5]);
     info!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().getpid(), current_task().unwrap().gettid(), syscall_id);
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
@@ -523,7 +523,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             "[Syscall Trace] ID: {:3} | Args: [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], args[3], args[4], ret
         );*/
-    warn!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
+    //warn!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
     info!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
     ret
 }
