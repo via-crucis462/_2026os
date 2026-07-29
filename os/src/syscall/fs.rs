@@ -122,7 +122,10 @@ fn ensure_fd_slots(files: &mut crate::process::FileDescriptorTable, target_len: 
 }
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
-    if !prepare_user_write(token, buf as usize, len) {
+    // write(2) copies bytes from user space into the kernel/file.  The user
+    // buffer only needs to be readable; requiring write permission rejects
+    // valid string literals and other read-only mappings with EFAULT.
+    if !prepare_user_read(token, buf as usize, len) {
         return EFAULT.as_isize();
     }
     let task = current_task().unwrap();

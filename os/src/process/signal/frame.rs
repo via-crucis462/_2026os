@@ -130,7 +130,8 @@ pub(super) fn push_signal_frame(
 ) -> Option<(usize, usize)> {
 	let trap_ctx = task_inner.get_trap_cx();
 	let frame_size = core::mem::size_of::<SignalFrame>();
-	let frame_sp = (trap_ctx.get_sp().checked_sub(frame_size)? & !0xfusize) as usize;
+	let user_sp = trap_ctx.get_sp();
+	let frame_sp = (user_sp.checked_sub(frame_size)? & !0xfusize) as usize;
 	let frame = SignalFrame {
 		info: crate::syscall::process::SigInfo {
 			si_signo: sig as i32 + 1,
@@ -145,8 +146,15 @@ pub(super) fn push_signal_frame(
 		},
 		ucontext: SignalUserContext::from_trap_ctx(trap_ctx, saved_mask.bits() as usize),
 	};
-    
+
 	let token = task_inner.get_user_token();
+	let mm = task_inner.mm.as_ref()?.clone();
+	if !mm
+		.exclusive_access()
+		.ensure_writable_user_range(frame_sp, frame_size, user_sp)
+	{
+		return None;
+	}
 	if !try_translated_write(token, frame_sp as *mut SignalFrame, frame) {
 		return None;
 	}

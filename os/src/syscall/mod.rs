@@ -175,7 +175,7 @@ const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MLOCK: usize = 228;
 const SYSCALL_MSYNC: usize = 227;
-const SYSCALL_PTHREADCREATE: usize = 236;
+const SYSCALL_GET_MEMPOLICY: usize = 236;
 /// madvise syscall
 const SYSCALL_MADVISE: usize = 233;
 const SYSCALL_FSYNC: usize = 82;
@@ -471,7 +471,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_USERFAULTFD => sys_userfaultfd(args[0] as i32),
         SYSCALL_MEMBARRIER => sys_membarrier(args[0] as i32, args[1] as u32, args[2] as i32),
         SYSCALL_SYMLINK => sys_symlinkat(args[0] as *const u8, args[1] as isize, args[2] as *const u8),
-        SYSCALL_PTHREADCREATE => sys_pthread_create(args[0] as *mut usize, args[1] as *const usize, args[2] as usize, args[3] as usize),
+        SYSCALL_GET_MEMPOLICY => sys_get_mempolicy(
+            args[0] as *mut i32,
+            args[1] as *mut usize,
+            args[2],
+            args[3],
+            args[4],
+        ),
         SYSCALL_SCHED_SETSCHEDULER => sys_sched_setscheduler(args[0] as isize, args[1] as isize, args[2] as *const SchedParam),
         SYSCALL_SCHED_GETSCHEDULER => sys_sched_getscheduler(args[0] as isize),
         SYSCALL_SCHED_GETPARAM => sys_sched_getparam(args[0] as isize, args[1] as *mut SchedParam),

@@ -385,7 +385,7 @@ pub fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
         let mut vpn = start_va.std_floor();
         let p_s = page_table.find_pte(vpn);
         let size = match p_s {
-            Some((pte, size)) if pte.is_valid() && pte.readable() => {
+            Some((pte, size)) if pte.is_valid() && pte.writable() => {
                 size
             }
             _ => {

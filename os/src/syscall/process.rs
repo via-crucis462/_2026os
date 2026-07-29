@@ -1495,91 +1495,51 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usi
     let task = current_task().unwrap();
     task.do_clone(flags, stack, ptid, ctid, tls)
 }
-pub fn sys_pthread_create(thread: *mut usize, attr: *const usize, start_routine: usize, arg: usize) -> isize {
-    warn!("sys_pthread_create: thread={:#x}, attr={:#x}, start_routine={:#x}, arg={:#x}", thread as usize, attr as usize, start_routine, arg);
-    
-    let token = current_user_token();
-    let current_task = current_task().unwrap();
-    
-    // 1. 尝试从 attr 中读取用户指定的栈地址
-    // pthread_attr_t 布局 (musl): 
-    //   offset 0: __detach_state (4 bytes)
-    //   offset 4: __sched_policy (4 bytes)  
-    //   offset 8: __sched_priority (4 bytes)
-    //   offset 16: __stack (8 bytes on 64-bit)
-    //   offset 24: __stack_size (8 bytes)
-    let user_stack: Option<usize> = if attr as usize != 0 {
-        // 读取 __stack 字段 (offset 16 in pthread_attr_t)
-        let stack_ptr: usize = if let Some(val) = try_translated_read(token, unsafe { (attr as *const usize).add(2) }) {
-            val
-        } else {
-            0
-        };
-        if stack_ptr != 0 {
-            // 读取 __stack_size (offset 24)
-            let stack_size: usize = if let Some(val) = try_translated_read(token, unsafe { (attr as *const usize).add(3) }) {
-                val
-            } else {
-                0
-            };
-            if stack_size > 0 {
-                // 栈顶 = 栈底 + 栈大小 (栈向下增长)
-                Some(stack_ptr + stack_size)
-            } else {
-                Some(stack_ptr)
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    
-    // 2. 创建内核线程，共享父进程地址空间
-    let clone_flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
-    let new_tid = current_task.do_clone(clone_flags, user_stack.unwrap_or(0), 0, 0, 0);
-    if new_tid < 0 {
-        return new_tid;
-    }
-    let new_tid = new_tid as usize;
-    let Some(new_task) = tid2task(new_tid) else {
-        return ESRCH.as_isize();
-    };
-    
-    // 3. 设置新线程的入口点和参数
+/// Return the effective NUMA memory policy. This kernel currently exposes one
+/// memory node, so every address uses node 0 and the default policy.
+pub fn sys_get_mempolicy(
+    mode: *mut i32,
+    nodemask: *mut usize,
+    maxnode: usize,
+    _addr: usize,
+    flags: usize,
+) -> isize {
+    const MPOL_F_NODE: usize = 1;
+    const MPOL_F_ADDR: usize = 2;
+    const MPOL_F_MEMS_ALLOWED: usize = 4;
+    const VALID_FLAGS: usize = MPOL_F_NODE | MPOL_F_ADDR | MPOL_F_MEMS_ALLOWED;
+
+    if flags & !VALID_FLAGS != 0
+        || flags & MPOL_F_MEMS_ALLOWED != 0 && flags != MPOL_F_MEMS_ALLOWED
+        || flags & MPOL_F_NODE != 0 && mode.is_null()
     {
-        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
-        trap_cx.set_rt(start_routine);
-        trap_cx.set_a0(arg);
+        return EINVAL.as_isize();
     }
-    
-    // 4. 将 TID 写回用户空间
-    if thread as usize != 0 {
-        if !try_translated_write(token, thread, new_tid as usize) {
-            warn!("sys_pthread_create: failed to write TID to user space");
+
+    let token = current_user_token();
+    if !mode.is_null() && !try_translated_write(token, mode, 0i32) {
+        return EFAULT.as_isize();
+    }
+
+    if !nodemask.is_null() && maxnode != 0 {
+        let word_bits = usize::BITS as usize;
+        let words = maxnode.saturating_add(word_bits - 1) / word_bits;
+        for index in 0..words {
+            let value = if index == 0 { 1usize } else { 0usize };
+            if !try_translated_write(token, unsafe { nodemask.add(index) }, value) {
+                return EFAULT.as_isize();
+            }
         }
     }
-    
-    warn!("sys_pthread_create: created thread with TID {}", new_tid);
-    new_tid as isize
+
+    0
 }
 // path elf路径
 // args 参数数组，必须以0结尾
 // envp 环境变量数组，必须以0结尾
 pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize) -> isize {
-    
-    //warn!("curent core id: {}, sys_exec called with path: {:?}, args: {:?}", get_hart_id(), path, args);
     let token = current_user_token();
     let task = current_task().unwrap();
-    let (fs, cred) = {
-        let inner = task.inner_exclusive_access();
-        (inner.fs.clone(), inner.cred.clone())
-    };
-    let cwd = fs.exclusive_access().get_pwd();
-    let (uid, gid) = {
-        let cred = cred.exclusive_access();
-        (cred.uid(), cred.gid())
-    };
     let path_str = {
         if let Some(path) = try_translated_str(token, path){
             normalize_leading_dot_path(path)
@@ -1595,9 +1555,6 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             return ENAMETOOLONG.as_isize(); 
         }
     }
-    let pid = task.getpid();
-
-
     let mut args_vec: Vec<String> = Vec::new();
     // 提取原始参数数组
     if args as usize != 0 {
@@ -1646,192 +1603,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             unsafe { envs = envs.add(1); }
         }
     }
-    let mut path_exists = false;
-    let mut hwaddr_exists = false;
-    for env in envs_vec.iter() {
-        if env.starts_with("PATH=") {
-            path_exists = true;
-            break;
-        }
-        if env.starts_with("LHOST_HWADDRS=") {
-            hwaddr_exists = true;
-        }
-    }
-    if !envs_vec.iter().any(|e| e.starts_with("ENOUGH=")) {
-        envs_vec.push("ENOUGH=5000".to_string());
-    }
-    // 初始化的时候增加基本的系统环境变量
-    if !path_exists {
-        envs_vec.push("PATH=/bin:/sbin:/usr/bin:/usr/sbin:/musl:/musl/ltp/testcases/bin".to_string());
-        envs_vec.push("HOME=/".to_string());
-        envs_vec.push("TERM=linux".to_string());
-    }
-    if !hwaddr_exists {
-        // 没有 MAC 地址后增加
-        #[cfg(target_arch = "loongarch64")]
-        let mac = crate::drivers::block::NET_DEVICE.get_mac_address();
-        #[cfg(target_arch = "riscv64")]
-        let mac = crate::drivers::block::NET_DEVICE.0.exclusive_access().mac();
-        let real_mac_str = alloc::format!(
-            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-        );
-        
-        envs_vec.push(alloc::format!("LHOST_HWADDRS={}", real_mac_str)); //本地真实 MAC
-        envs_vec.push("RHOST_HWADDRS=00:11:22:33:44:66".to_string());//远端假 MAC
-        envs_vec.push("LHOST_IFACES=eth0".to_string());               // 本地网卡名
-        envs_vec.push("RHOST_IFACES=eth0".to_string());               // 远端网卡名
-    }
-    trace!("[kernel] sys_exec: before open_file");
-    //给不支持的grep -1参数补成 -B
-    let is_grep = path_str.ends_with("grep") || args_vec.iter().any(|x| x == "grep");
-    
-    if is_grep && args_vec.contains(&"-1".to_string()) {
-        if let Some(pos) = args_vec.iter().position(|x| x == "-1") {
-            info!("[kernel] sys_exec: caught 'grep -1', patching to '-B 1'...");
-            args_vec[pos] = "-B".to_string();
-            args_vec.insert(pos + 1, "1".to_string());
-        }
-    }
-    // 1. 尝试正常打开主程序
-    let mut app_inode_opt = open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY,0);
-    let mut using_busybox_fallback = false;
-
-    // 2. 继续执行逻辑
-    if let Some(mut app_inode) = app_inode_opt {
-        {
-            let stat = app_inode.inode.get_stat();
-            let is_dir = (stat.mode & 0o170000) == 0o040000;
-            let perm = app_inode.get_perm();
-            let can_exec = perm.can_execute(uid, gid);
-            if is_dir || !can_exec {
-                warn!("[kernel] sys_exec: target '{}' is not executable (is_dir={}, mode={:#o})", path_str, is_dir, stat.mode);
-                return EACCES.as_isize();
-            }
-        }
-        
-        debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
-
-        let app_name = app_inode.get_dentry().name.clone();
-        let mut all_data = app_inode.read_all();
-        let is_script = app_name.ends_with(".sh") || (all_data.len() >= 2 && &all_data[0..2] == b"#!");
-        // 脚本处理逻辑 (.sh)——仅在非 busybox 回退模式下生效
-        if !using_busybox_fallback && is_script     {
-            info!("[kernel] sys_exec: detected script '{}', trying to execute with busybox", app_name);
-            let busybox = "/musl/busybox";
-            if let Some(inode) = open_file(cwd.clone(), busybox, OpenFlags::RDONLY,0) {
-                let mut new_args = vec!["musl/busybox".to_string(), "sh".to_string()];
-                info!("[kernel] sys_exec: redirecting script path to args: {}", path_str);
-                // 把脚本自己的路径作为第三个参数加进去
-                new_args.push(path_str.clone()); 
-                if args_vec.len() > 1 {
-                    for arg in args_vec.iter().skip(1) {
-                        new_args.push(arg.clone());
-                    }
-                }
-                args_vec = new_args;
-                app_inode = inode;
-                all_data = app_inode.read_all();
-                let current_proc = current_task().unwrap();
-                let inner = current_proc.inner_exclusive_access();
-                info!("[kernel] sys_exec: script detour success. Current process PID: {}, basic children count: {}", current_proc.getpid(), inner.children.len());
-            } else {
-                warn!("[kernel] sys_exec: failed to open busybox for script execution");
-                return ENOENT.as_isize();
-            }
-        }
-
-       
-        // 验证 ELF 签名
-        
-        if all_data.len() < 4 || &all_data[0..4] != &[0x7f, 0x45, 0x4c, 0x46] {
-            return ENOEXEC.as_isize();
-        }
-        
-        let task = current_task().unwrap();
-        let argc = args_vec.len();
-        for i in 0..argc {
-            info!("[kernel] sys_exec: arg[{}] = '{}'", i, args_vec[i]);
-        }
-        // 真正开始替换进程空间
-        task.do_exec(
-            task.clone(),
-            all_data.as_slice(),
-            args_vec,
-            envs_vec,
-            false,
-        );
-        // exec 成功后不会回到旧程序，返回 0 可避免 trap 收尾把 argc 写进新程序 a0。
-        #[cfg(target_arch = "loongarch64")]
-        // la应该手动刷新指令缓存
-        unsafe { core::arch::asm!("ibar 0"); }
-        0
-    } else {
-        let mut check_path = alloc::string::String::new();
-        if path_str.starts_with('/') { check_path.push('/'); }
-        
-        let comps: alloc::vec::Vec<&str> = path_str.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
-        for i in 0..comps.len() {
-            if i > 0 && !check_path.ends_with('/') { check_path.push('/'); }
-            check_path.push_str(comps[i]);
-            // 如果当前不是最后一段路径，或者原路径明确以 '/' 结尾（如 testfile/），这一段必须是目录
-            let require_dir = i < comps.len() - 1 || path_str.ends_with('/');
-            if require_dir {
-                if let Ok(node) = cwd.find_tree(&check_path, true) {
-                    let stat = node.inode.get_stat();
-                    let is_dir = (stat.mode & 0o170000) == 0o040000;
-                    if !is_dir {
-                        return ENOTDIR.as_isize(); // ENOTDIR: 路径中间遇到了非目录文件
-                    }
-                }
-            }
-        }
-        // 打开失败，细分错误码，后续考虑修改open_file逻辑来避免重复查路径
-        // 检查路径中是否有中间组件不是目录
-        let start_node = if path_str.starts_with('/') {
-            crate::fs::ROOT_DENTRY.clone()
-        } else {
-            cwd.clone()
-        };
-
-        let parts: Vec<&str> = path_str
-            .split('/')
-            .filter(|s| !s.is_empty() && *s != ".")
-            .collect();
-
-        if !parts.is_empty() {
-            let mut cur = start_node;
-            // 只遍历到倒数第二个（中间路径组件），最后一个是被执行的文件本身
-            for comp in &parts[..parts.len() - 1] {
-                if *comp == ".." {
-                    if let Some(parent) = cur.parent.upgrade() {
-                        cur = parent;
-                    }
-                    continue;
-                }
-                // 当前节点必须是目录才能继续向下查找
-                let stat = cur.inode.get_stat();
-                let ftype = stat.mode & 0o170000; // S_IFMT
-                if ftype != 0o040000 && ftype != 0o120000 {
-                    // 不是目录也不是软链接
-                    return ENOTDIR.as_isize();
-                }
-                if let Some(child) = cur.find_child(comp) {
-                    cur = child;
-                } else {
-                    // 中间组件不存在 -> ENOENT
-                    return ENOENT.as_isize();
-                }
-            }
-            // 检查最后一个组件的父目录是否是目录
-            let stat = cur.inode.get_stat();
-            let ftype = stat.mode & 0o170000; // S_IFMT
-            if ftype != 0o040000 && ftype != 0o120000 {
-                return ENOTDIR.as_isize();
-            }
-        }
-        ENOENT.as_isize()
-    }
+    task.do_exec(path_str, args_vec, envs_vec)
 }
 ///wait系的参数
 const P_ALL: i32 = 0;

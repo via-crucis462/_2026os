@@ -39,7 +39,10 @@ pub fn handle_signals() {
     let unmaskable = (SignalFlags::SIGKILL | SignalFlags::SIGSTOP);
     // 从掩码中移除不可屏蔽
     task_inner.blocked.remove(unmaskable);
-    let raw_signals = task_inner.pending.flags();
+    let thread_signals = task_inner.pending.flags();
+    let signal = task_inner.signal.clone();
+    let shared_signals = signal.exclusive_access().pending_flags();
+    let raw_signals = thread_signals | shared_signals;
     let mask = task_inner.blocked;
     let pending = {
         let mut copy = raw_signals;
@@ -54,7 +57,13 @@ pub fn handle_signals() {
         // 内核的处理函数统一用减一后的编号
         let sig = pending_bits.trailing_zeros() as usize;
         let flag = SignalFlags::from_bits(1 << sig).unwrap();
-        task_inner.pending.remove(flag);
+        if thread_signals.contains(flag) {
+            task_inner.pending.remove(flag);
+        } else {
+            // A process-directed signal is consumed by exactly one unblocked
+            // member of the thread group.
+            signal.exclusive_access().remove_pending(flag);
+        }
         drop(task_inner);
         // 跳到处理函数
         call_signal_handler(sig, flag);
@@ -71,12 +80,21 @@ pub fn handle_signals() {
 fn  call_signal_handler(sig: usize, signal: SignalFlags) {
     warn!("[SIG PROBE] Calling handler for sig: {}", sig);
     let task = current_task().unwrap();
+    warn!("[SIG PROBE] Selected PID {} TID {}", task.getpid(), task.gettid());
     let mut task_inner = task.inner_exclusive_access();
+    warn!("[SIG PROBE] Locked TID {}", task.gettid());
     let action = {
         task_inner.signal_hand.exclusive_access().action(sig)
-    };  
+    };
     let handler = action.handler;
     let mask = action.mask;
+    warn!(
+        "[SIG PROBE] Action sig={} handler={:#x} flags={:#x} mask={:#x}",
+        sig + 1,
+        handler,
+        action.flags,
+        mask.bits()
+    );
 
     // handler如果是0，1 表示默认/忽略
     // 默认，表示由内核处理
@@ -105,10 +123,21 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
 
         let trap_ctx = task_inner.get_trap_cx();
         task_inner.trap_ctx_backup.push(*trap_ctx);
+        warn!(
+            "[SIG PROBE] Building frame pc={:#x} sp={:#x}",
+            trap_ctx.get_rt(),
+            trap_ctx.get_sp()
+        );
         let Some((info_ptr, ucontext_ptr)) = push_signal_frame(&mut task_inner, sig, cur_mask) else {
+            warn!("[SIG PROBE] Failed to write signal frame");
             task_inner.term_signal = Some(sig as i32 + 1);
             return;
         };
+        warn!(
+            "[SIG PROBE] Frame ready info={:#x} uctx={:#x}",
+            info_ptr,
+            ucontext_ptr
+        );
 
         #[cfg(target_arch = "riscv64")]
         if sig + 1 == 33 {
@@ -132,6 +161,11 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
         trap_ctx.set_sp(info_ptr);
         // 保证信号处理完恢复
         set_sig_ret(trap_ctx);
+        warn!(
+            "[SIG PROBE] Returning to handler pc={:#x} sp={:#x}",
+            trap_ctx.get_rt(),
+            trap_ctx.get_sp()
+        );
     } else { 
         warn!(
             "[SIG PROBE] PID {} (tid {}) default handling for signal {} ({:?})",
