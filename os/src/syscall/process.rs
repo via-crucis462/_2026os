@@ -5,7 +5,7 @@
 use core::{panic, result};
 use crate::net::SOCKET_SET;
 use core::sync::atomic::{AtomicI32, Ordering};
-use crate::process::{block_current_and_run_next, wait4_block_current, waitid_block_current};
+use crate::process::{block_current_and_run_next_if, wait4_block_current, waitid_block_current};
 
 use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, USER_STACK_SIZE, get_hart_id};
@@ -44,10 +44,19 @@ pub(crate) fn clear_child_tid_and_wake(token: usize, clear_child_tid: usize) {
         return;
     }
 
+    // Clear first: try_translated_write may populate a lazy anonymous page or
+    // resolve COW, either of which can establish/change the physical futex key.
+    if !try_translated_write(token, clear_child_tid as *mut u32, 0u32) {
+        error!(
+            "[CLEAR_CHILD_TID] failed to clear va={:#x}",
+            clear_child_tid,
+        );
+        return;
+    }
+
+    // Translate again after the write and wake waiters on the final PTE's key.
     let page_table = PageTable::from_token(token);
     if let Some(pa) = page_table.translate_va(VirtAddr::from(clear_child_tid)) {
-        let _ = try_translated_write(token, clear_child_tid as *mut u32, 0u32);
-
         let queue = {
             let queues = FUTEX_WAIT_QUEUES.lock();
             queues.get(&pa.0).cloned()
@@ -4350,8 +4359,32 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 return EFAULT.as_isize();
             };
             let queue = get_futex_wait_queue(pa.0);
-            block_current_and_run_next(&queue);
-            warn!("task {} sleep on futex {:x}", current_task().unwrap().getpid(), pa.0);
+
+            // Linux FUTEX_WAIT 的“比较用户值并挂入等待队列”必须相对
+            // FUTEX_WAKE 原子。首次比较与这里之间，另一个 hart 可能已经
+            // 修改值并执行过 WAKE；若无条件入队，就会永久错过该唤醒。
+            // block_current_and_run_next_if 持有同一 queue 锁执行闭包并
+            // 入队，而 WAKE 也持有该锁 pop_front，从而关闭竞态窗口。
+            let mut rechecked_value = None;
+            let blocked = block_current_and_run_next_if(&queue, || {
+                rechecked_value = try_translated_read(token, uaddr as *const i32);
+                rechecked_value == Some(val)
+            });
+            if !blocked {
+                return match rechecked_value {
+                    Some(current) => {
+                        warn!(
+                            "[FUTEX RECHECK EAGAIN] tid={} uaddr={:#x} expect={} current={}",
+                            current_tid,
+                            uaddr as usize,
+                            val,
+                            current,
+                        );
+                        EAGAIN.as_isize()
+                    }
+                    None => EFAULT.as_isize(),
+                };
+            }
             let current = current_task().unwrap();
             let current_tid = current.gettid();
             {

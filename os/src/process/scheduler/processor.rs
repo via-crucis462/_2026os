@@ -4,6 +4,8 @@ use crate::process::scheduler::idle_tasks;
 use crate::process::scheduler::nanosleep::wake_expired_sleep_tasks;
 use crate::process::scheduler::runqueue::{enqueue_task_on_cpu, fetch_task, SCHED_OTHER};
 use crate::process::{TaskContext, TaskControlBlock, TaskStatus};
+use crate::process::id::kernel_mapping_generation;
+use crate::mm::kernel_asid;
 use crate::arch::timer::get_time_us;
 use crate::get_hart_id;
 use crate::sync::*;
@@ -29,6 +31,7 @@ extern "C" {
 pub struct Processor {
     pub(crate) current: Option<Arc<TaskControlBlock>>,
     idle_task_cx: TaskContext,
+    kernel_mapping_generation: u64,
 }
 
 impl Processor {
@@ -36,6 +39,7 @@ impl Processor {
         Self {
             current: None,
             idle_task_cx: TaskContext::zero_init(),
+            kernel_mapping_generation: 0,
         }
     }
 
@@ -126,17 +130,24 @@ pub fn run_tasks() {
                 .map(|task| task.inner_exclusive_access().sched_policy)
                 .unwrap_or(SCHED_OTHER);
             crate::arch::timer::set_next_trigger(sched_policy);
-            // Kernel-stack virtual addresses are recycled. Another hart may have
-            // unmapped and remapped this task's stack while this hart still holds
-            // the old translation, so invalidate locally before using the new sp.
-            #[cfg(target_arch = "riscv64")]
-            unsafe {
-                asm!("sfence.vma x0, x0");
-            }
-            #[cfg(target_arch = "loongarch64")]
-            unsafe {
-                asm!("invtlb 0, $r0, $r0");
-                asm!("dbar 0");
+            // Stack mappings live in the shared kernel page table. Only flush
+            // this hart when that page table changed since its last switch.
+            // Cached stacks do not change mappings and therefore need no flush.
+            let generation = kernel_mapping_generation();
+            let needs_kernel_tlb_flush = {
+                let mut processor = current_processor();
+                if processor.kernel_mapping_generation == generation {
+                    false
+                } else {
+                    processor.kernel_mapping_generation = generation;
+                    true
+                }
+            };
+            if needs_kernel_tlb_flush {
+                // ASIDs tag an address space, not one stack range. All kernel
+                // stacks belong to KERNEL_SPACE, whose dedicated ASID lets us
+                // preserve unrelated user-ASID translations on this hart.
+                crate::arch::mm::flush_tlb_for_asid(kernel_asid());
             }
             unsafe {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);

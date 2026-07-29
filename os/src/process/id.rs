@@ -10,6 +10,26 @@ use alloc::vec::Vec;
 use lazy_static::*;
 #[allow(unused)]
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Maximum number of unused kernel stacks whose mappings are kept alive.
+///
+/// A cached stack keeps both its virtual address and physical frames, so a
+/// stale TLB entry on another hart still describes the same mapping. 64 stacks
+/// cover the peak concurrency of the pthread create/join benchmark while
+/// keeping the retained memory bounded.
+const KSTACK_CACHE_LIMIT: usize = 64;
+
+/// Incremented whenever the kernel page table's stack mappings change.
+static KERNEL_MAPPING_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub fn kernel_mapping_generation() -> u64 {
+    KERNEL_MAPPING_GENERATION.load(Ordering::Acquire)
+}
+
+fn kernel_mapping_changed() {
+    KERNEL_MAPPING_GENERATION.fetch_add(1, Ordering::Release);
+}
 
 pub struct RecycleAllocator {
     current: usize,
@@ -54,7 +74,8 @@ lazy_static! {
     static ref PID_ALLOCATOR: MPSafeCell<RecycleAllocator> =
         MPSafeCell::new(RecycleAllocator::new_with_start(1));
     static ref KSTACK_ALLOCATOR: MPSafeCell<RecycleAllocator> =
-        MPSafeCell::new(RecycleAllocator::new());    
+        MPSafeCell::new(RecycleAllocator::new());
+    static ref KSTACK_CACHE: MPSafeCell<Vec<usize>> = MPSafeCell::new(Vec::new());
 }
 
 /// Abstract structure of PID
@@ -113,6 +134,18 @@ pub struct KernelStack(pub usize);
 
 /// allocate a new kernel stack
 pub fn kstack_alloc() -> KernelStack {
+    // Reuse the complete old mapping. In particular, do not unmap/remap the
+    // same virtual address to different physical frames: another hart may
+    // still have a translation for this globally shared kernel page table.
+    if let Some(kstack_id) = KSTACK_CACHE.exclusive_access().pop() {
+        let (kstack_bottom, _) = kernel_stack_position(kstack_id);
+        unsafe {
+            // 清空内核栈
+            core::ptr::write_bytes(kstack_bottom as *mut u8, 0, KERNEL_STACK_SIZE);
+        }
+        return KernelStack(kstack_id);
+    }
+
     let kstack_id = KSTACK_ALLOCATOR.exclusive_access().alloc();
     let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
     warn!("kstack_alloc: allocated kernel stack {} with bottom {:#x} and top {:#x}", kstack_id, kstack_bottom, kstack_top);
@@ -122,16 +155,25 @@ pub fn kstack_alloc() -> KernelStack {
         MapPermission::R | MapPermission::W,
         PageSize::Page4K, // 内核栈用标准页
     );
+    kernel_mapping_changed();
     KernelStack(kstack_id)
 }
 
 impl Drop for KernelStack {
     fn drop(&mut self) {
+        let mut cache = KSTACK_CACHE.exclusive_access();
+        if cache.len() < KSTACK_CACHE_LIMIT {
+            cache.push(self.0);
+            return;
+        }
+        drop(cache);
+
         let (kernel_stack_bottom, _) = kernel_stack_position(self.0);
         let kernel_stack_bottom_va: VirtAddr = kernel_stack_bottom.into();
         KERNEL_SPACE
             .exclusive_access()
             .remove_area_with_start_vpn(kernel_stack_bottom_va.into());
+        kernel_mapping_changed();
         KSTACK_ALLOCATOR.exclusive_access().dealloc(self.0);
     }
 }
