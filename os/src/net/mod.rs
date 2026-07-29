@@ -187,6 +187,7 @@ lazy_static! {
 }
 
 pub fn net_poll() {
+    debug!("net_poll called");
     let mut eth_iface = NET_IFACE.exclusive_access();
     let mut lo_iface = LO_IFACE.exclusive_access();
     let mut sockets = SOCKET_SET.exclusive_access();
@@ -264,4 +265,10 @@ pub fn net_poll() {
     for handle in dead_handles {
         sockets.remove(handle);
     }
+    debug!(
+        "net_poll finished, state_changed={}, loop_count={}, budget={}",
+        state_changed,
+        loop_count,
+        budget
+    );
 }

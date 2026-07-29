@@ -578,8 +578,7 @@ pub fn trap_handler() -> ! {
                     }
                 }
             }
-            #[cfg(board = "virt")]
-            net_poll();
+            crate::net::net_poll();
             // crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
         }

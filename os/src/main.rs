@@ -65,8 +65,6 @@ use crate::arch::la;
 
 pub use arch::timer::*;
 pub use arch::config;
-
-#[cfg(board = "virt")]
 use crate::drivers::net::NET_DEVICE;
 
 use core::sync::atomic::{AtomicBool, AtomicUsize};
@@ -176,7 +174,6 @@ fn main_init(hart_id: usize) {
         }
     }
     //#[cfg(target_arch = "riscv64")]
-    #[cfg(board = "virt")]
     {
         lazy_static::initialize(&NET_DEVICE);
         lazy_static::initialize(&crate::net::NET_IFACE);

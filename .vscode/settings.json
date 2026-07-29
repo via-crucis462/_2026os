@@ -9,9 +9,9 @@
 
     // 调整板卡
     "rust-analyzer.cargo.extraEnv": {
-        // "BOARD": "2k1000"
+        "BOARD": "2k1000"
         // "BOARD": "visionfive2"
-        "BOARD": "virt"
+        // "BOARD": "virt"
     },
     
     // 删除了废弃的 rust-analyzer.checkOnSave.allTargets
