@@ -71,8 +71,10 @@ use core::sync::atomic::{AtomicBool, AtomicUsize};
 use lazy_static::*;
 use spin::Mutex;
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(all(target_arch = "riscv64", not(board = "visionfive2")))]
 global_asm!(include_str!("arch/riscv/entry.asm"));
+#[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
+global_asm!(include_str!("arch/riscv/entry-visionfive2.asm"));
 #[cfg(target_arch = "loongarch64")]
 global_asm!(include_str!("arch/la/entry.asm"));
 
@@ -185,7 +187,9 @@ fn main_init(hart_id: usize) {
     fs::list_apps();
     MAIN_HART_ID.store(hart_id, Ordering::Release);
     task::add_initproc();
+    #[cfg(board = "virt")]
     arch::timer::set_next_trigger(task::manager::SCHED_OTHER);
+    #[cfg(board = "virt")]
     arch::trap::enable_timer_interrupt();
     // init_other_hart(hart_id);
 

@@ -239,7 +239,7 @@ pub fn init_frame_allocator() {
     let frame_start = ekernel as *const() as usize + DMA_SIZE;
 
     #[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
-    let frame_end = frame_start + 32 * 1024 * 1024;
+    let frame_end = crate::arch::config::FRAME_ALLOC_END;
     #[cfg(not(all(target_arch = "riscv64", board = "visionfive2")))]
     let frame_end = MEMORY_END;
     
