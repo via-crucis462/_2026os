@@ -30,6 +30,9 @@ pub const SDIO1_SIZE: usize = 0x0001_0000;
 /// JH7110 DWMAC0 以太网控制器。
 pub const DWMAC0_BASE: usize = 0x1603_0000;
 pub const DWMAC0_SIZE: usize = 0x0001_0000;
+/// JH7110 RTC 控制器。
+pub const RTC_BASE: usize = 0x1704_0000;
+pub const RTC_SIZE: usize = 0x0001_0000;
 
 pub const MMIO: &[(usize, usize)] = &[
     (UART0_BASE, UART0_SIZE),
@@ -38,4 +41,5 @@ pub const MMIO: &[(usize, usize)] = &[
     (DWMAC0_BASE, DWMAC0_SIZE),
     (0x1700_0000, 0x0001_0000), // AON_CRG
     (0x1701_0000, 0x0000_1000),
+    (RTC_BASE, RTC_SIZE),
 ];
