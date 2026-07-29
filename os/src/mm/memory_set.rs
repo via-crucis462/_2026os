@@ -45,6 +45,14 @@ pub fn kernel_token() -> usize {
     KERNEL_SPACE.exclusive_access().token()
 }
 
+/// ASID used by the kernel page table that owns all kernel-stack mappings.
+///
+/// ASIDs identify address spaces rather than individual virtual ranges, so
+/// every kernel stack shares this dedicated kernel address-space ASID.
+pub fn kernel_asid() -> usize {
+    KERNEL_SPACE.exclusive_access().asid()
+}
+
 /// address space
 /// 注意维护brk_index
 pub struct MemorySet {
