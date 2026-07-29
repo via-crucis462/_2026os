@@ -30,12 +30,20 @@ pub struct VirtIOBlock{
 #[allow(unused)]
 #[allow(dead_code)]
 impl VirtIOBlock {
-    pub unsafe fn new(transport: PciTransport) -> Self {
+    pub fn new() -> Self {
         let hal = VirtioHal;
-        let blk = VirtIOBlk::new(transport).expect("Failed to initialize VirtIOBlk");
+
+        debug!("BLOCK_DEVICE lazy init: begin scan transport");
+        let trans =
+            super::pci::scan_and_init_pci_device_to_trans(
+                super::DeviceType::VirtIOBlock
+            ).expect("Failed to find PCI device");
+        debug!("BLOCK_DEVICE lazy init: transport ready, build VirtIOBlock");
+
+        let blk = VirtIOBlk::new(trans).expect("Failed to initialize VirtIOBlk");
         Self { inner: MPSafeCell::new(blk) }
     }
-    pub unsafe fn visit(&self) -> spin::MutexGuard<'_, VirtIOBlk<VirtioHal, PciTransport>> {
+    pub fn visit(&self) -> spin::MutexGuard<'_, VirtIOBlk<VirtioHal, PciTransport>> {
         self.inner.exclusive_access()
     }
 }

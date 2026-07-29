@@ -5,6 +5,8 @@ use spin::Mutex;
 use lazy_static::*;
 use super::{VfsInode};
 
+use crate::drivers::block::BLOCK_DEVICE;
+
 pub struct Dentry {
     pub name: String,
     pub inode: Arc<dyn VfsInode>,
@@ -241,7 +243,7 @@ impl Dentry {
 
 lazy_static! {
     pub static ref ROOT_DENTRY: Arc<Dentry> = {
-        let ext4fs = crate::ext4fs::ext4::Ext4FS::open(crate::drivers::BLOCK_DEVICE.clone());
+        let ext4fs = crate::ext4fs::ext4::Ext4FS::open(BLOCK_DEVICE.clone());
         let root_disk_inode = ext4fs.get_disk_inode(2); 
         let vfs_inode = Arc::new(crate::ext4fs::ext4inode::Ext4Inode::new(
             2, 

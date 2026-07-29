@@ -2,4 +2,5 @@
 
 pub mod board;
 
-pub use board::{BLOCK_DEVICE, NET_DEVICE};
+pub use board::BlockDeviceImpl;
+pub use board::NetDeviceImpl;

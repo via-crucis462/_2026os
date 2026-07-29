@@ -4,6 +4,7 @@ use super::virtio_blk::VirtioHal;
 use crate::drivers::net::{EthernetDevice, EthernetError};
 use crate::sync::MPSafeCell;
 use crate::MMIO_SLOT_SIZE;
+use spin::Mutex;
 use virtio_drivers::{
     device::net::VirtIONet,
     transport::{
@@ -16,10 +17,9 @@ const VIRTIO_MMIO_BASE: usize = 0x1000_1000;
 const VIRTIO_MMIO_SLOTS: usize = 8;
 
 // 网卡驱动的外包装
-pub struct VirtIONetWrapper(
-    pub MPSafeCell<VirtIONet<VirtioHal, MmioTransport<'static>, 256>>,
-    pub [u8; 6],
-);
+pub struct VirtIONetWrapper{
+    pub inner: Mutex<VirtIONet<VirtioHal, MmioTransport<'static>, 256>>,
+}
 
 impl VirtIONetWrapper {
     /// 动态扫描 MMIO 区域，找到并初始化 VirtIO 网卡
@@ -38,42 +38,26 @@ impl VirtIONetWrapper {
                 (transport.device_type() == DeviceType::Network).then_some(transport)
             })
             .expect("virtio-net device not found");
-
-        let mut mac_addr = [0u8; 6];
-        for (index, byte) in mac_addr.iter_mut().enumerate() {
-            if let Ok(value) = transport.read_config_space::<u8>(index) {
-                *byte = value;
-            }
-        }
-
         let net = VirtIONet::new(transport, 2048).expect("Failed to initialize VirtIONet");
-        Self(MPSafeCell::new(net), mac_addr)
-    }
-
-    pub fn visit(&self) -> spin::MutexGuard<'_, VirtIONet<VirtioHal, MmioTransport<'static>, 256>> {
-        self.0.exclusive_access()
-    }
-
-    pub fn get_mac_address(&self) -> [u8; 6] {
-        self.1
+        Self { inner: Mutex::new(net)}
     }
 }
 
 impl EthernetDevice for VirtIONetWrapper {
     fn mac_address(&self) -> [u8; 6] {
-        self.get_mac_address()
+        self.inner.lock().mac_address()
     }
 
     fn can_receive(&self) -> bool {
-        self.0.exclusive_access().can_recv()
+        self.inner.lock().can_recv()
     }
 
     fn can_transmit(&self) -> bool {
-        self.0.exclusive_access().can_send()
+        self.inner.lock().can_send()
     }
 
     fn receive_frame(&self, buffer: &mut [u8]) -> Result<usize, EthernetError> {
-        let mut driver = self.0.exclusive_access();
+        let mut driver = self.inner.lock();
         let rx_buf = driver.receive().map_err(|_| EthernetError::Busy)?;
         let packet = rx_buf.packet();
         if packet.len() > buffer.len() {
@@ -91,7 +75,7 @@ impl EthernetDevice for VirtIONetWrapper {
     }
 
     fn transmit_frame(&self, frame: &[u8]) -> Result<(), EthernetError> {
-        let mut driver = self.0.exclusive_access();
+        let mut driver = self.inner.lock();
         if !driver.can_send() {
             return Err(EthernetError::Busy);
         }

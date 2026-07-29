@@ -67,7 +67,7 @@ pub use arch::timer::*;
 pub use arch::config;
 
 #[cfg(board = "virt")]
-use crate::arch::drivers::NET_DEVICE;
+use crate::drivers::net::NET_DEVICE;
 
 use core::sync::atomic::{AtomicBool, AtomicUsize};
 use lazy_static::*;

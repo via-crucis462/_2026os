@@ -3,6 +3,7 @@
 //! 内存管理也暂时放在此处，后续迁移到mm
 
 use core::{panic, result};
+use crate::drivers::net::EthernetDevice;
 use crate::net::SOCKET_SET;
 use core::sync::atomic::{AtomicI32, Ordering};
 use crate::process::block_current_and_run_next;
@@ -1761,7 +1762,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     }
     if !hwaddr_exists {
         // 没有 MAC 地址后增加
-        let mac = crate::arch::drivers::NET_DEVICE.get_mac_address();
+        let mac = crate::drivers::net::NET_DEVICE.mac_address();
         let real_mac_str = alloc::format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]

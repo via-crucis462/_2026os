@@ -12,8 +12,8 @@ use lazy_static::*;
 #[allow(unused)]
 use crate::arch::drivers::pci;
 use alloc::sync::Arc;
-type BlockDeviceImpl = SataBlock;
-type NetDeviceImpl = net::LA2k1000NetWrapper;
+pub type BlockDeviceImpl = SataBlock;
+pub type NetDeviceImpl = net::LA2k1000NetWrapper;
 
 lazy_static! {
     /// The global block device driver instance: BLOCK_DEVICE with BlockDevice trait
@@ -32,8 +32,6 @@ lazy_static! {
 
     };
 }
-
-pub const BLOCK_SZ: usize = 4096;
 
 use crate::drivers::block::block_cache::get_block_cache;
 impl BlockDevice for SataBlock {

@@ -7,3 +7,6 @@ pub use visionfive2::*;
 pub mod virt;
 #[cfg(board = "virt")]
 pub use virt::*;
+
+pub use NetDeviceImpl;
+pub use BlockDeviceImpl;

@@ -11,8 +11,8 @@ use lazy_static::*;
 
 use dwmac::DwMacWrapper;
 
-type BlockDeviceImpl = SdBlockDevice;
-type NetDeviceImpl = DwMacWrapper;
+pub type BlockDeviceImpl = SdBlockDevice;
+pub type NetDeviceImpl = DwMacWrapper;
 
 lazy_static! {
     pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = Arc::new(BlockDeviceImpl::new());

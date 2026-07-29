@@ -1,3 +1,13 @@
+use super::*;
+use alloc::sync::Arc;
+
+use lazy_static::*;
+
+
+lazy_static! {
+    pub static ref NET_DEVICE: Arc<NetDeviceImpl> = Arc::new(NetDeviceImpl::new());
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum EthernetError {
     Busy,

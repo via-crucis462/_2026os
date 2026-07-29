@@ -5,13 +5,15 @@
 //! 
 //! 设备关机时会同步块缓存但不同步页缓存
 
-use super::{BlockDevice, BLOCK_SZ};
+use super::BlockDevice;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use lazy_static::*;
 use spin::Mutex;
+
+use crate::ext4fs::BLOCK_SZ;
 
 pub struct BlockCache {
     cache: Vec<u8>,
