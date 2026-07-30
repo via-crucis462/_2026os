@@ -330,7 +330,7 @@ bitflags! {
     }
 }
 
-pub use inode::{list_apps, OpenFlags, open_file, ROOT_INODE, ROOT_VFS_INODE, make_dir, OSInode};
+pub use inode::{list_apps, OpenFlags, open_file, make_dir, OSInode};
 pub use pipe::{make_pipe, Pipe};
 pub use stdio::{Stdin, Stdout, Stderr};
 

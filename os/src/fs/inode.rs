@@ -1,12 +1,8 @@
 #[allow(unused)]
 use super::File;
-use crate::drivers::block::BLOCK_DEVICE;
 use crate::task::current_task;
 use alloc::sync::Arc;
 use bitflags::*;
-use lazy_static::*;
-use crate::ext4fs::ext4::Ext4FS;
-use crate::ext4fs::ext4inode::Ext4Inode;
 use crate::fs::file_tree::*;
 use super::VfsInode;
 use spin::Mutex;
@@ -435,7 +431,7 @@ pub fn list_apps() {
     println!("/**** APPS ****");
     let mut buf = [0u8; 4096];
     let mut file_offset = 0;
-    let len = ROOT_INODE.inode.getdents(&mut file_offset,&mut buf);
+    let len = ROOT_DENTRY.inode.getdents(&mut file_offset,&mut buf);
     if len > 0 {
         let mut offset = 0;
         while offset < len as usize {
@@ -450,15 +446,4 @@ pub fn list_apps() {
         }
     }
     println!("**************/");
-}
-lazy_static! {
-    pub static ref ROOT_VFS_INODE: Arc<dyn VfsInode> = {
-        let ext4fs = Ext4FS::open(BLOCK_DEVICE.clone());
-        let root_disk_inode = ext4fs.get_disk_inode(2);
-        Arc::new(Ext4Inode::new(2, &root_disk_inode, Arc::new(ext4fs), None))
-    };
-
-    pub static ref ROOT_INODE: Arc<OSInode> = {
-        Arc::new(OSInode::new(true, false, false, ROOT_VFS_INODE.clone(), ROOT_DENTRY.clone()))
-    };
 }
