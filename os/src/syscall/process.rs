@@ -4724,3 +4724,88 @@ pub fn sys_membarrier(cmd: i32, _flags: u32, _cpu_id: i32) -> isize {
         _ => Errno::EINVAL.as_isize(),
     }
 }
+
+/// RISC-V硬件探测系统调用的用户态ABI。
+#[cfg(target_arch = "riscv64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RiscvHwprobe {
+    pub key: i64,
+    pub value: u64,
+}
+
+/// 查询RISC-V硬件属性。
+#[cfg(target_arch = "riscv64")]
+pub fn sys_riscv_hwprobe(
+    pairs: *mut RiscvHwprobe,
+    pair_count: usize,
+    cpusetsize: usize,
+    cpus: *const u8,
+    flags: u32,
+) -> isize {
+    // 简化实现不支持RISCV_HWPROBE_WHICH_CPUS及其他扩展标志。
+    if flags != 0 {
+        return EINVAL.as_isize();
+    }
+    if pair_count != 0 && pairs.is_null() {
+        return EFAULT.as_isize();
+    }
+
+    let pair_bytes = match pair_count.checked_mul(core::mem::size_of::<RiscvHwprobe>()) {
+        Some(size) => size,
+        None => return EFAULT.as_isize(),
+    };
+    if (pairs as usize).checked_add(pair_bytes).is_none() {
+        return EFAULT.as_isize();
+    }
+
+    let token = current_user_token();
+
+    // Linux允许(NULL, 0)表示查询所有在线CPU。若用户显式传入CPU位图，
+    // 简化实现只检查该内存可读，所有CPU按同构处理。
+    if cpusetsize == 0 {
+        if !cpus.is_null() {
+            return EINVAL.as_isize();
+        }
+    } else if cpus.is_null()
+        || try_translated_read::<u8>(token, cpus).is_none()
+        || try_translated_read::<u8>(token, unsafe { cpus.add(cpusetsize - 1) }).is_none()
+    {
+        return EFAULT.as_isize();
+    }
+
+    fn fill_value(pair: &mut RiscvHwprobe) {
+        pair.value = match pair.key {
+            // 0~2分别是厂商、架构和实现ID，当前内核未缓存这些CSR。
+            0..=2 => 0,
+            // key 3：支持Linux定义的IMA基础行为。
+            3 => 1,
+            // key 4：当前目标明确支持F、D和C；对应bit 0和bit 1。
+            4 => (1 << 0) | (1 << 1),
+            // key 7：用户态可使用的最高虚拟地址。
+            7 => (crate::USER_APP_MAX_SIZE - 1) as u64,
+            // key 8：time CSR频率。
+            8 => crate::arch::config::CLOCK_FREQ as u64,
+            // 已知但暂时无法准确探测的性能、缓存块和厂商扩展保守返回0。
+            5..=6 | 9..=16 => 0,
+            _ => {
+                pair.key = -1;
+                0
+            }
+        };
+    }
+
+    for index in 0..pair_count {
+        let pair_ptr = (pairs as usize + index * core::mem::size_of::<RiscvHwprobe>())
+            as *mut RiscvHwprobe;
+        let Some(mut pair) = try_translated_read(token, pair_ptr as *const RiscvHwprobe) else {
+            return EFAULT.as_isize();
+        };
+        fill_value(&mut pair);
+        if !try_translated_write(token, pair_ptr, pair) {
+            return EFAULT.as_isize();
+        }
+    }
+
+    0
+}

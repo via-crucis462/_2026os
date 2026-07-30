@@ -184,6 +184,8 @@ const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_CLOCK_ADJTIME: usize = 266;
+#[cfg(target_arch = "riscv64")]
+const SYSCALL_RISCV_HWPROBE: usize = 258;
 const SYSCALL_USERFAULTFD: usize = 282;
 const SYSCALL_MEMBARRIER: usize = 283;
 /// statx syscall
@@ -473,6 +475,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MSGCTL => sys_msgctl(args[0] as u32, args[1], args[2]),
         SYSCALL_SHUTDOWN => sys_shutdown(args[0], args[1] as i32),
         SYSCALL_CLOCK_ADJTIME => sys_clock_adjtime(args[0] as i32, args[1] as *mut Timex),
+        #[cfg(target_arch = "riscv64")]
+        SYSCALL_RISCV_HWPROBE => sys_riscv_hwprobe(args[0] as *mut RiscvHwprobe, args[1], args[2], args[3] as *const u8, args[4] as u32),
         SYSCALL_CLOCK_SETTIME => sys_clock_settime(args[0] as i32, args[1] as *const TimeSpec),
         SYSCALL_WAITID => sys_waitid(args[0] as i32, args[1] as i32, args[2] as *mut SigInfo, args[3] as i32),
         SYSCALL_FUTEX => sys_futex(args[0] as *mut i32, args[1] as i32, args[2] as i32, args[3] as *const TimeSpec, args[4] as *mut i32, args[5] as i32),
