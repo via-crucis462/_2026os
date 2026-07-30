@@ -101,6 +101,7 @@ pub fn current_user_asid() -> usize {
 
 pub fn run_tasks() {
     let hart_id = get_hart_id();
+    // let mut times = 0;
     info!("[kernel] Hello from hart {}!", hart_id);
     loop {
         let hart_id = get_hart_id();
@@ -152,6 +153,7 @@ pub fn run_tasks() {
             unsafe {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
+            // println!("[kernel] hart {} back to scheduler", hart_id);
             let prev_task = {
                 let mut processor = current_processor();
                 processor.take_current()
@@ -182,9 +184,13 @@ pub fn run_tasks() {
         } else {
             crate::arch::timer::set_next_trigger(SCHED_OTHER);
             #[cfg(target_arch = "loongarch64")]
+            #[cfg(board = "virt")]
             unsafe {
                 asm!("idle 0");
             }
+            #[cfg(board = "2k1000")]
+            core::hint::spin_loop();
+
             #[cfg(target_arch = "riscv64")]
             unsafe {
                 asm!("wfi");
