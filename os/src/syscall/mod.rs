@@ -96,6 +96,7 @@ const SYSCALL_KILL: usize = 129;
 
 /// sigaction syscall
 const SYSCALL_CLOCK_GETTIME: usize = 113;
+const SYSCALL_RT_SIGSUSPEND: usize = 133;
 const SYSCALL_SIGACTION: usize = 134;
 /// sigprocmask syscall
 const SYSCALL_SIGPROCMASK: usize = 135;
@@ -343,6 +344,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_EXIT_GROUP =>sys_exit_group(args[0] as i32),
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_KILL => sys_kill(args[0] as isize, args[1] as i32),
+        SYSCALL_RT_SIGSUSPEND => sys_rt_sigsuspend(args[0] as *const usize, args[1]),
         SYSCALL_SIGACTION => sys_rt_sigaction(
             args[0] as i32,
             args[1] as *const SignalAction,

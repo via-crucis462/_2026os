@@ -6,7 +6,10 @@ use core::{panic, result};
 use crate::drivers::net::EthernetDevice;
 use crate::net::SOCKET_SET;
 use core::sync::atomic::{AtomicI32, Ordering};
-use crate::process::{block_current_and_run_next_if, wait4_block_current, waitid_block_current};
+use crate::process::{
+    block_current_and_run_next_if, block_current_and_run_next_if_task,
+    wait4_block_current, waitid_block_current,
+};
 
 use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, USER_STACK_SIZE, get_hart_id};
@@ -2684,6 +2687,45 @@ pub fn sys_sigprocmask(
     }
     //warn!("sys_sigprocmask: updated signal mask to {:064b}", inner.signal_mask.bits());
     0
+}
+
+pub fn sys_rt_sigsuspend(mask_ptr: *const usize, sigsetsize: usize) -> isize {
+    if sigsetsize != core::mem::size_of::<usize>() {
+        return EINVAL.as_isize();
+    }
+    if mask_ptr.is_null() {
+        return EFAULT.as_isize();
+    }
+
+    let token = current_user_token();
+    let Some(mask_bits) = try_translated_read(token, mask_ptr) else {
+        return EFAULT.as_isize();
+    };
+    let mut temporary_mask = SignalFlags::from_bits_truncate(mask_bits as u64);
+    temporary_mask.remove(SignalFlags::SIGKILL | SignalFlags::SIGSTOP);
+
+    let task = current_task().unwrap();
+    let original_mask = {
+        let mut inner = task.inner_exclusive_access();
+        let original_mask = inner.blocked;
+        inner.blocked = temporary_mask;
+        original_mask
+    };
+
+    loop {
+        let blocked = block_current_and_run_next_if_task(|inner| {
+            let thread_pending = inner.pending.flags();
+            let shared_pending = inner.signal.exclusive_access().pending_flags();
+            let mut deliverable = thread_pending | shared_pending;
+            deliverable.remove(inner.blocked);
+            deliverable.is_empty()
+        });
+
+        if !blocked {
+            task.inner_exclusive_access().sigsuspend_saved_mask = Some(original_mask);
+            return EINTR.as_isize();
+        }
+    }
 }
 
 

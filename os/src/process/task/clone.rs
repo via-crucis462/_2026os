@@ -253,6 +253,7 @@ impl TaskStruct {
 					blocked,
 					pending: Sigpending::new(),             // 子任务的私有挂起信号为空
 					signal_interrupted: false,
+					sigsuspend_saved_mask: None,
 					signal_mask_backup: Vec::new(),
 					trap_ctx_backup: Vec::new(),
 					signal_user_context_backup: Vec::new(),

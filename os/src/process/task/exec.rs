@@ -354,6 +354,7 @@ impl TaskStruct {
 			inner.signal_hand = Arc::new(MPSafeCell::new(SigHand::new()));
 			inner.pending = Sigpending::new();
 			inner.signal_interrupted = false;
+			inner.sigsuspend_saved_mask = None;
 			inner.signal_mask_backup.clear();
 			inner.trap_ctx_backup.clear();
 			inner.signal_user_context_backup.clear();

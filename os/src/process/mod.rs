@@ -55,6 +55,7 @@ pub use scheduler::processor::{
 };
 pub use scheduler::wait::{
     block_current_and_run_next, block_current_and_run_next_if,
+    block_current_and_run_next_if_task,
     suspend_current_and_run_next, wake_up_all, wake_up_one,
 };
 pub use child_wait::{wait4_block_current, waitid_block_current, wake_child_exit_waiters};
