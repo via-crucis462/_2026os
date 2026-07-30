@@ -295,7 +295,7 @@ impl File for OSInode {
         new_offset as isize
     }
     
-    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<Mutex<crate::mm::mmap::PageCache>>> {
+    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         // 转发给底层的具体文件系统 Inode
         self.inode.get_shared_page(page_offset)
     }

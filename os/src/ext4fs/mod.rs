@@ -12,7 +12,7 @@ use alloc::sync::Arc;
 pub use block_dev::BlockDevice;
 pub use superblock::{Ext4SuperBlock, Ext4SuperBlockDisk};
 pub use blockgroup::{Ext4GroupDescDisk, Ext4Group};
-pub use block_cache::{block_cache_sync_all, get_block_cache};
+pub use cache::{block_cache_sync_all, get_block_cache};
 pub use ext4::Ext4FS;
 pub use crate::ext4fs::ext4inode::{Ext4InodeDisk, Ext4Inode};
 

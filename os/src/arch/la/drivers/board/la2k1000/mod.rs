@@ -14,7 +14,7 @@ use lazy_static::*;
 pub type BlockDeviceImpl = SataBlock;
 pub type NetDeviceImpl = net::LA2k1000NetWrapper;
 
-use crate::drivers::block::block_cache::get_block_cache;
+use crate::drivers::block::cache::get_block_cache;
 impl BlockDevice for SataBlock {
     fn raw_read_block(&self, block_id: usize, buf: &mut [u8]) {
         if !self.read_block(block_id as u64, buf) {

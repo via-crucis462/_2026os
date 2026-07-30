@@ -14,7 +14,7 @@ use virtio_net::VirtIONetWrapper;
 pub type BlockDeviceImpl = VirtIOBlock;
 pub type NetDeviceImpl = VirtIONetWrapper;
 
-use crate::drivers::block::block_cache::get_block_cache;
+use crate::drivers::block::cache::get_block_cache;
 use crate::ext4fs::BLOCK_SZ as BLOCK_SZ;
 
 impl BlockDevice for VirtIOBlock {

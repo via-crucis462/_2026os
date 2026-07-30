@@ -17,7 +17,7 @@ pub type NetDeviceImpl = virtio_net::VirtIONetWrapper;
 
 use crate::drivers::block::BLOCK_DEVICE;
 
-use crate::drivers::block::block_cache::get_block_cache;
+use crate::drivers::block::cache::get_block_cache;
 impl BlockDevice for VirtIOBlock {
     fn raw_read_block(&self, block_id: usize, buf: &mut [u8]) {
         let len = buf.len();

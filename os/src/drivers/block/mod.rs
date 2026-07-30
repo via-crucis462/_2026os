@@ -3,13 +3,13 @@
 // 传递 arch 中的 block 驱动
 pub use crate::arch::drivers::*;
 
-pub mod block_cache;
+pub mod cache;
 pub mod block_dev;
 pub mod async_io;
 
 use alloc::sync::Arc;
 
-use crate::ext4fs::{get_block_cache, BlockDevice};
+use crate::ext4fs::BlockDevice;
 use lazy_static::*;
 
 

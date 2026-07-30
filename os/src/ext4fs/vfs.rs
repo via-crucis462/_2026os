@@ -72,6 +72,28 @@ impl VfsInode for Ext4Inode {
         written
     }
 
+    fn get_shared_page(&self, logical_block: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
+        let mut physical_block = self.find_physical_block(logical_block as u32);
+        if physical_block == 0 {
+            let new_block = self.fs.alloc_block()?;
+            physical_block = self.add_extent_entry(logical_block as u32, new_block)?;
+            return Some(crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
+                .get_new_page_cache(
+                    self.inode_id as u64,
+                    logical_block,
+                    physical_block as u64,
+                    self.fs.block_dev.clone(),
+                ));
+        }
+        Some(crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
+            .get_page_cache(
+                self.inode_id as u64,
+                logical_block,
+                physical_block as u64,
+                self.fs.block_dev.clone(),
+            ).0)
+    }
+
     /// 带页缓存的读取
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let page_size = crate::PAGE_SIZE;

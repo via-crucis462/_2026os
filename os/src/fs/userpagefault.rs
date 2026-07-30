@@ -154,7 +154,7 @@ impl File for UserPageFaultInfo {
     }
     // 获取该文件指定页偏移的物理页号。
     // 如果没有，文件内部负责分配一个并存起来。
-    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<Mutex<crate::mm::mmap::PageCache>>> {
+    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         None // 默认不支持
     }
     fn ioctl(&self, request: u32, argp: usize, token: usize) -> isize {

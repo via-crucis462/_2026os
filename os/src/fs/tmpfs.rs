@@ -149,7 +149,7 @@ impl super::VfsInode for TmpfsFileInode {
     fn get_shared_page(
         &self,
         page_offset: usize,
-    ) -> Option<Arc<Mutex<crate::mm::mmap::PageCache>>> {
+    ) -> Option<Arc<crate::mm::mmap::PageCache>> {
         let mut frames = self.pages.lock();
         // 如果 mmap 映射的页超出了当前文件大小，Linux 允许直接分配空白页给它
         let frame = frames.entry(page_offset).or_insert_with(|| {
@@ -157,8 +157,8 @@ impl super::VfsInode for TmpfsFileInode {
             f.get_bytes_array().fill(0);
             f
         });
-        let page_cache = crate::mm::mmap::PageCache::new(frame.clone());
-        Some(Arc::new(Mutex::new(page_cache)))
+        let page_cache = crate::mm::mmap::PageCache::from_frame(frame.clone());
+        Some(Arc::new(page_cache))
     }
     fn ino(&self) -> u64 {
         self.stat.lock().ino

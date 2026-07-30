@@ -23,13 +23,11 @@ pub use file_tree::{ROOT_DENTRY, parent_path, file_name, create_file_in_dentry};
 pub use file_tree::{Dentry};
 pub use fifo::{create_fifo_in_dentry, is_fifo_mode, open_fifo_file, S_IFIFO, S_IFMT};
 pub use userpagefault::UserPageFaultInfo;
-use crate::PAGE_SIZE_BITS;
 pub use crate::timer::TimeSpec;
 pub use ino::get_next_ino;
 use crate::mm::UserBuffer;
 use crate::syscall::errno::Errno;
 use alloc::sync::Arc;
-use spin::Mutex;
 use alloc::string::String;
 use alloc::collections::VecDeque; 
 use core::any::Any;
@@ -116,7 +114,7 @@ pub trait File: Send + Sync {
         false // 默认不支持
     }
     // 这里是默认实现，需要为不同文件重写
-    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<Mutex<crate::mm::mmap::PageCache>>> {
+    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         error!("File type does not support shared pages: page_offset={}", page_offset);
         None
     }
@@ -309,27 +307,9 @@ pub trait VfsInode: Send + Sync {
             f_namelen: 255, f_frsize: 0, f_flags: 0, f_spare: [0; 4],
         }
     }
-    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<Mutex<crate::mm::mmap::PageCache>>> {
-        let (cache, newly_allocated) = 
-            crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER.get_page_cache(self.get_stat().ino, page_offset);
-        if newly_allocated {
-            // 读入文件数据到分配的页
-            info!("VFS: Allocated new shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
-            let mut page = cache.lock();
-            let (ppn, page_size) = (page.frame.ppn, page.frame.page_size);
-            let page_addr = ppn.0 << PAGE_SIZE_BITS;
-            // 检查是否对齐，防止传入的 frame 是大页
-            assert!(page_addr % page_size.size() == 0, "Shared page address not aligned to its size");
-            // 普通 RAM 必须始终通过 cached 别名访问。FrameTracker::new
-            // 也会通过该别名清零，不能再用裸物理地址写入。
-            let buffer = page.frame.get_bytes_array();
-            // 从底层存储读取文件数据到缓存页（必须用 raw_read_at 绕过缓存，
-            // 否则当 read_at 本身依赖页缓存时会形成循环调用）
-            self.raw_read_at(page_offset * page_size.size(), buffer);
-        } else {
-            info!("VFS: Reusing existing shared page for ino {}, page_offset {}", self.get_stat().ino, page_offset);
-        }
-        Some(cache)
+    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
+        error!("VFS inode does not provide a physical block for page {}", page_offset);
+        None
     }
     /// 返回该 inode 的唯一标识号（跨所有文件系统唯一）
     fn ino(&self) -> u64 ;
