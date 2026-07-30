@@ -904,6 +904,7 @@ pub fn sys_listen(fd: usize, _backlog: i32) -> isize {
     }
 }
 const O_RDWR: u32 = 0o2;
+const ACCEPT_HEARTBEAT_INTERVAL_MS: usize = 5_000;//证明不死锁的调试
 pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
@@ -929,20 +930,25 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     if let Some(orig_socket) = file.as_any().downcast_ref::<TcpSocket>() {
         let mut local_port = 0;
         let mut remote_ep = None;
-        let start_time_ms = crate::timer::get_time_ms(); 
-        // 设定一个超时时间， 12 秒
-        let timeout_ms = 12_000;
+        // 阻塞式 accept 没有隐含超时：除非连接到达、收到可递送信号，或 fd 为非阻塞，
+        // 否则应持续等待。心跳只用于证明任务仍在被调度，不改变系统调用语义。
+        let wait_started_ms = crate::timer::get_time_ms();
+        let mut next_heartbeat_ms = wait_started_ms.saturating_add(ACCEPT_HEARTBEAT_INTERVAL_MS);
+        if (status & O_NONBLOCK) == 0 {
+            warn!(
+                "[kernel] sys_accept: pid={} fd={} entering blocking wait",
+                task.getpid(),
+                fd
+            );
+        }
         loop {
-            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-            let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(orig_socket.handle);
-            let state = smol_socket.state();
-            drop(sockets);
             crate::net::net_poll(); 
             let mut is_established = false;
+            let state;
             {
                 let mut sockets = crate::net::SOCKET_SET.exclusive_access();
                 let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(orig_socket.handle);
-                let state = smol_socket.state();
+                state = smol_socket.state();
                 if state == State::Established || state == State::SynReceived|| state == State::CloseWait {
                     is_established = true;
                     if let Some(ep) = smol_socket.local_endpoint() {
@@ -953,11 +959,25 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
                    
             }
             if is_established {
+                warn!(
+                    "[kernel] sys_accept: pid={} fd={} connection ready after {} ms, state={:?}",
+                    task.getpid(),
+                    fd,
+                    crate::timer::get_time_ms().saturating_sub(wait_started_ms),
+                    state
+                );
                 break; 
             }
             let current_time_ms = crate::timer::get_time_ms();
-            if current_time_ms - start_time_ms > timeout_ms {
-                return crate::syscall::errno::Errno::EINTR.as_isize();
+            if current_time_ms >= next_heartbeat_ms {
+                warn!(
+                    "[kernel] sys_accept: pid={} fd={} still waiting for a connection ({} ms), state={:?}",
+                    task.getpid(),
+                    fd,
+                    current_time_ms.saturating_sub(wait_started_ms),
+                    state
+                );
+                next_heartbeat_ms = current_time_ms.saturating_add(ACCEPT_HEARTBEAT_INTERVAL_MS);
             }
             if (status & O_NONBLOCK) != 0 {
                 return crate::syscall::errno::Errno::EAGAIN.as_isize();
