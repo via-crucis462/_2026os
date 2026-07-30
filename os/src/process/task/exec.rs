@@ -19,6 +19,41 @@ use crate::sync::MPSafeCell;
 use crate::syscall::errno::Errno;
 use alloc::{string::{String, ToString}, sync::Arc, vec, vec::Vec};
 
+/// Linux reads the interpreter command from the first line of a script.  The
+/// kernel does not interpret the script itself; it replaces the executable
+/// image with the interpreter and passes the script path in the new argv.
+fn parse_shebang(data: &[u8]) -> Result<Option<(String, Option<String>)>, isize> {
+	if !data.starts_with(b"#!") {
+		return Ok(None);
+	}
+
+	// Linux uses a bounded buffer for binfmt_script.  Requiring the first line
+	// to fit avoids silently executing a truncated interpreter path or option.
+	const SHEBANG_MAX: usize = 256;
+	let search_end = data.len().min(SHEBANG_MAX);
+	let Some(line_end) = data[2..search_end].iter().position(|byte| *byte == b'\n').map(|offset| offset + 2) else {
+		return Err(Errno::ENOEXEC.as_isize());
+	};
+	let line = core::str::from_utf8(&data[2..line_end])
+		.map_err(|_| Errno::ENOEXEC.as_isize())?
+		.trim_matches(|character: char| character == ' ' || character == '\t' || character == '\r');
+	if line.is_empty() {
+		return Err(Errno::ENOEXEC.as_isize());
+	}
+
+	let interpreter_end = line
+		.find(|character: char| character == ' ' || character == '\t')
+		.unwrap_or(line.len());
+	let interpreter = line[..interpreter_end].to_string();
+	let optional_arg = line[interpreter_end..]
+		.trim_matches(|character: char| character == ' ' || character == '\t')
+		.to_string();
+	Ok(Some((
+		interpreter,
+		if optional_arg.is_empty() { None } else { Some(optional_arg) },
+	)))
+}
+
 
 impl TaskStruct {
 	pub fn do_exec(
@@ -82,7 +117,7 @@ impl TaskStruct {
 			}
 		}
 
-		let Some(mut app_inode) = open_file(cwd.clone(), path.as_str(), OpenFlags::RDONLY, 0) else {
+		let Some(app_inode) = open_file(cwd.clone(), path.as_str(), OpenFlags::RDONLY, 0) else {
 			return Self::exec_open_error(cwd, path.as_str());
 		};
 		{
@@ -98,20 +133,44 @@ impl TaskStruct {
 		debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
 		let app_name = app_inode.get_dentry().name.clone();
 		let mut elf_data = app_inode.read_all();
-		let is_script = app_name.ends_with(".sh") || (elf_data.len() >= 2 && &elf_data[0..2] == b"#!");
-		if is_script {
-			info!("[kernel] sys_exec: detected script '{}', trying to execute with busybox", app_name);
-			let Some(inode) = open_file(cwd, "/musl/busybox", OpenFlags::RDONLY, 0) else {
-				warn!("[kernel] sys_exec: failed to open busybox for script execution");
-				return Errno::ENOENT.as_isize();
+		let shebang = match parse_shebang(&elf_data) {
+			Ok(shebang) => shebang,
+			Err(error) => return error,
+		};
+		if shebang.is_some() || app_name.ends_with(".sh") {
+			let (interpreter, optional_arg) = shebang
+				.unwrap_or_else(|| ("/musl/busybox".to_string(), Some("sh".to_string())));
+			info!(
+				"[kernel] sys_exec: script '{}' requests interpreter '{}' with option {:?}",
+				app_name,
+				interpreter,
+				optional_arg
+			);
+			let Some(inode) = open_file(cwd.clone(), interpreter.as_str(), OpenFlags::RDONLY, 0) else {
+				warn!("[kernel] sys_exec: failed to open script interpreter '{}'", interpreter);
+				return Self::exec_open_error(cwd, interpreter.as_str());
 			};
-			let mut new_args = vec!["musl/busybox".to_string(), "sh".to_string(), path.clone()];
+			let stat = inode.inode.get_stat();
+			let is_dir = (stat.mode & 0o170000) == 0o040000;
+			if is_dir || !inode.get_perm().can_execute(uid, gid) {
+				warn!("[kernel] sys_exec: script interpreter '{}' is not executable", interpreter);
+				return Errno::EACCES.as_isize();
+			}
+
+			let mut new_args = vec![interpreter.clone()];
+			if let Some(option) = optional_arg {
+				new_args.push(option);
+			}
+			new_args.push(path.clone());
 			new_args.extend(args.into_iter().skip(1));
 			args = new_args;
-			app_inode = inode;
-			elf_data = app_inode.read_all();
+			elf_data = inode.read_all();
+			if elf_data.len() < 4 || &elf_data[0..4] != b"\x7fELF" {
+				warn!("[kernel] sys_exec: script interpreter '{}' is not an ELF executable", interpreter);
+				return Errno::ENOEXEC.as_isize();
+			}
 			let inner = self.inner_exclusive_access();
-			info!("[kernel] sys_exec: script detour success. Current process PID: {}, basic children count: {}", self.getpid(), inner.children.len());
+			info!("[kernel] sys_exec: interpreter detour success. Current process PID: {}, basic children count: {}", self.getpid(), inner.children.len());
 		}
 
 		if elf_data.len() < 4 || &elf_data[0..4] != b"\x7fELF" {

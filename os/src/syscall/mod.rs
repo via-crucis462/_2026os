@@ -540,7 +540,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             "[Syscall Trace] ID: {:3} | Args: [0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], args[3], args[4], ret
         );*/
-    //warn!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
+    warn!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
     info!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
     ret
 }
