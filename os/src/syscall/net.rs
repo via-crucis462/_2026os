@@ -1,6 +1,7 @@
 use crate::task::current_task;
 use crate::net::socket::{TcpSocket, UnixSocket, UnixSocketType};
 use crate::process::*;
+use crate::process::signal::get_pending_signals;
 use crate::syscall::Errno::*;
 use crate::syscall::Arc;
 use crate::mm::{try_translated_read, try_translated_write, translated_byte_buffer, UserBuffer};
@@ -436,13 +437,7 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
             }
             net_poll();
             crate::timer::check_timer_cooperative();
-            let task = crate::task::current_task().unwrap();
-            let (thread_pending, signal) = {
-                let inner = task.inner_exclusive_access();
-                (inner.pending.flags(), inner.signal.clone())
-            };
-            let pending = thread_pending | signal.exclusive_access().pending_flags();
-            if pending.contains(crate::task::SignalFlags::SIGALRM) {
+            if get_pending_signals().contains(crate::task::SignalFlags::SIGALRM) {
                 return Errno::EINTR.as_isize();
             }
             crate::task::suspend_current_and_run_next();
@@ -630,13 +625,7 @@ pub fn sys_recvfrom(
                     }
                 }
                 crate::timer::check_timer_cooperative();
-                let task = crate::task::current_task().unwrap();
-                let (thread_pending, signal) = {
-                    let inner = task.inner_exclusive_access();
-                    (inner.pending.flags(), inner.signal.clone())
-                };
-                let pending = thread_pending | signal.exclusive_access().pending_flags();
-                if pending.contains(crate::task::SignalFlags::SIGALRM) {
+                if get_pending_signals().contains(crate::task::SignalFlags::SIGALRM) {
                     return crate::syscall::errno::Errno::EINTR.as_isize(); 
                 }
                 crate::task::suspend_current_and_run_next();
@@ -963,13 +952,7 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
                 return crate::syscall::errno::Errno::EAGAIN.as_isize();
             }
             crate::task::suspend_current_and_run_next();
-            let task = current_task().unwrap();
-            let (thread_pending, signal) = {
-                let inner = task.inner_exclusive_access();
-                (inner.pending.flags(), inner.signal.clone())
-            };
-            let pending_signals = thread_pending | signal.exclusive_access().pending_flags();
-            if pending_signals.intersects(fatal_signals) {
+            if get_pending_signals().intersects(fatal_signals) {
                 return Errno::EINTR.as_isize();
             }
         }

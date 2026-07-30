@@ -27,6 +27,7 @@ use smoltcp::wire::{IpAddress, IpEndpoint};
 use smoltcp::wire::{IpProtocol, IpVersion};
 use spin::Mutex;
 
+use crate::process::signal::get_pending_signals;
 use crate::process::check_pending_signal;
 use crate::task::suspend_current_and_run_next;
 
@@ -225,18 +226,11 @@ impl File for TcpSocket {
             drop(sockets);
             crate::net::net_poll();
             crate::timer::check_timer_cooperative();
-            let task = crate::task::current_task().unwrap();
-            let task_inner = task.inner_exclusive_access();
-            if task_inner
-                .signal
-                .exclusive_access()
-                .pending_flags()
+            if get_pending_signals()
                 .contains(crate::task::SignalFlags::SIGALRM)
             {
-                drop(task_inner);
                 return EINTR.as_isize() as usize;
             }
-            drop(task_inner);
             crate::task::suspend_current_and_run_next();
         }
     }
@@ -271,17 +265,11 @@ impl File for TcpSocket {
             drop(sockets);
             crate::net::net_poll();
             crate::timer::check_timer_cooperative();
-            let task = crate::task::current_task().unwrap();
-            let task_inner = task.inner_exclusive_access();
-            if task_inner.signal
-                .exclusive_access()
-                .pending_flags()
+            if get_pending_signals()
                 .contains(crate::task::SignalFlags::SIGALRM)
             {
-                drop(task_inner);
                 return EINTR.as_isize() as usize;
             }
-            drop(task_inner);
 
             // 让出 CPU，等待下一轮调度回来继续尝试发送
             crate::task::suspend_current_and_run_next();

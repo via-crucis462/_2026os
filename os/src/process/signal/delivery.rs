@@ -206,6 +206,11 @@ fn set_sig_ret(trap_ctx: &mut TrapContext) {
 
 /// 检查当前任务是否有未屏蔽的挂起信号
 pub fn check_pending_signal() -> bool {
+    get_pending_signals().bits() != 0
+}
+
+/// 返回当前私有和共享的未屏蔽的挂起信号集
+pub fn get_pending_signals() -> SignalFlags {
     let task = current_task().unwrap();
     let task_inner = task.inner_exclusive_access();
     let thread_pending = task_inner.pending.flags();
@@ -215,5 +220,6 @@ pub fn check_pending_signal() -> bool {
         task_inner.blocked.bits() & 
         !(SignalFlags::SIGKILL | SignalFlags::SIGSTOP).bits()
     );
-    pending != 0
+    debug!("current task get_pending_signals: {:?}", pending);
+    SignalFlags::from_bits(pending).unwrap_or(SignalFlags::empty())
 }
