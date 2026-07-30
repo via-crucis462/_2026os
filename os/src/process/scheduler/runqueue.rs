@@ -215,7 +215,7 @@ pub fn wake_up_task(task: Arc<TaskControlBlock>) {
 		} else if inner.state == TaskStatus::BlockSaving {
 			// 原本实现没有 loop，直接返回 false ，似乎会把 BlockSaving 的任务给直接丢弃掉
 			// 添加一个 loop 以及调试信息
-			warn!(
+			println!(
 				"[kernel] wake_up_task: task {} is saving context, current state: {:?}",
 				task.getpid(), inner.state
 			);

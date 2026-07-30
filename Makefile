@@ -2,6 +2,7 @@ export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
 export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
 
 MODE ?= release
+LOG ?= OFF
 RV_SMP ?= 1
 LA_SMP ?= 1
 RV_GDB_PORT ?= 1234
@@ -22,7 +23,7 @@ TFTP_TIMEOUT ?= 900
 SATA_WRITE_TIMEOUT ?= 900
 SATA_VERIFY_TIMEOUT ?= 900
 
-.PHONY: sata sata-verify
+.PHONY: sata sata-verify build-user-la copy-user-la build-la copy-la debug-la
 
 GDB_MUL_EXITS = $(shell command -v gdb-multiarch)
 
@@ -86,8 +87,9 @@ ifeq ($(BOARD),visionfive2)
 	rust-objcopy -O binary kernel-rv-$(BOARD) kernel-rv-$(BOARD).bin
 endif
 copy-la:
-	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la-$(BOARD)
+	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la
 ifeq ($(BOARD),2k1000)
+	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la-$(BOARD)
 	@echo "  -> Packing uImage for 2K1000..."
 	python3 boot/build_uimage.py kernel-la-$(BOARD) kernel-la-$(BOARD).uImage
 	@echo "  -> Making binary for 2K1000..."
@@ -118,7 +120,7 @@ test-la: MODE = release
 test-la: build-user-la copy-user-la build-la copy-la
 	@rm -f kernel_output.log
 	@qemu-system-loongarch64 \
-	-kernel kernel-la-$(BOARD) \
+	-kernel kernel-la \
 	-m 1G -nographic \
 	-smp $(LA_SMP) \
 	-drive file=sdcard-la.img,if=none,format=raw,id=x0 \
@@ -182,6 +184,7 @@ debug-la: build-user-la copy-user-la build-la copy-la
 	-monitor tcp::1237,server,nowait \
 	| tee kernel_output.log
 
+gdb-rv: MODE = debug
 gdb-rv:
 	@$(GDB) $(RV_ELF) \
 	-ex "set confirm off" \
@@ -196,7 +199,7 @@ gdb-rv:
 	
 #	-ex "b os::syscall::fs::sys_dup2"
     
-
+gdb-rv: MODE = debug
 gdb-la:
 	@$(GDB) $(LA_ELF) \
 	-ex "set confirm off" \

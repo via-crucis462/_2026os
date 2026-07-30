@@ -93,6 +93,7 @@ gdbclient:
 	@riscv64-unknown-elf-gdb -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'
 
 .PHONY: build env kernel clean run-inner gdbserver gdbclient
+.PHONY: env-la kernel-la build-la run-la run-inner-la
 
 # 此处开始为LA64相关
 
