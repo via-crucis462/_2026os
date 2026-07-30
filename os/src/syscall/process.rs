@@ -84,6 +84,9 @@ pub use crate::{
     },
     syscall::errno::Errno
 };
+pub use crate::process::timer::{
+    add_posix_timer, remove_posix_timer, KernelSigEvent, PosixTimer,
+};
 use alloc::task;
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 use crate::fs::{open_file, OpenFlags}; 
@@ -3255,6 +3258,73 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
     }
 
     0 
+}
+
+/// 创建POSIX定时器（RISC-V/asm-generic系统调用107）。
+///
+/// 此调用只创建定时器并返回timer_t，不会立即开始计时；真正的到期时间
+/// 应由timer_settime设置。
+pub fn sys_timer_create(clock_id: i32, event: *const KernelSigEvent, timer_id: *mut i32) -> isize {
+    const CLOCK_REALTIME: i32 = 0;
+    const CLOCK_MONOTONIC: i32 = 1;
+    const SIGEV_SIGNAL: i32 = 0;
+    const SIGEV_NONE: i32 = 1;
+    const SIGEV_THREAD_ID: i32 = 4;
+
+    if clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC {
+        return EINVAL.as_isize();
+    }
+    if timer_id.is_null() {
+        return EFAULT.as_isize();
+    }
+
+    let token = current_user_token();
+    let owner = current_task().unwrap();
+    let owner_pid = owner.getpid();
+    let (notify, signo, value, target_tid) = if event.is_null() {
+        // Linux在event为NULL时默认向进程发送SIGALRM。
+        (SIGEV_SIGNAL, 14, 0, 0)
+    } else {
+        let Some(event) = try_translated_read(token, event) else {
+            return EFAULT.as_isize();
+        };
+        if !matches!(event.notify, SIGEV_SIGNAL | SIGEV_NONE | SIGEV_THREAD_ID) {
+            return EINVAL.as_isize();
+        }
+        if event.notify != SIGEV_NONE && !(1..=MAX_SIG as i32).contains(&event.signo) {
+            return EINVAL.as_isize();
+        }
+        let target_tid = if event.notify == SIGEV_THREAD_ID {
+            if event.tid <= 0 {
+                return EINVAL.as_isize();
+            }
+            let Some(target) = tid2task(event.tid as usize) else {
+                return EINVAL.as_isize();
+            };
+            if target.getpid() != owner_pid {
+                return EINVAL.as_isize();
+            }
+            event.tid as usize
+        } else {
+            0
+        };
+        (event.notify, event.signo, event.value, target_tid)
+    };
+
+    let id = add_posix_timer(PosixTimer {
+        owner_pid,
+        clock_id,
+        notify,
+        signo,
+        value,
+        target_tid,
+    });
+
+    if !try_translated_write(token, timer_id, id) {
+        remove_posix_timer(id);
+        return EFAULT.as_isize();
+    }
+    0
 }
 
 /// 调整文件大小

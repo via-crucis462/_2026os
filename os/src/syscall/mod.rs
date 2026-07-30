@@ -79,6 +79,7 @@ const SYSCALL_TGKILL: usize = 131;
 
 const SYSCALL_SLEEP:usize =101;
 const SYSCALL_SETITIMER: usize = 103;
+const SYSCALL_TIMER_CREATE: usize = 107;
 const SYSCALL_CLOCK_SETTIME: usize = 112;
 const SYSCALL_CLOCK_GETRES: usize = 114;
 const SYSCALL_SYSLOG: usize = 116;
@@ -360,6 +361,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RECVFROM => sys_recvfrom(args[0], args[1] as *mut u8, args[2], args[3] as i32, args[4] as *mut u8, args[5] as *mut u32),
         SYSCALL_SETSOCKOPT => sys_setsockopt(args[0], args[1], args[2], args[3] as *const u8, args[4] as u32),
         SYSCALL_SETITIMER => sys_setitimer(args[0], args[1] , args[2] ),
+        SYSCALL_TIMER_CREATE => sys_timer_create(
+            args[0] as i32,
+            args[1] as *const KernelSigEvent,
+            args[2] as *mut i32,
+        ),
         SYSCALL_FTRUNCATE => sys_ftruncate(args[0], args[1]),
         SYSCALL_FALLOCATE => sys_fallocate(args[0], args[1], args[2] as i64, args[3] as i64),
         SYSCALL_FCHMODAT => sys_fchmodat(args[0] as isize, args[1] as *const u8, args[2] as u32),
