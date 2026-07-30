@@ -26,7 +26,8 @@ pub const TRAMPOLINE: usize = usize::MAX - PAGE_SIZE + 1;
 pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
 /// clock frequency
 #[cfg(board = "virt")]
-pub const CLOCK_FREQ: usize = 4000000;
+/// Platform Timer Device       : aclint-mtimer @ 10000000Hz
+pub const CLOCK_FREQ: usize = 10_000_000;
 #[cfg(board = "visionfive2")]
 pub const CLOCK_FREQ: usize = 4000000;
 /// Reserved contiguous memory for DMA-capable virtio devices.

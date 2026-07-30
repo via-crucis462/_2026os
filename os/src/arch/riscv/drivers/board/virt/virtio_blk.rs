@@ -1,6 +1,6 @@
 use core::ptr::NonNull;
 
-use crate::MMIO_SLOT_SIZE;
+use crate::{MEMORY_END, MMIO_SLOT_SIZE};
 use crate::mm::{
     kernel_token, PageTable, PhysAddr, VirtAddr,
 };
@@ -88,6 +88,15 @@ unsafe impl Hal for VirtioHal {
 
     unsafe fn share(buffer: NonNull<[u8]>, _direction: BufferDirection) -> VirtioPhysAddr {
         let vaddr = buffer.as_ptr() as *mut u8 as usize;
+
+        if vaddr >= 0x8000_0000
+            && vaddr
+                .checked_add(buffer.len())
+                .is_some_and(|end| end <= MEMORY_END)
+        {
+            return vaddr as VirtioPhysAddr;
+        }
+        
         PageTable::from_token(kernel_token())
             .translate_va(VirtAddr::from(vaddr))
             .expect("virtio buffer is not mapped")
