@@ -9,6 +9,7 @@ pub mod clone;
 pub mod exec;
 pub mod exit;
 pub mod sched;
+pub mod worker;
 
 pub use tcb::*;
 pub use context::*;

@@ -96,13 +96,13 @@ impl Rqinner {
 			return;
 		}
 		self.nr_running += 1;
-		let (sched_policy, sched_priority, vruntime, load_weight, absolute_deadline) = {
+		let (sched_policy, prio, vruntime, load_weight, absolute_deadline) = {
 			let mut inner = task.inner_exclusive_access();
 			inner.on_rq = true;
 			inner.on_cpu = false;
 			(
 				inner.sched_policy,
-				inner.sched_priority,
+				inner.prio,
 				inner.se.vruntime,
 				inner.se.load_weight,
 				inner.dl.absolute_deadline,
@@ -114,7 +114,7 @@ impl Rqinner {
 				self.cfs.exclusive_access().enqueue(task, vruntime, load_weight)
 			}
 			SCHED_FIFO | SCHED_RR => {
-				let priority = sched_priority.max(0) as usize;
+				let priority = prio.max(0) as usize;
 				self.rt.exclusive_access().enqueue(task, priority.min(99), sched_policy == SCHED_RR);
 			}
 			SCHED_DEADLINE => self.deadline.exclusive_access().enqueue(task, absolute_deadline),

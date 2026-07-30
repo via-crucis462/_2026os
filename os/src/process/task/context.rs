@@ -10,7 +10,7 @@ pub struct TaskContext {
     /// Stack pointer
     pub sp: usize,
     /// s0-11 register, callee saved
-    pub s: [usize; 12],// la64只有s0-s9，但不单独定义，牺牲一点空间换取简洁
+    pub s: [usize; 12], // la64只有s0-s9，但不单独定义，牺牲一点空间换取简洁
 }
 
 impl TaskContext {
@@ -31,8 +31,17 @@ impl TaskContext {
             s: [0; 12],
         }
     }
+    pub fn goto_kernel_worker(entry: fn() -> !, kstack_ptr: usize) -> Self {
+        //println!("goto_kernel_worker: kstack_ptr=0x{:x}", kstack_ptr);
+        Self {
+            ra: entry as *const () as usize,
+            sp: kstack_ptr,
+            s: [0; 12],
+        }
+    }
 }
+
 pub struct ThreadStruct {
     pub task_ctx: TaskContext, // 线程上下文，保存寄存器等信息
-    pub trap_ctx: usize,  // 陷阱上下文，保存陷阱相关寄存器等信息
+    pub trap_ctx: usize,       // 陷阱上下文，保存陷阱相关寄存器等信息，地址，内核线程用不到直接填0
 }

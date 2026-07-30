@@ -5,6 +5,8 @@ pub use crate::arch::drivers::*;
 
 pub mod block_cache;
 pub mod block_dev;
+pub mod async_io;
+
 use alloc::sync::Arc;
 
 use crate::ext4fs::{get_block_cache, BlockDevice};

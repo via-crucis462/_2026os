@@ -174,6 +174,14 @@ lazy_static! {
 	};
 }
 
+pub fn add_worker_tasks(){
+	let worker_task = TaskStruct::new_kernel_worker(
+		crate::process::task::worker::test_kernel_worker
+	);
+	add_task(worker_task.clone());
+	info!("add_worker_tasks: pid={}", worker_task.getpid());
+}
+
 pub fn add_initproc() {
 	add_task(INITTASK.clone());
 	info!("add_initproc: pid={}", INITTASK.getpid());

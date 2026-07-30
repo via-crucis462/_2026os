@@ -133,11 +133,8 @@ impl PageCache {
 // 页缓存 lru 队列
 struct PageCacheLRUQueue {
     // 存储存在的页缓存条目
-    exists: BTreeMap<(u64, usize), ()>,
-    // (ino, page_offset) → next (ino, page_offset)
-    nexts: BTreeMap<(u64, usize), Option<(u64, usize)>>,
-    // (ino, page_offset) → prev (ino, page_offset)
-    prevs: BTreeMap<(u64, usize), Option<(u64, usize)>>,
+    // (ino, page_offset) → (prev, next)
+    chain: BTreeMap<(u64, usize), (Option<(u64, usize)>, Option<(u64, usize)>)>,
     head: Option<(u64, usize)>,
     tail: Option<(u64, usize)>,
 }
@@ -145,9 +142,7 @@ struct PageCacheLRUQueue {
 impl PageCacheLRUQueue{
     pub fn new() -> Self {
         Self {
-            exists: BTreeMap::new(),
-            nexts: BTreeMap::new(),
-            prevs: BTreeMap::new(),
+            chain: BTreeMap::new(),
             head: None,
             tail: None,
         }
@@ -157,14 +152,14 @@ impl PageCacheLRUQueue{
     }
     pub fn pop(&mut self) -> Option<(u64, usize)> {
         if let Some(head) = self.head {
-            let next = self.nexts[&head];
+            let next = self.chain[&head].1;
             if let Some(n) = next {
-                self.prevs.insert(n, None);
+                self.chain.insert(n, (self.chain[&n].0, None));
             } else {
                 self.tail = None;
             }
             self.head = next;
-            self.exists.remove(&head);
+            self.chain.remove(&head);
             Some(head)
         } else {
             None
@@ -173,41 +168,42 @@ impl PageCacheLRUQueue{
     /// 将页缓存条目移动到队尾（最近使用）；若不存在则插入
     pub fn update(&mut self, ino: u64, page_offset: usize) {
         let key = (ino, page_offset);
-        if !self.exists.contains_key(&key) {
-            // 新条目：直接插入到队尾
-            self.exists.insert(key, ());
-            if let Some(t) = self.tail {
-                self.nexts.insert(t, Some(key));
+
+        let Some(&(prev, next)) = self.chain.get(&key) else {
+            if let Some(tail) = self.tail {
+                self.chain.get_mut(&tail).unwrap().1 = Some(key);
             } else {
                 self.head = Some(key);
             }
-            self.prevs.insert(key, self.tail);
-            self.nexts.insert(key, None);
+
+            self.chain.insert(key, (self.tail, None));
             self.tail = Some(key);
             return;
+        };
+
+        if self.tail == Some(key) {
+            return;
         }
+
         // 从当前位置断开
-        let prev = self.prevs[&key];
-        let next = self.nexts[&key];
-        if let Some(p) = prev {
-            self.nexts.insert(p, next);
+        if let Some(prev) = prev {
+            self.chain.get_mut(&prev).unwrap().1 = next;
         } else {
             self.head = next;
         }
-        if let Some(n) = next {
-            self.prevs.insert(n, prev);
-        } else {
-            self.tail = prev;
+
+        if let Some(next) = next {
+            self.chain.get_mut(&next).unwrap().0 = prev;
         }
+
         // 插入到队尾
-        if let Some(t) = self.tail {
-            self.nexts.insert(t, Some(key));
+        if let Some(tail) = self.tail {
+            self.chain.get_mut(&tail).unwrap().1 = Some(key);
         } else {
-            // 队列在断开后变空（单元素 update 自身），head 也需恢复
             self.head = Some(key);
         }
-        self.prevs.insert(key, self.tail);
-        self.nexts.insert(key, None);
+
+        *self.chain.get_mut(&key).unwrap() = (self.tail, None);
         self.tail = Some(key);
     }
 }
