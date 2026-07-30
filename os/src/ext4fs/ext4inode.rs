@@ -720,7 +720,7 @@ impl Ext4Inode {
                 buf[actual_read..actual_read + read_len].fill(0);
             } else {
                 let mut temp_buf = alloc::vec![0u8; 4096];
-                self.fs.block_dev.read_block(physical_block_id as usize, &mut temp_buf);
+                self.fs.block_dev.read_data_block(physical_block_id as usize, &mut temp_buf);
                 buf[actual_read..actual_read + read_len].copy_from_slice(&temp_buf[block_pos..block_pos + read_len]);
             }
             
@@ -796,12 +796,12 @@ impl Ext4Inode {
             info!("raw_write_at: write block {} offset={} len={}", physical_block_id, block_pos, core::cmp::min(block_size - block_pos, end - curr_offset));
 
             let mut temp_buf = alloc::vec![0u8; 4096];
-            self.fs.block_dev.read_block(physical_block_id as usize, &mut temp_buf);
+            self.fs.block_dev.read_data_block(physical_block_id as usize, &mut temp_buf);
 
             let write_len = core::cmp::min(block_size - block_pos, end - curr_offset);
             temp_buf[block_pos..block_pos + write_len].copy_from_slice(&buf[actual_write..actual_write + write_len]);
 
-            self.fs.block_dev.write_block(physical_block_id as usize, &temp_buf);
+            self.fs.block_dev.write_data_block(physical_block_id as usize, &temp_buf);
 
             actual_write += write_len;
             curr_offset += write_len;

@@ -149,22 +149,31 @@ impl PageCacheLruQueue {
         }
         Some(head)
     }
+
+    fn remove(&mut self, block_id: u64) -> bool {
+        let Some((prev, next)) = self.chain.remove(&block_id) else {
+            return false;
+        };
+        if let Some(prev) = prev {
+            self.chain.get_mut(&prev).unwrap().1 = next;
+        } else {
+            self.head = next;
+        }
+        if let Some(next) = next {
+            self.chain.get_mut(&next).unwrap().0 = prev;
+        } else {
+            self.tail = prev;
+        }
+        true
+    }
+
     /// 将指定物理块移到队尾
     fn update(&mut self, block_id: u64) {
         if self.tail == Some(block_id) {
             return;
         }
 
-        if let Some((prev, next)) = self.chain.remove(&block_id) {
-            if let Some(prev) = prev {
-                self.chain.get_mut(&prev).unwrap().1 = next;
-            } else {
-                self.head = next;
-            }
-            if let Some(next) = next {
-                self.chain.get_mut(&next).unwrap().0 = prev;
-            }
-        }
+        self.remove(block_id);
 
         if let Some(tail) = self.tail {
             self.chain.get_mut(&tail).unwrap().1 = Some(block_id);
@@ -255,10 +264,15 @@ impl PageCacheManager {
     }
     /// 在 LRU 队列中标记一次访问
     fn touch_lru(&self, block_id: u64, is_data: bool) {
+        // 固定锁序 data -> meta，并保证一个物理块只属于一种 LRU。
+        let mut data_queue = self.data_lru_queue.lock();
+        let mut meta_queue = self.meta_lru_queue.lock();
         if is_data {
-            self.data_lru_queue.lock().update(block_id);
+            meta_queue.remove(block_id);
+            data_queue.update(block_id);
         } else {
-            self.meta_lru_queue.lock().update(block_id);
+            data_queue.remove(block_id);
+            meta_queue.update(block_id);
         }
     }
     /// 尝试回收元数据缓存
@@ -315,6 +329,15 @@ impl PageCacheManager {
         self.get_physical_page(block_id as u64, block_device, false, true)
             .0
     }
+    /// 获取不需要 ino/logical_block 映射的普通文件数据块缓存。
+    pub fn get_data_block_cache(
+        &self,
+        block_id: usize,
+        block_device: Arc<dyn BlockDevice>,
+    ) -> Arc<PageCache> {
+        self.get_physical_page(block_id as u64, block_device, true, true)
+            .0
+    }
     /// 封装原本 SharedPageCacheManager 的功能，获取数据块缓存
     pub fn get_page_cache(
         &self,
@@ -350,6 +373,7 @@ impl PageCacheManager {
         }
         cache
     }
+
     pub fn register_file(&self, ino: u64, file: &Arc<dyn File + Send + Sync>) {
         self.file_register.lock().insert(ino, Arc::downgrade(file));
     }
@@ -427,6 +451,10 @@ lazy_static! {
 
 pub fn get_block_cache(block_id: usize, block_device: Arc<dyn BlockDevice>) -> Arc<PageCache> {
     SHARED_PAGE_CACHE_MANAGER.get_block_cache(block_id, block_device)
+}
+
+pub fn get_data_block_cache(block_id: usize, block_device: Arc<dyn BlockDevice>) -> Arc<PageCache> {
+    SHARED_PAGE_CACHE_MANAGER.get_data_block_cache(block_id, block_device)
 }
 
 pub fn block_cache_sync_all() {
