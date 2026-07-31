@@ -5,14 +5,13 @@
 
 use super::BlockDevice;
 use alloc::collections::BTreeMap;
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::{Mutex, MutexGuard};
 
 use crate::ext4fs::BLOCK_SZ;
-use crate::fs::{File, VfsInode};
 use crate::mm::{frame_alloc, frame_ref_count, FrameTracker, PageSize};
 
 
@@ -203,10 +202,11 @@ pub struct PageCacheManager {
     page_cache_id_map: Mutex<BTreeMap<(u64, usize), u64>>,
     /// physical_block_id -> cached
     page_cache_map: Mutex<BTreeMap<u64, Arc<PageCache>>>,
-    /// MMAP 文件注册表，ino -> file
-    file_register: Mutex<BTreeMap<u64, Weak<dyn File + Send + Sync>>>,
-    /// VFS inode 注册表，ino -> vfs inode
-    vfs_register: Mutex<BTreeMap<u64, Weak<dyn VfsInode>>>,
+
+    // 旧实现中这里还有 vfsinode/file 注册表
+    // 而现在所有页缓存通过块号管理
+    // 不再需要回写的注册机制
+
     /// 数据块（非元数据块） LRU 队列
     data_lru_queue: Mutex<PageCacheLruQueue>,
     /// 元数据块 LRU 队列
@@ -218,8 +218,6 @@ impl PageCacheManager {
         Self {
             page_cache_id_map: Mutex::new(BTreeMap::new()),
             page_cache_map: Mutex::new(BTreeMap::new()),
-            file_register: Mutex::new(BTreeMap::new()),
-            vfs_register: Mutex::new(BTreeMap::new()),
             data_lru_queue: Mutex::new(PageCacheLruQueue::new()),
             meta_lru_queue: Mutex::new(PageCacheLruQueue::new()),
         }
@@ -400,27 +398,6 @@ impl PageCacheManager {
         cache
     }
 
-    pub fn register_file(&self, ino: u64, file: &Arc<dyn File + Send + Sync>) {
-        self.file_register.lock().insert(ino, Arc::downgrade(file));
-    }
-    pub fn register_vfs_inode(&self, ino: u64, vfs: &Arc<dyn VfsInode>) {
-        self.vfs_register.lock().insert(ino, Arc::downgrade(vfs));
-    }
-    pub fn unregister_file(&self, ino: u64) {
-        self.file_register.lock().remove(&ino);
-        self.vfs_register.lock().remove(&ino);
-        self.page_cache_id_map
-            .lock()
-            .retain(|(key_ino, _), _| *key_ino != ino);
-    }
-    pub fn clear_closed_files(&self) {
-        self.file_register
-            .lock()
-            .retain(|_, file| file.upgrade().is_some());
-        self.vfs_register
-            .lock()
-            .retain(|_, inode| inode.upgrade().is_some());
-    }
     fn find_file_page(&self, ino: u64, logical_block: usize) -> Option<Arc<PageCache>> {
         let block_id = *self.page_cache_id_map.lock().get(&(ino, logical_block))?;
         self.page_cache_map.lock().get(&block_id).cloned()
@@ -429,17 +406,6 @@ impl PageCacheManager {
         &self,
         ino: u64,
         page_offset: usize,
-        _file: &Arc<dyn File + Send + Sync>,
-    ) {
-        if let Some(cache) = self.find_file_page(ino, page_offset) {
-            cache.sync();
-        }
-    }
-    pub fn write_back_page_cache_vfs(
-        &self,
-        ino: u64,
-        page_offset: usize,
-        _vfs: &Arc<dyn VfsInode>,
     ) {
         if let Some(cache) = self.find_file_page(ino, page_offset) {
             cache.sync();
@@ -492,7 +458,6 @@ pub fn block_cache_sync_all() {
 }
 
 pub fn sync_shared_page_cache() {
-    SHARED_PAGE_CACHE_MANAGER.clear_closed_files();
     SHARED_PAGE_CACHE_MANAGER.sync_all();
     LAST_SYNC_TIME.store(crate::arch::timer::get_time_ms(), Ordering::Release);
 }
@@ -513,6 +478,5 @@ pub fn tick_sync() {
 }
 
 pub fn free_up_mem_space(std_pages: usize) -> usize {
-    SHARED_PAGE_CACHE_MANAGER.clear_closed_files();
     SHARED_PAGE_CACHE_MANAGER.free_data_pages(std_pages)
 }

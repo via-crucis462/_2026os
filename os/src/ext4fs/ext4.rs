@@ -1,5 +1,6 @@
 use super::*;
-use alloc::sync::Arc;
+use alloc::collections::BTreeMap;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -8,6 +9,13 @@ pub struct Ext4FS{
     pub block_dev: Arc<dyn BlockDevice>,
     pub superblock: Ext4SuperBlock,
     pub block_groups: Vec<Arc<Mutex<Ext4Group>>>,
+    /// inode 缓存表：ino -> Weak<Ext4Inode>
+    /// 
+    /// 从磁盘读取 inode 前先查表；
+    /// 从磁盘中读取一个 inode 时，会将其注册（缓存）到表中；
+    /// 后续访问时，若缓存中存在则直接使用。
+    /// 所有已注册表项不应当被主动删除。
+    pub inodes: Mutex<BTreeMap<u32, Weak<Ext4Inode>>>,
 }
 
 impl Ext4FS {
@@ -34,6 +42,7 @@ impl Ext4FS {
             block_dev,
             superblock,
             block_groups,
+            inodes: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -59,9 +68,18 @@ impl Ext4FS {
         let (block_id, offset) = self.get_inode_pos(inode_id);
         block_read(&self.block_dev, block_id as usize, offset)
     }
+    /// 获取 inode 对象，若缓存中不存在则从磁盘读取并创建新对象
     pub fn get_inode(self: &Arc<Self>, inode_id: u32) -> Arc<Ext4Inode> {
+        let mut inodes = self.inodes.lock();
+        // 命中缓存：所有引用者共享同一个 Arc，Arc 引用计数即该 ino 的内存引用数
+        if let Some(arc) = inodes.get(&inode_id).and_then(|w| w.upgrade()) {
+            return arc;
+        }
+        // 缓存缺失或 Weak 已失效：在锁内读盘并重建，避免并发 miss 产生重复对象
         let disk_inode = self.get_disk_inode(inode_id);
-        Arc::new(Ext4Inode::new(inode_id, &disk_inode, self.clone(), None))
+        let arc = Arc::new(Ext4Inode::new(inode_id, &disk_inode, self.clone(), None));
+        inodes.insert(inode_id, Arc::downgrade(&arc));
+        arc
     }
 
     pub fn alloc_inode(&self) -> Option<u32> {
@@ -148,7 +166,13 @@ impl Ext4FS {
 
         let byte_idx = (inode_idx / 8) as usize;
         let bit_idx = inode_idx % 8;
-        bitmap[byte_idx] &= !(1 << bit_idx);
+        let bit = 1u8 << bit_idx;
+        if bitmap[byte_idx] & bit == 0 {
+            // 该 inode 已被释放过（例如失效对象重复 Drop），幂等返回，
+            // 避免 free_inodes_count 重复统计
+            return;
+        }
+        bitmap[byte_idx] &= !bit;
         self.block_dev.write_block(bitmap_block as usize, &buf);
 
         group.free_inodes_count += 1;

@@ -272,14 +272,9 @@ impl Dentry {
 
 lazy_static! {
     pub static ref ROOT_DENTRY: Arc<Dentry> = {
-        let ext4fs = crate::ext4fs::ext4::Ext4FS::open(BLOCK_DEVICE.clone());
-        let root_disk_inode = ext4fs.get_disk_inode(2); 
-        let vfs_inode = Arc::new(crate::ext4fs::ext4inode::Ext4Inode::new(
-            2, 
-            &root_disk_inode, 
-            Arc::new(ext4fs), 
-            None
-        ));
+        // 用 get_inode() 而不是原地创建，保证经过映射缓存
+        let ext4fs = Arc::new(crate::ext4fs::ext4::Ext4FS::open(BLOCK_DEVICE.clone()));
+        let vfs_inode = ext4fs.get_inode(2);
 
         Dentry::new(
             String::from("/"),

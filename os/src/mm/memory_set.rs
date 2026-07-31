@@ -1241,8 +1241,6 @@ impl MemorySet {
                     return Err(Errno::ENOMEM.as_isize());
                 }
             }
-            // 注册到全局共享页面管理器
-            crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER.register_file(file.ino(), file);
             // 这里是简单插入，映射在前面已经完成了
             self.areas.push(area);
         } else if is_anonymous {
@@ -1825,7 +1823,7 @@ impl MapArea {
                         let file_page_offset =
                             *base_offset + (vpn.0 - self.vpn_range.get_start().0);
                         let man = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
-                        man.write_back_page_cache(file.ino(), file_page_offset, file);
+                        man.write_back_page_cache(file.ino(), file_page_offset);
                     }
                 }
 
@@ -2061,7 +2059,7 @@ impl MapArea {
                 for vpn in self.vpn_range.clone() {
                     let file_page_offset = *offset + (vpn.0 - self.vpn_range.get_start().0);
                     let man = &super::mmap::SHARED_PAGE_CACHE_MANAGER;
-                    man.write_back_page_cache(ino, file_page_offset, file);
+                    man.write_back_page_cache(ino, file_page_offset);
                 }
             }
         }

@@ -11,7 +11,6 @@ use crate::sync::MPSafeCell;
 use crate::fs::{File, OSInode, VfsInode, TimeSpec, ROOT_DENTRY, file_name, parent_path};
 use crate::ext4fs::BlockDevice;
 use crate::ext4fs::ext4::Ext4FS;
-use crate::ext4fs::ext4inode::Ext4Inode;
 use crate::mm::UserBuffer;
 use crate::fs::get_next_ino;
 use crate::process::id::RecycleAllocator;
@@ -234,9 +233,9 @@ pub fn create_loop_device(backing_file: Option<Arc<dyn VfsInode>>, offset: usize
 pub fn mount_loop_device(loop_device: Arc<LoopDevice>, mount_point: &str) -> Result<usize, isize>{
     // 创建一个loop设备实例
     let id = loop_device.device_id;
-    let ext4fs = Ext4FS::open(loop_device);
-    let root_disk_inode = ext4fs.get_disk_inode(2);
-    let root_inode = Arc::new(Ext4Inode::new(2, &root_disk_inode, Arc::new(ext4fs), None));
+    let ext4fs = Arc::new(Ext4FS::open(loop_device));
+    // 根 inode 走缓存，保证同一 ino 只有一个对象
+    let root_inode = ext4fs.get_inode(2);
 
     // 挂载到文件系统目录树中
     let parent_dir = parent_path(mount_point);

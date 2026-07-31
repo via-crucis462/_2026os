@@ -37,14 +37,9 @@ impl VfsInode for Ext4Inode {
                     }
                     if dirent.inode() != 0 && dirent.name_len() > 0 {
                         if dirent.safe_name() == name {
-                            // 找到了名称匹配的项，去磁盘读它的 Inode
-                            let disk_inode = self.fs.get_disk_inode(dirent.inode());
-                            return Some(Arc::new(Ext4Inode::new(
-                                dirent.inode(),
-                                &disk_inode,
-                                self.fs.clone(),
-                                Some(self.inode_id),
-                            )));
+                            // 找到名称匹配的目录项，统一走 inode 映射表，
+                            // 保证同一 ino 全局只有一个 Ext4Inode 对象
+                            return Some(self.fs.get_inode(dirent.inode()));
                         }
                     }
                     block_offset += rec_len;
@@ -562,7 +557,10 @@ impl VfsInode for Ext4Inode {
                 links = self.fs.decrease_link_count(target_inode_id);
             }
             if links == 0 {
-                warn!("Renamed-over inode {} has zero links but remains allocated until orphan cleanup is implemented", target_inode_id);
+                // 与 delete_dir_entry 相同：强制实例化一次并立即丢弃，
+                // 确保即使该 ino 从未被打开过也会触发 Drop 完成回收
+                let _orphan = self.fs.get_inode(target_inode_id);
+                info!("Renamed-over inode {} has zero links; data blocks and inode slot will be released when the last reference is dropped", target_inode_id);
             }
         }
         Ok(())

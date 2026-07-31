@@ -134,6 +134,9 @@ pub struct Ext4Inode {
     pub flags: u32,
     /// 数据块指针（直接块、间接块等）
     pub i_block: [u8; 60],
+    /// inode 代数：记录创建时的磁盘代数，防止 ino 被释放并复用后，
+    /// 失效的旧对象误释放新文件
+    generation: u32,
     /// 块设备
     pub fs: Arc<Ext4FS>,
     /// 父目录 Inode 编号（可选）
@@ -205,6 +208,7 @@ impl Ext4Inode {
             size: AtomicU64::new(disk_inode.size()), // 使用 DiskInode 已有的方法计算大小
             flags: disk_inode.i_flags,
             i_block: disk_inode.i_block,
+            generation: disk_inode.i_generation,
             fs,
             parent,
         }
@@ -1027,10 +1031,11 @@ impl Ext4Inode {
         let (target_inode_id, _) = self.remove_dir_entry_only(name)?;
         let links = self.fs.decrease_link_count(target_inode_id);
         if links == 0 {
-            // 暂不释放 inode 位图，避免仍被打开的孤立文件与新文件复用同一 ino。
-            // 完成 orphan 生命周期管理后，在最后一个引用关闭时恢复回收。
-            // self.fs.dealloc_inode(target_inode_id);
-            warn!("Inode {} link count is zero, but not deallocated yet (orphan handling not implemented)", target_inode_id);
+            // 磁盘链接数归零：真正的回收（数据块 + inode 位图）由 Ext4Inode::drop
+            // 在最后一个引用释放时执行。这里强制实例化一次并立即丢弃，确保即使
+            // 该 ino 此前从未被打开过（内存中没有对象），也会触发 Drop 完成回收。
+            let _orphan = self.fs.get_inode(target_inode_id);
+            info!("Inode {} link count is zero; data blocks and inode slot will be released when the last reference is dropped", target_inode_id);
         }
         Some(target_inode_id)
     }
@@ -1187,4 +1192,42 @@ impl Ext4Inode {
         true
     }
     
+}
+
+impl Drop for Ext4Inode {
+    fn drop(&mut self) {
+        // 在 inode 缓存（ino -> Weak）下，本对象是全局唯一的，因此 drop 一定发生在
+        // 最后一个引用释放时。此时只有当磁盘链接数已经为 0（unlink/rmdir/rename-over）
+        // 且该磁盘 inode 仍属于本对象创建时的代数时才真正回收：
+        // - 链接数不为 0：文件仍被目录引用，不能释放；
+        // - 代数不匹配：同一 ino 已经被释放并重新分配（或已被另一个对象回收），
+        //   失效的旧对象不能释放新文件，也不能重复归还位图。
+        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        if disk_inode.i_links_count != 0 || disk_inode.i_generation != self.generation {
+            return;
+        }
+
+        // 真正内联的快速符号链接（目标存于 i_block、i_blocks_lo 为 0）没有占用
+        // 数据块，不能走 truncate，否则直接块路径会把 i_block 里的文本误当成
+        // 物理块号释放。注意：本内核通过 write_at 创建的短符号链接虽然 size<60，
+        // 但会额外分配一个数据块（i_blocks_lo>0），这种情况必须走 truncate。
+        let inline_symlink = self.is_symlink()
+            && disk_inode.size() < 60
+            && disk_inode.i_blocks_lo == 0;
+        if !inline_symlink {
+            // 释放全部数据块并清空 extent 树（i_size / i_blocks 一并归零）
+            self.truncate(0);
+        }
+        info!("Ext4Inode::drop: ino={} links=0, releasing data blocks and inode slot", self.inode_id);
+
+        // 标记为已删除并推进代数，保证后续即使有同 ino 的失效对象 drop 也会跳过
+        block_modify_inode(&self.fs, self.inode_id, |d| {
+            d.i_dtime = 1; // 简化标记：非零即可，仅用于观察/调试
+            d.i_generation = d.i_generation.wrapping_add(1);
+            d.i_mode = 0;
+        });
+
+        // 归还 inode 位图
+        self.fs.dealloc_inode(self.inode_id);
+    }
 }
