@@ -29,6 +29,7 @@ impl Dentry {
             mounted_children: Mutex::new(BTreeMap::new()),
         })
     }
+    /*
     pub fn find(self: &Arc<Self>, name: &str) -> Arc<dyn VfsInode> {
         // 1. 挂载点优先
         let mounted_children = self.mounted_children.lock();
@@ -59,7 +60,7 @@ impl Dentry {
         // 4. 磁盘也没找到，按照要求 panic
         panic!("VFS: File '{}' not found in directory '{}'", name, self.name);
     }
-
+    */
     /// 创建新节点，将其作为self的子节点插入树
     /// bug/特性：getdents不遍历children，只遍历mounted_children
     pub fn insert(self: &Arc<Self>, name: String, inode: Arc<dyn VfsInode>) -> Arc<Self> {

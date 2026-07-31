@@ -58,7 +58,7 @@ pub fn create_fifo_in_dentry(parent: &Arc<Dentry>, name: String, mode: u32) -> A
 }
 
 pub fn open_fifo_file(inode: &OSInode, readable: bool, writable: bool) -> Arc<dyn File> {
-	let ino = inode.inode.get_stat().ino;
+	let ino = inode.inode().get_stat().ino;
 	let (read_end, write_end) = ensure_named_pipe(ino);
 	match (readable, writable) {
 		(true, false) => read_end,

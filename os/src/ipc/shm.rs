@@ -115,7 +115,7 @@ impl Shm {
             tmpfs.clone(),
             Weak::new(),
         );
-        let os_inode = Arc::new(OSInode::new(true, true, false, tmpfs.clone(), dentry));
+        let os_inode = Arc::new(OSInode::new(true, true, false, dentry));
         Self { id, stat: Mutex::new(stat), inner: os_inode }
     }
     pub fn get_id(&self) -> u32 {

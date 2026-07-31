@@ -86,7 +86,7 @@ impl TaskStruct {
 			return Self::exec_open_error(cwd, path.as_str());
 		};
 		{
-			let stat = app_inode.inode.get_stat();
+				let stat = app_inode.inode().get_stat();
 			let is_dir = (stat.mode & 0o170000) == 0o040000;
 			let can_exec = app_inode.get_perm().can_execute(uid, gid);
 			if is_dir || !can_exec {
@@ -95,7 +95,7 @@ impl TaskStruct {
 			}
 		}
 
-		debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode.get_size());
+			debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode().get_size());
 		let app_name = app_inode.get_dentry().name.clone();
 		let mut elf_data = app_inode.read_all();
 		let is_script = app_name.ends_with(".sh") || (elf_data.len() >= 2 && &elf_data[0..2] == b"#!");

@@ -323,7 +323,6 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
         readable,
         writable,
         false,
-        anon_vfs_inode,
         anon_dentry,
         ));
 
@@ -344,11 +343,11 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
     let open_flags = OpenFlags::from_bits_truncate(flags);
     let mask = mode & !current_umask();
     if let Some(inode) = open_file(start_dentry, path_str.as_str(), open_flags, mask) {
-        if open_flags.should_be_directory() && (inode.inode.get_stat().mode & 0o040000) == 0 {
+        if open_flags.should_be_directory() && (inode.inode().get_stat().mode & 0o040000) == 0 {
             trace!("kernel:pid[{}] VFS: sys_openat failed - '{}' is not a directory", task.getpid(), path_str);
             return ENOTDIR.as_isize(); // 目标文件不是目录
         }
-        let file: Arc<dyn File> = if is_fifo_mode(inode.inode.get_stat().mode) {
+        let file: Arc<dyn File> = if is_fifo_mode(inode.inode().get_stat().mode) {
             open_fifo_file(&inode, readable, writable)
         } else {
             inode
@@ -482,7 +481,7 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, mode: u32, _flags: u32) -> is
         if mode == 0 {
             return 0;
         }
-        let stat = os_inode.inode.get_stat();
+        let stat = os_inode.inode().get_stat();
         let file_mode = stat.mode & 0o777; 
         if (mode & 4) != 0 && (file_mode & 0o444) == 0 {
             return EACCES.as_isize(); 

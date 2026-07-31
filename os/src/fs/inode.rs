@@ -18,7 +18,6 @@ pub struct OSInode {
     writable: bool,
     append: bool,
     inner: Mutex<OSInodeInner>,
-    pub inode: Arc<dyn VfsInode>,   //实现了VfsInode trait的具体文件系统的inode
     pub dentry: Arc<Dentry>, 
 }
 
@@ -72,7 +71,6 @@ impl OSInode {
         readable: bool,
         writable: bool,
         append: bool,
-        inode: Arc<dyn VfsInode>,
         dentry: Arc<Dentry>,
     ) -> Self {
         Self {
@@ -80,21 +78,23 @@ impl OSInode {
             writable,
             append,
             inner: Mutex::new(OSInodeInner { offset: 0, mounted_offset: 0 }),
-            inode,
             dentry,
         }
     }
+    pub fn inode(&self) -> &Arc<dyn VfsInode> {
+        &self.dentry.inode
+    }
     pub fn set_time(&self, atime: &TimeSpec, mtime: &TimeSpec) -> isize {
-        self.inode.set_time(atime, mtime)
+        self.inode().set_time(atime, mtime)
     }
     pub fn read_all(&self) -> alloc::vec::Vec<u8> {
         // 1. 获取文件总大小
-        let size = self.inode.get_size();
+        let size = self.inode().get_size();
         trace!("[kernel] read_all: size={}", size);
         // 2. 准备缓冲区
         let mut buffer = alloc::vec![0u8; size];
         // 3. 从偏移量 0 开始读取
-        let read_len = self.inode.read_at(0, &mut buffer);
+        let read_len = self.inode().read_at(0, &mut buffer);
         trace!("[kernel] read_all: read_len={}", read_len);
         
         // 理论上 read_len 应该等于 size
@@ -128,7 +128,7 @@ impl File for OSInode {
         // O_APPEND 要求每次 write 都从当时的文件末尾开始，而不是只在 open
         // 时设置一次偏移；这样多个追加写入者也不会沿用过期偏移。
         let offset = if self.append {
-            self.inode.get_size()
+            self.inode().get_size()
         } else {
             inner.offset
         };
@@ -141,7 +141,7 @@ impl File for OSInode {
         let mut total_read = 0;
         let mut current_offset = offset;
         for slice in buf.buffers.iter_mut() {
-            let read_len = self.inode.raw_read_at(current_offset, *slice);
+            let read_len = self.inode().raw_read_at(current_offset, *slice);
             if read_len == 0 { break; }
             current_offset += read_len;
             total_read += read_len;
@@ -153,7 +153,7 @@ impl File for OSInode {
         let mut total_write = 0;
         let mut current_offset = offset;
         for slice in buf.buffers.iter() {
-            let write_len = self.inode.raw_write_at(current_offset, *slice);
+            let write_len = self.inode().raw_write_at(current_offset, *slice);
             if write_len == 0 { break; }
             current_offset += write_len;
             total_write += write_len;
@@ -164,13 +164,14 @@ impl File for OSInode {
     /// 带页缓存的读取，调用 VfsInode::read_at
     fn read_at(&self, offset: usize, mut buf: UserBuffer) -> usize {
         // 注册到全局页缓存管理器，以便周期性回写能找到此文件
+        let inode = self.inode();
         crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
-            .register_vfs_inode(self.inode.ino(), &self.inode);
+            .register_vfs_inode(inode.ino(), inode);
 
         let mut total_read = 0;
         let mut current_offset = offset;
         for slice in buf.buffers.iter_mut() {
-            let read_len = self.inode.read_at(current_offset, *slice);
+            let read_len = inode.read_at(current_offset, *slice);
             if read_len == 0 { break; }
             current_offset += read_len;
             total_read += read_len;
@@ -181,13 +182,14 @@ impl File for OSInode {
     /// 带页缓存的写入，调用 VfsInode::write_at
     fn write_at(&self, offset: usize, buf: UserBuffer) -> usize {
         // 注册到全局页缓存管理器，以便周期性回写能找到此文件
+        let inode = self.inode();
         crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
-            .register_vfs_inode(self.inode.ino(), &self.inode);
+            .register_vfs_inode(inode.ino(), inode);
 
         let mut total_write = 0;
         let mut current_offset = offset;
         for slice in buf.buffers.iter() {
-            let write_len = self.inode.write_at(current_offset, *slice);
+            let write_len = inode.write_at(current_offset, *slice);
             if write_len == 0 { break; }
             current_offset += write_len;
             total_write += write_len;
@@ -196,17 +198,17 @@ impl File for OSInode {
     }
 
     fn get_stat(&self) -> super::Stat {
-        self.inode.get_stat()
+        self.inode().get_stat()
     }
 
     fn getdents(&self, buf: &mut [u8]) -> isize{
         let mut inner = self.inner.lock();
-        let read_bytes = self.inode.getdents(&mut inner.offset, buf);
+        let read_bytes = self.inode().getdents(&mut inner.offset, buf);
         if read_bytes < 0 {
             return read_bytes;
         }
 
-        let lower_size = self.inode.get_size();
+        let lower_size = self.inode().get_size();
         if inner.offset < lower_size {
             return read_bytes;
         }
@@ -249,11 +251,11 @@ impl File for OSInode {
     }
 
     fn get_perm(&self) -> crate::auth::PermStat {
-        self.inode.get_perm()
+        self.inode().get_perm()
     }
 
     fn set_perm(&self, perm: PermStat) -> bool {
-        self.inode.set_perm(perm)
+        self.inode().set_perm(perm)
     }
 
     fn lseek(&self, offset: isize, whence: i32) -> isize {
@@ -270,7 +272,7 @@ impl File for OSInode {
             SEEK_SET => offset,
             SEEK_CUR => current_offset + offset,
             SEEK_END => {
-                let file_size = self.inode.get_size() as isize; 
+                let file_size = self.inode().get_size() as isize; 
                 file_size + offset
             },
             _ => return -22, // EINVAL (Invalid argument) whence 参数不合法
@@ -293,11 +295,11 @@ impl File for OSInode {
     
     fn get_shared_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         // 转发给底层的具体文件系统 Inode
-        self.inode.get_shared_page(page_offset)
+        self.inode().get_shared_page(page_offset)
     }
 
     fn truncate(&self, len: usize) -> bool {
-        self.inode.truncate(len)
+        self.inode().truncate(len)
     }
 
     fn as_any(&self) -> &dyn Any { self }
@@ -384,7 +386,6 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> O
             readable,
             writable,
             flags.contains(OpenFlags::APPEND),
-            new_dentry.inode.clone(),
             new_dentry,
         )));
     }
@@ -395,7 +396,6 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> O
         readable,
         writable,
         flags.contains(OpenFlags::APPEND),
-        target_dentry.inode.clone(),
         target_dentry,
     )))
 }
