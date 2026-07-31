@@ -175,6 +175,11 @@ impl Ext4FS {
         self.block_dev.write_block(bitmap_block as usize, &buf);
 
         group.free_blocks_count += 1;
+
+        // 物理块已释放：作废并丢弃它的缓存，不回写。
+        // 否则旧文件的数据会留在缓存里，重新分配后新所有者会读到旧数据，
+        // 脏缓存还可能把旧数据写回磁盘。
+        invalidate_block_cache(block_id as usize);
     }
 
     pub fn decrease_link_count(&self, inode_id: u32) -> u16 {
@@ -186,5 +191,16 @@ impl Ext4FS {
         });
         // 读取写回后的值
         block_read::<Ext4InodeDisk>(&self.block_dev, block_id as usize, offset).i_links_count
+    }
+
+    pub fn adjust_link_count(&self, inode_id: u32, delta: i16) {
+        let (block_id, offset) = self.get_inode_pos(inode_id);
+        block_modify(&self.block_dev, block_id as usize, offset, |disk_inode: &mut Ext4InodeDisk| {
+            if delta >= 0 {
+                disk_inode.i_links_count = disk_inode.i_links_count.saturating_add(delta as u16);
+            } else {
+                disk_inode.i_links_count = disk_inode.i_links_count.saturating_sub((-delta) as u16);
+            }
+        });
     }
 }

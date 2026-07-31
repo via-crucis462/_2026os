@@ -33,6 +33,8 @@ pub struct PageCacheInner {
     pub frame: FrameTracker,
     pub dirty: bool,
     pub state: CacheState,
+    /// 缓存已作废：对应物理块已被释放，禁止再写回
+    pub discarded: bool,
 }
 
 impl PageCacheInner {
@@ -80,6 +82,7 @@ impl PageCache {
                 frame: frame_alloc(PageSize::Page4K).unwrap(),
                 dirty: false,
                 state: CacheState::Loading,
+                discarded: false,
             }),
             block_id,
             block_device: Some(block_device),
@@ -91,6 +94,7 @@ impl PageCache {
                 frame,
                 dirty: false,
                 state: CacheState::Clean,
+                discarded: false,
             }),
             block_id: 0,
             block_device: None,
@@ -105,7 +109,7 @@ impl PageCache {
             return;
         };
         let mut inner = self.inner.lock();
-        if !inner.dirty {
+        if inner.discarded || !inner.dirty {
             return;
         }
         inner.state = CacheState::Writeback;
@@ -320,6 +324,28 @@ impl PageCacheManager {
             false
         }
     }
+    /// 作废并丢弃指定物理块的缓存（不回写）。
+    /// 
+    /// 用于物理块被释放（truncate/dealloc）的场景：
+    /// 块释放后旧缓存既不能继续回写（可能污染重新分配后的新所有者），
+    /// 也不能继续作为该物理块的缓存被复用（会读到已释放文件的旧数据）。
+    /// 与 get_physical_page 保持一致：先锁 map 再锁 inner。
+    pub fn invalidate_block(&self, block_id: u64) {
+        let mut map = self.page_cache_map.lock();
+        if let Some(cache) = map.get(&block_id).cloned() {
+            cache.lock().discarded = true;
+        }
+        map.remove(&block_id);
+        drop(map);
+
+        // 从 LRU 队列移除，避免之后被当作存活缓存弹出
+        self.data_lru_queue.lock().remove(block_id);
+        self.meta_lru_queue.lock().remove(block_id);
+        // 清理指向该物理块的 (ino, logical_block) 映射
+        self.page_cache_id_map
+            .lock()
+            .retain(|_, v| *v != block_id);
+    }
     /// 封装原本 BlockCacheManager 的功能，获取元数据块缓存
     pub fn get_block_cache(
         &self,
@@ -455,6 +481,10 @@ pub fn get_block_cache(block_id: usize, block_device: Arc<dyn BlockDevice>) -> A
 
 pub fn get_data_block_cache(block_id: usize, block_device: Arc<dyn BlockDevice>) -> Arc<PageCache> {
     SHARED_PAGE_CACHE_MANAGER.get_data_block_cache(block_id, block_device)
+}
+
+pub fn invalidate_block_cache(block_id: usize) {
+    SHARED_PAGE_CACHE_MANAGER.invalidate_block(block_id as u64);
 }
 
 pub fn block_cache_sync_all() {

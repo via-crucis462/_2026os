@@ -1083,6 +1083,7 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
         if !parent_mode.contains(FileMode::U_WRITE) || !parent_mode.contains(FileMode::U_EXECUTE) {
             return EACCES.as_isize();
         }
+        let _namespace_guard = parent.namespace_lock.lock();
         // 尝试删除
         if let Some(_inode_id) = parent.inode.delete_dir_entry(&name) {
             parent.children.lock().remove(&name);
@@ -2134,11 +2135,23 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
         Err(_) => return ENOENT.as_isize(),
     };
 
+    let _namespace_guard = parent_dentry.namespace_lock.lock();
+    if parent_dentry.mounted_children.lock().contains_key(&name)
+        || parent_dentry.children.lock().contains_key(&name)
+    {
+        return EEXIST.as_isize();
+    }
     // 通过父目录的 inode 创建符号链接
     //warn!("parent_path_str={}, name={}, target_str={}", parent_dentry.inode.type_name(), name, target_str);
     if let Some(symlink_inode) = parent_dentry.inode.create_symlink(&name, &target_str) {
         // 将新创建的 Inode 挂到 VFS 树
-        parent_dentry.insert(name, symlink_inode);
+        let mut children = parent_dentry.children.lock();
+        let new_dentry = Dentry::new(
+            name.clone(),
+            symlink_inode,
+            Arc::downgrade(&parent_dentry),
+        );
+        children.insert(name, new_dentry);
         0
     } else {
         EACCES.as_isize()

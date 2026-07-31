@@ -83,7 +83,7 @@ pub use crate::{
 };
 use alloc::task;
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
-use crate::fs::{open_file, OpenFlags}; 
+use crate::fs::{open_file, OpenFlags, RenameError};
 use super::{errno::Errno::*, normalize_leading_dot_path};
 
 use crate::syscall::epoll::{EpollFile, EventFile, EpollEvent};
@@ -720,7 +720,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
         is_tty = true; 
     } else if let Some(dentry) = file.get_dentry() {
         // 如果 fd > 2，检查它的文件名，只要包含 tty 或 console，是合法的终端 fd
-        let name = dentry.name.as_str();
+        let name = dentry.name();
         if name.contains("tty") || name.contains("console") {
             is_tty = true;
         }
@@ -874,7 +874,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             };
             
             let mut target_id = None;
-            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+            if let Some(id_str) = dentry.name().strip_prefix("loop") {
                 if let Ok(id) = id_str.parse::<usize>() {
                     target_id = Some(id);
                 }
@@ -898,7 +898,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             };
             
             let mut target_id = None;
-            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+            if let Some(id_str) = dentry.name().strip_prefix("loop") {
                 if let Ok(id) = id_str.parse::<usize>() {
                     target_id = Some(id);
                 }
@@ -920,7 +920,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 None => return EINVAL.as_isize(),
             };
             let mut target_id = None;
-            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+            if let Some(id_str) = dentry.name().strip_prefix("loop") {
                 if let Ok(id) = id_str.parse::<usize>() {
                     target_id = Some(id);
                 }
@@ -953,7 +953,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 None => return EINVAL.as_isize(),
             };
             let mut target_id = None;
-            if let Some(id_str) = dentry.name.strip_prefix("loop") {
+            if let Some(id_str) = dentry.name().strip_prefix("loop") {
                 if let Ok(id) = id_str.parse::<usize>() {
                     target_id = Some(id);
                 }
@@ -1098,8 +1098,13 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
 
 pub fn sys_renameat2(
     _olddirfd: i32, oldpath_ptr: usize,
-    _newdirfd: i32, newpath_ptr: usize, _flags: usize
+    _newdirfd: i32, newpath_ptr: usize, flags: usize
 ) -> isize {
+    const RENAME_NOREPLACE: usize = 1;
+    if flags & !RENAME_NOREPLACE != 0 {
+        return EINVAL.as_isize();
+    }
+
     let task = current_task().unwrap();
     let token = current_user_token();
 
@@ -1128,32 +1133,101 @@ pub fn sys_renameat2(
         // 判断是否在同一个目录下操作（如同目录内重命名 mv /a/foo /a/bar）
         let same_dir = Arc::ptr_eq(&old_parent, &new_parent);
 
-        // 先从前台 VFS 树上把旧节点摘下来
-        let moved_dentry_opt = {
-            let mut old_children = old_parent.children.lock(); 
-            old_children.remove(&old_name)
-        }; 
-
-        if let Some(moved_dentry) = moved_dentry_opt {
-            // 先改名
-            let disk_success = old_parent.inode.rename_dir_entry(&old_name, &new_name);
-            if disk_success {
-                // 底层成功了，再把节点以新名字挂到 VFS 树上
-                // 注意：old_children 锁已随块结束而释放，此处重新获取不会死锁
-                if same_dir {
-                    let mut children = old_parent.children.lock();
-                    children.insert(new_name.to_string(), moved_dentry);
-                } else {
-                    let mut new_children = new_parent.children.lock();
-                    new_children.insert(new_name.to_string(), moved_dentry);
+        let rename_locked = || -> isize {
+            if same_dir {
+                let mounted = old_parent.mounted_children.lock();
+                if mounted.contains_key(&old_name) || mounted.contains_key(&new_name) {
+                    return EBUSY.as_isize();
                 }
-                return 0;
-            } else {
-                // 不成功，挂回去（锁已释放，安全重取）
-                let mut old_children = old_parent.children.lock();
-                old_children.insert(old_name.to_string(), moved_dentry);
-                return EIO.as_isize();
+            } else if old_parent.mounted_children.lock().contains_key(&old_name)
+                || new_parent.mounted_children.lock().contains_key(&new_name)
+            {
+                return EBUSY.as_isize();
             }
+
+            // Materialize an uncached source without publishing any namespace change yet.
+            let moved_dentry = old_parent
+                .children
+                .lock()
+                .get(&old_name)
+                .cloned()
+                .or_else(|| {
+                    old_parent.inode.find(&old_name).map(|inode| {
+                        crate::fs::Dentry::new(
+                            old_name.clone(),
+                            inode,
+                            Arc::downgrade(&old_parent),
+                        )
+                    })
+                });
+            let Some(moved_dentry) = moved_dentry else {
+                return ENOENT.as_isize();
+            };
+
+            if (moved_dentry.inode.get_stat().mode & 0o170000) == 0o040000 && !same_dir {
+                let mut ancestor = Some(new_parent.clone());
+                while let Some(node) = ancestor {
+                    if Arc::ptr_eq(&node, &moved_dentry) {
+                        return EINVAL.as_isize();
+                    }
+                    ancestor = node.parent().upgrade();
+                }
+            }
+
+            let disk_result = old_parent.inode.rename_dir_entry(
+                &old_name,
+                &new_parent.inode,
+                &new_name,
+                flags & RENAME_NOREPLACE != 0,
+            );
+            if let Err(error) = disk_result {
+                return match error {
+                    RenameError::NotFound => ENOENT.as_isize(),
+                    RenameError::Exists => EEXIST.as_isize(),
+                    RenameError::NotDir => ENOTDIR.as_isize(),
+                    RenameError::IsDir => EISDIR.as_isize(),
+                    RenameError::NotEmpty => ENOTEMPTY.as_isize(),
+                    RenameError::CrossDevice => EXDEV.as_isize(),
+                    RenameError::Invalid => EINVAL.as_isize(),
+                    RenameError::Io => EIO.as_isize(),
+                };
+            }
+
+            // Commit the cache update only after the filesystem operation succeeded.
+            if same_dir {
+                let mut children = old_parent.children.lock();
+                let moved_dentry = children.remove(&old_name).unwrap_or(moved_dentry);
+                children.remove(&new_name);
+                moved_dentry.relocate(new_name.clone(), Arc::downgrade(&new_parent));
+                children.insert(new_name.clone(), moved_dentry);
+            } else {
+                let moved_dentry = old_parent
+                    .children
+                    .lock()
+                    .remove(&old_name)
+                    .unwrap_or(moved_dentry);
+                new_parent.children.lock().remove(&new_name);
+                moved_dentry.relocate(new_name.clone(), Arc::downgrade(&new_parent));
+                new_parent.children.lock().insert(new_name.clone(), moved_dentry);
+            }
+            0
+        };
+
+        if same_dir {
+            let _guard = old_parent.namespace_lock.lock();
+            return rename_locked();
+        }
+
+        let old_addr = Arc::as_ptr(&old_parent) as usize;
+        let new_addr = Arc::as_ptr(&new_parent) as usize;
+        if old_addr < new_addr {
+            let _old_guard = old_parent.namespace_lock.lock();
+            let _new_guard = new_parent.namespace_lock.lock();
+            return rename_locked();
+        } else {
+            let _new_guard = new_parent.namespace_lock.lock();
+            let _old_guard = old_parent.namespace_lock.lock();
+            return rename_locked();
         }
     }
     

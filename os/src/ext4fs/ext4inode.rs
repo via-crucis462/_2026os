@@ -899,54 +899,140 @@ impl Ext4Inode {
         written == BLOCK_SZ
     }
 
-    pub fn delete_dir_entry(&self, name: &str) -> Option<u32> {
+    pub fn lookup_dir_entry(&self, name: &str) -> Option<(u32, u8)> {
+        let file_size_bytes = self.fs.get_disk_inode(self.inode_id).size() as usize;
         let mut offset = 0;
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        let file_size_bytes = disk_inode.size() as usize;
-
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; BLOCK_SZ];
-            self.raw_read_at(offset, &mut buf);
-
+            let read_len = self.raw_read_at(offset, &mut buf);
             let mut block_offset = 0;
-            let mut prev_offset = 0;
-            while block_offset < BLOCK_SZ {
-                let dirent = unsafe { &mut *(buf[block_offset..].as_ptr() as *mut Ext4DirEntry) };
-                let rec_len = dirent.rec_len as usize;
-                
-                if rec_len == 0 { break; } 
-
-                if dirent.inode != 0 && dirent.name() == name {
-                    let target_inode_id = dirent.inode;
-                    if block_offset == 0 {
-                        dirent.inode = 0;
-                    } else {
-                        let prev_dirent = unsafe { &mut *(buf[prev_offset..].as_ptr() as *mut Ext4DirEntry) };
-                        prev_dirent.rec_len += rec_len as u16;
-                    }
-
-                    self.update_dir_block_checksum_if_needed(&mut buf);
-                    self.raw_write_at(offset, &buf);
-                    
-                    // 递减链接数并检查是否需要回收
-                    let links = self.fs.decrease_link_count(target_inode_id);
-                    if links == 0 {
-                        // 暂不释放 inode 位图，避免仍被打开的孤立文件与新文件复用同一 ino。
-                        // 完成 orphan 生命周期管理后，在最后一个引用关闭时恢复回收。
-                        // self.fs.dealloc_inode(target_inode_id);
-                        warn!("Inode {} link count is zero, but not deallocated yet (orphan handling not implemented)", target_inode_id);
-                    }
-                    
-                    return Some(target_inode_id);
+            while block_offset + 8 <= read_len {
+                let dirent = Ext4DirEntry::from_bytes(&buf[block_offset..read_len])?;
+                let rec_len = dirent.rec_len() as usize;
+                if rec_len == 0 || block_offset + rec_len > read_len {
+                    break;
                 }
-
-                prev_offset = block_offset;
+                if dirent.inode() != 0 && dirent.safe_name() == name {
+                    return Some((dirent.inode(), dirent.file_type));
+                }
                 block_offset += rec_len;
-                if block_offset >= BLOCK_SZ { break; }
             }
             offset += BLOCK_SZ;
         }
         None
+    }
+
+    /// 移除目录项，但不修改 inode 链接计数
+    pub fn remove_dir_entry_only(&self, name: &str) -> Option<(u32, u8)> {
+        let file_size_bytes = self.fs.get_disk_inode(self.inode_id).size() as usize;
+        let mut offset = 0;
+        while offset < file_size_bytes {
+            let mut buf = alloc::vec![0u8; BLOCK_SZ];
+            let read_len = self.raw_read_at(offset, &mut buf);
+            let mut block_offset = 0;
+            let mut prev_offset = None;
+            while block_offset + 8 <= read_len {
+                let dirent = unsafe { &mut *(buf[block_offset..].as_mut_ptr() as *mut Ext4DirEntry) };
+                let rec_len = dirent.rec_len as usize;
+                if rec_len < 8 || block_offset + rec_len > read_len {
+                    break;
+                }
+                if dirent.inode != 0 && dirent.safe_name() == name {
+                    let removed = (dirent.inode, dirent.file_type);
+                    if let Some(previous) = prev_offset {
+                        let prev = unsafe { &mut *(buf[previous..].as_mut_ptr() as *mut Ext4DirEntry) };
+                        prev.rec_len = prev.rec_len.saturating_add(dirent.rec_len);
+                    } else {
+                        dirent.inode = 0;
+                    }
+                    self.update_dir_block_checksum_if_needed(&mut buf);
+                    if self.raw_write_at(offset, &buf) == BLOCK_SZ {
+                        return Some(removed);
+                    }
+                    return None;
+                }
+                prev_offset = Some(block_offset);
+                block_offset += rec_len;
+            }
+            offset += BLOCK_SZ;
+        }
+        None
+    }
+
+    /// Change the inode referenced by an existing name, returning the old target.
+    pub fn replace_dir_entry(
+        &self,
+        name: &str,
+        inode_id: u32,
+        file_type: u8,
+    ) -> Option<(u32, u8)> {
+        let file_size_bytes = self.fs.get_disk_inode(self.inode_id).size() as usize;
+        let mut offset = 0;
+        while offset < file_size_bytes {
+            let mut buf = alloc::vec![0u8; BLOCK_SZ];
+            let read_len = self.raw_read_at(offset, &mut buf);
+            let mut block_offset = 0;
+            while block_offset + 8 <= read_len {
+                let dirent = unsafe { &mut *(buf[block_offset..].as_mut_ptr() as *mut Ext4DirEntry) };
+                let rec_len = dirent.rec_len as usize;
+                if rec_len < 8 || block_offset + rec_len > read_len {
+                    break;
+                }
+                if dirent.inode != 0 && dirent.safe_name() == name {
+                    let replaced = (dirent.inode, dirent.file_type);
+                    dirent.inode = inode_id;
+                    dirent.file_type = file_type;
+                    self.update_dir_block_checksum_if_needed(&mut buf);
+                    if self.raw_write_at(offset, &buf) == BLOCK_SZ {
+                        return Some(replaced);
+                    }
+                    return None;
+                }
+                block_offset += rec_len;
+            }
+            offset += BLOCK_SZ;
+        }
+        None
+    }
+
+    pub fn directory_is_empty(&self) -> bool {
+        let file_size_bytes = self.fs.get_disk_inode(self.inode_id).size() as usize;
+        let mut offset = 0;
+        while offset < file_size_bytes {
+            let mut buf = alloc::vec![0u8; BLOCK_SZ];
+            let read_len = self.raw_read_at(offset, &mut buf);
+            let mut block_offset = 0;
+            while block_offset + 8 <= read_len {
+                let Some(dirent) = Ext4DirEntry::from_bytes(&buf[block_offset..read_len]) else {
+                    return false;
+                };
+                let rec_len = dirent.rec_len() as usize;
+                if rec_len == 0 || block_offset + rec_len > read_len {
+                    return false;
+                }
+                if dirent.inode() != 0 {
+                    let entry_name = dirent.safe_name();
+                    if entry_name != "." && entry_name != ".." {
+                        return false;
+                    }
+                }
+                block_offset += rec_len;
+            }
+            offset += BLOCK_SZ;
+        }
+        true
+    }
+
+    pub fn delete_dir_entry(&self, name: &str) -> Option<u32> {
+        let (target_inode_id, _) = self.remove_dir_entry_only(name)?;
+        let links = self.fs.decrease_link_count(target_inode_id);
+        if links == 0 {
+            // 暂不释放 inode 位图，避免仍被打开的孤立文件与新文件复用同一 ino。
+            // 完成 orphan 生命周期管理后，在最后一个引用关闭时恢复回收。
+            // self.fs.dealloc_inode(target_inode_id);
+            warn!("Inode {} link count is zero, but not deallocated yet (orphan handling not implemented)", target_inode_id);
+        }
+        Some(target_inode_id)
     }
 
     /// 截断/扩展文件到指定大小

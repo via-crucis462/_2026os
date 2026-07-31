@@ -199,7 +199,7 @@ gdb-rv:
 	
 #	-ex "b os::syscall::fs::sys_dup2"
     
-gdb-rv: MODE = debug
+gdb-la: MODE = debug
 gdb-la:
 	@$(GDB) $(LA_ELF) \
 	-ex "set confirm off" \

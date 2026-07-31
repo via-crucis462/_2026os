@@ -202,6 +202,7 @@ impl File for OSInode {
     }
 
     fn getdents(&self, buf: &mut [u8]) -> isize{
+        let _namespace_guard = self.dentry.namespace_lock.lock();
         let mut inner = self.inner.lock();
         let read_bytes = self.inode().getdents(&mut inner.offset, buf);
         if read_bytes < 0 {
@@ -222,6 +223,7 @@ impl File for OSInode {
         let mut mount_index = inner.mounted_offset;
         while mount_index < mounted_children.len() {
             let child = &mounted_children[mount_index];
+            let child_name = child.name();
             let stat = child.inode.get_stat();
             let next_offset = (lower_size + mount_index + 1) as i64;
             let Some(written) = append_dirent_record(
@@ -230,7 +232,7 @@ impl File for OSInode {
                 stat.ino,
                 next_offset,
                 dirent_type_from_mode(stat.mode),
-                child.name.as_str(),
+                child_name.as_str(),
             ) else {
                 break;
             };
@@ -352,7 +354,7 @@ impl OpenFlags {
     }
 }
 pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> Option<Arc<OSInode>> {
-    warn!("VFS: pid{} open_file - path='{}', flags={:?},cwd={}", current_task().unwrap().getpid(), path, flags, base.name);
+    warn!("VFS: pid{} open_file - path='{}', flags={:?},cwd={}", current_task().unwrap().getpid(), path, flags, base.name());
     let start_node = if path.starts_with('/') {
         ROOT_DENTRY.clone() // 绝对路径，从根开始
     } else {

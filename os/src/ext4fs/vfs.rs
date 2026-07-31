@@ -6,7 +6,7 @@ use alloc::vec;
 use alloc::string::String;
 use core::sync::atomic::Ordering;
 use crate::fs::TimeSpec;
-use crate::fs::VfsInode;
+use crate::fs::{RenameError, VfsInode};
 use crate::syscall::fs::Statfs;
 use super::block_modify_inode;
 
@@ -451,60 +451,121 @@ impl VfsInode for Ext4Inode {
         });
         true
     }
-    fn rename_dir_entry(&self, old_name: &str, new_name: &str) -> bool {
-        if new_name.len() > old_name.len() {
-            return false; 
+    fn rename_dir_entry(
+        &self,
+        old_name: &str,
+        new_parent: &Arc<dyn VfsInode>,
+        new_name: &str,
+        no_replace: bool,
+    ) -> Result<(), RenameError> {
+        if !self.is_dir() || (new_parent.get_stat().mode & 0o170000) != 0o040000 {
+            return Err(RenameError::NotDir);
+        }
+        if new_parent.type_name() != "Ext4Inode" {
+            return Err(RenameError::CrossDevice);
+        }
+        if old_name.is_empty()
+            || new_name.is_empty()
+            || old_name.len() > 255
+            || new_name.len() > 255
+            || old_name == "."
+            || old_name == ".."
+            || new_name == "."
+            || new_name == ".."
+        {
+            return Err(RenameError::Invalid);
         }
 
-        let mut offset = 0;
-        let block_size = BLOCK_SZ; 
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        let file_size_bytes = disk_inode.size() as usize;
+        let new_parent_id = u32::try_from(new_parent.ino()).map_err(|_| RenameError::CrossDevice)?;
+        let same_parent = self.inode_id == new_parent_id;
+        let source = self.lookup_dir_entry(old_name).ok_or(RenameError::NotFound)?;
+        let new_parent_inode = self.fs.get_inode(new_parent_id);
+        let target = new_parent_inode.lookup_dir_entry(new_name);
+        if no_replace && target.is_some() {
+            return Err(RenameError::Exists);
+        }
+        if same_parent && old_name == new_name {
+            return Ok(());
+        }
 
-    
+        let source_disk_inode = self.fs.get_disk_inode(source.0);
+        let source_is_dir = source_disk_inode.is_dir();
+        if let Some((target_inode_id, _)) = target {
+            let target_inode = self.fs.get_inode(target_inode_id);
+            let target_is_dir = target_inode.is_dir();
+            if source_is_dir && !target_is_dir {
+                return Err(RenameError::NotDir);
+            }
+            if !source_is_dir && target_is_dir {
+                return Err(RenameError::IsDir);
+            }
+            if target_is_dir && !target_inode.directory_is_empty() {
+                return Err(RenameError::NotEmpty);
+            }
+        }
 
-        while offset < file_size_bytes {
-            let logical_block = (offset / block_size) as u32;
-            let physical_block = self.find_physical_block(logical_block);
-            if physical_block == 0 { break; }
+        let source_inode = self.fs.get_inode(source.0);
+        let update_dotdot = source_is_dir
+            && !same_parent
+            && source_inode.lookup_dir_entry("..").is_some();
+        if update_dotdot
+            && source_inode
+                .replace_dir_entry("..", new_parent_id, 2)
+                .is_none()
+        {
+            return Err(RenameError::Io);
+        }
 
-            let mut buf = [0u8; BLOCK_SZ];
-            self.fs.block_dev.read_block(physical_block as usize, &mut buf);
-            let block: &mut [u8; 4096] = unsafe { &mut *(buf.as_mut_ptr() as *mut [u8; 4096]) };
-
-            let mut found = false;
-            let mut block_offset = 0;
-            while block_offset < block_size {
-                let dirent_ptr = block.as_mut_ptr().wrapping_add(block_offset) as *mut Ext4DirEntry;
-                let dirent = unsafe { &mut *dirent_ptr };
-
-                let rec_len = dirent.rec_len as usize;
-                if rec_len == 0 { break; }
-
-                if dirent.inode != 0 {
-                    if dirent.name() == old_name {
-                        dirent.name_len = new_name.len() as u8;
-                        let name_bytes = new_name.as_bytes();
-                        for i in 0..name_bytes.len() {
-                            dirent.name[i] = name_bytes[i];
-                        }
-                        for i in name_bytes.len()..old_name.len() {
-                            dirent.name[i] = 0; 
-                        }
-                        found = true;
-                        break;
-                    }
+        if let Some(_) = target {
+            if new_parent_inode
+                .replace_dir_entry(new_name, source.0, source.1)
+                .is_none()
+            {
+                if update_dotdot {
+                    source_inode.replace_dir_entry("..", self.inode_id, 2);
                 }
-                block_offset += rec_len;
+                return Err(RenameError::Io);
             }
-
-            if found {
-                self.fs.block_dev.write_block(physical_block as usize, &buf);
-                return true;
+        } else if !new_parent_inode.add_dir_entry(new_name, source.0, source.1) {
+            if update_dotdot {
+                source_inode.replace_dir_entry("..", self.inode_id, 2);
             }
-            offset += block_size;
+            return Err(RenameError::Io);
         }
-        false
+
+        if self.remove_dir_entry_only(old_name).is_none() {
+            if let Some((target_inode_id, target_file_type)) = target {
+                new_parent_inode.replace_dir_entry(new_name, target_inode_id, target_file_type);
+            } else {
+                new_parent_inode.remove_dir_entry_only(new_name);
+            }
+            if update_dotdot {
+                source_inode.replace_dir_entry("..", self.inode_id, 2);
+            }
+            return Err(RenameError::Io);
+        }
+
+        if source_is_dir && !same_parent {
+            self.fs.adjust_link_count(self.inode_id, -1);
+            if target.is_none() {
+                self.fs.adjust_link_count(new_parent_id, 1);
+            }
+        } else if source_is_dir && target.is_some() {
+            // Replacing a directory in the same parent removes one child directory.
+            self.fs.adjust_link_count(self.inode_id, -1);
+        }
+
+        if let Some((target_inode_id, _)) = target {
+            let target_is_dir = self.fs.get_disk_inode(target_inode_id).is_dir();
+            let mut links = self.fs.decrease_link_count(target_inode_id);
+            if target_is_dir {
+                links = self.fs.decrease_link_count(target_inode_id);
+            }
+            if links == 0 {
+                warn!("Renamed-over inode {} has zero links but remains allocated until orphan cleanup is implemented", target_inode_id);
+            }
+        }
+        Ok(())
     }
     fn set_time(&self, atime: &TimeSpec, mtime: &TimeSpec) -> isize {
         block_modify_inode(&self.fs, self.inode_id, |disk_inode| {

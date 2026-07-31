@@ -8,11 +8,18 @@ use super::{VfsInode};
 use crate::drivers::block::BLOCK_DEVICE;
 
 pub struct Dentry {
-    pub name: String,
     pub inode: Arc<dyn VfsInode>,
-    pub parent: Weak<Dentry>,
+    location: Mutex<DentryLocation>,
+    /// 对当前目录的操作（如插入、删除、查找）都应加此锁
+    /// 保证不发生数据竞争
+    pub namespace_lock: Mutex<()>,
     pub children: Mutex<BTreeMap<String, Arc<Dentry>>>,
     pub mounted_children: Mutex<BTreeMap<String, Arc<Dentry>>>,
+}
+
+struct DentryLocation {
+    name: String,
+    parent: Weak<Dentry>,
 }
 
 impl Dentry {
@@ -22,12 +29,26 @@ impl Dentry {
         parent: Weak<Dentry>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            name,
             inode,
-            parent,
+            location: Mutex::new(DentryLocation { name, parent }),
+            namespace_lock: Mutex::new(()),
             children: Mutex::new(BTreeMap::new()),
             mounted_children: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    pub fn name(&self) -> String {
+        self.location.lock().name.clone()
+    }
+
+    pub fn parent(&self) -> Weak<Dentry> {
+        self.location.lock().parent.clone()
+    }
+
+    pub fn relocate(&self, name: String, parent: Weak<Dentry>) {
+        let mut location = self.location.lock();
+        location.name = name;
+        location.parent = parent;
     }
     /*
     pub fn find(self: &Arc<Self>, name: &str) -> Arc<dyn VfsInode> {
@@ -64,6 +85,11 @@ impl Dentry {
     /// 创建新节点，将其作为self的子节点插入树
     /// bug/特性：getdents不遍历children，只遍历mounted_children
     pub fn insert(self: &Arc<Self>, name: String, inode: Arc<dyn VfsInode>) -> Arc<Self> {
+        let _namespace_guard = self.namespace_lock.lock();
+        self.insert_locked(name, inode)
+    }
+
+    fn insert_locked(self: &Arc<Self>, name: String, inode: Arc<dyn VfsInode>) -> Arc<Self> {
         let mut children = self.children.lock();
         if let Some(child) = children.get(&name) {
             return child.clone();
@@ -82,6 +108,7 @@ impl Dentry {
     /// 在目前的实现中，专用于虚拟文件夹挂载
     /// bug/特性：getdents不遍历children，只遍历mounted_children
     pub fn mount_child(self: &Arc<Self>, name: String, inode: Arc<dyn VfsInode>) -> Arc<Self> {
+        let _namespace_guard = self.namespace_lock.lock();
         let mut mounted_children = self.mounted_children.lock();
         if let Some(child) = mounted_children.get(&name) {
             return child.clone();
@@ -125,7 +152,7 @@ impl Dentry {
             let comp = components.remove(0); // 取出当前要解析的层级
             // 处理上一级目录 ".."
             if comp == ".." {
-                if let Some(parent) = current.parent.upgrade() {
+                if let Some(parent) = current.parent().upgrade() {
                     current = parent;
                 }
                 continue;
@@ -187,7 +214,8 @@ impl Dentry {
 
     /// 查找子节点（单级）：返回的是 Dentry 包装，以便继续向下查找
     pub fn find_child(self: &Arc<Self>, name: &str) -> Option<Arc<Dentry>> {
-        trace!("[kernel] Dentry::find_child: parent={}, name={}", self.name, name);
+        trace!("[kernel] Dentry::find_child: parent={}, name={}", self.name(), name);
+        let _namespace_guard = self.namespace_lock.lock();
         //先看虚拟挂载点
         let mounted_children = self.mounted_children.lock();
         if let Some(child) = mounted_children.get(name) {
@@ -213,7 +241,7 @@ impl Dentry {
             return Some(new_child);
         }
         // 3. 磁盘也没找到，按照要求 panic
-        trace!("VFS: File '{}' not found in directory '{}'", name, self.name);
+        trace!("VFS: File '{}' not found in directory '{}'", name, self.name());
         None
     }
 
@@ -222,8 +250,8 @@ impl Dentry {
         let mut current = self.clone();
 
         // 向上回溯直到根目录（根目录的 parent.upgrade() 会返回 None）
-        while let Some(parent) = current.parent.upgrade() {
-            parts.push(current.name.clone());
+        while let Some(parent) = current.parent().upgrade() {
+            parts.push(current.name());
             current = parent;
         }
 
@@ -287,6 +315,13 @@ pub fn file_name(path: &str) -> String {
 }
 
 pub fn create_file_in_dentry(parent: &Arc<Dentry>, name: String, mode: u32) -> Arc<Dentry> {
+    let _namespace_guard = parent.namespace_lock.lock();
+    if let Some(child) = parent.mounted_children.lock().get(&name).cloned() {
+        return child;
+    }
+    if let Some(child) = parent.children.lock().get(&name).cloned() {
+        return child;
+    }
     // open(O_CREAT) 传入的 mode 通常只包含权限位；inode 的 st_mode 还必须包含
     // S_IFREG，否则 stat(2) 无法把它识别为普通文件，`test -f` 会失败。
     let mode = (mode & 0o7777) | 0o100000;
@@ -294,15 +329,22 @@ pub fn create_file_in_dentry(parent: &Arc<Dentry>, name: String, mode: u32) -> A
         .expect("VFS: Failed to create file in disk");
     
     // 将新创建的 Inode 插入 Dentry 缓存树
-    parent.insert(name, vfs_inode)
+    parent.insert_locked(name, vfs_inode)
 }
 
 pub fn create_dir_in_dentry(parent: &Arc<Dentry>, name: String, _mode: u32) -> Arc<Dentry> {
+    let _namespace_guard = parent.namespace_lock.lock();
+    if let Some(child) = parent.mounted_children.lock().get(&name).cloned() {
+        return child;
+    }
+    if let Some(child) = parent.children.lock().get(&name).cloned() {
+        return child;
+    }
     // 解码权限：取 _mode 的低 9 位（权限位）并加上目录类型标志 0o040000 (S_IFDIR)
     let mode = (_mode & 0o777) | 0o040000;
     let vfs_inode = parent.inode.create_dir(&name, mode)
         .expect("VFS: Failed to create directory in disk");
     
     // 将新创建的 Inode 插入 Dentry 缓存树
-    parent.insert(name, vfs_inode)
+    parent.insert_locked(name, vfs_inode)
 }

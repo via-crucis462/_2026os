@@ -96,7 +96,7 @@ impl TaskStruct {
 		}
 
 			debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode().get_size());
-		let app_name = app_inode.get_dentry().name.clone();
+        let app_name = app_inode.get_dentry().name();
 		let mut elf_data = app_inode.read_all();
 		let is_script = app_name.ends_with(".sh") || (elf_data.len() >= 2 && &elf_data[0..2] == b"#!");
 		if is_script {
@@ -160,7 +160,7 @@ impl TaskStruct {
 		if !components.is_empty() {
 			for component in &components[..components.len() - 1] {
 				if *component == ".." {
-					if let Some(parent) = current.parent.upgrade() {
+						if let Some(parent) = current.parent().upgrade() {
 						current = parent;
 					}
 					continue;

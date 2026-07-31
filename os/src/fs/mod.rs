@@ -203,6 +203,17 @@ pub struct StatxTimestamp {
     pub tv_nsec: u32,
     pub __reserved: i32,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenameError {
+    NotFound,
+    Exists,
+    NotDir,
+    IsDir,
+    NotEmpty,
+    CrossDevice,
+    Invalid,
+    Io,
+}
 pub const UTIME_NOW: usize = 0x3fffffff;
 pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub trait VfsInode: Send + Sync {
@@ -242,8 +253,14 @@ pub trait VfsInode: Send + Sync {
         false
     }
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize;
-    fn rename_dir_entry(&self, _old_name: &str, _new_name: &str) -> bool{
-        false
+    fn rename_dir_entry(
+        &self,
+        _old_name: &str,
+        _new_parent: &Arc<dyn VfsInode>,
+        _new_name: &str,
+        _no_replace: bool,
+    ) -> Result<(), RenameError> {
+        Err(RenameError::CrossDevice)
     }
     fn get_perm(&self) -> PermStat {
         let stat = self.get_stat();
