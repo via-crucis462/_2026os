@@ -931,8 +931,10 @@ impl Ext4Inode {
                     // 递减链接数并检查是否需要回收
                     let links = self.fs.decrease_link_count(target_inode_id);
                     if links == 0 {
-                        // 如果链接数为0，回收 Inode (目前暂不递归回收数据块，以防复杂性)
-                        self.fs.dealloc_inode(target_inode_id);
+                        // 暂不释放 inode 位图，避免仍被打开的孤立文件与新文件复用同一 ino。
+                        // 完成 orphan 生命周期管理后，在最后一个引用关闭时恢复回收。
+                        // self.fs.dealloc_inode(target_inode_id);
+                        warn!("Inode {} link count is zero, but not deallocated yet (orphan handling not implemented)", target_inode_id);
                     }
                     
                     return Some(target_inode_id);
