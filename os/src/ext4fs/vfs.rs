@@ -68,6 +68,12 @@ impl VfsInode for Ext4Inode {
     }
 
     fn get_shared_page(&self, logical_block: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
+        if let Some(cache) = crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
+            .get_cached_file_page(self.inode_id as u64, logical_block)
+        {
+            return Some(cache);
+        }
+
         let mut physical_block = self.find_physical_block(logical_block as u32);
         if physical_block == 0 {
             let new_block = self.fs.alloc_block()?;

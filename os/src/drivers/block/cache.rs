@@ -398,7 +398,12 @@ impl PageCacheManager {
         cache
     }
 
-    fn find_file_page(&self, ino: u64, logical_block: usize) -> Option<Arc<PageCache>> {
+    /// 按文件逻辑块查询已经存在的缓存页，不创建缓存，也不访问文件系统 extent。
+    pub fn get_cached_file_page(
+        &self,
+        ino: u64,
+        logical_block: usize,
+    ) -> Option<Arc<PageCache>> {
         let block_id = *self.page_cache_id_map.lock().get(&(ino, logical_block))?;
         self.page_cache_map.lock().get(&block_id).cloned()
     }
@@ -407,7 +412,7 @@ impl PageCacheManager {
         ino: u64,
         page_offset: usize,
     ) {
-        if let Some(cache) = self.find_file_page(ino, page_offset) {
+        if let Some(cache) = self.get_cached_file_page(ino, page_offset) {
             cache.sync();
         }
     }

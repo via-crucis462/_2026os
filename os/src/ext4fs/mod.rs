@@ -25,31 +25,26 @@ pub const BLOCK_SZ: usize = 4096;
 pub fn block_read<T: Clone + Sized>(
     dev: &Arc<dyn BlockDevice>, block_id: usize, offset: usize
 ) -> T {
-    let mut buf = [0u8; BLOCK_SZ];
-    dev.read_block(block_id, &mut buf);
-    unsafe { (&*(buf.as_ptr().add(offset) as *const T)).clone() }
+    let cache = get_block_cache(block_id, dev.clone());
+    let block = cache.lock();
+    block.read(offset, Clone::clone)
 }
-/// 从块设备读，改，写T
+/// 从块设备（经过页缓存）改T
 pub fn block_modify<T: Sized>(
     dev: &Arc<dyn BlockDevice>, 
     block_id: usize, 
     offset: usize, 
     f: impl FnOnce(&mut T)
 ) {
-    let mut buf = [0u8; BLOCK_SZ];
-    dev.read_block(block_id, &mut buf);
-    f(unsafe { &mut *(buf.as_mut_ptr().add(offset) as *mut T) });
-    dev.write_block(block_id, &buf);
+    let cache = get_block_cache(block_id, dev.clone());
+    cache.lock().modify(offset, f);
 }
-/// 从Ext4FS读，改，写inode
+/// 从Ext4FS（经过页缓存）改inode
 pub fn block_modify_inode(
     fs: &Arc<Ext4FS>, 
     inode_id: u32, 
     f: impl FnOnce(&mut Ext4InodeDisk)
 ) {
     let (block_id, offset) = fs.get_inode_pos(inode_id);
-    let mut buf = [0u8; BLOCK_SZ];
-    fs.block_dev.read_block(block_id as usize, &mut buf);
-    f(unsafe { &mut *(buf.as_mut_ptr().add(offset) as *mut Ext4InodeDisk) });
-    fs.block_dev.write_block(block_id as usize, &buf);
+    block_modify(&fs.block_dev, block_id as usize, offset, f);
 }

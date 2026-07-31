@@ -5,7 +5,7 @@ use xmas_elf::header;
 use core::sync::atomic::{AtomicU64, Ordering};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 use crate::ext4fs::BLOCK_SZ;
-use super::{ext4::Ext4FS, ext4_dir_entry::Ext4DirEntry, block_modify_inode};
+use super::{ext4::Ext4FS, ext4_dir_entry::Ext4DirEntry, block_modify_inode, get_block_cache};
 
 use core::arch::asm;
 
@@ -306,9 +306,9 @@ impl Ext4Inode {
     pub fn add_extent_entry(&self, logical_block_id: u32, physical_block_id: u32) -> Option<u32> {
         info!("add_extent_entry: ino={} logical={} physical={}", self.inode_id, logical_block_id, physical_block_id);
         let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
-        let mut buf = [0u8; BLOCK_SZ];
-        self.fs.block_dev.read_block(block_id as usize, &mut buf);
-        let disk_inode: &mut Ext4InodeDisk = unsafe { &mut *(buf.as_mut_ptr().add(inode_offset) as *mut Ext4InodeDisk) };
+        let inode_table_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
+        let mut inode_table = inode_table_cache.lock();
+        let disk_inode = inode_table.get_mut::<Ext4InodeDisk>(inode_offset);
 
         let result: Option<u32> = 'body: {
             // 用 raw pointer 读魔数（i_block 是 [u8;60]，对齐=1，无 UB）
@@ -472,10 +472,18 @@ impl Ext4Inode {
                         let aim_leaf = Ext4ExtentLeaf::mut_from_bytes(
                             unsafe { core::slice::from_raw_parts_mut(ap, 12) }
                         ).unwrap();
-                        if aim_leaf.ee_block == logical_block_id
+                        let is_unwritten = aim_leaf.ee_len > 32768;
+                        let max_len = if is_unwritten { 32767 } else { 32768 };
+                        if aim_leaf.actual_len() < max_len
+                            && aim_leaf.ee_block + aim_leaf.actual_len() == logical_block_id
                             && aim_leaf.phys_end() == (physical_block_id as u64)
                         {
-                            aim_leaf.ee_len = aim_leaf.actual_len() as u16 + 1;
+                            let new_len = aim_leaf.actual_len() as u16 + 1;
+                            aim_leaf.ee_len = if is_unwritten {
+                                new_len + 32768
+                            } else {
+                                new_len
+                            };
                             write_back_block(current_block_phys, current_data_ptr, 4096);
                             return None;
                         }
@@ -651,10 +659,12 @@ impl Ext4Inode {
                 }
             }
 
-           Some(physical_block_id)
+            disk_inode.i_blocks_lo = disk_inode
+                .i_blocks_lo
+                .saturating_add((BLOCK_SZ / 512) as u32);
+            Some(physical_block_id)
         };
 
-        self.fs.block_dev.write_block(block_id as usize, &buf);
         result
     }
 
