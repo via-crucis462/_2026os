@@ -14,7 +14,6 @@
 mod context;
 use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 use crate::mm::VirtAddr;
-use crate::net::net_poll;
 use crate::syscall::syscall;
 use crate::task::{
     add_task, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token,
@@ -105,8 +104,6 @@ pub fn trap_handler() -> ! {
             cx.set_a0(result as usize);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
-            net_poll();
-            crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
         }
         Trap::Exception(Exception::StorePageFault)

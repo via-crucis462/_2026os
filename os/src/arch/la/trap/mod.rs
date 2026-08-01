@@ -13,8 +13,6 @@ use crate::task::{
     current_user_token, exit_current_and_run_next,
     suspend_current_and_run_next, handle_signals
 };
-#[cfg(board = "virt")]
-use crate::net::net_poll;
 use alloc::sync::Arc;
 use core::arch::{asm, global_asm};
 global_asm!(include_str!("trap.S"));
@@ -572,8 +570,6 @@ pub fn trap_handler() -> ! {
             unsafe {
                 asm!("csrwr {}, 0x44", inout(reg) 1 => _);// 清除定时器中断
             }
-            crate::net::net_poll();
-            // crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
         }
         _ => {

@@ -483,6 +483,12 @@ pub fn tick_sync() {
     }
 }
 
+pub fn next_sync_delay_ms() -> usize {
+    let elapsed = crate::arch::timer::get_time_ms()
+        .wrapping_sub(LAST_SYNC_TIME.load(Ordering::Relaxed));
+    SYNC_INTERVAL_MS.saturating_sub(elapsed.min(SYNC_INTERVAL_MS))
+}
+
 pub fn free_up_mem_space(std_pages: usize) -> usize {
     SHARED_PAGE_CACHE_MANAGER.free_data_pages(std_pages)
 }

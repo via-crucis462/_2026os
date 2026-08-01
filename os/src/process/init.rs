@@ -183,6 +183,20 @@ pub fn add_timer_worker() {
 	info!("add_timer_worker: pid={}", worker_task.getpid());
 }
 
+pub fn add_net_worker() {
+	let worker_task =
+		TaskStruct::new_kernel_worker(crate::process::task::worker::net_kernel_worker);
+	add_task(worker_task.clone());
+	info!("add_net_worker: pid={}", worker_task.getpid());
+}
+
+pub fn add_writeback_worker() {
+	let worker_task =
+		TaskStruct::new_kernel_worker(crate::process::task::worker::writeback_kernel_worker);
+	add_task(worker_task.clone());
+	info!("add_writeback_worker: pid={}", worker_task.getpid());
+}
+
 pub fn add_initproc() {
 	add_task(INITTASK.clone());
 	info!("add_initproc: pid={}", INITTASK.getpid());

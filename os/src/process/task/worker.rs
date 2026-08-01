@@ -101,15 +101,38 @@ pub fn test_kernel_worker() -> ! {
     }
 }
 
+fn sleep_current_for_us(delay_us: usize) {
+    let deadline_ns = crate::arch::timer::get_time_us()
+        .saturating_add(delay_us)
+        .saturating_mul(1_000);
+    crate::process::scheduler::nanosleep::sleep_current_until(deadline_ns);
+}
+
 pub fn timer_kernel_worker() -> ! {
     const TIMER_CHECK_INTERVAL_US: usize = 10_000;
 
     loop {
         crate::timer::check_timers();
-        let deadline_ns = crate::arch::timer::get_time_us()
-            .saturating_add(TIMER_CHECK_INTERVAL_US)
+        sleep_current_for_us(TIMER_CHECK_INTERVAL_US);
+    }
+}
+
+pub fn net_kernel_worker() -> ! {
+    const NET_POLL_INTERVAL_US: usize = 10_000;
+
+    loop {
+        crate::net::net_poll();
+        sleep_current_for_us(NET_POLL_INTERVAL_US);
+    }
+}
+
+pub fn writeback_kernel_worker() -> ! {
+    loop {
+        crate::drivers::block::cache::tick_sync();
+        let delay_us = crate::drivers::block::cache::next_sync_delay_ms()
+            .max(1)
             .saturating_mul(1_000);
-        crate::process::scheduler::nanosleep::sleep_current_until(deadline_ns);
+        sleep_current_for_us(delay_us);
     }
 }
 
