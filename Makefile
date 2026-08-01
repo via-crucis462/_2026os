@@ -121,7 +121,7 @@ test-la: build-user-la copy-user-la build-la copy-la
 	@rm -f kernel_output.log
 	@qemu-system-loongarch64 \
 	-kernel kernel-la \
-	-m 1G -nographic \
+	-m 16G -nographic \
 	-smp $(LA_SMP) \
 	-drive file=sdcard-la.img,if=none,format=raw,id=x0 \
 	-device virtio-blk-pci,drive=x0 \

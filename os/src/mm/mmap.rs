@@ -97,3 +97,15 @@ pub fn do_munmap(addr: usize, length: usize) -> Result<(), isize> {
     let result = mm.exclusive_access().munmap(addr, length);
     result
 }
+
+pub fn do_madvise_dontneed(addr: usize, length: usize) -> Result<(), isize> {
+    let task = current_processor().current().unwrap();
+    let mm = task
+        .inner_exclusive_access()
+        .mm
+        .as_ref()
+        .cloned()
+        .ok_or(crate::syscall::errno::Errno::EINVAL.as_isize())?;
+    let result = mm.exclusive_access().madvise_dontneed(addr, length);
+    result
+}
