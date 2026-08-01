@@ -68,6 +68,14 @@ impl VfsInode for Ext4Inode {
     }
 
     fn get_shared_page(&self, logical_block: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
+        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        if self.is_symlink() && disk_inode.size() <= 60 {
+            // Fast symlinks keep their target directly in i_block. Treating a
+            // missing data block as a hole would allocate a block and then
+            // parse the target bytes as an extent header.
+            return None;
+        }
+
         if let Some(cache) = crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
             .get_cached_file_page(self.inode_id as u64, logical_block)
         {
@@ -97,9 +105,14 @@ impl VfsInode for Ext4Inode {
 
     /// 带页缓存的读取
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        if self.is_symlink() && disk_inode.size() <= 60 {
+            return self.raw_read_at(offset, buf);
+        }
+
         let page_size = crate::PAGE_SIZE;
         let file_size = self.get_size();
-        if offset >= file_size { return 0; }
+        if buf.is_empty() || offset >= file_size { return 0; }
         let read_end = core::cmp::min(offset + buf.len(), file_size);
         let start_page = offset / page_size;
         let end_page = (read_end - 1) / page_size;
@@ -109,7 +122,29 @@ impl VfsInode for Ext4Inode {
             let page_off = if page_idx == start_page { offset % page_size } else { 0 };
             let copy_len = core::cmp::min(page_size - page_off, read_end - (page_idx * page_size + page_off));
 
-            let cache = self.get_shared_page(page_idx).unwrap();
+            let cache_manager = &crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER;
+            let cache = if let Some(cache) = cache_manager
+                .get_cached_file_page(self.inode_id as u64, page_idx)
+            {
+                cache
+            } else {
+                let physical_block = self.find_physical_block(page_idx as u32);
+                if physical_block == 0 {
+                    // Sparse-file holes read as zeroes. A read must never
+                    // allocate blocks or mutate the extent tree.
+                    buf[buf_offset..buf_offset + copy_len].fill(0);
+                    buf_offset += copy_len;
+                    continue;
+                }
+                cache_manager
+                    .get_page_cache(
+                        self.inode_id as u64,
+                        page_idx,
+                        physical_block as u64,
+                        self.fs.block_dev.clone(),
+                    )
+                    .0
+            };
             let page = cache.lock();
             // clone FrameTracker：持有期间物理页不会被释放
             let _guard = page.frame.clone();
@@ -122,6 +157,21 @@ impl VfsInode for Ext4Inode {
 
     /// 带页缓存的写入
     fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+        if buf.is_empty() {
+            return 0;
+        }
+
+        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        let old_size = disk_inode.size() as usize;
+        if self.is_symlink() && old_size <= 60 && offset + buf.len() <= 60 {
+            let written = self.raw_write_at(offset, buf);
+            let new_end = offset + written;
+            if new_end > old_size {
+                self.size.store(new_end as u64, Ordering::Relaxed);
+            }
+            return written;
+        }
+
         let page_size = crate::PAGE_SIZE;
         let write_end = offset + buf.len();
         let start_page = offset / page_size;
@@ -132,7 +182,10 @@ impl VfsInode for Ext4Inode {
             let page_off = if page_idx == start_page { offset % page_size } else { 0 };
             let copy_len = core::cmp::min(page_size - page_off, write_end - (page_idx * page_size + page_off));
 
-            let cache = self.get_shared_page(page_idx).unwrap();
+            let Some(cache) = self.get_shared_page(page_idx) else {
+                error!("VFS: write_at - failed to get page ino={} page={}", self.inode_id, page_idx);
+                break;
+            };
             let mut page = cache.lock();
             // clone FrameTracker：持有期间物理页不会被释放
             let _guard = page.frame.clone();
@@ -144,12 +197,13 @@ impl VfsInode for Ext4Inode {
         
 
         // 更新文件大小（如果需要）
+        let new_end = offset + buf_offset;
         let old_size = self.get_size();
-        if write_end > old_size {
-            self.size.store(write_end as u64, Ordering::Relaxed);
+        if new_end > old_size {
+            self.size.store(new_end as u64, Ordering::Relaxed);
             block_modify_inode(&self.fs, self.inode_id, |disk_inode: &mut Ext4InodeDisk| {
-                disk_inode.i_size_lo = write_end as u32;
-                disk_inode.i_size_high = (write_end >> 32) as u32;
+                disk_inode.i_size_lo = new_end as u32;
+                disk_inode.i_size_high = (new_end >> 32) as u32;
             });
         }
 
