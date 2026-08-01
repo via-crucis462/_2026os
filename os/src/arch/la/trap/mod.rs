@@ -845,7 +845,9 @@ pub fn trap_return() -> ! {
     unsafe {
         let mut euen: usize;
         asm!("csrrd {}, 0x2", out(reg) euen);
-        euen |= 0x1;
+        // FPE (bit 0) and SXE/LSX (bit 1) must be enabled before returning
+        // to glibc: its dynamic loader uses LSX vector loads during startup.
+        euen |= 0x3;
         asm!("csrwr {}, 0x2", inout(reg) euen => _);
     }
     crate::mm::MemorySet::flush_tlb_after_mapping_change();

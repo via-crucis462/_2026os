@@ -6,6 +6,8 @@ use super::{PageSize, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
 #[allow(unused)]
 use crate::arch::config::*;
+use crate::fs::File;
+use crate::mm::PageSize::Page4K;
 use crate::mm::{get_free_frames, mmap};
 use crate::process::signal::frame;
 use crate::sync::MPSafeCell;
@@ -17,8 +19,6 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use core::hint::spin_loop;
 use core::ptr::{read_volatile, write_volatile};
-use crate::fs::File;
-use crate::mm::PageSize::Page4K;
 
 use lazy_static::*;
 
@@ -74,12 +74,8 @@ impl MemorySet {
     #[cfg(target_arch = "riscv64")]
     pub fn install_trap_context_page(&mut self, va: VirtAddr, ppn: PhysPageNum) {
         let vpn = va.std_floor();
-        self.page_table.map(
-            vpn,
-            ppn,
-            PTEFlags::R | PTEFlags::W,
-            PageSize::Page4K,
-        );
+        self.page_table
+            .map(vpn, ppn, PTEFlags::R | PTEFlags::W, PageSize::Page4K);
         self.areas.push(MapArea::new(
             VirtAddr::from(vpn),
             VirtAddr::from((vpn.0 + 1) * PAGE_SIZE),
@@ -101,8 +97,7 @@ impl MemorySet {
             self.page_table.unmap(vpn);
         }
         self.areas.retain(|area| {
-            area.map_type != MapType::BorrowedKernel
-                || area.vpn_range.get_start() != vpn
+            area.map_type != MapType::BorrowedKernel || area.vpn_range.get_start() != vpn
         });
         unsafe {
             asm!("sfence.vma {va}, {asid}", va = in(reg) va.0, asid = in(reg) self.asid());
@@ -175,11 +170,7 @@ impl MemorySet {
 
     /// 返回当前 program break，即 brk 区域的字节结束地址。
     pub fn current_brk(&self) -> usize {
-        self.areas[self.brk_index]
-            .get_vpn_range()
-            .get_end()
-            .0
-            * PAGE_SIZE
+        self.areas[self.brk_index].get_vpn_range().get_end().0 * PAGE_SIZE
     }
 
     /// 调整当前任务的 program break。
@@ -189,11 +180,7 @@ impl MemorySet {
             return Ok(current_brk);
         }
 
-        let heap_bottom = self.areas[self.brk_index]
-            .get_vpn_range()
-            .get_start()
-            .0
-            * PAGE_SIZE;
+        let heap_bottom = self.areas[self.brk_index].get_vpn_range().get_start().0 * PAGE_SIZE;
         if addr < heap_bottom {
             return Err(Errno::ENOMEM.as_isize() as i32);
         }
@@ -490,6 +477,22 @@ impl MemorySet {
     where
         F: FnMut(&str) -> Option<Vec<u8>>,
     {
+        /// 获取对齐要求，返回至少为 PAGE_SIZE 的对齐值，或者 None 表示无效对齐
+        fn load_align(raw_align: u64) -> Option<usize> {
+            let align = usize::try_from(raw_align).ok()?;
+            match align {
+                0 | 1 => Some(PAGE_SIZE),
+                _ if align.is_power_of_two() => Some(align.max(PAGE_SIZE)),
+                _ => None,
+            }
+        }
+        /// 把 value 向上对齐到 align 的倍数，返回 Some(对齐后的值) 或 None（溢出）
+        fn align_up(value: usize, align: usize) -> Option<usize> {
+            value
+                .checked_add(align - 1)
+                .map(|value| value & !(align - 1))
+        }
+
         let mut memory_set = Self::new_bare();
 
         // riscv映射跳板
@@ -516,11 +519,33 @@ impl MemorySet {
         let mut max_end_vpn = VirtPageNum(0);
         let mut main_max_end_vpn = VirtPageNum(0);
 
+        // The runtime load bias of ET_DYN images must preserve each PT_LOAD's
+        // p_vaddr/p_offset alignment. Use the strongest requirement of the
+        // image and reject malformed alignment values instead of mapping an
+        // image with an invalid bias.
+        let Some(main_load_align) = elf
+            .program_iter()
+            .try_fold(PAGE_SIZE, |max_align, segment| {
+                if matches!(segment.get_type(), Ok(xmas_elf::program::Type::Load)) {
+                    Some(max_align.max(load_align(segment.align())?))
+                } else {
+                    Some(max_align)
+                }
+            })
+        else {
+            warn!("MemorySet::from_elf: invalid main PT_LOAD alignment");
+            return None;
+        };
+        let main_load_bias = match elf_header.pt2.type_().as_type() {
+            xmas_elf::header::Type::SharedObject => align_up(USER_APP_BASE, main_load_align)?,
+            _ => OFFSET_FOR_USER_APP,
+        };
+
         let mut phdr_addr = 0;
         let phnum = ph_count as usize;
         let phent = elf_header.pt2.ph_entry_size() as usize;
         let mut final_entry =
-            elf.header.pt2.entry_point() as *const () as usize + OFFSET_FOR_USER_APP;
+            (elf.header.pt2.entry_point() as usize).checked_add(main_load_bias)?;
         let main_entry = final_entry;
         let mut saw_interp = false;
         let mut loaded_interp = false;
@@ -535,11 +560,24 @@ impl MemorySet {
             match ph.get_type() {
                 //如果是Load段
                 Ok(xmas_elf::program::Type::Load) => {
+                    let file_size = ph.file_size() as usize;
+                    let mem_size = ph.mem_size() as usize;
+                    let file_offset = ph.offset() as usize;
+                    let virtual_addr = ph.virtual_addr() as usize;
+                    if file_size > mem_size
+                        || file_offset
+                            .checked_add(file_size)
+                            .map_or(true, |end| end > elf.input.len())
+                        || load_align(ph.align()).is_none()
+                    {
+                        warn!("MemorySet::from_elf: invalid PT_LOAD segment");
+                        return None;
+                    }
                     //获取加载段的虚拟地址范围与权限
-                    let start_va: VirtAddr =
-                        (ph.virtual_addr() as usize + OFFSET_FOR_USER_APP).into();
-                    let end_va: VirtAddr =
-                        ((ph.virtual_addr() + ph.mem_size()) as usize + OFFSET_FOR_USER_APP).into();
+                    let start = virtual_addr.checked_add(main_load_bias)?;
+                    let end = start.checked_add(mem_size)?;
+                    let start_va: VirtAddr = start.into();
+                    let end_va: VirtAddr = end.into();
                     let mut map_perm = MapPermission::U;
                     let ph_flags = ph.flags();
                     if ph_flags.is_read() {
@@ -570,17 +608,15 @@ impl MemorySet {
                     //将文件数据复制到逻辑段中
                     memory_set.push(
                         map_area,
-                        Some(
-                            &elf.input[ph.offset() as *const () as usize
-                                ..(ph.offset() + ph.file_size()) as *const () as usize],
-                        ),
-                        ph.virtual_addr() as usize + OFFSET_FOR_USER_APP,
+                        Some(&elf.input[file_offset..file_offset + file_size]),
+                        start,
                     );
                     if ph.offset() <= elf_header.pt2.ph_offset()
                         && elf_header.pt2.ph_offset() < ph.offset() + ph.file_size()
                     {
                         phdr_addr = (ph.virtual_addr() + (elf_header.pt2.ph_offset() - ph.offset()))
-                            as usize;
+                            as usize
+                            + main_load_bias;
                     }
                 }
                 Ok(xmas_elf::program::Type::Interp) => {
@@ -596,7 +632,7 @@ impl MemorySet {
                 // PHDR 可用于更稳定地提供 AT_PHDR。
                 Ok(xmas_elf::program::Type::Phdr) => {
                     if phdr_addr == 0 {
-                        phdr_addr = ph.virtual_addr() as usize + OFFSET_FOR_USER_APP;
+                        phdr_addr = ph.virtual_addr() as usize + main_load_bias;
                     }
                 }
                 // 这些段通常由 LOAD 段覆盖或仅提供元信息，不需要单独映射。
@@ -617,25 +653,24 @@ impl MemorySet {
                 const GUARD_PAGES: usize = 10;
                 let interp_runtime_base = main_max_end_vpn.0 * PAGE_SIZE + GUARD_PAGES * PAGE_SIZE;
                 memory_set.push_guard_area(main_max_end_vpn.0 * PAGE_SIZE, GUARD_PAGES);
-                let interp_image_base = interp_elf
+                let Some(interp_load_align) =
+                    interp_elf
                     .program_iter()
-                    .filter_map(|segment| {
-                        if let Ok(xmas_elf::program::Type::Load) = segment.get_type() {
-                            Some(
-                                VirtAddr::from(segment.virtual_addr() as usize)
-                                    .std_floor()
-                                    .0
-                                    * PAGE_SIZE,
-                            )
+                        .try_fold(PAGE_SIZE, |max_align, segment| {
+                            if matches!(segment.get_type(), Ok(xmas_elf::program::Type::Load)) {
+                                Some(max_align.max(load_align(segment.align())?))
                         } else {
-                            None
+                                Some(max_align)
                         }
                     })
-                    .min()
-                    .unwrap_or(0);
-                let interp_load_bias = interp_runtime_base.saturating_sub(interp_image_base);
+                else {
+                    warn!("MemorySet::from_elf: invalid interpreter PT_LOAD alignment");
+                    return None;
+                };
+                let interp_load_bias = align_up(interp_runtime_base, interp_load_align)?;
                 interp_base = Some(interp_load_bias);
-                final_entry = interp_load_bias + interp_elf.header.pt2.entry_point() as usize;
+                final_entry =
+                    interp_load_bias.checked_add(interp_elf.header.pt2.entry_point() as usize)?;
                 loaded_interp = true;
                 info!(
                     "MemorySet::from_elf: PT_INTERP loaded '{}', entry switched {:#x} -> {:#x}",
@@ -643,8 +678,21 @@ impl MemorySet {
                 );
                 for interp_ph in interp_elf.program_iter() {
                     if let Ok(xmas_elf::program::Type::Load) = interp_ph.get_type() {
-                        let start_va = interp_load_bias + interp_ph.virtual_addr() as usize;
-                        let end_va = start_va + interp_ph.mem_size() as usize;
+                        let file_size = interp_ph.file_size() as usize;
+                        let mem_size = interp_ph.mem_size() as usize;
+                        let file_offset = interp_ph.offset() as usize;
+                        let virtual_addr = interp_ph.virtual_addr() as usize;
+                        if file_size > mem_size
+                            || file_offset
+                                .checked_add(file_size)
+                                .map_or(true, |end| end > interp_data.len())
+                            || load_align(interp_ph.align()).is_none()
+                        {
+                            warn!("MemorySet::from_elf: invalid interpreter PT_LOAD segment");
+                            return None;
+                        }
+                        let start_va = interp_load_bias.checked_add(virtual_addr)?;
+                        let end_va = start_va.checked_add(mem_size)?;
                         let mut map_perm = MapPermission::U;
                         let interp_flags = interp_ph.flags();
                         if interp_flags.is_read() {
@@ -656,9 +704,7 @@ impl MemorySet {
                         if interp_flags.is_execute() {
                             map_perm |= MapPermission::X;
                         }
-                        let offset = interp_ph.offset() as usize;
-                        let file_size = interp_ph.file_size() as usize;
-                        let data = &interp_data[offset..offset + file_size];
+                        let data = &interp_data[file_offset..file_offset + file_size];
                         let interp_end_vpn: VirtPageNum = VirtAddr::from(end_va).std_ceil();
                         if interp_end_vpn > max_end_vpn {
                             max_end_vpn = interp_end_vpn;
@@ -775,7 +821,9 @@ impl MemorySet {
             // Copying one through push() would call map_one(), while a guard
             // mapping is supposed to be a no-op rather than an allocation.
             if map_type == MapType::Guard {
-                memory_set.areas.push(MapArea::from_another(&user_space.areas[idx]));
+                memory_set
+                    .areas
+                    .push(MapArea::from_another(&user_space.areas[idx]));
                 continue;
             }
             let map_perm = user_space.areas[idx].map_perm;
@@ -818,9 +866,7 @@ impl MemorySet {
                         .get(&vpn)
                         .cloned()
                         .unwrap();
-                    new_area
-                        .data_frames
-                        .insert(vpn, frame_tracker);
+                    new_area.data_frames.insert(vpn, frame_tracker);
                     if writable_cow {
                         let parent_perm = map_perm & !MapPermission::W;
                         let parent_flags = PTEFlags::from_bits(parent_perm.bits).unwrap();
@@ -1140,9 +1186,7 @@ impl MemorySet {
         let page_offset = offset / PAGE_SIZE;
 
         // 计算需要的物理页数
-        let needing_std_pages = 
-            VirtAddr(addr+length).std_ceil().0 -
-            VirtAddr(addr).std_floor().0;
+        let needing_std_pages = VirtAddr(addr + length).std_ceil().0 - VirtAddr(addr).std_floor().0;
         // 匿名映射只预留虚拟地址，物理页在首次访问时分配，因此不能
         // 按整个映射长度在 mmap 阶段拒绝它。文件映射仍保持当前的
         // eager population 语义，需要在这里检查物理页余量。
@@ -1218,10 +1262,9 @@ impl MemorySet {
                 map_type: MapType::File,
                 map_perm: permission,
                 is_shared: true,
-                backing_file: file_inner.clone()
-                    .map(|f| (f.clone(), page_offset)),
+                backing_file: file_inner.clone().map(|f| (f.clone(), page_offset)),
                 anonymous_shared_frames: None,
-                page_size:Page4K // 默认用标准页
+                page_size: Page4K, // 默认用标准页
             };
 
             // 文件页偏移末，开边界，也就是文件最后一页的下一个页的偏移，超过的部分不映射
@@ -1272,7 +1315,6 @@ impl MemorySet {
                 permission,
                 PageSize::Page4K, // mmap目前直接用标准页
             );
-            
         }
 
         #[cfg(target_arch = "loongarch64")]
@@ -1636,9 +1678,9 @@ impl MemorySet {
             // PROT_NONE 区域只保留地址空间，任何访问都必须失败，不能
             // 因缺页而无意义地消耗一个物理页。
             if !area.map_perm.contains(MapPermission::U)
-                || !area.map_perm.intersects(
-                    MapPermission::R | MapPermission::W | MapPermission::X,
-                )
+                || !area
+                    .map_perm
+                    .intersects(MapPermission::R | MapPermission::W | MapPermission::X)
             {
                 return false;
             }
@@ -1867,7 +1909,12 @@ impl MapArea {
         }
     }
     /// Try to allocate/map one page. Returns false on physical-memory exhaustion.
-    pub fn try_map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum, page_size: PageSize) -> bool {
+    pub fn try_map_one(
+        &mut self,
+        page_table: &mut PageTable,
+        vpn: VirtPageNum,
+        page_size: PageSize,
+    ) -> bool {
         let ppn: PhysPageNum;
         match self.map_type {
             MapType::Identical => {

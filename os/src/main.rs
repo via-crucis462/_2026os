@@ -180,9 +180,8 @@ fn main_init(hart_id: usize) {
         lazy_static::initialize(&crate::net::NET_IFACE);
     }
 
-    fs::init_test_env();
+    fs::set_up_env_final();
     fs::mount_procfs();
-    fs::setup_oscomp_env();
     fs::list_apps();
     MAIN_HART_ID.store(hart_id, Ordering::Release);
     crate::process::init::add_initproc();

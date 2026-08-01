@@ -463,11 +463,11 @@ fn populate_lib_from_dentries(src: &Arc<Dentry>, lib: &Arc<Dentry>, lib64: &Arc<
                         // 尤其不能把另一版本的 ld.so 与 libc.so.6 混用。
                         if let Ok(child) = src.find_tree(name, true) {
                             if lib.find_child(name).is_none() {
-                                println!("[VFS] Mounted missing lib entry: {}", name);
+                                trace!("[VFS] Mounted missing lib entry: {}", name);
                                 lib.mount_child(name.to_string(), child.inode.clone());
                             }
                             if lib64.find_child(name).is_none() {
-                                println!("[VFS] Mounted missing lib64 entry: {}", name);
+                                trace!("[VFS] Mounted missing lib64 entry: {}", name);
                                 lib64.mount_child(name.to_string(), child.inode.clone());
                             }
                         }
@@ -477,6 +477,71 @@ fn populate_lib_from_dentries(src: &Arc<Dentry>, lib: &Arc<Dentry>, lib64: &Arc<
             pos += d_reclen;
         }
     }
+}
+
+/// Prepare only the writable kernel-provided pieces needed by the final image.
+///
+/// The final image is a Debian usr-merge filesystem (`/bin -> /usr/bin`,
+/// `/lib* -> /usr/lib*`).  In particular, do not use `setup_oscomp_env()` here:
+/// its compatibility tmpfs mounts hide the image's own programs and libraries.
+pub fn set_up_env_final() {
+    info!("[VFS] Setting up final-image environment...");
+    let root = ROOT_DENTRY.clone();
+
+    root.mount_child("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o1777)));
+    root.mount_child("run".to_string(), Arc::new(TmpfsDirInode::new(0o755)));
+    if let Ok(var) = root.find_tree("/var", true) {
+        var.mount_child("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o1777)));
+    }
+
+    let dev = root.find_tree("/dev", true).unwrap_or_else(|_| {
+        root.mount_child("dev".to_string(), Arc::new(TmpfsDirInode::new(0o755)))
+    });
+    dev.insert("shm".to_string(), Arc::new(TmpfsDirInode::new(0o1777)));
+    dev.insert("null".to_string(), Arc::new(NullInode::new()));
+    dev.insert("zero".to_string(), Arc::new(ZeroInode::new()));
+    dev.insert("rtc".to_string(), Arc::new(RtcInode::new()));
+    dev.insert("urandom".to_string(), Arc::new(UrandomInode::new()));
+    dev.insert("random".to_string(), Arc::new(UrandomInode::new()));
+    dev.insert("tty".to_string(), Arc::new(TtyInode::new()));
+    dev.insert("loop-control".to_string(), Arc::new(LoopControlInode::new()));
+    for index in 0..8 {
+        dev.insert(alloc::format!("loop{}", index), create_loop_device(None, 0, 0));
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    {
+        // The image's normal multiarch directory remains authoritative. These
+        // aliases support PT_INTERP paths used by LoongArch glibc binaries.
+        let usr_lib = root.find_tree("/usr/lib", true);
+        let usr_lib64 = root.find_tree("/usr/lib64", true);
+        if let (Ok(usr_lib), Ok(usr_lib64)) = (usr_lib, usr_lib64) {
+            if let Ok(multiarch_lib) = root.find_tree("/usr/lib/loongarch64-linux-gnu", true) {
+                populate_lib_from_dentries(&multiarch_lib, &usr_lib, &usr_lib64);
+            }
+
+            let loader = [
+                "/opt/qemu-la64/lib/ld-linux-loongarch-lp64d.so.1",
+                "/usr/lib/loongarch64-linux-gnu/ld-linux-loongarch-lp64d.so.1",
+                "/glibc/lib/ld-linux-loongarch-lp64d.so.1",
+            ]
+            .iter()
+            .find_map(|path| root.find_tree(path, true).ok());
+            if let Some(loader) = loader {
+                let name = "ld-linux-loongarch-lp64d.so.1".to_string();
+                usr_lib.mount_child(name.clone(), loader.inode.clone());
+                usr_lib64.mount_child(name, loader.inode.clone());
+                info!("[VFS] Installed LoongArch glibc loader aliases");
+            } else {
+                warn!("[VFS] No LoongArch glibc loader was found in the final image");
+            }
+        } else {
+            warn!("[VFS] Final image is missing /usr/lib or /usr/lib64");
+        }
+    }
+
+    mount_hugepages();
+    info!("[VFS] Final-image environment ready");
 }
 
 pub fn setup_oscomp_env() {

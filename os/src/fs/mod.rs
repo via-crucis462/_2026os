@@ -15,7 +15,7 @@ pub mod memfd;
 use alloc::vec::{self, Vec};
 pub use memfd::*;
 pub mod tmpfs;
-pub use tmpfs::setup_oscomp_env;
+pub use tmpfs::{set_up_env_final, setup_oscomp_env};
 pub use tmpfs::{TmpfsFileInode, TmpfsDirInode};
 pub use procfs::mount_procfs;
 pub use dir_entry::DirEntry;

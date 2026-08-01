@@ -73,11 +73,14 @@ impl TaskStruct {
 		};
 
 		let mut path_exists = false;
+		let mut library_path_exists = false;
 		let mut hwaddr_exists = false;
 		for env in envs.iter() {
 			if env.starts_with("PATH=") {
 				path_exists = true;
-				break;
+			}
+			if env.starts_with("LD_LIBRARY_PATH=") {
+				library_path_exists = true;
 			}
 			if env.starts_with("LHOST_HWADDRS=") {
 				hwaddr_exists = true;
@@ -90,6 +93,10 @@ impl TaskStruct {
 			envs.push("PATH=/bin:/sbin:/usr/bin:/usr/sbin:/musl:/musl/ltp/testcases/bin".to_string());
 			envs.push("HOME=/".to_string());
 			envs.push("TERM=linux".to_string());
+		}
+		#[cfg(target_arch = "loongarch64")]
+		if !library_path_exists {
+			envs.push("LD_LIBRARY_PATH=/lib/loongarch64-linux-gnu:/usr/lib/loongarch64-linux-gnu:/usr/local/lib/loongarch64-linux-gnu:/usr/local/lib".to_string());
 		}
 		if !hwaddr_exists {
 			use crate::drivers::net::EthernetDevice;

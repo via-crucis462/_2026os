@@ -6,7 +6,6 @@ extern crate user_lib;
 extern crate alloc;
 
 use alloc::vec::Vec;
-use alloc::format;
 use user_lib::*;
 
 /// Build a null-terminated C string from a &str
@@ -17,14 +16,12 @@ fn cstr(s: &str) -> Vec<u8> {
     v
 }
 
-/// Run a shell command via busybox sh -c.
-/// Returns the exit code of the shell.
-fn run_shell(_cmd: &str) -> i32 {
+/// Run the final image's interactive Bash and return its exit status.
+fn run_shell() -> i32 {
     let forked = fork();
     if forked == 0 {
-        // child: exec busybox sh -c "cmd"
-        let a0 = cstr("busybox");
-        let a1 = cstr("sh");
+        let a0 = cstr("bash");
+        let a1 = cstr("-i");
 
         let argv: &[*const u8] = &[
             a0.as_ptr(),
@@ -32,7 +29,7 @@ fn run_shell(_cmd: &str) -> i32 {
             core::ptr::null(),
         ];
 
-        exec("/musl/busybox\0", argv);
+        exec("/bin/bash\0", argv);
         // exec only returns on error
         exit(-1);
     } else if forked > 0 {
@@ -46,12 +43,12 @@ fn run_shell(_cmd: &str) -> i32 {
 
 #[no_mangle]
 fn main() -> i32 {
-    run_shell("");
-    // Init (PID 1) must never exit — otherwise the kernel panics.
-    // Loop forever, reaping any zombie children.
-
-    let mut _status: i32 = 0;
-    // waitpid(-1, ...) = wait for any child; returns -1 if no children
-    waitpid((-1isize) as usize, &mut _status);
-    0
+    // PID 1 must survive a shell exit so that the kernel keeps running.
+    loop {
+        let status = run_shell();
+        println!("init: bash exited with status {}, restarting", status);
+        for _ in 0..1000 {
+            yield_();
+        }
+    }
 }
