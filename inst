@@ -25,4 +25,7 @@ DiffviewOpen main...HEAD
 xz -dkfv sdcard-rv.img.xz
 BOARD=virt INIT=sh make test-rv
 BOARD=visionfive2 INIT=sh make rv
-./basic_testcode.sh 
+./basic_testcode.sh
+./iperf_testcode.sh
+BOARD=virt INIT=sh make debug-rv
+BOARD=virt INIT=sh make gdb-rv

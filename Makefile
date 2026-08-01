@@ -3,7 +3,7 @@ export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
 
 MODE ?= release
 LOG ?= OFF
-RV_SMP ?= 1
+RV_SMP ?= 8
 LA_SMP ?= 1
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235

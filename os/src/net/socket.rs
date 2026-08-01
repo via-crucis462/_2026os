@@ -27,8 +27,8 @@ use smoltcp::wire::{IpAddress, IpEndpoint};
 use smoltcp::wire::{IpProtocol, IpVersion};
 use spin::Mutex;
 
-use crate::process::signal::get_pending_signals;
 use crate::process::check_pending_signal;
+use crate::process::signal::get_pending_signals;
 use crate::task::suspend_current_and_run_next;
 
 pub struct TcpSocket {
@@ -72,8 +72,6 @@ impl TcpSocket {
         socket.remote_endpoint()
     }
     pub fn connect(&self, remote_ep: smoltcp::wire::IpEndpoint) -> isize {
-        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-        let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
         let is_loopback = match remote_ep.addr {
             smoltcp::wire::IpAddress::Ipv4(v4) => v4.as_bytes()[0] == 127,
             _ => false,
@@ -89,16 +87,19 @@ impl TcpSocket {
 
         let res = if is_loopback {
             let mut lo_iface = crate::net::LO_IFACE.exclusive_access();
+            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+            let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
             socket.connect(lo_iface.context(), remote_ep, local_port)
         } else {
             let mut eth_iface = crate::net::NET_IFACE.exclusive_access();
+            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+            let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
             socket.connect(eth_iface.context(), remote_ep, local_port)
         };
         let connect_status = match res {
             Ok(_) => 0,
             Err(_) => crate::syscall::errno::Errno::ECONNREFUSED.as_isize(),
         };
-        drop(sockets);
 
         loop {
             crate::net::net_poll();
@@ -226,9 +227,7 @@ impl File for TcpSocket {
             drop(sockets);
             crate::net::net_poll();
             crate::timer::check_timer_cooperative();
-            if get_pending_signals()
-                .contains(crate::task::SignalFlags::SIGALRM)
-            {
+            if get_pending_signals().contains(crate::task::SignalFlags::SIGALRM) {
                 return EINTR.as_isize() as usize;
             }
             crate::task::suspend_current_and_run_next();
@@ -265,9 +264,7 @@ impl File for TcpSocket {
             drop(sockets);
             crate::net::net_poll();
             crate::timer::check_timer_cooperative();
-            if get_pending_signals()
-                .contains(crate::task::SignalFlags::SIGALRM)
-            {
+            if get_pending_signals().contains(crate::task::SignalFlags::SIGALRM) {
                 return EINTR.as_isize() as usize;
             }
 
@@ -407,9 +404,7 @@ impl UdpSocket {
         }
         match socket.send_slice(buf, remote_ep) {
             Ok(_) => buf.len() as isize,
-            Err(udp::SendError::BufferFull) => {
-                crate::syscall::errno::Errno::EAGAIN.as_isize()
-            }
+            Err(udp::SendError::BufferFull) => crate::syscall::errno::Errno::EAGAIN.as_isize(),
             Err(udp::SendError::Unaddressable) => {
                 crate::syscall::errno::Errno::EDESTADDRREQ.as_isize()
             }
@@ -440,7 +435,9 @@ impl UdpSocket {
 }
 // 实现 File trait，使其能放进系统的 fd_table 中
 impl File for UdpSocket {
-    fn is_socket(&self) -> bool { true }
+    fn is_socket(&self) -> bool {
+        true
+    }
     fn get_flags(&self) -> OpenFlags {
         *self.flags.lock()
     }
@@ -644,8 +641,12 @@ impl UnixSocket {
 }
 
 impl File for UnixSocket {
-    fn readable(&self) -> bool { true }
-    fn writable(&self) -> bool { true }
+    fn readable(&self) -> bool {
+        true
+    }
+    fn writable(&self) -> bool {
+        true
+    }
 
     fn read(&self, mut buf: UserBuffer) -> usize {
         if buf.len() == 0 {
