@@ -12,7 +12,7 @@ use crate::process::task::{
     cred::Cred,
     fs::FsStruct,
 };
-use crate::process::signal::{Signal, SigHand, Sigpending};
+use crate::process::signal::{Signal, SignalAltStack, SigHand, Sigpending};
 use alloc::{string::String, sync::{Arc, Weak}, vec::Vec};
 use crate::process::task::*;
 
@@ -124,6 +124,7 @@ pub struct TaskStructInner {
     pub signal_mask_backup: Vec<SignalFlags>,
     pub trap_ctx_backup: Vec<TrapContext>,
     pub signal_user_context_backup: Vec<usize>,
+    pub signal_alt_stack: SignalAltStack,
     pub term_signal: Option<i32>,
     pub frozen: bool,
 

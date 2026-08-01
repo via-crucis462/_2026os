@@ -3,7 +3,7 @@
 use crate::arch::{timer::get_time_us, trap::TrapContext};
 use crate::mm::{KERNEL_SPACE, MemorySet, VirtAddr};
 use crate::process::{add_task, kstack_alloc, pid_alloc};
-use crate::process::signal::{SigHand, Signal, Sigpending};
+use crate::process::signal::{SigHand, Signal, SignalAltStack, Sigpending};
 use crate::process::task::{context::ThreadStruct, *};
 use crate::sync::MPSafeCell;
 use crate::syscall::errno::Errno;
@@ -175,6 +175,11 @@ impl TaskStruct {
 		let sid = parent_inner.sid;
 		let oom_score_adj = parent_inner.oom_score_adj;
 		let exe_path = parent_inner.exe_path.clone();
+		let signal_alt_stack = if flags & CLONE_VM != 0 {
+			SignalAltStack::default()
+		} else {
+			parent_inner.signal_alt_stack
+		};
 		drop(parent_inner); // 释放父任务锁，避免后续分配 PID/内核栈时持锁
 
 		// ── 4. 分配新任务标识 ──
@@ -270,6 +275,7 @@ impl TaskStruct {
 					signal_mask_backup: Vec::new(),
 					trap_ctx_backup: Vec::new(),
 					signal_user_context_backup: Vec::new(),
+					signal_alt_stack,
 					term_signal: None,
 					frozen: false,
 					cred,

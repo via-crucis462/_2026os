@@ -435,6 +435,7 @@ impl TaskStruct {
 			inner.signal_mask_backup.clear();
 			inner.trap_ctx_backup.clear();
 			inner.signal_user_context_backup.clear();
+			inner.signal_alt_stack = crate::process::signal::SignalAltStack::default();
 			inner.term_signal = None;
 			inner.frozen = false;
 			inner.clear_child_tid = 0;

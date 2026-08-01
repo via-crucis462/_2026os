@@ -5,7 +5,7 @@ use super::*;
 use crate::fs::ROOT_DENTRY;
 use crate::ipc::namespace::{IPCNamespace, NsProxy};
 use crate::process::scheduler::runqueue::SCHED_IDLE;
-use crate::process::signal::{SigHand, Signal, SignalFlags, Sigpending};
+use crate::process::signal::{SigHand, Signal, SignalAltStack, SignalFlags, Sigpending};
 use crate::process::{self, kstack_alloc, pid_alloc};
 use crate::sync::MPSafeCell;
 use alloc::{
@@ -76,6 +76,7 @@ impl TaskStruct {
                 signal_mask_backup: Vec::new(),
                 trap_ctx_backup: Vec::new(),
                 signal_user_context_backup: Vec::new(),
+                signal_alt_stack: SignalAltStack::default(),
                 term_signal: None,
                 frozen: false,
                 cred: Arc::new(MPSafeCell::new(Cred::new(0, 0, 0, 0, 0, 0, 0, 0))),

@@ -76,6 +76,7 @@ const SYSCALL_GET_ROBUST_LIST: usize = 100;
 const SYSCALL_CLOCK_NANOSLEEP: usize = 115;
 const SYSCALL_TKILL: usize = 130;
 const SYSCALL_TGKILL: usize = 131;
+const SYSCALL_SIGALTSTACK: usize = 132;
 
 const SYSCALL_SLEEP:usize =101;
 const SYSCALL_SETITIMER: usize = 103;
@@ -392,6 +393,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SETGID => sys_setgid(args[0] as u32),
         SYSCALL_TKILL => sys_tkill(args[0], args[1] as i32),
         SYSCALL_TGKILL => sys_tgkill(args[0], args[1], args[2] as i32),
+        SYSCALL_SIGALTSTACK => sys_sigaltstack(
+            args[0] as *const crate::process::signal::SignalAltStack,
+            args[1] as *mut crate::process::signal::SignalAltStack,
+        ),
         SYSCALL_GETRESUID => sys_getresuid(args[0] as *mut u32, args[1] as *mut u32, args[2] as *mut u32),
         SYSCALL_UMASK => sys_umask(args[0] as u32),
         SYSCALL_GETPID => sys_getpid(),

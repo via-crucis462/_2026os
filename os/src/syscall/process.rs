@@ -71,6 +71,61 @@ pub(crate) fn clear_child_tid_and_wake(token: usize, clear_child_tid: usize) {
         }
     }
 }
+
+pub fn sys_sigaltstack(
+    new_stack: *const SignalAltStack,
+    old_stack: *mut SignalAltStack,
+) -> isize {
+    const MINSIGSTKSZ: usize = 2048;
+
+    let token = current_user_token();
+    let requested = if new_stack.is_null() {
+        None
+    } else {
+        let Some(stack) = try_translated_read(token, new_stack) else {
+            return EFAULT.as_isize();
+        };
+        Some(stack)
+    };
+
+    let task = current_task().unwrap();
+    let (current, current_sp) = {
+        let inner = task.inner_exclusive_access();
+        (inner.signal_alt_stack, inner.get_trap_cx().get_sp())
+    };
+
+    if !old_stack.is_null()
+        && !try_translated_write(token, old_stack, current.status_for_sp(current_sp))
+    {
+        return EFAULT.as_isize();
+    }
+
+    let Some(mut stack) = requested else {
+        return 0;
+    };
+    if current.contains(current_sp) {
+        return EPERM.as_isize();
+    }
+    if stack.ss_flags == SS_DISABLE {
+        stack = SignalAltStack::default();
+    } else {
+        if stack.ss_flags != 0 {
+            return EINVAL.as_isize();
+        }
+        if stack.ss_size < MINSIGSTKSZ {
+            return ENOMEM.as_isize();
+        }
+        if stack.ss_sp.checked_add(stack.ss_size).is_none() {
+            return EINVAL.as_isize();
+        }
+        stack.ss_flags = 0;
+        stack._pad = 0;
+    }
+
+    task.inner_exclusive_access().signal_alt_stack = stack;
+    0
+}
+
 pub use crate::{
     timer::*,
     fs::*, 
@@ -91,6 +146,7 @@ pub use crate::process::timer::{
 use alloc::task;
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 use crate::fs::{open_file, OpenFlags, RenameError};
+use crate::process::signal::{SignalAltStack, SS_DISABLE};
 use super::{errno::Errno::*, normalize_leading_dot_path};
 
 use crate::syscall::epoll::{EpollFile, EventFile, EpollEvent};

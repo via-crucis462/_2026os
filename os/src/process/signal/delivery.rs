@@ -139,7 +139,13 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
             trap_ctx.get_rt(),
             trap_ctx.get_sp()
         );
-        let Some((info_ptr, ucontext_ptr)) = push_signal_frame(&mut task_inner, sig, saved_mask) else {
+        const SA_ONSTACK: usize = 0x08000000;
+        let Some((info_ptr, ucontext_ptr)) = push_signal_frame(
+            &mut task_inner,
+            sig,
+            saved_mask,
+            action.flags & SA_ONSTACK != 0,
+        ) else {
             warn!("[SIG PROBE] Failed to write signal frame");
             task_inner.term_signal = Some(sig as i32 + 1);
             return;

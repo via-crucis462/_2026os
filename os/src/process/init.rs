@@ -6,7 +6,7 @@ use crate::fs::ROOT_DENTRY;
 use crate::ipc::namespace::{IPCNamespace, NsProxy};
 use crate::mm::{KERNEL_SPACE, MemorySet, VirtAddr};
 use crate::process::scheduler::runqueue::{SCHED_IDLE, SCHED_OTHER};
-use crate::process::signal::{SigHand, Signal, Sigpending, SignalFlags};
+use crate::process::signal::{SigHand, Signal, SignalAltStack, Sigpending, SignalFlags};
 use crate::process::task::{
 	context::ThreadStruct, Cred, FileDescriptorTable, FsStruct, TaskContext,
 	SchedDlEntity, SchedEntity, SchedRtEntity, TaskControlBlock, TaskStatus,
@@ -101,6 +101,7 @@ impl TaskStruct {
 				signal_mask_backup: Vec::new(),
 				trap_ctx_backup: Vec::new(),
 				signal_user_context_backup: Vec::new(),
+				signal_alt_stack: SignalAltStack::default(),
 				term_signal: None,
 				frozen: false,
 				cred: Arc::new(MPSafeCell::new(Cred::new(0, 0, 0, 0, 0, 0, 0, 0))),

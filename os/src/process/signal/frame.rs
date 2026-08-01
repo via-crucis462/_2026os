@@ -3,12 +3,52 @@ use crate::process::{current_task, SignalFlags, TaskControlBlockInner};
 use crate::process::trap::TrapContext;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-struct SignalAltStack {
-	ss_sp: usize,
-	ss_flags: i32,
-	_pad: i32,
-	ss_size: usize,
+#[derive(Debug, Clone, Copy)]
+pub struct SignalAltStack {
+	pub ss_sp: usize,
+	pub ss_flags: i32,
+	pub _pad: i32,
+	pub ss_size: usize,
+}
+
+pub const SS_ONSTACK: i32 = 1;
+pub const SS_DISABLE: i32 = 2;
+
+impl Default for SignalAltStack {
+	fn default() -> Self {
+		Self {
+			ss_sp: 0,
+			ss_flags: SS_DISABLE,
+			_pad: 0,
+			ss_size: 0,
+		}
+	}
+}
+
+impl SignalAltStack {
+	pub fn is_enabled(&self) -> bool {
+		self.ss_flags & SS_DISABLE == 0
+	}
+
+	pub fn contains(&self, sp: usize) -> bool {
+		self.is_enabled()
+			&& self
+				.ss_sp
+				.checked_add(self.ss_size)
+				.is_some_and(|end| sp >= self.ss_sp && sp < end)
+	}
+
+	pub fn status_for_sp(&self, sp: usize) -> Self {
+		let mut status = *self;
+		status.ss_flags = if self.contains(sp) {
+			SS_ONSTACK
+		} else if self.is_enabled() {
+			0
+		} else {
+			SS_DISABLE
+		};
+		status
+	}
 }
 
 // musl's sigset_t stores 128 bytes, i.e. 16 unsigned long words on riscv64.
@@ -60,7 +100,11 @@ struct SignalUserContext {
 
 #[cfg(target_arch = "riscv64")]
 impl SignalUserContext {
-	fn from_trap_ctx(trap_ctx: &TrapContext, sigmask: usize) -> Self {
+	fn from_trap_ctx(
+		trap_ctx: &TrapContext,
+		sigmask: usize,
+		alt_stack: SignalAltStack,
+	) -> Self {
 		let mut uc_sigmask = [0usize; USER_SIGSET_WORDS];
 		let mut uc_mcontext = RiscvMContext {
 			gregs: [0usize; 32],
@@ -72,7 +116,7 @@ impl SignalUserContext {
 		Self {
 			uc_flags: 0,
 			uc_link: 0,
-			uc_stack: SignalAltStack::default(),
+			uc_stack: alt_stack,
 			uc_sigmask,
 			uc_mcontext,
 		}
@@ -91,13 +135,17 @@ impl SignalUserContext {
 
 #[cfg(target_arch = "loongarch64")]
 impl SignalUserContext {
-	fn from_trap_ctx(trap_ctx: &TrapContext, sigmask: usize) -> Self {
+	fn from_trap_ctx(
+		trap_ctx: &TrapContext,
+		sigmask: usize,
+		alt_stack: SignalAltStack,
+	) -> Self {
 		let mut uc_sigmask = [0usize; USER_SIGSET_WORDS];
 		uc_sigmask[0] = sigmask;
 		Self {
 			uc_flags: 0,
 			uc_link: 0,
-			uc_stack: SignalAltStack::default(),
+			uc_stack: alt_stack,
 			uc_sigmask,
 			__uc_pad: 0,
 			uc_mcontext_pc: trap_ctx.get_rt(),
@@ -127,10 +175,17 @@ pub(super) fn push_signal_frame(
 	task_inner: &mut TaskControlBlockInner,
 	sig: usize,
 	saved_mask: SignalFlags,
+	use_alt_stack: bool,
 ) -> Option<(usize, usize)> {
 	let trap_ctx = task_inner.get_trap_cx();
 	let frame_size = core::mem::size_of::<SignalFrame>();
-	let user_sp = trap_ctx.get_sp();
+	let interrupted_sp = trap_ctx.get_sp();
+	let alt_stack = task_inner.signal_alt_stack;
+	let user_sp = if use_alt_stack && alt_stack.is_enabled() && !alt_stack.contains(interrupted_sp) {
+		alt_stack.ss_sp.checked_add(alt_stack.ss_size)?
+	} else {
+		interrupted_sp
+	};
 	let frame_sp = (user_sp.checked_sub(frame_size)? & !0xfusize) as usize;
 	let frame = SignalFrame {
 		info: crate::syscall::process::SigInfo {
@@ -144,7 +199,11 @@ pub(super) fn push_signal_frame(
 			_pad1: 0,
 			_pad: [0; 12],
 		},
-		ucontext: SignalUserContext::from_trap_ctx(trap_ctx, saved_mask.bits() as usize),
+		ucontext: SignalUserContext::from_trap_ctx(
+			trap_ctx,
+			saved_mask.bits() as usize,
+			alt_stack.status_for_sp(interrupted_sp),
+		),
 	};
 
 	let token = task_inner.get_user_token();
