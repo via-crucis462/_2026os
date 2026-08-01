@@ -343,11 +343,26 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
     let open_flags = OpenFlags::from_bits_truncate(flags);
     let mask = mode & !current_umask();
     if let Some(inode) = open_file(start_dentry, path_str.as_str(), open_flags, mask) {
-        if open_flags.should_be_directory() && (inode.inode().get_stat().mode & 0o040000) == 0 {
+        let inode_mode = inode.inode().get_stat().mode;
+        let inode_type = inode_mode & S_IFMT;
+        if open_flags.should_be_directory() && inode_type != 0o040000 {
             trace!("kernel:pid[{}] VFS: sys_openat failed - '{}' is not a directory", task.getpid(), path_str);
             return ENOTDIR.as_isize(); // 目标文件不是目录
         }
-        let file: Arc<dyn File> = if is_fifo_mode(inode.inode().get_stat().mode) {
+
+        // Shell redirection opens its target with write access and O_TRUNC.
+        // Never let that path treat ext4 directory records as regular data.
+        if inode_type == 0o040000 && writable {
+            return EISDIR.as_isize();
+        }
+
+        if inode_type == 0o100000 && writable && open_flags.contains(OpenFlags::TRUNC) {
+            if !inode.truncate(0) {
+                return EIO.as_isize();
+            }
+        }
+
+        let file: Arc<dyn File> = if is_fifo_mode(inode_mode) {
             open_fifo_file(&inode, readable, writable)
         } else {
             inode
@@ -1086,6 +1101,12 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
         let _namespace_guard = parent.namespace_lock.lock();
         // 尝试删除
         if let Some(_inode_id) = parent.inode.delete_dir_entry(&name) {
+            if removing_dir {
+                // Drop the directory's implicit '.' link and the parent's
+                // link contributed by the child's implicit '..'.
+                target.inode.dec_link_count();
+                parent.inode.dec_link_count();
+            }
             parent.children.lock().remove(&name);
             return 0;
         } else {

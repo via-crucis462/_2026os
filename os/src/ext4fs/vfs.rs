@@ -215,7 +215,11 @@ impl VfsInode for Ext4Inode {
     }
 
     fn truncate(&self, len: usize) -> bool {
-        self.truncate(len)
+        let truncated = Ext4Inode::truncate(self, len);
+        if truncated {
+            self.size.store(len as u64, Ordering::Relaxed);
+        }
+        truncated
     }
 
     fn get_stat(&self) -> crate::fs::Stat {
@@ -256,6 +260,7 @@ impl VfsInode for Ext4Inode {
             disk_inode.i_mode = mode as u16; 
             disk_inode.i_size_lo = 0;
             disk_inode.i_size_high = 0;
+            disk_inode.i_dtime = 0;
             disk_inode.i_links_count = 1;
             disk_inode.i_blocks_lo = 0;
             if (self.fs.superblock.incompat_features & 0x40) != 0 {
@@ -313,6 +318,7 @@ impl VfsInode for Ext4Inode {
             disk_inode.i_mode = mode as u16; 
             disk_inode.i_size_lo = 0;
             disk_inode.i_size_high = 0;
+            disk_inode.i_dtime = 0;
             disk_inode.i_links_count = 2;
             disk_inode.i_blocks_lo = 0;
             disk_inode.i_flags = 0;
