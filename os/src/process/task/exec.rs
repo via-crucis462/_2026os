@@ -150,7 +150,7 @@ impl TaskStruct {
 				warn!("[kernel] sys_exec: failed to open script interpreter '{}'", interpreter);
 				return Self::exec_open_error(cwd, interpreter.as_str());
 			};
-			let stat = inode.inode.get_stat();
+			let stat = inode.get_stat();
 			let is_dir = (stat.mode & 0o170000) == 0o040000;
 			if is_dir || !inode.get_perm().can_execute(uid, gid) {
 				warn!("[kernel] sys_exec: script interpreter '{}' is not executable", interpreter);
