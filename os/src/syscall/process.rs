@@ -85,7 +85,8 @@ pub use crate::{
     syscall::errno::Errno
 };
 pub use crate::process::timer::{
-    add_posix_timer, remove_posix_timer, KernelSigEvent, PosixTimer,
+    add_posix_timer, delete_posix_timer, get_posix_timer_spec, remove_posix_timer,
+    set_posix_timer, ITimerSpec, KernelSigEvent, PosixTimer,
 };
 use alloc::task;
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
@@ -3318,6 +3319,8 @@ pub fn sys_timer_create(clock_id: i32, event: *const KernelSigEvent, timer_id: *
         signo,
         value,
         target_tid,
+        expires_ns: None,
+        interval_ns: 0,
     });
 
     if !try_translated_write(token, timer_id, id) {
@@ -3325,6 +3328,50 @@ pub fn sys_timer_create(clock_id: i32, event: *const KernelSigEvent, timer_id: *
         return EFAULT.as_isize();
     }
     0
+}
+
+/// 设置、启动、解除或重新设置POSIX定时器（系统调用110）。
+pub fn sys_timer_settime(
+    timer_id: i32,
+    flags: i32,
+    new_value: *const ITimerSpec,
+    old_value: *mut ITimerSpec,
+) -> isize {
+    const TIMER_ABSTIME: i32 = 1;
+
+    if flags & !TIMER_ABSTIME != 0 {
+        return EINVAL.as_isize();
+    }
+    if new_value.is_null() {
+        return EFAULT.as_isize();
+    }
+
+    let token = current_user_token();
+    let owner_pid = current_task().unwrap().getpid();
+    let Some(new_spec) = try_translated_read(token, new_value) else {
+        return EFAULT.as_isize();
+    };
+    let Some(previous) = get_posix_timer_spec(timer_id, owner_pid) else {
+        return EINVAL.as_isize();
+    };
+
+    if set_posix_timer(timer_id, owner_pid, new_spec, flags & TIMER_ABSTIME != 0).is_none() {
+        return EINVAL.as_isize();
+    }
+    if !old_value.is_null() && !try_translated_write(token, old_value, previous) {
+        return EFAULT.as_isize();
+    }
+    0
+}
+
+/// 删除POSIX定时器（系统调用111）。
+pub fn sys_timer_delete(timer_id: i32) -> isize {
+    let owner_pid = current_task().unwrap().getpid();
+    if delete_posix_timer(timer_id, owner_pid) {
+        0
+    } else {
+        EINVAL.as_isize()
+    }
 }
 
 /// 调整文件大小

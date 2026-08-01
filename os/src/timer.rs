@@ -94,6 +94,7 @@ lazy_static! {
 pub fn check_timer_cooperative() {
     let current_ms = get_time_ms();
     let expired_pids = TIMER_MANAGER.lock().tick(current_ms);
+    crate::process::check_posix_timers();
     
     for pid in expired_pids {
         if let Some(process) = crate::task::get_process(pid) {

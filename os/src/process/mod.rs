@@ -44,7 +44,10 @@ pub use signal::{
     mark_signal_interrupted, take_current_signal_interrupted, SignalAction,
     SignalActions, SignalFlags, MAX_SIG,
 };
-pub use timer::{add_posix_timer, remove_posix_timer, KernelSigEvent, PosixTimer};
+pub use timer::{
+    add_posix_timer, check_posix_timers, delete_posix_timer, get_posix_timer_spec,
+    remove_posix_timer, set_posix_timer, ITimerSpec, KernelSigEvent, PosixTimer,
+};
 pub(crate) use signal::restore_signal_context;
 pub use init::{add_initproc, INITTASK};
 pub use task::exit::{exit_current_and_run_next, IDLE_PID};
