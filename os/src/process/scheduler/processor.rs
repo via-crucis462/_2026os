@@ -202,8 +202,10 @@ pub fn run_tasks() {
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     let mut processor = current_processor();
     let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
+    // debug!("[kernel] task_ctx {:p} - hart {} scheduled", switched_task_cx_ptr, get_hart_id());
     drop(processor);
     unsafe {
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
+    // debug!("[kernel] task_ctx {:p} - hart {} back to scheduler", idle_task_cx_ptr, get_hart_id());
 }

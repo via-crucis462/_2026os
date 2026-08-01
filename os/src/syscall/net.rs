@@ -18,7 +18,6 @@ use core::sync::atomic::{AtomicU16, Ordering};
 use crate::fs::{OpenFlags, create_fifo_in_dentry};
 use crate::timer::TimeVal;
 use crate::get_time_ms;
-use crate::timer::check_timer_cooperative;
 use smoltcp::socket::tcp::State;
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -436,7 +435,6 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
                 return Errno::ECONNREFUSED.as_isize();
             }
             net_poll();
-            crate::timer::check_timer_cooperative();
             if get_pending_signals().contains(crate::task::SignalFlags::SIGALRM) {
                 return Errno::EINTR.as_isize();
             }
@@ -624,7 +622,6 @@ pub fn sys_recvfrom(
                         return crate::syscall::errno::Errno::EAGAIN.as_isize(); 
                     }
                 }
-                crate::timer::check_timer_cooperative();
                 if get_pending_signals().contains(crate::task::SignalFlags::SIGALRM) {
                     return crate::syscall::errno::Errno::EINTR.as_isize(); 
                 }

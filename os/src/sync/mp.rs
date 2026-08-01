@@ -1,6 +1,9 @@
 //! 多核安全数据管理器
-//! 保留这个的目的是避免修改原有UPSafeCell包装
-//! 本质上是spin::Mutex
+//! 保留这个的目的是避免修改原有 UPSafeCell 包装
+//! 本质上是 spin::Mutex
+//! 
+//! 注: 后续实现实际上应该尽可能用 spin::Mutex 代替 MPSafeCell
+
 #[cfg(target_arch = "riscv64")]
 use riscv::register::sstatus;
 use super::*;

@@ -176,12 +176,11 @@ lazy_static! {
 	};
 }
 
-pub fn add_worker_tasks(){
-	let worker_task = TaskStruct::new_kernel_worker(
-		crate::process::task::worker::test_kernel_worker
-	);
+pub fn add_timer_worker() {
+	let worker_task =
+		TaskStruct::new_kernel_worker(crate::process::task::worker::timer_kernel_worker);
 	add_task(worker_task.clone());
-	info!("add_worker_tasks: pid={}", worker_task.getpid());
+	info!("add_timer_worker: pid={}", worker_task.getpid());
 }
 
 pub fn add_initproc() {

@@ -13,7 +13,8 @@ pub fn suspend_current_and_run_next() {
     drop(task);
     schedule(task_cx_ptr);
 }
-// 无条件阻塞
+
+/// 满足条件则阻塞，返回 false 表示未阻塞，返回 true 表示阻塞成功并且已经被唤醒
 pub fn block_current_and_run_next_if_task<F>(should_block: F) -> bool
 where
     F: FnOnce(&TaskControlBlockInner) -> bool,
@@ -33,6 +34,7 @@ where
     true
 }
 
+/// 无条件阻塞，放入指定等待队列
 pub fn block_current_and_run_next(queue: &Mutex<WaitQueue>) {
     let task = current_task().unwrap();
     let task_cx_ptr = {
@@ -47,6 +49,7 @@ pub fn block_current_and_run_next(queue: &Mutex<WaitQueue>) {
     schedule(task_cx_ptr);
 }
 
+/// 带条件阻塞，放入指定等待队列
 pub fn block_current_and_run_next_if<F>(queue: &Mutex<WaitQueue>, should_block: F) -> bool
 where
     F: FnOnce() -> bool,
@@ -118,7 +121,7 @@ pub fn wake_up_all(queue: &Mutex<WaitQueue>) -> usize {
     count
 }
 
-/// 唤醒多核安全等待队列中的全部任务。
+/// 唤醒多核安全等待队列中的全部任务
 pub(crate) fn wake_up_all_mp(queue: &MPSafeCell<WaitQueue>) -> usize {
     let tasks = {
         let mut guard = queue.exclusive_access();

@@ -185,7 +185,7 @@ fn main_init(hart_id: usize) {
     fs::list_apps();
     MAIN_HART_ID.store(hart_id, Ordering::Release);
     crate::process::init::add_initproc();
-    //crate::process::init::add_worker_tasks();
+    crate::process::init::add_timer_worker();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger(process::scheduler::runqueue::SCHED_OTHER);
     #[cfg(board = "virt")]

@@ -225,7 +225,6 @@ impl File for TcpSocket {
             }
             drop(sockets);
             crate::net::net_poll();
-            crate::timer::check_timer_cooperative();
             if get_pending_signals()
                 .contains(crate::task::SignalFlags::SIGALRM)
             {
@@ -264,7 +263,6 @@ impl File for TcpSocket {
             }
             drop(sockets);
             crate::net::net_poll();
-            crate::timer::check_timer_cooperative();
             if get_pending_signals()
                 .contains(crate::task::SignalFlags::SIGALRM)
             {

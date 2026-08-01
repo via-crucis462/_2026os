@@ -115,8 +115,8 @@ pub struct TaskStructInner {
     /*7. 信号处理相关 */
     pub signal: Arc<MPSafeCell<Signal>>,  // 信号处理相关信息
     pub signal_hand: Arc<MPSafeCell<SigHand>>, // 信号处理函数相关信息
-    pub blocked: SignalFlags, // 当前阻塞的信号集
-    pub pending: Sigpending, // 当前挂起的信号集 
+    pub blocked: SignalFlags, // 当前阻塞（不允许接收）的信号集
+    pub pending: Sigpending, // 当前挂起（收到但还未处理）的信号集 
     pub signal_interrupted: bool,
     pub sigsuspend_saved_mask: Option<SignalFlags>,
     pub signal_mask_backup: Vec<SignalFlags>,

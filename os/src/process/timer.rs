@@ -8,8 +8,7 @@ use spin::Mutex;
 use crate::arch::timer::get_time_us;
 use crate::process::registry::{get_process, tid2task, TID2TCB};
 use crate::process::signal::SignalFlags;
-use crate::process::task::TaskStatus;
-use crate::timer::{TimeSpec, CLOCK_REALTIME_OFFSET_NS};
+use crate::timer::{queue_timer_signal, TimeSpec, CLOCK_REALTIME_OFFSET_NS};
 
 /// Linux内核使用的sigevent布局；只保留timer_create需要读取的字段。
 #[repr(C)]
@@ -211,14 +210,7 @@ pub fn check_posix_timers() {
         };
 
         for task in tasks {
-            let mut inner = task.inner_exclusive_access();
-            inner.pending.insert(signal);
-            if inner.state == TaskStatus::Blocked {
-                inner.signal_interrupted = true;
-                inner.state = TaskStatus::Ready;
-                drop(inner);
-                crate::process::add_task(task);
-            }
+            queue_timer_signal(task, signal);
             if timer.notify == SIGEV_THREAD_ID {
                 break;
             }

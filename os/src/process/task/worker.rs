@@ -101,6 +101,18 @@ pub fn test_kernel_worker() -> ! {
     }
 }
 
+pub fn timer_kernel_worker() -> ! {
+    const TIMER_CHECK_INTERVAL_US: usize = 10_000;
+
+    loop {
+        crate::timer::check_timers();
+        let deadline_ns = crate::arch::timer::get_time_us()
+            .saturating_add(TIMER_CHECK_INTERVAL_US)
+            .saturating_mul(1_000);
+        crate::process::scheduler::nanosleep::sleep_current_until(deadline_ns);
+    }
+}
+
 pub fn bio_kernel_worker() -> ! {
     loop {
         println!("TODO: bio_kernel_worker is running");
