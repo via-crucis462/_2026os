@@ -7,6 +7,7 @@ use super::{StepByOne, VPNRange};
 #[allow(unused)]
 use crate::arch::config::*;
 use crate::mm::{get_free_frames, mmap};
+use crate::process::signal::frame;
 use crate::sync::MPSafeCell;
 use crate::syscall::errno::Errno;
 use alloc::collections::BTreeMap;
@@ -812,9 +813,14 @@ impl MemorySet {
                     memory_set
                         .page_table
                         .map(vpn, src_pte.ppn(), child_flags, page_size);
+                    let frame_tracker = user_space.areas[idx]
+                        .data_frames
+                        .get(&vpn)
+                        .cloned()
+                        .unwrap();
                     new_area
                         .data_frames
-                        .insert(vpn, FrameTracker::from_ppn(src_pte.ppn(), page_size));
+                        .insert(vpn, frame_tracker);
                     if writable_cow {
                         let parent_perm = map_perm & !MapPermission::W;
                         let parent_flags = PTEFlags::from_bits(parent_perm.bits).unwrap();

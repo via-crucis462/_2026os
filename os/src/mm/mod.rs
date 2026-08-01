@@ -25,7 +25,7 @@ pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use core::hint::spin_loop;
 use core::ptr::{read_volatile, write_volatile};
 pub use flags::PTEFlags;
-pub use frame_allocator::{frame_alloc, frame_dealloc, frame_ref_count, FrameTracker};
+pub use frame_allocator::{frame_alloc, frame_dealloc, FrameTracker};
 pub use memory_set::remap_test;
 pub use memory_set::{kernel_asid, kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
 #[allow(unused)]

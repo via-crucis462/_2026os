@@ -12,7 +12,7 @@ use lazy_static::lazy_static;
 use spin::{Mutex, MutexGuard};
 
 use crate::ext4fs::BLOCK_SZ;
-use crate::mm::{frame_alloc, frame_ref_count, FrameTracker, PageSize};
+use crate::mm::{frame_alloc, FrameTracker, PageSize};
 
 
 /// 缓存状态
@@ -306,7 +306,8 @@ impl PageCacheManager {
         };
 
         cache.sync();
-        if frame_ref_count(cache.lock().frame.ppn) != 1 {
+        let count = Arc::strong_count(&cache.lock().frame);
+        if count != 1 {
             return false;
         }
 

@@ -6,20 +6,24 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
+use alloc::sync::Arc;
 
+/// 用 Arc 替代了原有的引用计数器
+pub type FrameTracker = Arc<Frame>;
 
 /// tracker for physical page frame allocation and deallocation
-/// 现在的实现带引用计数
-pub struct FrameTracker {
+/// 引用计数挪至外层 Arc 包装
+pub struct Frame {
     /// physical page number
     pub ppn: PhysPageNum,
     /// 页大小
     pub page_size: PageSize,
 }
 
-impl FrameTracker {
+impl Frame {
     /// Create a new FrameTracker
-    pub fn new(ppn: PhysPageNum, page_size: PageSize) -> Self {
+    /// 需要保证只在 frame_alloc() 中调用
+    fn new(ppn: PhysPageNum, page_size: PageSize) -> Self {
         // page cleaning
         let bytes_array = ppn.get_bytes_array_with_size(page_size);
         for i in bytes_array {
@@ -27,35 +31,21 @@ impl FrameTracker {
         }
         Self { ppn, page_size: page_size }
     }
-
-    pub fn from_ppn(ppn: PhysPageNum, page_size: PageSize) -> Self {
-        frame_add_ref(ppn);
-        Self { ppn, page_size: page_size }
-    }
     pub fn get_bytes_array(&self) -> &'static mut [u8] {
         self.ppn.get_bytes_array_with_size(self.page_size)
     }
 }
 
-impl Clone for FrameTracker {
-    fn clone(&self) -> Self {
-        Self::from_ppn(self.ppn, self.page_size)
-    }
-}
 
-impl Debug for FrameTracker {
+impl Debug for Frame {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("FrameTracker:PPN=0x{:x}", self.ppn.0))
+        f.write_fmt(format_args!("Frame:PPN=0x{:x}", self.ppn.0))
     }
 }
 
-impl Drop for FrameTracker {
+impl Drop for Frame {
     fn drop(&mut self) {
-        let remain = frame_release_ref(self.ppn);
-        if remain == 0 {
-            // 按页大小释放
-            frame_dealloc_raw(self.ppn, self.page_size);
-        }
+        frame_dealloc(self.ppn, self.page_size);
     }
 }
 
@@ -227,8 +217,10 @@ lazy_static! {
     /// frame allocator instance through lazy_static!
     pub static ref FRAME_ALLOCATOR: MPSafeCell<FrameAllocatorImpl> =
         MPSafeCell::new(FrameAllocatorImpl::new());
+    /* 页帧引用计数，现已由 Arc 管理，弃置
     static ref FRAME_REF_COUNTS: MPSafeCell<BTreeMap<usize, usize>> =
         MPSafeCell::new(BTreeMap::new());
+    */
 }
 /// initiate the frame allocator using `ekernel` and `MEMORY_END`
 pub fn init_frame_allocator() {
@@ -283,8 +275,9 @@ pub fn frame_alloc(page_size: PageSize) -> Option<FrameTracker> {
         ppn.unwrap()
     };
 
-    FRAME_REF_COUNTS.exclusive_access().insert(ppn.0, 1);
-    Some(FrameTracker::new(ppn, page_size))
+    // FRAME_REF_COUNTS.exclusive_access().insert(ppn.0, 1);
+    let frame = Frame::new(ppn, page_size);
+    Some(FrameTracker::new(frame))
 }
 /// 连续分配物理页帧，返回起始物理地址, 只允许标准页
 /// 不过目前未实现连续分配
@@ -294,18 +287,24 @@ pub fn frame_alloc_con(pages: usize) -> Option<PhysPageNum> {
 }
 
 /// Deallocate a physical page frame with a given ppn
+#[inline(always)]
 pub fn frame_dealloc(ppn: PhysPageNum, page_size: PageSize) {
+    /*
     let remain = frame_release_ref(ppn);
     if remain == 0 {
         frame_dealloc_raw(ppn, page_size);
     }
+     */
+    frame_dealloc_raw(ppn, page_size);
 }
 
+/*
 pub fn frame_add_ref(ppn: PhysPageNum) {
     let mut ref_counts = FRAME_REF_COUNTS.exclusive_access();
     let counter = ref_counts.entry(ppn.0).or_insert(0);
     *counter += 1;
 }
+
 
 pub fn frame_ref_count(ppn: PhysPageNum) -> usize {
     FRAME_REF_COUNTS
@@ -328,7 +327,7 @@ fn frame_release_ref(ppn: PhysPageNum) -> usize {
     }
     remain
 }
-
+*/
 fn frame_dealloc_raw(ppn: PhysPageNum, page_size: PageSize) {
     FRAME_ALLOCATOR.exclusive_access().dealloc(ppn, page_size);
 }
