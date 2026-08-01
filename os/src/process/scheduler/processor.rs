@@ -2,7 +2,10 @@
 
 use crate::process::scheduler::idle_tasks;
 use crate::process::scheduler::nanosleep::wake_expired_sleep_tasks;
-use crate::process::scheduler::runqueue::{enqueue_task_on_cpu, fetch_task, SCHED_OTHER};
+use crate::process::scheduler::runqueue::{
+    advance_cfs_min_vruntime, enqueue_task_on_cpu, fetch_task, SCHED_BATCH, SCHED_IDLE,
+    SCHED_OTHER,
+};
 use crate::process::{TaskContext, TaskControlBlock, TaskStatus};
 use crate::process::id::kernel_mapping_generation;
 use crate::mm::kernel_asid;
@@ -159,7 +162,7 @@ pub fn run_tasks() {
                 processor.take_current()
             };
             if let Some(prev_task) = prev_task {
-				let (status, cpu_id) = {
+				let (status, cpu_id, sched_policy) = {
 					let mut prev_inner = prev_task.inner_exclusive_access();
                     let now = get_time_us() as u64;
                     let delta_exec = now.saturating_sub(prev_inner.se.exec_start).max(1);
@@ -173,12 +176,17 @@ pub fn run_tasks() {
                         .saturating_add(delta_vruntime.max(1));
                     prev_inner.se.exec_start = 0;
 					prev_inner.on_cpu = false;
-					(prev_inner.state, prev_inner.cpu)
+					(prev_inner.state, prev_inner.cpu, prev_inner.sched_policy)
 				};
                 if status == TaskStatus::Ready {
 					enqueue_task_on_cpu(prev_task, cpu_id);
-                } else if status == TaskStatus::BlockSaving {
-                    prev_task.inner_exclusive_access().state = TaskStatus::Blocked;
+                } else {
+                    if matches!(sched_policy, SCHED_OTHER | SCHED_BATCH | SCHED_IDLE) {
+                        advance_cfs_min_vruntime(cpu_id);
+                    }
+                    if status == TaskStatus::BlockSaving {
+                        prev_task.inner_exclusive_access().state = TaskStatus::Blocked;
+                    }
                 }
             }
         } else {

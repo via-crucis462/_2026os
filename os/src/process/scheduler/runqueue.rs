@@ -205,6 +205,16 @@ pub(crate) fn remove_task_from_all_local_queues_unlocked(tid: usize) {
 /// 新框架没有全局任务池，保留为空操作以兼容迁移中的清理路径。
 pub(crate) fn remove_task_from_global_pool_unlocked(_tid: usize) {}
 
+/// 当前 CFS 实体不再可运行时，推进对应 CPU 的最小虚拟运行时间。
+pub(crate) fn advance_cfs_min_vruntime(cpu_id: usize) {
+	let cpu_id = cpu_id.min(RQ_ARRAY.len().saturating_sub(1));
+	RQ_ARRAY[cpu_id]
+		.inner_exclusive_access()
+		.cfs
+		.exclusive_access()
+		.advance_min_vruntime();
+}
+
 /// 唤醒阻塞任务，并重新加入它原先所属 CPU 的运行队列。
 pub fn wake_up_task(task: Arc<TaskControlBlock>) {
 	let should_enqueue = loop {

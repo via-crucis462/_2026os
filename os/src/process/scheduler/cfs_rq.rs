@@ -9,7 +9,9 @@ use core::cmp::Ordering;
 struct CfsKey {
 	/// 实体累计的归一化虚拟运行时间，数值越小越应优先运行。
 	vruntime: u64,
-	/// vruntime 相同时，线程 ID 越大越应优先运行。
+	/// 入队位次。vruntime 相同时，先入队的实体优先运行。
+	enqueue_order: u64,
+	/// 保证键在 enqueue_order 回绕时仍然唯一。
 	tid: usize,
 }
 
@@ -17,8 +19,8 @@ impl Ord for CfsKey {
 	fn cmp(&self, other: &Self) -> Ordering {
 		self.vruntime
 			.cmp(&other.vruntime)
-			// 红黑树取最小键，因此反向比较 tid，使较大的 tid 排在更左侧。
-			.then_with(|| other.tid.cmp(&self.tid))
+			.then_with(|| self.enqueue_order.cmp(&other.enqueue_order))
+			.then_with(|| self.tid.cmp(&other.tid))
 	}
 }
 
@@ -46,10 +48,12 @@ pub struct CfsRq {
 	pub h_nr_queued: usize,
 	/// 队列当前最小虚拟运行时间，防止新实体获得不公平优势。
 	pub min_vruntime: u64,
-	/// 按 `vruntime` 升序、`tid` 降序排列并缓存最左节点的时间线红黑树。
+	/// 按 `vruntime`、入队顺序升序排列并缓存最左节点的时间线红黑树。
 	tasks_timeline: RbRootCached<CfsKey, Arc<TaskControlBlock>>,
 	/// 本 CFS 队列累计消耗的实际执行时间。
 	pub exec_clock: u64,
+	/// vruntime 相同时保持 FIFO 次序的入队序号。
+	enqueue_order: u64,
 }
 
 impl CfsRq {
@@ -62,26 +66,40 @@ impl CfsRq {
 			min_vruntime: 0,
 			tasks_timeline: RbRootCached::new(),
 			exec_clock: 0,
+			enqueue_order: 0,
 		}
 	}
 
 	/// 将任务按虚拟运行时间加入 CFS 时间线，并更新数量和负载统计。
 	pub fn enqueue(&mut self, task: Arc<TaskControlBlock>, vruntime: u64, weight: u64) {
-		self.tasks_timeline.insert(CfsKey { vruntime, tid: task.gettid() }, task);
+		// min_vruntime 保持单调不减，以保证任务睡眠唤醒后不会因 vruntime 过小而被长期单独执行
+		let vruntime = vruntime.max(self.min_vruntime);
+		task.inner_exclusive_access().se.vruntime = vruntime;
+		let key = CfsKey {
+			vruntime,
+			enqueue_order: self.enqueue_order,
+			tid: task.gettid(),
+		};
+		self.enqueue_order = self.enqueue_order.wrapping_add(1);
+		self.tasks_timeline.insert(key, task);
 		self.nr_queued += 1;
 		self.h_nr_queued += 1;
 		self.load.weight = self.load.weight.saturating_add(weight);
-		self.min_vruntime = self.tasks_timeline
+		let leftmost_vruntime = self.tasks_timeline
 			.first_key()
 			.map(|key| key.vruntime)
 			.unwrap_or(vruntime);
+		self.min_vruntime = self.min_vruntime.max(leftmost_vruntime);
 	}
 
 	/// 从 CFS 时间线移除指定任务，并回退对应的数量和负载统计。
 	///
 	/// 返回 `None` 表示给定 `(tid, vruntime)` 不在队列中。
 	pub fn dequeue(&mut self, tid: usize, vruntime: u64, weight: u64) -> Option<Arc<TaskControlBlock>> {
-		let task = self.tasks_timeline.remove(CfsKey { vruntime, tid });
+		let task = self.tasks_timeline.remove_where(|task| {
+			let inner = task.inner_exclusive_access();
+			task.gettid() == tid && inner.se.vruntime == vruntime
+		});
 		if task.is_some() {
 			self.nr_queued -= 1;
 			self.h_nr_queued -= 1;
@@ -98,14 +116,18 @@ impl CfsRq {
 	/// 移除并返回 vruntime 最小的任务，供调度和空闲核负载均衡使用。
 	pub fn pop_next(&mut self) -> Option<Arc<TaskControlBlock>> {
 		let task = self.tasks_timeline.pop_first()?;
-		let load_weight = task.inner_exclusive_access().se.load_weight;
+		let (load_weight, current_vruntime) = {
+			let inner = task.inner_exclusive_access();
+			(inner.se.load_weight, inner.se.vruntime)
+		};
 		self.nr_queued = self.nr_queued.saturating_sub(1);
 		self.h_nr_queued = self.h_nr_queued.saturating_sub(1);
 		self.load.weight = self.load.weight.saturating_sub(load_weight);
-		self.min_vruntime = self.tasks_timeline
+		let candidate = self.tasks_timeline
 			.first_key()
-			.map(|key| key.vruntime)
-			.unwrap_or(self.min_vruntime);
+			.map(|key| key.vruntime.min(current_vruntime))
+			.unwrap_or(current_vruntime);
+		self.min_vruntime = self.min_vruntime.max(candidate);
 		Some(task)
 	}
 
@@ -116,5 +138,12 @@ impl CfsRq {
 		self.h_nr_queued = self.h_nr_queued.saturating_sub(1);
 		self.load.weight = self.load.weight.saturating_sub(task.inner_exclusive_access().se.load_weight);
 		Some(task)
+	}
+
+	/// 当前实体阻塞或退出后，以剩余最左实体推进运行队列时钟。
+	pub fn advance_min_vruntime(&mut self) {
+		if let Some(key) = self.tasks_timeline.first_key() {
+			self.min_vruntime = self.min_vruntime.max(key.vruntime);
+		}
 	}
 }

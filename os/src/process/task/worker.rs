@@ -15,10 +15,14 @@ use alloc::{
 
 impl TaskStruct {
     /// 创建一个新的内核工作线程
-    pub fn new_kernel_worker(entry: fn() -> !) -> Arc<Self> {
+    pub fn new_kernel_worker(entry: fn() -> !, sched_policy: isize) -> Arc<Self> {
         let pid = Arc::new(pid_alloc());
         let kernel_stack = kstack_alloc();
         let kernel_stack_top = kernel_stack.get_top();
+        let mut sched_entity = SchedEntity::new();
+        if sched_policy == SCHED_IDLE {
+            sched_entity.load_weight = 3;
+        }
 
         Arc::new_cyclic(|task_weak| Self {
             pid: pid.clone(),
@@ -47,12 +51,12 @@ impl TaskStruct {
                 flags: 0,
                 errno: 0,
                 oom_score_adj: 0,
-                sched_policy: SCHED_IDLE,
+                sched_policy,
                 sched_priority: 0,
                 prio: 120,
                 static_prio: 120,
                 normal_prio: 120,
-                se: SchedEntity::new(),
+                se: sched_entity,
                 rt: SchedRtEntity::new(),
                 dl: SchedDlEntity::new(),
                 mm: None,

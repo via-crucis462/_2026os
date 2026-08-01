@@ -5,7 +5,7 @@ use crate::arch::{
 use crate::fs::ROOT_DENTRY;
 use crate::ipc::namespace::{IPCNamespace, NsProxy};
 use crate::mm::{KERNEL_SPACE, MemorySet, VirtAddr};
-use crate::process::scheduler::runqueue::SCHED_IDLE;
+use crate::process::scheduler::runqueue::{SCHED_IDLE, SCHED_OTHER};
 use crate::process::signal::{SigHand, Signal, Sigpending, SignalFlags};
 use crate::process::task::{
 	context::ThreadStruct, Cred, FileDescriptorTable, FsStruct, TaskContext,
@@ -178,21 +178,21 @@ lazy_static! {
 
 pub fn add_timer_worker() {
 	let worker_task =
-		TaskStruct::new_kernel_worker(crate::process::task::worker::timer_kernel_worker);
+		TaskStruct::new_kernel_worker(crate::process::task::worker::timer_kernel_worker, SCHED_OTHER);
 	add_task(worker_task.clone());
 	info!("add_timer_worker: pid={}", worker_task.getpid());
 }
 
 pub fn add_net_worker() {
 	let worker_task =
-		TaskStruct::new_kernel_worker(crate::process::task::worker::net_kernel_worker);
+		TaskStruct::new_kernel_worker(crate::process::task::worker::net_kernel_worker, SCHED_OTHER);
 	add_task(worker_task.clone());
 	info!("add_net_worker: pid={}", worker_task.getpid());
 }
 
 pub fn add_writeback_worker() {
 	let worker_task =
-		TaskStruct::new_kernel_worker(crate::process::task::worker::writeback_kernel_worker);
+		TaskStruct::new_kernel_worker(crate::process::task::worker::writeback_kernel_worker, SCHED_IDLE);
 	add_task(worker_task.clone());
 	info!("add_writeback_worker: pid={}", worker_task.getpid());
 }
