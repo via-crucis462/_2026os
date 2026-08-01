@@ -1,7 +1,7 @@
 //!Stdin & Stdout
 use super::File;
 use crate::mm::UserBuffer;
-use crate::arch::sbi::console_getchar;
+use crate::console::{console_peek_char, console_read_char, echo_if_enabled};
 use crate::task::suspend_current_and_run_next;
 use lazy_static::*;
 use crate::sync::MPSafeCell;
@@ -11,14 +11,6 @@ use core::any::Any;
 lazy_static! {
     pub static ref STDOUT_LOCK: MPSafeCell<()> = MPSafeCell::new(());
     static ref STDIN_BUFFERED_CHAR: MPSafeCell<Option<u8>> = MPSafeCell::new(None);
-}
-
-fn normalize_console_char(c: usize) -> Option<u8> {
-    if c == 0 || c == usize::MAX {
-        return None;
-    }
-    let normalized = if c == 13 || c == '\r' as usize { 10 } else { c };
-    Some(normalized as u8)
 }
 
 /// stdin file for getting chars from console
@@ -40,7 +32,8 @@ impl File for Stdin {
         if STDIN_BUFFERED_CHAR.exclusive_access().is_some() {
             return true;
         }
-        if let Some(ch) = normalize_console_char(console_getchar()) {
+        // 探测时不回显，回显统一放在 read() 里，保证每个字符只回显一次
+        if let Some(ch) = console_peek_char() {
             *STDIN_BUFFERED_CHAR.exclusive_access() = Some(ch);
             return true;
         }
@@ -51,8 +44,6 @@ impl File for Stdin {
         false
     }
     fn read(&self, user_buf: UserBuffer) -> usize {
-        // assert_eq!(user_buf.len(), 1);
-        // busy loop
         let ch = loop {
             let task = crate::task::current_task().unwrap();
             let task_inner = task.inner_exclusive_access();
@@ -64,19 +55,19 @@ impl File for Stdin {
             if pending != 0 || unmaskable != 0 {
                 return 0; 
             }
-            
-            // 2. 只读取一次字符，避免吞掉输入
-            let mut c = console_getchar();
-            
-            // 转换回车键
-            if c == 13 || c == '\r' as usize {
-                c = 10;
+
+            // 优先使用 ready_to_read() 时已缓冲的字符（此时需要补回显）
+            if let Some(ch) = STDIN_BUFFERED_CHAR.exclusive_access().take() {
+                echo_if_enabled(ch);
+                break ch;
             }
-            if let Some(ch) = normalize_console_char(c) {
+
+            // 读取并回显单个字符（ICRNL 转换 + ECHO 回显在 console 层完成）
+            if let Some(ch) = console_read_char() {
                 break ch;
             }
             suspend_current_and_run_next();
-        }; // 注意这里的最后要加分号
+        };
 
         let mut count = 0;
         for byte_ref in user_buf.into_iter() {

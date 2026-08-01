@@ -739,13 +739,13 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 warn!("[kernel] sys_ioctl: TCGETS request on non-tty fd {}", fd);
                 return ENOTTY.as_isize();
             }
-            let mut termios = Termios {
-                c_iflag: 0o012402, c_oflag: 0o000005,
-                c_cflag: 0o002277, c_lflag: 0o0105011,
-                c_line: 0, c_cc: [0; 19],
+            // 返回全局存储的 termios（ECHO 等标志由它控制）
+            let t = crate::console::get_termios();
+            let termios = Termios {
+                c_iflag: t.c_iflag, c_oflag: t.c_oflag,
+                c_cflag: t.c_cflag, c_lflag: t.c_lflag,
+                c_line: t.c_line, c_cc: t.c_cc,
             };
-            termios.c_cc[0] = 3; termios.c_cc[1] = 28;
-            termios.c_cc[2] = 127; termios.c_cc[4] = 4;
             if argp != 0 {
                 if !try_translated_write(token, argp as *mut Termios, termios) {
                     return EFAULT.as_isize();
@@ -1013,8 +1013,24 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             }
             0
         }
-        0x5402 => { /* TCSETS */
-            0
+        0x5402 | 0x5403 | 0x5404 => { /* TCSETS / TCSETSW / TCSETSF */
+            if !is_tty {
+                warn!("[kernel] sys_ioctl: TCSETS request on non-tty fd {}", fd);
+                return ENOTTY.as_isize();
+            }
+            if argp == 0 {
+                return EFAULT.as_isize();
+            }
+            if let Some(t) = try_translated_read(token, argp as *const Termios) {
+                crate::console::set_termios(crate::console::ConsoleTermios {
+                    c_iflag: t.c_iflag, c_oflag: t.c_oflag,
+                    c_cflag: t.c_cflag, c_lflag: t.c_lflag,
+                    c_line: t.c_line, c_cc: t.c_cc,
+                });
+                0
+            } else {
+                EFAULT.as_isize()
+            }
         }
         SIOCGIFFLAGS => { // 获取网卡运行状态
         if let Some(mut ifr) = try_translated_read::<IfReq>(token, argp as *const IfReq) {
