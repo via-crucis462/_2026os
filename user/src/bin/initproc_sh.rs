@@ -44,11 +44,7 @@ fn run_shell() -> i32 {
 #[no_mangle]
 fn main() -> i32 {
     // PID 1 must survive a shell exit so that the kernel keeps running.
-    loop {
-        let status = run_shell();
-        println!("init: bash exited with status {}, restarting", status);
-        for _ in 0..1000 {
-            yield_();
-        }
-    }
+    let status = run_shell();
+    println!("init: bash exited with status {}, shutting down...", status);
+    0
 }

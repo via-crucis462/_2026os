@@ -157,8 +157,17 @@ impl TaskStruct {
 		let parent_cpu = parent_inner.cpu;
 		let blocked = parent_inner.blocked;               // 信号阻塞掩码
 		let nsproxy = parent_inner.nsproxy.clone();       // 命名空间代理
-		let cred = parent_inner.cred.clone();              // 有效凭据
-		let real_cred = parent_inner.real_cred.clone();   // 真实凭据
+		// 凭据：CLONE_THREAD 共享 cred（与 Linux 一致）；独立进程必须复制。
+		// 否则子进程 setuid/seteuid 会通过共享的 Arc 把父进程/兄弟进程的 uid
+		// 一起改掉，导致后续 fork 出的测试进程变成非 root，chmod/chown 报 EPERM。
+		let (cred, real_cred) = if clone_thread {
+			(parent_inner.cred.clone(), parent_inner.real_cred.clone())
+		} else {
+			(
+				Arc::new(MPSafeCell::new(parent_inner.cred.exclusive_access().clone())),
+				Arc::new(MPSafeCell::new(parent_inner.real_cred.exclusive_access().clone())),
+			)
+		};
 		let personality = parent_inner.personality;
 		let locked_bytes = parent_inner.locked_bytes;
 		let comm = parent_inner.comm;

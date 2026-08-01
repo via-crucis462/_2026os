@@ -1323,13 +1323,16 @@ pub fn sys_uname(uts: *mut UtsName) -> isize {
 
     // 填充系统信息
     let sysname = b"Linux";
-    let nodename = b"rCore-Nodename";
-    let version = b"v0.1.0";
+    let nodename = b"ShellCore";
+    let version = b"5.10.0";
+    #[cfg(target_arch = "riscv64")]
     let machine = b"riscv64";
-    let domainname = b"rcore.os";
+    #[cfg(target_arch = "loongarch64")]
+    let machine = b"loongarch64";
+    let domainname = b"shell.core";
 
     // UNAME26: release 字段只保留前 3 个 '.' 分隔的版本段
-    let full_release = b"5.10.0-rcore";
+    let full_release = b"5.10.0-ShellCore";
     let release: &[u8] = if uname26 {
         // 找第 3 个 '.' 出现的位置，或直接到字符串末尾
         let mut dot_count = 0;
