@@ -132,6 +132,8 @@ pub struct TaskStructInner {
     /* 9. 其他 */
     pub start_time: u64, // 进程启动时间
     pub start_boottime: u64, // 进程启动时间的低位
+    /// 进程的 oom_score_adj（范围 -1000..=1000，LTP 兼容）
+    pub oom_score_adj: i32,
 
     /* 10 .CPU调度  */
     pub on_cpu: bool,

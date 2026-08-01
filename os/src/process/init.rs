@@ -79,6 +79,7 @@ impl TaskStruct {
 				exit_signal: 0,
 				flags: 0,
 				errno: 0,
+				oom_score_adj: 0,
 				sched_policy: SCHED_IDLE, // initproc默认用SCHED_IDLE策略
 				sched_priority: 0,
 				prio: 120,

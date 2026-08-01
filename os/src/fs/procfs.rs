@@ -277,14 +277,16 @@ impl VfsInode for OomScoreAdjInode {
         None 
     }
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        // 新 TaskStruct 暂未保存 oom_score_adj，兼容性返回默认值 0。
-        let score = 0;
+        // 从进程 TCB 中读取 oom_score_adj，进程不存在时按默认值 0 处理
+        let score = get_task(self.pid)
+            .map(|task| task.inner_exclusive_access().oom_score_adj)
+            .unwrap_or(0);
 
-        // 2. 格式化为字符串
+        // 格式化为字符串
         let score_str = format!("{}\n", score);
         let score_bytes = score_str.as_bytes();
-        
-        // 3. 处理偏移和复制给用户态
+
+        // 处理偏移和复制给用户态
         if offset >= score_bytes.len() {
             return 0;
         }
@@ -294,13 +296,23 @@ impl VfsInode for OomScoreAdjInode {
     }
 
     fn raw_write_at(&self, _offset: usize, buf: &[u8]) -> usize {
-        // 1. 解析 LTP 传进来的 "-1000" 等字符串
+        // 解析 LTP 传进来的 "-1000" 等字符串并保存到进程 TCB
         let s = core::str::from_utf8(buf).unwrap_or("").trim();
-        let _ = s.parse::<i32>();
-        // 返回写入长度，告知系统调用成功
-        buf.len()
+        match s.parse::<i32>() {
+            Ok(v) => {
+                // 与 Linux 一致：合法范围 [-1000, 1000]，超过 1000 截断
+                if let Some(task) = get_task(self.pid) {
+                    task.inner_exclusive_access().oom_score_adj = v.clamp(-1000, 1000);
+                }
+                // 返回写入长度，告知系统调用成功
+                buf.len()
+            }
+            // 非法输入，写入失败
+            Err(_) => 0,
+        }
     }
     fn get_size(&self) -> usize { 0 }
+    fn truncate(&self, _len: usize) -> bool { true } // O_TRUNC 打开对该伪文件无意义，直接成功
     fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> super::Stat {
         super::Stat {

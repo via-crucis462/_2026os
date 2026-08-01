@@ -479,24 +479,61 @@ fn populate_lib_from_dentries(src: &Arc<Dentry>, lib: &Arc<Dentry>, lib64: &Arc<
     }
 }
 
-/// Prepare only the writable kernel-provided pieces needed by the final image.
-///
-/// The final image is a Debian usr-merge filesystem (`/bin -> /usr/bin`,
-/// `/lib* -> /usr/lib*`).  In particular, do not use `setup_oscomp_env()` here:
-/// its compatibility tmpfs mounts hide the image's own programs and libraries.
-pub fn set_up_env_final() {
-    info!("[VFS] Setting up final-image environment...");
-    let root = ROOT_DENTRY.clone();
+#[derive(Clone, Copy, Debug)]
+enum RootfsProfile {
+    FinalDebian,
+    PreliminaryCompat,
+    Unknown,
+}
 
-    root.mount_child("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o1777)));
-    root.mount_child("run".to_string(), Arc::new(TmpfsDirInode::new(0o755)));
-    if let Ok(var) = root.find_tree("/var", true) {
-        var.mount_child("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o1777)));
+fn rootfs_profile(root: &Arc<Dentry>) -> RootfsProfile {
+    // The final image is Debian usr-merge and must retain its own `/bin`,
+    // `/etc`, and library directories. Prefer it when both layouts coexist.
+    if root.find_tree("/usr/bin/bash", true).is_ok()
+        && root
+            .find_tree("/usr/lib/loongarch64-linux-gnu", true)
+            .is_ok()
+    {
+        RootfsProfile::FinalDebian
+    } else if root.find_tree("/musl/busybox", true).is_ok()
+        && root.find_tree("/musl/lib", true).is_ok()
+    {
+        RootfsProfile::PreliminaryCompat
+    } else {
+        RootfsProfile::Unknown
     }
+}
 
-    let dev = root.find_tree("/dev", true).unwrap_or_else(|_| {
-        root.mount_child("dev".to_string(), Arc::new(TmpfsDirInode::new(0o755)))
-    });
+/// Return an existing child, mounting an empty directory only when absent.
+///
+/// `find_child` must precede `mount_child`: mounts take precedence over disk
+/// entries and would otherwise hide files from a complete root filesystem.
+fn existing_or_mount_dir(parent: &Arc<Dentry>, name: &str, mode: u32) -> Arc<Dentry> {
+    parent
+        .find_child(name)
+        .unwrap_or_else(|| parent.mount_child(name.to_string(), Arc::new(TmpfsDirInode::new(mode))))
+}
+
+/// Insert a compatibility file only if neither the image nor an earlier setup
+/// step already provides it.
+fn insert_if_missing(parent: &Arc<Dentry>, name: &str, inode: Arc<dyn VfsInode>) -> Arc<Dentry> {
+    parent
+        .find_child(name)
+        .unwrap_or_else(|| parent.insert(name.to_string(), inode))
+}
+
+fn setup_common_env(root: &Arc<Dentry>) {
+    // Reuse rootfs standard directories. A trimmed image receives only the
+    // missing writable directories as Tmpfs, so a full image keeps its shell,
+    // env, configuration, and dynamic libraries visible.
+    existing_or_mount_dir(root, "tmp", 0o1777);
+    existing_or_mount_dir(root, "run", 0o755);
+    let var = existing_or_mount_dir(root, "var", 0o755);
+    existing_or_mount_dir(&var, "tmp", 0o1777);
+
+    let dev = existing_or_mount_dir(root, "dev", 0o755);
+    // These are kernel-provided device implementations, not compatibility
+    // files from either disk image.
     dev.insert("shm".to_string(), Arc::new(TmpfsDirInode::new(0o1777)));
     dev.insert("null".to_string(), Arc::new(NullInode::new()));
     dev.insert("zero".to_string(), Arc::new(ZeroInode::new()));
@@ -504,11 +541,20 @@ pub fn set_up_env_final() {
     dev.insert("urandom".to_string(), Arc::new(UrandomInode::new()));
     dev.insert("random".to_string(), Arc::new(UrandomInode::new()));
     dev.insert("tty".to_string(), Arc::new(TtyInode::new()));
-    dev.insert("loop-control".to_string(), Arc::new(LoopControlInode::new()));
+    dev.insert(
+        "loop-control".to_string(),
+        Arc::new(LoopControlInode::new()),
+    );
     for index in 0..8 {
-        dev.insert(alloc::format!("loop{}", index), create_loop_device(None, 0, 0));
+        dev.insert(
+            alloc::format!("loop{}", index),
+            create_loop_device(None, 0, 0),
+        );
     }
+}
 
+/// 挂载决赛的 glibc 环境
+fn setup_final_glibc_env(root: &Arc<Dentry>) {
     #[cfg(target_arch = "loongarch64")]
     {
         // The image's normal multiarch directory remains authoritative. These
@@ -529,8 +575,12 @@ pub fn set_up_env_final() {
             .find_map(|path| root.find_tree(path, true).ok());
             if let Some(loader) = loader {
                 let name = "ld-linux-loongarch-lp64d.so.1".to_string();
-                usr_lib.mount_child(name.clone(), loader.inode.clone());
-                usr_lib64.mount_child(name, loader.inode.clone());
+                if usr_lib.find_child(&name).is_none() {
+                    usr_lib.mount_child(name.clone(), loader.inode.clone());
+                }
+                if usr_lib64.find_child(&name).is_none() {
+                    usr_lib64.mount_child(name, loader.inode.clone());
+                }
                 info!("[VFS] Installed LoongArch glibc loader aliases");
             } else {
                 warn!("[VFS] No LoongArch glibc loader was found in the final image");
@@ -539,85 +589,58 @@ pub fn set_up_env_final() {
             warn!("[VFS] Final image is missing /usr/lib or /usr/lib64");
         }
     }
-
-    mount_hugepages();
-    info!("[VFS] Final-image environment ready");
 }
 
-pub fn setup_oscomp_env() {
-    info!("[VFS] INFO: Start setup_oscomp_env...");
-    let root = ROOT_DENTRY.clone();
-
-    // 1. 挂载 /tmp 
-    root.mount_child("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    info!("[VFS] Mounted /tmp");
-    
-    // 2. 复用根文件系统中的标准目录。只有精简镜像确实缺少目录时，
-    // 才创建兼容用的 Tmpfs；否则会隐藏镜像中的 bash、env 和动态库。
-    let etc_dentry = root.mount_child("etc".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+/// 挂载初赛环境
+fn setup_preliminary_compat_env(root: &Arc<Dentry>) {
+    // Reuse rootfs standard directories. Only a trimmed preliminary image gets
+    // a Tmpfs fallback, preventing compatibility mounts from hiding a final
+    // image's bash, env, configuration, or dynamic libraries.
+    let etc_dentry = existing_or_mount_dir(root, "etc", 0o755);
     let passwd_content =
         "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
     let group_content = "root:x:0:\nnobody:x:65534:\n";
-    
-    etc_dentry.insert(
-        "passwd".to_string(),
+    insert_if_missing(
+        &etc_dentry,
+        "passwd",
         Arc::new(TmpfsFileInode::new_with_data(passwd_content.as_bytes())),
     );
-    etc_dentry.insert(
-        "group".to_string(),
+    insert_if_missing(
+        &etc_dentry,
+        "group",
         Arc::new(TmpfsFileInode::new_with_data(group_content.as_bytes())),
     );
 
-    let var_dentry = root.mount_child("var".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    var_dentry.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    var_dentry.insert("run".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let bin_dentry = root.find_tree("/bin", true).unwrap_or_else(|_| {
-        root.mount_child("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
-    });
-    let sbin_dentry = root.find_tree("/sbin", true).unwrap_or_else(|_| {
-        root.mount_child("sbin".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
-    });
-    let usr_dentry = root.find_tree("/usr", true).unwrap_or_else(|_| {
-        root.mount_child("usr".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
-    });
-    let usr_local_dentry = root.find_tree("/usr/local", true).unwrap_or_else(|_| {
-        usr_dentry.insert("local".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
-    });
-    let usr_local_bin_dentry = root.find_tree("/usr/local/bin", true).unwrap_or_else(|_| {
-        usr_local_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
-    });
-    let usr_bin_dentry = root.find_tree("/usr/bin", true).unwrap_or_else(|_| {
-        usr_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
-    });
-    let lib_dentry = root.find_tree("/lib", true).unwrap_or_else(|_| {
-        root.mount_child("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
-    });
-    let lib64_dentry = root.find_tree("/lib64", true).unwrap_or_else(|_| {
-        root.mount_child("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
-    });
-    
-    // loop测例检查的文件
-    let lib_modules = lib_dentry.insert("modules".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let lib_modules_rcore = lib_modules.insert(
-        "5.10.0-rcore".to_string(),
-        Arc::new(TmpfsDirInode::new(0o777)),
-    );
-    lib_modules_rcore.insert(
-        "modules.builtin".to_string(),
+    let var_dentry = existing_or_mount_dir(root, "var", 0o755);
+    existing_or_mount_dir(&var_dentry, "run", 0o755);
+    let bin_dentry = existing_or_mount_dir(root, "bin", 0o755);
+    let sbin_dentry = existing_or_mount_dir(root, "sbin", 0o755);
+    let usr_dentry = existing_or_mount_dir(root, "usr", 0o755);
+    let usr_local_dentry = existing_or_mount_dir(&usr_dentry, "local", 0o755);
+    let usr_local_bin_dentry = existing_or_mount_dir(&usr_local_dentry, "bin", 0o755);
+    let usr_bin_dentry = existing_or_mount_dir(&usr_dentry, "bin", 0o755);
+    let lib_dentry = existing_or_mount_dir(root, "lib", 0o755);
+    let lib64_dentry = existing_or_mount_dir(root, "lib64", 0o755);
+
+    // loop 测例检查的文件。仅补缺，避免覆盖镜像自己的 modules/sysfs。
+    let lib_modules = existing_or_mount_dir(&lib_dentry, "modules", 0o755);
+    let lib_modules_rcore = existing_or_mount_dir(&lib_modules, "5.10.0-rcore", 0o755);
+    insert_if_missing(
+        &lib_modules_rcore,
+        "modules.builtin",
         Arc::new(TmpfsFileInode::new_with_data(
             b"kernel/drivers/block/loop.ko\n",
         )),
     );
-    lib_modules_rcore.insert(
-        "modules.dep".to_string(),
+    insert_if_missing(
+        &lib_modules_rcore,
+        "modules.dep",
         Arc::new(TmpfsFileInode::new_with_data(b"")),
     );
-    
-    // loop测例检查的文件
-    let sys_dentry = root.mount_child("sys".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let sys_module_dentry =
-        sys_dentry.insert("module".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    sys_module_dentry.insert("loop".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+
+    let sys_dentry = existing_or_mount_dir(root, "sys", 0o755);
+    let sys_module_dentry = existing_or_mount_dir(&sys_dentry, "module", 0o755);
+    existing_or_mount_dir(&sys_module_dentry, "loop", 0o755);
 
     // 3. 将 Busybox 和 libc 的真实 Inode 映射进虚拟目录
     if let Ok(musl_dir) = root.find_tree("/musl", true) {
@@ -631,7 +654,7 @@ pub fn setup_oscomp_env() {
                 "uniq", "tee", "sleep", "id", "uname", "which", "find", "xargs", "chmod", "chown",
                 "date", "printf", "clear", "ps", "fgrep", "mktemp",
             ];
-            
+
             for app in applets {
                 // BusyBox 仅用于补齐缺失命令。覆盖镜像原有命令会让
                 // /usr/bin/env 等程序意外变成 BusyBox applet。
@@ -648,97 +671,64 @@ pub fn setup_oscomp_env() {
             }
             info!("[VFS] Populated busybox applets");
         }
-        let dev_dentry = if let Ok(dev) = root.find_tree("/dev", true) {
-            dev
-        } else {
-            // 理论上不会走到这
-            root.mount_child("dev".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
-        };
-
-        // 挂载shm到/dev/shm
-        dev_dentry.insert("shm".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-        // 挂载常用设备文件
-        dev_dentry.insert("null".to_string(), Arc::new(NullInode::new())); 
-        dev_dentry.insert("zero".to_string(), Arc::new(ZeroInode::new()));
-        dev_dentry.insert("rtc".to_string(), Arc::new(RtcInode::new()));
-        dev_dentry.insert("urandom".to_string(), Arc::new(UrandomInode::new()));
-        dev_dentry.insert("random".to_string(), Arc::new(UrandomInode::new()));
-        // 终端设备
-        dev_dentry.insert("tty".to_string(), Arc::new(TtyInode::new()));
-
-        // loop-control
-        dev_dentry.insert(
-            "loop-control".to_string(),
-            Arc::new(LoopControlInode::new()),
-        );
-
-        // 挂载8个loop设备
-        for i in 0..8 {
-            let loop_name = alloc::format!("loop{}", i);
-            let loop_device = create_loop_device(None, 0, 0);
-            dev_dentry.insert(loop_name, loop_device);
-        }
-
-        info!("[VFS] Mounted /dev/shm safely");
-        if let Ok(_) = root.find_tree("/dev/shm", true) {
-            info!("DEBUG: /dev/shm path is VALID");
-        } else {
-            error!("DEBUG: /dev/shm path is BROKEN!");
-        }        
     } else {
         warn!("[VFS] WARNING: /musl not found, skipped busybox mapping.");
     }
 
     // --- 挂载 动态链接库 & 加载器 ---
-    // musl
-    let libc_node = root.find_tree("/musl/lib", true).unwrap();
-    populate_lib_from_dentries(&libc_node, &lib_dentry, &lib64_dentry);
-    let ld = libc_node.find_child("libc.so").unwrap();
-    #[cfg(target_arch = "loongarch64")]
-    {
-        lib64_dentry.mount_child("ld-musl-loongarch-lp64d.so.1".to_string(), ld.inode.clone());
-        lib_dentry.mount_child("ld-musl-loongarch-lp64d.so.1".to_string(), ld.inode.clone());
+    if let Ok(musl_lib) = root.find_tree("/musl/lib", true) {
+        populate_lib_from_dentries(&musl_lib, &lib_dentry, &lib64_dentry);
+        if let Some(ld) = musl_lib.find_child("libc.so") {
+            #[cfg(target_arch = "loongarch64")]
+            for name in ["ld-musl-loongarch-lp64d.so.1"] {
+                if lib_dentry.find_child(name).is_none() {
+                    lib_dentry.mount_child(name.to_string(), ld.inode.clone());
+                }
+                if lib64_dentry.find_child(name).is_none() {
+                    lib64_dentry.mount_child(name.to_string(), ld.inode.clone());
+                }
+            }
+            #[cfg(target_arch = "riscv64")]
+            for name in ["ld-musl-riscv64.so.1", "ld-musl-riscv64-sf.so.1"] {
+                if lib_dentry.find_child(name).is_none() {
+                    lib_dentry.mount_child(name.to_string(), ld.inode.clone());
+                }
+                if lib64_dentry.find_child(name).is_none() {
+                    lib64_dentry.mount_child(name.to_string(), ld.inode.clone());
+                }
+            }
+        }
+        info!("[VFS] Populated musl lib symlinks");
+    } else {
+        warn!("[VFS] /musl/lib not found, skipped musl aliases");
     }
-    #[cfg(target_arch = "riscv64")]
-    {
-        lib64_dentry.mount_child("ld-musl-riscv64.so.1".to_string(), ld.inode.clone());
-        lib_dentry.mount_child("ld-musl-riscv64.so.1".to_string(), ld.inode.clone());
-        lib64_dentry.mount_child("ld-musl-riscv64-sf.so.1".to_string(), ld.inode.clone());
-        lib_dentry.mount_child("ld-musl-riscv64-sf.so.1".to_string(), ld.inode.clone());
-    }
-    info!("[VFS] Populated musl lib symlinks");
 
     // glibc
-    let user_lib64_dentry = root.find_tree("/usr/lib64", true).unwrap_or_else(|_| {
-        usr_dentry.mount_child("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
-    });
-    let user_lib_dentry = root.find_tree("/usr/lib", true).unwrap_or_else(|_| {
-        usr_dentry.mount_child("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
-    });
-    let libc_node = root.find_tree("/glibc/lib", true).unwrap();
-    // 同时挂载到 /lib* 和 /usr/lib*
-    populate_lib_from_dentries(&libc_node, &user_lib_dentry, &user_lib64_dentry);
-    populate_lib_from_dentries(&libc_node, &lib_dentry, &lib64_dentry);
-    info!("[VFS] Populated glibc lib symlinks");
-
-    if let Ok(_) = root.find_tree("/dev/shm", true) {
-        info!("DEBUG: /dev/shm path is VALID");
+    let user_lib64_dentry = existing_or_mount_dir(&usr_dentry, "lib64", 0o755);
+    let user_lib_dentry = existing_or_mount_dir(&usr_dentry, "lib", 0o755);
+    if let Ok(glibc_lib) = root.find_tree("/glibc/lib", true) {
+        // 同时挂载到 /lib* 和 /usr/lib*。
+        populate_lib_from_dentries(&glibc_lib, &user_lib_dentry, &user_lib64_dentry);
+        populate_lib_from_dentries(&glibc_lib, &lib_dentry, &lib64_dentry);
+        info!("[VFS] Populated glibc lib symlinks");
     } else {
-        error!("DEBUG: /dev/shm path is BROKEN!");
+        warn!("[VFS] /glibc/lib not found, skipped glibc aliases");
     }
-    mount_hugepages();
     //返回简单的“语言、国家、字符编码”的一套环境变量并挂载
     let locale_content = "#!/bin/sh\necho \"LANG=C\"\necho \"LC_ALL=C\"\n";
-    bin_dentry.insert(
-        "locale".to_string(),
+    insert_if_missing(
+        &bin_dentry,
+        "locale",
         Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())),
     );
-    sbin_dentry.insert(
-        "locale".to_string(),
+    insert_if_missing(
+        &sbin_dentry,
+        "locale",
         Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())),
     );
-    usr_bin_dentry.insert(
-        "locale".to_string(),
+    insert_if_missing(
+        &usr_bin_dentry,
+        "locale",
         Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())),
     );
     // rsh远程连接sh
@@ -750,54 +740,89 @@ pub fn setup_oscomp_env() {
     fi
     exec /musl/busybox sh -c "$*"
     "#;
-    bin_dentry.insert(
-        "rsh".to_string(),
+    insert_if_missing(
+        &bin_dentry,
+        "rsh",
         Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())),
     );
-    sbin_dentry.insert(
-        "rsh".to_string(),
+    insert_if_missing(
+        &sbin_dentry,
+        "rsh",
         Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())),
     );
-    usr_bin_dentry.insert(
-        "rsh".to_string(),
+    insert_if_missing(
+        &usr_bin_dentry,
+        "rsh",
         Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())),
     );
     //setkey命令
     let fake_setkey = "#!/bin/sh\nexit 0\n";
-    bin_dentry.insert(
-        "setkey".to_string(),
+    insert_if_missing(
+        &bin_dentry,
+        "setkey",
         Arc::new(TmpfsFileInode::new_with_data(fake_setkey.as_bytes())),
     );
-    sbin_dentry.insert(
-        "setkey".to_string(),
+    insert_if_missing(
+        &sbin_dentry,
+        "setkey",
         Arc::new(TmpfsFileInode::new_with_data(fake_setkey.as_bytes())),
     );
-    info!("[VFS] setup_oscomp_env done.");
     // 伪造并转发 expr 命令给 busybox
     let fake_expr = "#!/bin/sh\nexec /musl/busybox expr \"$@\"\n";
-    bin_dentry.insert(
-        "expr".to_string(),
+    insert_if_missing(
+        &bin_dentry,
+        "expr",
         Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())),
     );
-    usr_bin_dentry.insert(
-        "expr".to_string(),
+    insert_if_missing(
+        &usr_bin_dentry,
+        "expr",
         Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())),
     );
 
-     let fake_ip = "#!/bin/sh\nexec /musl/busybox ip \"$@\"\n";
-    sbin_dentry.insert(
-        "ip".to_string(),
+    let fake_ip = "#!/bin/sh\nexec /musl/busybox ip \"$@\"\n";
+    insert_if_missing(
+        &sbin_dentry,
+        "ip",
         Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())),
     );
-    bin_dentry.insert(
-        "ip".to_string(),
+    insert_if_missing(
+        &bin_dentry,
+        "ip",
         Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())),
     );
     //处理一个绝对路径脚本
     let symlink_inode: Arc<dyn super::VfsInode> = Arc::new(TmpfsFsSymbolicLinkInode::new(
         "/musl/ltp/testcases".to_string(),
     ));
-    root.mount_child("testcases".to_string(), symlink_inode);
+    if root.find_child("testcases").is_none() {
+        root.mount_child("testcases".to_string(), symlink_inode);
+    }
+}
+
+/// Set up the mounted root filesystem without assuming a particular contest
+/// image layout. The public name is kept for existing boot paths.
+pub fn set_up_env_final() {
+    let root = ROOT_DENTRY.clone();
+    let profile = rootfs_profile(&root);
+    info!("[VFS] Setting up rootfs environment: {:?}", profile);
+    setup_common_env(&root);
+
+    match profile {
+        RootfsProfile::FinalDebian => setup_final_glibc_env(&root),
+        RootfsProfile::PreliminaryCompat => setup_preliminary_compat_env(&root),
+        RootfsProfile::Unknown => {
+            warn!("[VFS] Unknown rootfs layout; installed only non-destructive common environment")
+        }
+    }
+
+    mount_hugepages();
+    info!("[VFS] Rootfs environment ready");
+}
+
+/// Compatibility entry point used by older boot and test configurations.
+pub fn setup_oscomp_env() {
+    set_up_env_final();
 }
 
 // 挂载 /sys/kernel/mm/hugepages

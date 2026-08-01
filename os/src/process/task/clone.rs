@@ -173,6 +173,7 @@ impl TaskStruct {
 		let comm = parent_inner.comm;
 		let pgid = parent_inner.pgid;
 		let sid = parent_inner.sid;
+		let oom_score_adj = parent_inner.oom_score_adj;
 		drop(parent_inner); // 释放父任务锁，避免后续分配 PID/内核栈时持锁
 
 		// ── 4. 分配新任务标识 ──
@@ -246,6 +247,7 @@ impl TaskStruct {
 					exit_signal: (flags & CSIGNAL) as i32, // 退出时向父进程发送的信号
 					flags: 0,
 					errno: 0,
+					oom_score_adj,
 					sched_policy,
 					sched_priority,
 					prio,

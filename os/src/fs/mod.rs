@@ -239,8 +239,9 @@ pub trait VfsInode: Send + Sync {
     /// len < 当前大小：丢弃超出部分
     /// len > 当前大小：扩展并用零填充（对 tmpfs 等可以只更新 size）
     fn truncate(&self, _len: usize) -> bool {
-        panic!("truncate not implemented for this inode type");
-        false // 默认不支持
+        // 默认返回 false，由调用方返回错误
+        // 旧实现的 panic 不妥
+        false
     }
     fn get_stat(&self) -> Stat;
     fn get_statx(&self) -> Statx;
