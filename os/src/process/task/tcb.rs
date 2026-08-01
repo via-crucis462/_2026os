@@ -118,6 +118,7 @@ pub struct TaskStructInner {
     pub blocked: SignalFlags, // 当前阻塞的信号集
     pub pending: Sigpending, // 当前挂起的信号集 
     pub signal_interrupted: bool,
+    pub sigsuspend_saved_mask: Option<SignalFlags>,
     pub signal_mask_backup: Vec<SignalFlags>,
     pub trap_ctx_backup: Vec<TrapContext>,
     pub signal_user_context_backup: Vec<usize>,

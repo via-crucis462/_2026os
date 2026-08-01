@@ -79,6 +79,9 @@ const SYSCALL_TGKILL: usize = 131;
 
 const SYSCALL_SLEEP:usize =101;
 const SYSCALL_SETITIMER: usize = 103;
+const SYSCALL_TIMER_CREATE: usize = 107;
+const SYSCALL_TIMER_SETTIME: usize = 110;
+const SYSCALL_TIMER_DELETE: usize = 111;
 const SYSCALL_CLOCK_SETTIME: usize = 112;
 const SYSCALL_CLOCK_GETRES: usize = 114;
 const SYSCALL_SYSLOG: usize = 116;
@@ -96,6 +99,7 @@ const SYSCALL_KILL: usize = 129;
 
 /// sigaction syscall
 const SYSCALL_CLOCK_GETTIME: usize = 113;
+const SYSCALL_RT_SIGSUSPEND: usize = 133;
 const SYSCALL_SIGACTION: usize = 134;
 /// sigprocmask syscall
 const SYSCALL_SIGPROCMASK: usize = 135;
@@ -183,6 +187,8 @@ const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_CLOCK_ADJTIME: usize = 266;
+#[cfg(target_arch = "riscv64")]
+const SYSCALL_RISCV_HWPROBE: usize = 258;
 const SYSCALL_USERFAULTFD: usize = 282;
 const SYSCALL_MEMBARRIER: usize = 283;
 /// statx syscall
@@ -343,6 +349,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_EXIT_GROUP =>sys_exit_group(args[0] as i32),
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_KILL => sys_kill(args[0] as isize, args[1] as i32),
+        SYSCALL_RT_SIGSUSPEND => sys_rt_sigsuspend(args[0] as *const usize, args[1]),
         SYSCALL_SIGACTION => sys_rt_sigaction(
             args[0] as i32,
             args[1] as *const SignalAction,
@@ -356,6 +363,18 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RECVFROM => sys_recvfrom(args[0], args[1] as *mut u8, args[2], args[3] as i32, args[4] as *mut u8, args[5] as *mut u32),
         SYSCALL_SETSOCKOPT => sys_setsockopt(args[0], args[1], args[2], args[3] as *const u8, args[4] as u32),
         SYSCALL_SETITIMER => sys_setitimer(args[0], args[1] , args[2] ),
+        SYSCALL_TIMER_CREATE => sys_timer_create(
+            args[0] as i32,
+            args[1] as *const KernelSigEvent,
+            args[2] as *mut i32,
+        ),
+        SYSCALL_TIMER_SETTIME => sys_timer_settime(
+            args[0] as i32,
+            args[1] as i32,
+            args[2] as *const ITimerSpec,
+            args[3] as *mut ITimerSpec,
+        ),
+        SYSCALL_TIMER_DELETE => sys_timer_delete(args[0] as i32),
         SYSCALL_FTRUNCATE => sys_ftruncate(args[0], args[1]),
         SYSCALL_FALLOCATE => sys_fallocate(args[0], args[1], args[2] as i64, args[3] as i64),
         SYSCALL_FCHMODAT => sys_fchmodat(args[0] as isize, args[1] as *const u8, args[2] as u32),
@@ -471,6 +490,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MSGCTL => sys_msgctl(args[0] as u32, args[1], args[2]),
         SYSCALL_SHUTDOWN => sys_shutdown(args[0], args[1] as i32),
         SYSCALL_CLOCK_ADJTIME => sys_clock_adjtime(args[0] as i32, args[1] as *mut Timex),
+        #[cfg(target_arch = "riscv64")]
+        SYSCALL_RISCV_HWPROBE => sys_riscv_hwprobe(args[0] as *mut RiscvHwprobe, args[1], args[2], args[3] as *const u8, args[4] as u32),
         SYSCALL_CLOCK_SETTIME => sys_clock_settime(args[0] as i32, args[1] as *const TimeSpec),
         SYSCALL_WAITID => sys_waitid(args[0] as i32, args[1] as i32, args[2] as *mut SigInfo, args[3] as i32),
         SYSCALL_FUTEX => sys_futex(args[0] as *mut i32, args[1] as i32, args[2] as i32, args[3] as *const TimeSpec, args[4] as *mut i32, args[5] as i32),
@@ -538,7 +559,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             "[Syscall Trace] ID: {:3} | Args: [0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], args[3], args[4], ret
         );*/
-    //warn!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
+    warn!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
     info!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
     ret
 }

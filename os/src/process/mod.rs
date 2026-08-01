@@ -13,6 +13,7 @@ pub mod task;
 pub mod id;
 pub mod registry;
 pub mod signal;
+pub mod timer;
 pub mod init;
 pub mod child_wait;
 
@@ -43,6 +44,10 @@ pub use signal::{
     mark_signal_interrupted, take_current_signal_interrupted, SignalAction,
     SignalActions, SignalFlags, MAX_SIG,
 };
+pub use timer::{
+    add_posix_timer, check_posix_timers, delete_posix_timer, get_posix_timer_spec,
+    remove_posix_timer, set_posix_timer, ITimerSpec, KernelSigEvent, PosixTimer,
+};
 pub(crate) use signal::restore_signal_context;
 pub use init::{add_initproc, INITTASK};
 pub use task::exit::{exit_current_and_run_next, IDLE_PID};
@@ -55,6 +60,7 @@ pub use scheduler::processor::{
 };
 pub use scheduler::wait::{
     block_current_and_run_next, block_current_and_run_next_if,
+    block_current_and_run_next_if_task,
     suspend_current_and_run_next, wake_up_all, wake_up_one,
 };
 pub use child_wait::{wait4_block_current, waitid_block_current, wake_child_exit_waiters};

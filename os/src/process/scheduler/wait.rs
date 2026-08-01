@@ -1,4 +1,4 @@
-use crate::process::{TaskContext, TaskStatus};
+use crate::process::{TaskContext, TaskControlBlockInner, TaskStatus};
 use crate::process::scheduler::processor::{current_task, schedule};
 use crate::process::scheduler::runqueue::wake_up_task;
 use crate::sync::{MPSafeCell, WaitQueue};
@@ -12,6 +12,25 @@ pub fn suspend_current_and_run_next() {
     drop(task_inner);
     drop(task);
     schedule(task_cx_ptr);
+}
+// 无条件阻塞
+pub fn block_current_and_run_next_if_task<F>(should_block: F) -> bool
+where
+    F: FnOnce(&TaskControlBlockInner) -> bool,
+{
+    let task = current_task().unwrap();
+    let task_cx_ptr = {
+        let mut task_inner = task.inner_exclusive_access();
+        if !should_block(&task_inner) {
+            return false;
+        }
+        let ptr = &mut task_inner.thread.task_ctx as *mut TaskContext;
+        task_inner.state = TaskStatus::BlockSaving;
+        ptr
+    };
+    drop(task);
+    schedule(task_cx_ptr);
+    true
 }
 
 pub fn block_current_and_run_next(queue: &Mutex<WaitQueue>) {

@@ -68,6 +68,9 @@ pub fn handle_signals() {
         // 跳到处理函数
         call_signal_handler(sig, flag);
     } else {
+        if let Some(saved_mask) = task_inner.sigsuspend_saved_mask.take() {
+            task_inner.blocked = saved_mask;
+        }
         // 无待处理信号
         if raw_signals.bits() != 0 {
             warn!("[SIG PROBE] Signals exist ({:#x}) but fully masked ({:#x})", raw_signals, mask);
@@ -102,15 +105,23 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
     // 忽略
     const SIG_IGN: usize = 1;
 
+    let (saved_mask, restore_sigsuspend_mask) =
+        match task_inner.sigsuspend_saved_mask.take() {
+            Some(mask) => (mask, true),
+            None => (task_inner.blocked, false),
+        };
+
     if handler == SIG_IGN {
+        if restore_sigsuspend_mask {
+            task_inner.blocked = saved_mask;
+        }
         return; // 返回，正常trap_return
     }
     
     if handler != SIG_DFL {
         // 非默认，回到用户态处理
         // 先保存 mask 和上下文
-        let cur_mask = task_inner.blocked;
-        task_inner.signal_mask_backup.push(cur_mask);
+        task_inner.signal_mask_backup.push(saved_mask);
         
         // 屏蔽 action 中指定的掩码
         task_inner.blocked |= mask;
@@ -128,7 +139,7 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
             trap_ctx.get_rt(),
             trap_ctx.get_sp()
         );
-        let Some((info_ptr, ucontext_ptr)) = push_signal_frame(&mut task_inner, sig, cur_mask) else {
+        let Some((info_ptr, ucontext_ptr)) = push_signal_frame(&mut task_inner, sig, saved_mask) else {
             warn!("[SIG PROBE] Failed to write signal frame");
             task_inner.term_signal = Some(sig as i32 + 1);
             return;
@@ -195,6 +206,9 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
                 let pid = task.getpid();
                 warn!("[SIG_DEATH] PID {} killed by signal {} ({:?})", pid, sig as i32 + 1, signal);
             }
+        }
+        if restore_sigsuspend_mask {
+            task_inner.blocked = saved_mask;
         }
     }
 }

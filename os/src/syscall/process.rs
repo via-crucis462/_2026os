@@ -6,7 +6,10 @@ use core::{panic, result};
 use crate::drivers::net::EthernetDevice;
 use crate::net::SOCKET_SET;
 use core::sync::atomic::{AtomicI32, Ordering};
-use crate::process::{block_current_and_run_next_if, wait4_block_current, waitid_block_current};
+use crate::process::{
+    block_current_and_run_next_if, block_current_and_run_next_if_task,
+    wait4_block_current, waitid_block_current,
+};
 
 use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, USER_STACK_SIZE, get_hart_id};
@@ -80,6 +83,10 @@ pub use crate::{
         registry::*
     },
     syscall::errno::Errno
+};
+pub use crate::process::timer::{
+    add_posix_timer, delete_posix_timer, get_posix_timer_spec, remove_posix_timer,
+    set_posix_timer, ITimerSpec, KernelSigEvent, PosixTimer,
 };
 use alloc::task;
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
@@ -2760,6 +2767,45 @@ pub fn sys_sigprocmask(
     0
 }
 
+pub fn sys_rt_sigsuspend(mask_ptr: *const usize, sigsetsize: usize) -> isize {
+    if sigsetsize != core::mem::size_of::<usize>() {
+        return EINVAL.as_isize();
+    }
+    if mask_ptr.is_null() {
+        return EFAULT.as_isize();
+    }
+
+    let token = current_user_token();
+    let Some(mask_bits) = try_translated_read(token, mask_ptr) else {
+        return EFAULT.as_isize();
+    };
+    let mut temporary_mask = SignalFlags::from_bits_truncate(mask_bits as u64);
+    temporary_mask.remove(SignalFlags::SIGKILL | SignalFlags::SIGSTOP);
+
+    let task = current_task().unwrap();
+    let original_mask = {
+        let mut inner = task.inner_exclusive_access();
+        let original_mask = inner.blocked;
+        inner.blocked = temporary_mask;
+        original_mask
+    };
+
+    loop {
+        let blocked = block_current_and_run_next_if_task(|inner| {
+            let thread_pending = inner.pending.flags();
+            let shared_pending = inner.signal.exclusive_access().pending_flags();
+            let mut deliverable = thread_pending | shared_pending;
+            deliverable.remove(inner.blocked);
+            deliverable.is_empty()
+        });
+
+        if !blocked {
+            task.inner_exclusive_access().sigsuspend_saved_mask = Some(original_mask);
+            return EINTR.as_isize();
+        }
+    }
+}
+
 
 // ID 19: sys_eventfd2
 pub fn sys_eventfd2(initval: u32, _flags: i32) -> isize {
@@ -3287,6 +3333,119 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
     }
 
     0 
+}
+
+/// 创建POSIX定时器（RISC-V/asm-generic系统调用107）。
+///
+/// 此调用只创建定时器并返回timer_t，不会立即开始计时；真正的到期时间
+/// 应由timer_settime设置。
+pub fn sys_timer_create(clock_id: i32, event: *const KernelSigEvent, timer_id: *mut i32) -> isize {
+    const CLOCK_REALTIME: i32 = 0;
+    const CLOCK_MONOTONIC: i32 = 1;
+    const SIGEV_SIGNAL: i32 = 0;
+    const SIGEV_NONE: i32 = 1;
+    const SIGEV_THREAD_ID: i32 = 4;
+
+    if clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC {
+        return EINVAL.as_isize();
+    }
+    if timer_id.is_null() {
+        return EFAULT.as_isize();
+    }
+
+    let token = current_user_token();
+    let owner = current_task().unwrap();
+    let owner_pid = owner.getpid();
+    let (notify, signo, value, target_tid) = if event.is_null() {
+        // Linux在event为NULL时默认向进程发送SIGALRM。
+        (SIGEV_SIGNAL, 14, 0, 0)
+    } else {
+        let Some(event) = try_translated_read(token, event) else {
+            return EFAULT.as_isize();
+        };
+        if !matches!(event.notify, SIGEV_SIGNAL | SIGEV_NONE | SIGEV_THREAD_ID) {
+            return EINVAL.as_isize();
+        }
+        if event.notify != SIGEV_NONE && !(1..=MAX_SIG as i32).contains(&event.signo) {
+            return EINVAL.as_isize();
+        }
+        let target_tid = if event.notify == SIGEV_THREAD_ID {
+            if event.tid <= 0 {
+                return EINVAL.as_isize();
+            }
+            let Some(target) = tid2task(event.tid as usize) else {
+                return EINVAL.as_isize();
+            };
+            if target.getpid() != owner_pid {
+                return EINVAL.as_isize();
+            }
+            event.tid as usize
+        } else {
+            0
+        };
+        (event.notify, event.signo, event.value, target_tid)
+    };
+
+    let id = add_posix_timer(PosixTimer {
+        owner_pid,
+        clock_id,
+        notify,
+        signo,
+        value,
+        target_tid,
+        expires_ns: None,
+        interval_ns: 0,
+    });
+
+    if !try_translated_write(token, timer_id, id) {
+        remove_posix_timer(id);
+        return EFAULT.as_isize();
+    }
+    0
+}
+
+/// 设置、启动、解除或重新设置POSIX定时器（系统调用110）。
+pub fn sys_timer_settime(
+    timer_id: i32,
+    flags: i32,
+    new_value: *const ITimerSpec,
+    old_value: *mut ITimerSpec,
+) -> isize {
+    const TIMER_ABSTIME: i32 = 1;
+
+    if flags & !TIMER_ABSTIME != 0 {
+        return EINVAL.as_isize();
+    }
+    if new_value.is_null() {
+        return EFAULT.as_isize();
+    }
+
+    let token = current_user_token();
+    let owner_pid = current_task().unwrap().getpid();
+    let Some(new_spec) = try_translated_read(token, new_value) else {
+        return EFAULT.as_isize();
+    };
+    let Some(previous) = get_posix_timer_spec(timer_id, owner_pid) else {
+        return EINVAL.as_isize();
+    };
+
+    if set_posix_timer(timer_id, owner_pid, new_spec, flags & TIMER_ABSTIME != 0).is_none() {
+        return EINVAL.as_isize();
+    }
+    if !old_value.is_null() && !try_translated_write(token, old_value, previous) {
+        return EFAULT.as_isize();
+    }
+    0
+}
+
+/// 删除POSIX定时器（系统调用111）。
+pub fn sys_timer_delete(timer_id: i32) -> isize {
+    let owner_pid = current_task().unwrap().getpid();
+    if delete_posix_timer(timer_id, owner_pid) {
+        0
+    } else {
+        EINVAL.as_isize()
+    }
 }
 
 /// 调整文件大小
@@ -4755,4 +4914,89 @@ pub fn sys_membarrier(cmd: i32, _flags: u32, _cpu_id: i32) -> isize {
         }
         _ => Errno::EINVAL.as_isize(),
     }
+}
+
+/// RISC-V硬件探测系统调用的用户态ABI。
+#[cfg(target_arch = "riscv64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RiscvHwprobe {
+    pub key: i64,
+    pub value: u64,
+}
+
+/// 查询RISC-V硬件属性。
+#[cfg(target_arch = "riscv64")]
+pub fn sys_riscv_hwprobe(
+    pairs: *mut RiscvHwprobe,
+    pair_count: usize,
+    cpusetsize: usize,
+    cpus: *const u8,
+    flags: u32,
+) -> isize {
+    // 简化实现不支持RISCV_HWPROBE_WHICH_CPUS及其他扩展标志。
+    if flags != 0 {
+        return EINVAL.as_isize();
+    }
+    if pair_count != 0 && pairs.is_null() {
+        return EFAULT.as_isize();
+    }
+
+    let pair_bytes = match pair_count.checked_mul(core::mem::size_of::<RiscvHwprobe>()) {
+        Some(size) => size,
+        None => return EFAULT.as_isize(),
+    };
+    if (pairs as usize).checked_add(pair_bytes).is_none() {
+        return EFAULT.as_isize();
+    }
+
+    let token = current_user_token();
+
+    // Linux允许(NULL, 0)表示查询所有在线CPU。若用户显式传入CPU位图，
+    // 简化实现只检查该内存可读，所有CPU按同构处理。
+    if cpusetsize == 0 {
+        if !cpus.is_null() {
+            return EINVAL.as_isize();
+        }
+    } else if cpus.is_null()
+        || try_translated_read::<u8>(token, cpus).is_none()
+        || try_translated_read::<u8>(token, unsafe { cpus.add(cpusetsize - 1) }).is_none()
+    {
+        return EFAULT.as_isize();
+    }
+
+    fn fill_value(pair: &mut RiscvHwprobe) {
+        pair.value = match pair.key {
+            // 0~2分别是厂商、架构和实现ID，当前内核未缓存这些CSR。
+            0..=2 => 0,
+            // key 3：支持Linux定义的IMA基础行为。
+            3 => 1,
+            // key 4：当前目标明确支持F、D和C；对应bit 0和bit 1。
+            4 => (1 << 0) | (1 << 1),
+            // key 7：用户态可使用的最高虚拟地址。
+            7 => (crate::USER_APP_MAX_SIZE - 1) as u64,
+            // key 8：time CSR频率。
+            8 => crate::arch::config::CLOCK_FREQ as u64,
+            // 已知但暂时无法准确探测的性能、缓存块和厂商扩展保守返回0。
+            5..=6 | 9..=16 => 0,
+            _ => {
+                pair.key = -1;
+                0
+            }
+        };
+    }
+
+    for index in 0..pair_count {
+        let pair_ptr = (pairs as usize + index * core::mem::size_of::<RiscvHwprobe>())
+            as *mut RiscvHwprobe;
+        let Some(mut pair) = try_translated_read(token, pair_ptr as *const RiscvHwprobe) else {
+            return EFAULT.as_isize();
+        };
+        fill_value(&mut pair);
+        if !try_translated_write(token, pair_ptr, pair) {
+            return EFAULT.as_isize();
+        }
+    }
+
+    0
 }

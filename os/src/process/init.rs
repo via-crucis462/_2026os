@@ -95,6 +95,7 @@ impl TaskStruct {
 				blocked: SignalFlags::empty(),
 				pending: Sigpending::new(),
 				signal_interrupted: false,
+				sigsuspend_saved_mask: None,
 				signal_mask_backup: Vec::new(),
 				trap_ctx_backup: Vec::new(),
 				signal_user_context_backup: Vec::new(),

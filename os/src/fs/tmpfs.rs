@@ -458,11 +458,18 @@ fn populate_lib_from_dentries(src: &Arc<Dentry>, lib: &Arc<Dentry>, lib64: &Arc<
                     .unwrap_or(name_max - name_start);
                 if let Ok(name) = core::str::from_utf8(&data[name_start..name_start + name_len]) {
                     if name != "." && name != ".." {
-                        // 用 find_tree 跟随符号链接，拿到真实文件 inode
+                        // 用 find_tree 跟随符号链接，拿到真实文件 inode。
+                        // 兼容库只能补缺，不能覆盖根文件系统已有的同名库；
+                        // 尤其不能把另一版本的 ld.so 与 libc.so.6 混用。
                         if let Ok(child) = src.find_tree(name, true) {
-                            println!("[VFS] Mounted lib entry: {}", name);
-                            lib.mount_child(name.to_string(), child.inode.clone());
-                            lib64.mount_child(name.to_string(), child.inode.clone());
+                            if lib.find_child(name).is_none() {
+                                println!("[VFS] Mounted missing lib entry: {}", name);
+                                lib.mount_child(name.to_string(), child.inode.clone());
+                            }
+                            if lib64.find_child(name).is_none() {
+                                println!("[VFS] Mounted missing lib64 entry: {}", name);
+                                lib64.mount_child(name.to_string(), child.inode.clone());
+                            }
                         }
                     }
                 }
@@ -480,7 +487,8 @@ pub fn setup_oscomp_env() {
     root.mount_child("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     info!("[VFS] Mounted /tmp");
     
-    // 2. 挂载 bin, sbin, usr 等虚拟目录
+    // 2. 复用根文件系统中的标准目录。只有精简镜像确实缺少目录时，
+    // 才创建兼容用的 Tmpfs；否则会隐藏镜像中的 bash、env 和动态库。
     let etc_dentry = root.mount_child("etc".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     let passwd_content =
         "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
@@ -498,16 +506,30 @@ pub fn setup_oscomp_env() {
     let var_dentry = root.mount_child("var".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     var_dentry.insert("tmp".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
     var_dentry.insert("run".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let bin_dentry = root.mount_child("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let sbin_dentry = root.mount_child("sbin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let usr_dentry = root.mount_child("usr".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let usr_local_dentry =
-        usr_dentry.insert("local".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let usr_local_bin_dentry =
-        usr_local_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let usr_bin_dentry = usr_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let lib_dentry = root.mount_child("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let lib64_dentry = root.mount_child("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let bin_dentry = root.find_tree("/bin", true).unwrap_or_else(|_| {
+        root.mount_child("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+    });
+    let sbin_dentry = root.find_tree("/sbin", true).unwrap_or_else(|_| {
+        root.mount_child("sbin".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+    });
+    let usr_dentry = root.find_tree("/usr", true).unwrap_or_else(|_| {
+        root.mount_child("usr".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+    });
+    let usr_local_dentry = root.find_tree("/usr/local", true).unwrap_or_else(|_| {
+        usr_dentry.insert("local".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+    });
+    let usr_local_bin_dentry = root.find_tree("/usr/local/bin", true).unwrap_or_else(|_| {
+        usr_local_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+    });
+    let usr_bin_dentry = root.find_tree("/usr/bin", true).unwrap_or_else(|_| {
+        usr_dentry.insert("bin".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+    });
+    let lib_dentry = root.find_tree("/lib", true).unwrap_or_else(|_| {
+        root.mount_child("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+    });
+    let lib64_dentry = root.find_tree("/lib64", true).unwrap_or_else(|_| {
+        root.mount_child("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+    });
     
     // loop测例检查的文件
     let lib_modules = lib_dentry.insert("modules".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
@@ -546,10 +568,18 @@ pub fn setup_oscomp_env() {
             ];
             
             for app in applets {
-                bin_dentry.insert(app.to_string(), bb_inode.clone());
-                sbin_dentry.insert(app.to_string(), bb_inode.clone());
-                usr_bin_dentry.insert(app.to_string(), bb_inode.clone());
-                usr_local_bin_dentry.insert(app.to_string(), bb_inode.clone());
+                // BusyBox 仅用于补齐缺失命令。覆盖镜像原有命令会让
+                // /usr/bin/env 等程序意外变成 BusyBox applet。
+                for directory in [
+                    &bin_dentry,
+                    &sbin_dentry,
+                    &usr_bin_dentry,
+                    &usr_local_bin_dentry,
+                ] {
+                    if directory.find_child(app).is_none() {
+                        directory.insert(app.to_string(), bb_inode.clone());
+                    }
+                }
             }
             info!("[VFS] Populated busybox applets");
         }
@@ -614,10 +644,12 @@ pub fn setup_oscomp_env() {
     info!("[VFS] Populated musl lib symlinks");
 
     // glibc
-    let user_lib64_dentry =
-        usr_dentry.mount_child("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
-    let user_lib_dentry =
-        usr_dentry.mount_child("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)));
+    let user_lib64_dentry = root.find_tree("/usr/lib64", true).unwrap_or_else(|_| {
+        usr_dentry.mount_child("lib64".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+    });
+    let user_lib_dentry = root.find_tree("/usr/lib", true).unwrap_or_else(|_| {
+        usr_dentry.mount_child("lib".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+    });
     let libc_node = root.find_tree("/glibc/lib", true).unwrap();
     // 同时挂载到 /lib* 和 /usr/lib*
     populate_lib_from_dentries(&libc_node, &user_lib_dentry, &user_lib64_dentry);

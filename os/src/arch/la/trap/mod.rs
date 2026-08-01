@@ -575,6 +575,8 @@ pub fn trap_handler() -> ! {
             }
             let current_ms = get_time_ms();
             let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
+            // 处理 POSIX 定时器
+            crate::process::check_posix_timers();
             for pid in expired_pids {
                 if let Some(process) = crate::task::get_process(pid) {
                     let tasks = crate::process::registry::TID2TCB
