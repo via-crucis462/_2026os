@@ -44,11 +44,13 @@ impl TcpSocket {
         let rx_buffer = SocketBuffer::new(vec![0; 8192]);
         let tx_buffer = SocketBuffer::new(vec![0; 8192]);
         let socket = TcpSocketSmol::new(rx_buffer, tx_buffer);
-        let handle = SOCKET_SET.exclusive_access().add(socket);
         let waiters = Arc::new(crate::sync::MPSafeCell::new(WaitQueue::new()));
-        SOCKET_WAIT_QUEUES
-            .lock()
-            .insert(handle, SocketWaitQueue::new());
+        let mut sockets = SOCKET_SET.exclusive_access();
+        let mut socket_wait_queues = SOCKET_WAIT_QUEUES.lock();
+        let handle = sockets.add(socket);
+        socket_wait_queues.insert(handle, SocketWaitQueue::new());
+        drop(socket_wait_queues);
+        drop(sockets);
         Self {
             handle,
             local_port: Mutex::new(None),
@@ -343,14 +345,15 @@ impl UdpSocket {
         let tx_buffer =
             udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0; 16384]);
         let socket = udp::Socket::new(rx_buffer, tx_buffer);
-        // 将 socket 加入全局协议栈 SOCKET_SET
-        let handle = crate::net::SOCKET_SET.exclusive_access().add(socket);
         let wait_queues = crate::net::SocketWaitQueue::new();
         let rx_waiters = wait_queues.rx_queue.clone();
         let tx_waiters = wait_queues.tx_queue.clone();
-        crate::net::SOCKET_WAIT_QUEUES
-            .lock()
-            .insert(handle, wait_queues);
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        let mut socket_wait_queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+        let handle = sockets.add(socket);
+        socket_wait_queues.insert(handle, wait_queues);
+        drop(socket_wait_queues);
+        drop(sockets);
         Self {
             handle,
             remote_ep: Mutex::new(None),
@@ -841,15 +844,16 @@ impl RawSocket {
             tx_buffer,
         );
 
-        // 加入全局 SocketSet 中进行调度
-        let handle = SOCKET_SET.exclusive_access().add(socket);
         let rx_wait_queue = Arc::new(Mutex::new(WaitQueue::new()));
         let wait_queues = crate::net::SocketWaitQueue::new();
         let rx_waiters = wait_queues.rx_queue.clone();
         let tx_waiters = wait_queues.tx_queue.clone();
-        crate::net::SOCKET_WAIT_QUEUES
-            .lock()
-            .insert(handle, wait_queues);
+        let mut sockets = SOCKET_SET.exclusive_access();
+        let mut socket_wait_queues = SOCKET_WAIT_QUEUES.lock();
+        let handle = sockets.add(socket);
+        socket_wait_queues.insert(handle, wait_queues);
+        drop(socket_wait_queues);
+        drop(sockets);
         Self {
             handle,
             rx_wait_queue,
