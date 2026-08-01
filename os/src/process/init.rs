@@ -14,7 +14,7 @@ use crate::process::task::{
 };
 use crate::process::{add_task, kstack_alloc, pid_alloc};
 use crate::sync::MPSafeCell;
-use alloc::{sync::{Arc, Weak}, vec::Vec};
+use alloc::{string::String, sync::{Arc, Weak}, vec::Vec};
 use lazy_static::*;
 
 impl TaskStruct {
@@ -91,6 +91,7 @@ impl TaskStruct {
 				mm: Some(Arc::new(MPSafeCell::new(memory_set))),
 				fs: Arc::new(MPSafeCell::new(FsStruct::new(ROOT_DENTRY.clone(), ROOT_DENTRY.clone()))),
 				files: Arc::new(MPSafeCell::new(FileDescriptorTable::new())),
+				exe_path: String::from("/initproc"),
 				signal: Arc::new(MPSafeCell::new(Signal::new())),
 				signal_hand: Arc::new(MPSafeCell::new(SigHand::new())),
 				blocked: SignalFlags::empty(),

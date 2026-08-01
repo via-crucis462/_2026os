@@ -13,7 +13,7 @@ use crate::process::task::{
     fs::FsStruct,
 };
 use crate::process::signal::{Signal, SigHand, Sigpending};
-use alloc::{sync::{Arc, Weak}, vec::Vec};
+use alloc::{string::String, sync::{Arc, Weak}, vec::Vec};
 use crate::process::task::*;
 
 #[deny(non_camel_case_types)]
@@ -111,6 +111,8 @@ pub struct TaskStructInner {
     /* 6. 文件系统与文件描述符 */
     pub fs: Arc<MPSafeCell<FsStruct>>,       // 进程当前目录、根目录信息
     pub files: Arc<MPSafeCell<FileDescriptorTable>>, // 进程打开的文件描述符表
+    /// 当前进程映像对应的规范绝对路径，用于 /proc/<pid>/exe。
+    pub exe_path: String,
 
     /*7. 信号处理相关 */
     pub signal: Arc<MPSafeCell<Signal>>,  // 信号处理相关信息

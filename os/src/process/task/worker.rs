@@ -9,6 +9,7 @@ use crate::process::signal::{SigHand, Signal, SignalFlags, Sigpending};
 use crate::process::{self, kstack_alloc, pid_alloc};
 use crate::sync::MPSafeCell;
 use alloc::{
+    string::String,
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -65,6 +66,7 @@ impl TaskStruct {
                     ROOT_DENTRY.clone(),
                 ))),
                 files: Arc::new(MPSafeCell::new(FileDescriptorTable::new())),
+                exe_path: String::new(),
                 signal: Arc::new(MPSafeCell::new(Signal::new())),
                 signal_hand: Arc::new(MPSafeCell::new(SigHand::new())),
                 blocked: SignalFlags::empty(),

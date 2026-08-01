@@ -127,6 +127,7 @@ impl TaskStruct {
 		let Some(app_inode) = open_file(cwd.clone(), path.as_str(), OpenFlags::RDONLY, 0) else {
 			return Self::exec_open_error(cwd, path.as_str());
 		};
+		let mut executable_path = app_inode.get_dentry().get_full_path();
 		{
 				let stat = app_inode.inode().get_stat();
 			let is_dir = (stat.mode & 0o170000) == 0o040000;
@@ -157,6 +158,7 @@ impl TaskStruct {
 				warn!("[kernel] sys_exec: failed to open script interpreter '{}'", interpreter);
 				return Self::exec_open_error(cwd, interpreter.as_str());
 			};
+			executable_path = inode.get_dentry().get_full_path();
 			let stat = inode.get_stat();
 			let is_dir = (stat.mode & 0o170000) == 0o040000;
 			if is_dir || !inode.get_perm().can_execute(uid, gid) {
@@ -186,7 +188,14 @@ impl TaskStruct {
 		for (index, arg) in args.iter().enumerate() {
 			info!("[kernel] sys_exec: arg[{}] = '{}'", index, arg);
 		}
-		self.install_exec_image(self.clone(), elf_data.as_slice(), args, envs, false);
+		self.install_exec_image(
+			self.clone(),
+			elf_data.as_slice(),
+			args,
+			envs,
+			executable_path,
+			false,
+		);
 		#[cfg(target_arch = "loongarch64")]
 		unsafe {
 			core::arch::asm!("ibar 0");
@@ -254,6 +263,7 @@ impl TaskStruct {
 		elf_data: &[u8],
 		args: Vec<String>,
 		envs: Vec<String>,
+		executable_path: String,
 		on_main_hart: bool,
 	) {
 
@@ -414,6 +424,7 @@ impl TaskStruct {
 			inner.thread.trap_ctx = trap_cx_addr;
 			inner.mm = Some(Arc::new(MPSafeCell::new(memory_set)));
 			inner.on_main_hart = on_main_hart;
+			inner.exe_path = executable_path;
 			inner.signal = Arc::new(MPSafeCell::new(Signal::fork_from(
 				&old_signal.exclusive_access(),
 			)));

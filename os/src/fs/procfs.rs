@@ -151,6 +151,7 @@ impl VfsInode for ProcPidDirInode {
         match name {
             // 当查找 oom_score_adj 时，返回一个绑定了该 PID 的特殊文件
             "oom_score_adj" => Some(Arc::new(OomScoreAdjInode::new(self.pid))),
+            "exe" => Some(Arc::new(ProcExeSymlinkInode::new(self.pid))),
             "stat" => Some(Arc::new(ProcStatInode::new(self.pid))),
             "status" => Some(Arc::new(ProcStatusInode::new(self.pid))),
             "ns" => Some(Arc::new(ProcNsDirInode::new(self.pid))),
@@ -191,6 +192,7 @@ impl VfsInode for ProcPidDirInode {
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
         let entries = [
+            (String::from("exe"), (12000 + self.pid) as u32, 10u8),
             (String::from("maps"), 8888u32, 8u8),
             (String::from("ns"), 2u32, 4u8),
             (String::from("oom_score_adj"), 998u32, 8u8),
@@ -200,6 +202,68 @@ impl VfsInode for ProcPidDirInode {
         write_dirents(offset, buf, &entries)
     }
 }
+
+pub struct ProcExeSymlinkInode {
+    pid: usize,
+    ino: u64,
+}
+
+impl ProcExeSymlinkInode {
+    pub fn new(pid: usize) -> Self {
+        Self { pid, ino: get_next_ino() }
+    }
+
+    fn target(&self) -> String {
+        get_task(self.pid)
+            .map(|task| task.inner_exclusive_access().exe_path.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl VfsInode for ProcExeSymlinkInode {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        let target = self.target();
+        let data = target.as_bytes();
+        if offset >= data.len() {
+            return 0;
+        }
+        let read_len = core::cmp::min(buf.len(), data.len() - offset);
+        buf[..read_len].copy_from_slice(&data[offset..offset + read_len]);
+        read_len
+    }
+
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn get_size(&self) -> usize { self.target().len() }
+    fn ino(&self) -> u64 { self.ino }
+    fn get_stat(&self) -> Stat {
+        let size = self.target().len() as i64;
+        Stat {
+            dev: 0,
+            ino: self.ino,
+            mode: 0o120777,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            __pad: 0,
+            size,
+            blksize: 512,
+            __pad2: 0,
+            blocks: 0,
+            atime_sec: 0,
+            atime_nsec: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            __unused: [0; 2],
+        }
+    }
+    fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
+    impl_default_statx!();
+    impl_unsupported_ops!(-1);
+}
+
 pub struct ProcStatInode {
     pub pid: usize,
     pub ino: u64,

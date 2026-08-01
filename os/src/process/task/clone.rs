@@ -174,6 +174,7 @@ impl TaskStruct {
 		let pgid = parent_inner.pgid;
 		let sid = parent_inner.sid;
 		let oom_score_adj = parent_inner.oom_score_adj;
+		let exe_path = parent_inner.exe_path.clone();
 		drop(parent_inner); // 释放父任务锁，避免后续分配 PID/内核栈时持锁
 
 		// ── 4. 分配新任务标识 ──
@@ -259,6 +260,7 @@ impl TaskStruct {
 					mm: Some(child_mm),
 					fs: child_fs,
 					files: child_files,
+					exe_path,
 					signal: child_signal,
 					signal_hand: child_signal_hand,
 					blocked,
