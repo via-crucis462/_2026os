@@ -418,6 +418,45 @@ impl TaskStruct {
 		trap_cx.set_a0(args.len());
 		trap_cx.set_a1(argv_base);
 
+		let sibling_tasks = {
+			let tasks = TID2TCB.exclusive_access();
+			tasks
+				.values()
+				.filter(|task| task.gettgid() == caller_task.gettgid())
+				.filter(|task| !Arc::ptr_eq(task, &caller_task))
+				.cloned()
+				.collect::<Vec<_>>()
+		};
+
+		// 先等待所有同组线程离开 CPU
+		for sibling in &sibling_tasks {
+			let mut sibling_inner = sibling.inner_exclusive_access();
+			sibling_inner.exec_exit_requested = true;
+			sibling_inner.need_resched = true;
+		}
+
+		for sibling in sibling_tasks {
+			while sibling.inner_exclusive_access().on_cpu {
+				core::hint::spin_loop();
+			}
+
+			let mut sibling_inner = sibling.inner_exclusive_access();
+			#[cfg(target_arch = "riscv64")]
+			if let Some(mm) = sibling_inner.mm.as_ref() {
+				mm.exclusive_access().remove_trap_context_page(VirtAddr::from(
+					sibling_inner.thread.trap_ctx,
+				));
+			}
+			sibling_inner.state = TaskStatus::Zombie;
+			sibling_inner.on_rq = false;
+			sibling_inner.mm.take();
+			drop(sibling_inner);
+			let _dispatch = lock_dispatch();
+			remove_from_tid2task(sibling.gettid());
+			remove_task_from_all_local_queues_unlocked(sibling.gettid());
+			remove_task_from_global_pool_unlocked(sibling.gettid());
+		}
+
 		let old_signal = {
 			let mut inner = caller_task.inner_exclusive_access();
 			let old_signal = inner.signal.clone();
@@ -438,6 +477,7 @@ impl TaskStruct {
 			inner.signal_alt_stack = crate::process::signal::SignalAltStack::default();
 			inner.term_signal = None;
 			inner.frozen = false;
+			inner.exec_exit_requested = false;
 			inner.clear_child_tid = 0;
 			inner.start_time = get_time_us() as u64;
 			if let Some(argv0) = args.first() {
@@ -456,32 +496,6 @@ impl TaskStruct {
 					files.clear_fd(fd);
 				}
 			}
-		}
-
-		let sibling_tasks = {
-			let tasks = TID2TCB.exclusive_access();
-			tasks
-				.values()
-				.filter(|task| task.gettgid() == caller_task.gettgid())
-				.filter(|task| !Arc::ptr_eq(task, &caller_task))
-				.cloned()
-				.collect::<Vec<_>>()
-		};
-		for sibling in sibling_tasks {
-			let mut sibling_inner = sibling.inner_exclusive_access();
-			#[cfg(target_arch = "riscv64")]
-			if let Some(mm) = sibling_inner.mm.as_ref() {
-				mm.exclusive_access().remove_trap_context_page(VirtAddr::from(
-					sibling_inner.thread.trap_ctx,
-				));
-			}
-			sibling_inner.state = TaskStatus::Zombie;
-			sibling_inner.mm.take();
-			drop(sibling_inner);
-			let _dispatch = lock_dispatch();
-			remove_from_tid2task(sibling.gettid());
-			remove_task_from_all_local_queues_unlocked(sibling.gettid());
-			remove_task_from_global_pool_unlocked(sibling.gettid());
 		}
 	}
 }

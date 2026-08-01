@@ -27,9 +27,19 @@ fn panic(info: &PanicInfo) -> ! {
         println!("[kernel] Panicked: {}", info.message());
     }
 
-    println!("syncing disks...");
-    crate::ext4fs::block_cache_sync_all();
-    println!("shutting down...");
-    shutdown(); // 调试时注释掉这行方便回溯调用栈
-    loop{}
+    #[cfg(debug_assertions)]
+    loop {
+        spin_loop();
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        println!("syncing disks...");
+        crate::ext4fs::block_cache_sync_all();
+        println!("shutting down...");
+        shutdown();
+        loop {
+            spin_loop();
+        }
+    }
 }

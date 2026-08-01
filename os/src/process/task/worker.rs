@@ -88,6 +88,7 @@ impl TaskStruct {
                 cpu: 0,
                 cpus_allowed: (1usize << crate::arch::config::CPU_CORE_NUM) - 1,
                 need_resched: false,
+                exec_exit_requested: false,
                 clear_child_tid: 0,
                 personality: 0,
                 locked_bytes: 0,

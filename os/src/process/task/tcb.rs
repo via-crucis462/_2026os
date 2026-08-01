@@ -146,6 +146,9 @@ pub struct TaskStructInner {
     pub cpus_allowed: usize,
     /// 是否请求在安全调度点重新调度当前任务。
     pub need_resched: bool,
+    /// 是否被 exec 系统调用请求退出。
+    /// 有此标记的线程将在被调度到时不执行。
+    pub exec_exit_requested: bool,
 
     /*11 .线程退出清理地址 */
     pub clear_child_tid: usize, // 线程清理指针

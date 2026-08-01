@@ -287,6 +287,7 @@ impl TaskStruct {
 					cpu: parent_cpu,
 					cpus_allowed,
 					need_resched: false,
+					exec_exit_requested: false,
 					clear_child_tid: if flags & CLONE_CHILD_CLEARTID != 0 {
 						ctid  // 退出时清零此地址并 futex 唤醒
 					} else {
