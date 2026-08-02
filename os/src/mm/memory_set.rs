@@ -216,8 +216,7 @@ impl MemorySet {
             start_va.into(),
         );
     }
-    /// Insert a lazy private file mapping. Physical pages are populated by
-    /// handle_page_fault on first access.
+    /// 插入惰性文件映射，首次访问时由 handle_page_fault 填充物理页。
     pub fn insert_file_area(
         &mut self,
         start_va: VirtAddr,
@@ -226,9 +225,11 @@ impl MemorySet {
         page_size: PageSize,
         file: Arc<dyn File + Send + Sync>,
         page_offset: usize,
+        is_shared: bool,
     ) {
         let mut area = MapArea::new(start_va, end_va, MapType::File, permission, page_size);
         area.backing_file = Some((file, page_offset));
+        area.is_shared = is_shared;
         self.areas.push(area);
     }
     /// remove a area
@@ -1169,8 +1170,11 @@ impl MemorySet {
         }
         false
     }
-    /// mmap的实现（只分配内存，不加载文件，并且不检查参数合法性）
-    /// 目前的实现全用4k页
+    /// mmap 实现
+    /// 
+    /// 当前实现下所有映射都为懒分配，
+    /// 首次访问时由 handle_page_fault 分配物理页并映射。
+    /// 目前暂时固定用 4KB 页。
     pub fn mmap(
         &mut self,
         addr: usize,
@@ -1187,21 +1191,11 @@ impl MemorySet {
 
         // 计算需要的物理页数
         let needing_std_pages = VirtAddr(addr + length).std_ceil().0 - VirtAddr(addr).std_floor().0;
-        // Anonymous and private file mappings reserve virtual address space
-        // only. Shared file mappings are still populated eagerly below.
         let is_anonymous = mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS);
         let is_shared = mmap_flags.contains(mmap::MMapFlags::MAP_SHARED);
         let free_std_pages = get_free_frames();
         info!("mapping memory: addr={:#x}, length={:#x}, prot={:?}, flags={:?}, free_std_pages={}, needing_std_pages={}", 
             addr, length, prot, mmap_flags, free_std_pages, needing_std_pages);
-        // 检查内存是否充足
-        if is_shared && !is_anonymous && free_std_pages < needing_std_pages {
-            warn!(
-                "mmap failed: not enough free frames (need {}, have {})",
-                needing_std_pages, free_std_pages
-            );
-            return Err(Errno::ENOMEM.as_isize());
-        }
 
         // 找合适起始地址
         let mut start_va = addr;
@@ -1249,49 +1243,7 @@ impl MemorySet {
             permission |= MapPermission::U;
         }
 
-        if is_shared && !is_anonymous {
-            // 共享文件映射
-            let file = file_inner.as_ref().unwrap();
-            let mut area = MapArea {
-                vpn_range: VPNRange::new(
-                    VirtAddr::from(start_va).std_floor(),
-                    VirtAddr::from(start_va + length).std_ceil(),
-                ),
-                data_frames: BTreeMap::new(),
-                map_type: MapType::File,
-                map_perm: permission,
-                is_shared: true,
-                backing_file: file_inner.clone().map(|f| (f.clone(), page_offset)),
-                anonymous_shared_frames: None,
-                page_size: Page4K, // 默认用标准页
-            };
-
-            // 文件页偏移末，开边界，也就是文件最后一页的下一个页的偏移，超过的部分不映射
-            let file_end_page_offset = PhysAddr(file.get_stat().size as usize).std_ceil().0;
-
-            let start_vpn = VirtAddr::from(start_va).std_floor().0;
-            for i in 0..needing_std_pages {
-                let vpn = start_vpn + i;
-                let file_page_offset = page_offset + i;
-                if file_page_offset >= file_end_page_offset {
-                    break;
-                }
-                if let Some(cache) = file.get_shared_page(file_page_offset) {
-                    let page = cache.lock();
-                    let ppn = page.frame.ppn;
-                    // clone FrameTracker: 引用计数 +1
-                    let frame_clone = page.frame.clone();
-                    let pte_flags = PTEFlags::from_bits(permission.bits).unwrap();
-                    self.page_table
-                        .map(VirtPageNum::from(vpn), ppn, pte_flags, Page4K);
-                    area.data_frames.insert(VirtPageNum::from(vpn), frame_clone);
-                } else {
-                    return Err(Errno::ENOMEM.as_isize());
-                }
-            }
-            // 这里是简单插入，映射在前面已经完成了
-            self.areas.push(area);
-        } else if is_anonymous {
+        if is_anonymous {
             // 匿名 mmap 只创建区域元数据。首次访问由 handle_page_fault
             // 分配并清零一个物理页，不再在这里遍历整个线程栈。
             let mut area = MapArea::new(
@@ -1315,6 +1267,7 @@ impl MemorySet {
                 PageSize::Page4K,
                 file,
                 page_offset,
+                is_shared,
             );
         }
 
@@ -1343,13 +1296,13 @@ impl MemorySet {
         let mut sorted_areas: Vec<_> = self.areas.iter().collect();
         sorted_areas.sort_by_key(|a| a.vpn_range.get_start());
 
-        for _area in sorted_areas.iter() {
-            /*println!(
+        /*for _area in sorted_areas.iter() {
+            println!(
                 "[kernel] find_free_area: existing area [0x{:x}, 0x{:x})",
                 area.vpn_range.get_start().0 * PAGE_SIZE,
                 area.vpn_range.get_end().0 * PAGE_SIZE
-            );*/
-        }
+            );
+        }*/
 
         for area in sorted_areas {
             let area_start: usize = area.vpn_range.get_start().0 * PAGE_SIZE;
@@ -1424,7 +1377,6 @@ impl MemorySet {
                         area.unmap_one(&mut self.page_table, vpn);
                         vpn.step_by(step);
                     }
-
                     area.resize(end_vpn, a_end);
                 } else if delete_right {
                     // 情况4：Inc_Right（删掉右边部分）
@@ -1453,9 +1405,8 @@ impl MemorySet {
         Ok(())
     }
 
-    /// Discard resident private pages while preserving the virtual mapping.
-    /// Anonymous pages are recreated as zero-filled pages, and private file
-    /// pages are reloaded from their backing file on the next access.
+    /// 丢弃驻留页但保留虚拟映射。匿名页重新分配为零页，私有文件页重新
+    /// 从文件读取，共享文件页则在下次访问时重新映射对应的 page cache。
     pub fn madvise_dontneed(&mut self, start: usize, length: usize) -> Result<(), isize> {
         let end = start
             .checked_add(length)
@@ -1469,12 +1420,6 @@ impl MemorySet {
             let discard_start = core::cmp::max(start_vpn, area_start);
             let discard_end = core::cmp::min(end_vpn, area_end);
             if discard_start >= discard_end || area.map_type == MapType::Guard {
-                continue;
-            }
-
-            // Shared file pages belong to the page cache. Keeping their PTEs
-            // is a valid advisory fallback until shared faults are lazy too.
-            if area.is_shared && area.backing_file.is_some() {
                 continue;
             }
 
@@ -1737,12 +1682,7 @@ impl MemorySet {
                 }
             }
 
-            // 共享文件映射直接返回false，交给后续处理
-            if area.is_shared && area.backing_file.is_some() {
-                return false;
-            }
-
-            // 非共享映射：惰性分配新物理帧
+            // 按映射类型惰性分配物理页或映射文件页缓存
             if !area.try_map_one(page_table, vpn, page_size_opt.unwrap()) {
                 return false;
             }
@@ -1864,8 +1804,10 @@ pub struct MapArea {
     pub is_shared: bool,
     // 记录文件信息和页偏移，其中页偏移的语义为映射起始页在文件中的页偏移量
     pub backing_file: Option<(Arc<dyn File + Send + Sync>, usize)>,
-    /// Lazily populated pages of an anonymous MAP_SHARED object. The map is
-    /// shared by forked address spaces so pages faulted after fork remain shared.
+    /// 匿名共享映射登记，懒分配，用于子进程继承父进程的共享匿名映射
+    /// 
+    /// 每次共享匿名映射缺页先查该表，如果存在则直接克隆 FrameTracker，
+    /// 否则分配新的物理页并登记。
     anonymous_shared_frames: Option<Arc<MPSafeCell<BTreeMap<VirtPageNum, FrameTracker>>>>,
     pub page_size: PageSize,
 }
@@ -1959,17 +1901,14 @@ impl MapArea {
             page_size: self.page_size,
         }
     }
-    /// Try to allocate/map one page. Returns false on physical-memory exhaustion.
+    /// 尝试分配物理页并建立映射，失败返回 false
+    /// 为共享文件映射分配页缓存，为匿名映射分配物理页，私有文件映射分配物理页并从文件读取内容
     pub fn try_map_one(
         &mut self,
         page_table: &mut PageTable,
         vpn: VirtPageNum,
         page_size: PageSize,
     ) -> bool {
-        if self.map_type == MapType::File {
-            return self.try_map_private_file_pages(page_table, vpn, page_size);
-        }
-
         let ppn: PhysPageNum;
         match self.map_type {
             MapType::Identical => {
@@ -1998,8 +1937,13 @@ impl MapArea {
                     self.data_frames.insert(vpn, frame);
                 }
             }
-            MapType::File => unreachable!(),
-            // Borrowed mappings must be installed with an explicit kernel-owned PPN.
+            MapType::File => {
+                return if self.is_shared {
+                    self.try_map_shared_file_page(page_table, vpn, page_size)
+                } else {
+                    self.try_map_private_file_pages(page_table, vpn, page_size)
+                };
+            }
             MapType::BorrowedKernel => {
                 return false;
             }
@@ -2015,6 +1959,46 @@ impl MapArea {
         }
         #[cfg(target_arch = "riscv64")]
         page_table.map(vpn, ppn, pte_flags, page_size);
+        true
+    }
+
+    fn try_map_shared_file_page(
+        &mut self,
+        page_table: &mut PageTable,
+        vpn: VirtPageNum,
+        page_size: PageSize,
+    ) -> bool {
+        if page_size != PageSize::Page4K {
+            warn!("Shared file mapping only supports 4K pages, but got {:?}", page_size);
+            return false;
+        }
+
+        // 计算并验证文件页偏移
+        let Some((file, base_page_offset)) = &self.backing_file else {
+            return false;
+        };
+        let Some(relative_page) = vpn.0.checked_sub(self.vpn_range.get_start().0) else {
+            return false;
+        };
+        let Some(file_page_offset) = base_page_offset.checked_add(relative_page) else {
+            return false;
+        };
+        let file_end_page_offset = VirtAddr::from(file.get_stat().size as usize).std_ceil().0;
+        if file_page_offset >= file_end_page_offset {
+            return false;
+        }
+
+        let Some(cache) = file.get_shared_page(file_page_offset) else {
+            return false;
+        };
+        let page = cache.lock();
+        let frame = page.frame.clone();
+        let ppn = frame.ppn;
+        drop(page);
+
+        let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+        page_table.map(vpn, ppn, pte_flags, page_size);
+        self.data_frames.insert(vpn, frame);
         true
     }
 
@@ -2227,9 +2211,11 @@ impl MapArea {
 /// map type for memory set: identical or framed
 pub enum MapType {
     Identical,
+    // 匿名映射和普通独占物理页
     Framed,
+    // 文件映射，通过 is_shared 区分共享和私有
     File,
-    //共享页表
+    // 共享页表
     BorrowedKernel,
     Guard,
 }
