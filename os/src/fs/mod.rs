@@ -97,6 +97,15 @@ pub trait File: Send + Sync {
     fn ready_to_write(&self) -> bool {
         self.writable()
     }
+    /// 检查读错误
+    /// 
+    /// 如果有错误则返回 Some(errno)，否则返回 None
+    fn check_read_error(&self) -> Option<Errno> {
+        None
+    }
+    /// 检查写错误
+    /// 
+    /// 如果有错误则返回 Some(errno)，否则返回 None
     fn check_write_error(&self) -> Option<Errno> {
         None
     }

@@ -457,7 +457,7 @@ impl TaskStruct {
 			remove_task_from_global_pool_unlocked(sibling.gettid());
 		}
 
-		let old_signal = {
+		let (files, vfork_completion) = {
 			let mut inner = caller_task.inner_exclusive_access();
 			let old_signal = inner.signal.clone();
 			inner.thread.trap_ctx = trap_cx_addr;
@@ -479,6 +479,7 @@ impl TaskStruct {
 			inner.frozen = false;
 			inner.exec_exit_requested = false;
 			inner.clear_child_tid = 0;
+			let vfork_completion = inner.vfork_completion.take();
 			inner.start_time = get_time_us() as u64;
 			if let Some(argv0) = args.first() {
 				inner.comm = [0; 10];
@@ -487,15 +488,18 @@ impl TaskStruct {
 				inner.comm[..copy_len].copy_from_slice(&bytes[..copy_len]);
 			}
 			*inner.get_trap_cx() = trap_cx;
-			inner.files.clone()
+			(inner.files.clone(), vfork_completion)
 		};
 		{
-			let mut files = old_signal.exclusive_access();
+			let mut files = files.exclusive_access();
 			for fd in 0..files.fds.len() {
 				if files.fds[fd].flags.contains(FdFlags::CLOEXEC) {
 					files.clear_fd(fd);
 				}
 			}
+		}
+		if let Some(completion) = vfork_completion {
+			completion.complete();
 		}
 	}
 }

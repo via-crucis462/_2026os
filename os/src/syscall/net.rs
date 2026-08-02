@@ -731,6 +731,7 @@ pub fn sys_socketpair(domain: usize, socket_type: usize, protocol: usize, sv: *m
     const AF_UNIX: usize = 1;
     const SOCK_STREAM: usize = 1;
     const SOCK_DGRAM: usize = 2;
+    const SOCK_SEQPACKET: usize = 5;
     const SOCK_NONBLOCK: usize = 0o4000;
     const SOCK_CLOEXEC: usize = 0o2000000;
 
@@ -748,7 +749,7 @@ pub fn sys_socketpair(domain: usize, socket_type: usize, protocol: usize, sv: *m
     let real_type = socket_type & 0xff;
     let socket_kind = match real_type {
         SOCK_STREAM => UnixSocketType::Stream,
-        SOCK_DGRAM => UnixSocketType::Datagram,
+        SOCK_DGRAM | SOCK_SEQPACKET => UnixSocketType::Datagram,
         _ => return Errno::EPROTOTYPE.as_isize(),
     };
 

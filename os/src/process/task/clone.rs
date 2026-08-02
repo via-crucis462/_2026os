@@ -31,12 +31,14 @@ impl TaskStruct {
 		const CLONE_FS: usize = 0x00000200;              // 共享 fs_struct（根目录/工作目录）
 		const CLONE_FILES: usize = 0x00000400;           // 共享文件描述符表
 		const CLONE_SIGHAND: usize = 0x00000800;         // 共享信号处理函数表
+		const CLONE_VFORK: usize = 0x00004000;           // 子进程 exec/exit 前挂起父进程
 		const CLONE_SETTLS: usize = 0x00080000;          // 设置子任务 TLS 指针
 		const CLONE_PARENT_SETTID: usize = 0x00100000;   // 向父地址空间写入子 TID
 		const CLONE_CHILD_CLEARTID: usize = 0x00200000;  // 子任务退出时清零 ctid 并 futex 唤醒
 		const CLONE_CHILD_SETTID: usize = 0x01000000;    // 向子地址空间写入 TID
 		const CLONE_THREAD: usize = 0x00010000;           // 创建线程（共享 tgid）
 		const CLONE_SYSVSEM: usize = 0x00040000;           // 共享 System V 信号量（todo）
+		const CLONE_CLEAR_SIGHAND: usize = 0x1_0000_0000; // 清空子进程信号处理函数表
 
 		// ── 0. 判断是创建线程还是独立进程 ──
 		let clone_thread = flags & CLONE_THREAD != 0;
@@ -110,7 +112,9 @@ impl TaskStruct {
 		};
 
 		// 3d. 信号处理函数表（SigHand）
-		let child_signal_hand = if flags & CLONE_SIGHAND != 0 {
+		let child_signal_hand = if flags & CLONE_CLEAR_SIGHAND != 0 {
+			Arc::new(MPSafeCell::new(SigHand::new()))
+		} else if flags & CLONE_SIGHAND != 0 {
 			// 共享信号处理函数（线程必须；Linux 要求 CLONE_SIGHAND ⇒ CLONE_VM）
 			parent_inner.signal_hand.clone()
 		} else {
@@ -179,6 +183,11 @@ impl TaskStruct {
 			SignalAltStack::default()
 		} else {
 			parent_inner.signal_alt_stack
+		};
+		let vfork_completion = if flags & CLONE_VFORK != 0 {
+			Some(Arc::new(VforkCompletion::new()))
+		} else {
+			None
 		};
 		drop(parent_inner); // 释放父任务锁，避免后续分配 PID/内核栈时持锁
 
@@ -293,6 +302,7 @@ impl TaskStruct {
 					} else {
 						0
 					},
+					vfork_completion: vfork_completion.clone(),
 					personality,
 					locked_bytes,
 					comm,
@@ -367,6 +377,11 @@ impl TaskStruct {
 			);
 		}
 		add_task(child);
+
+		// 如果是 CLONE_VFORK，则父任务阻塞等待子任务完成 exec/exit
+		if let Some(completion) = vfork_completion {
+			completion.wait();
+		}
 
 		// 返回子任务的 PID（父任务视角）
 		pid.0 as isize

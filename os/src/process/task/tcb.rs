@@ -114,7 +114,7 @@ pub struct TaskStructInner {
     /// 当前进程映像对应的规范绝对路径，用于 /proc/<pid>/exe。
     pub exe_path: String,
 
-    /*7. 信号处理相关 */
+    /* 7. 信号处理相关 */
     pub signal: Arc<MPSafeCell<Signal>>,  // 信号处理相关信息
     pub signal_hand: Arc<MPSafeCell<SigHand>>, // 信号处理函数相关信息
     pub blocked: SignalFlags, // 当前阻塞（不允许接收）的信号集
@@ -132,13 +132,13 @@ pub struct TaskStructInner {
     pub cred: Arc<MPSafeCell<Cred>>, // 进程的凭证信息
     pub real_cred: Arc<MPSafeCell<Cred>>, // 进程的真实凭证信息
 
-    /* 9. 其他 */
+    /* 9. 时间相关 */
     pub start_time: u64, // 进程启动时间
     pub start_boottime: u64, // 进程启动时间的低位
     /// 进程的 oom_score_adj（范围 -1000..=1000，LTP 兼容）
     pub oom_score_adj: i32,
 
-    /* 10 .CPU调度  */
+    /* 10. CPU调度  */
     pub on_cpu: bool,
     pub on_rq: bool,
     pub cpu: usize,
@@ -150,8 +150,9 @@ pub struct TaskStructInner {
     /// 有此标记的线程将在被调度到时不执行。
     pub exec_exit_requested: bool,
 
-    /*11 .线程退出清理地址 */
+    /* 11. 杂项 */
     pub clear_child_tid: usize, // 线程清理指针
+    pub vfork_completion: Option<Arc<VforkCompletion>>, // vfork 同步原语
     pub personality: usize, // 进程个性化标志
     pub locked_bytes: usize, // MAP_LOCKED 映射字节数
     pub comm: [u8; 10],

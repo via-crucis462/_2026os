@@ -419,8 +419,7 @@ impl VfsInode for Ext4Inode {
                         buf[buf_offset+16..buf_offset+18].copy_from_slice(&reclen_u16.to_ne_bytes());
                         
 
-                        let d_type: u8 = ext4_dirent.file_type;
-                        buf[buf_offset+18] = d_type;
+                        buf[buf_offset+18] = ext4_dirent.linux_dirent_type();
                         
 
                         buf[buf_offset+19..buf_offset+19+name_len].copy_from_slice(name_bytes);

@@ -355,6 +355,7 @@ pub fn sys_exit(exit_code: i32) -> ! {
 pub fn sys_exit_group(exit_code: i32) -> ! {
     let task = current_task().unwrap();
     let pid = task.getpid();
+
     let tasks = crate::process::registry::TID2TCB
         .exclusive_access()
         .values()
@@ -362,21 +363,26 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
         .cloned()
         .collect::<alloc::vec::Vec<_>>();
 
-    // 遍历当前进程的所有线程（tasks 列表）
     for thread in tasks.iter() {
         if thread.gettid() != task.gettid() {
-            let mut t_inner = thread.inner_exclusive_access();
-            t_inner.pending.insert(SignalFlags::SIGKILL);
-            t_inner.term_signal = Some(9);
-            if matches!(t_inner.state, crate::task::TaskStatus::Blocked) {
-                t_inner.signal_interrupted = true;
+            let mut inner = thread.inner_exclusive_access();
+            let files = core::mem::replace(
+                &mut inner.files,
+                Arc::new(crate::sync::MPSafeCell::new(
+                    crate::process::FileDescriptorTable::empty(),
+                )),
+            );
+            inner.pending.insert(SignalFlags::SIGKILL);
+            inner.term_signal = Some(9);
+            if matches!(inner.state, crate::task::TaskStatus::Blocked) {
+                inner.signal_interrupted = true;
             }
-            drop(t_inner);
+            drop(inner);
+            drop(files);
             crate::process::wake_up_task(thread.clone());
         }
     }
-    
-    drop(tasks); // 先前没有这行，会导致内存泄露
+    drop(tasks);
 
     // 退出进程  // 先放掉锁，避免后续迭代时死锁
     task.inner_exclusive_access().exit_code = exit_code;
@@ -717,6 +723,7 @@ const TCGETS: u32 = 0x5401;
 const TIOCGPGRP: u32 = 0x540F;   // 获取前台进程组 ID
 const TIOCSPGRP: u32 = 0x5410;   // 设置前台进程组 ID
 const TIOCGWINSZ: u32 = 0x5413;
+const FIONBIO: u32 = 0x5421;
 const RTC_RD_TIME: u32 = 0x80247009; // 真实的 RTC 读取指令号
 const TIOCSCTTY: u32 = 0x540E; // 设置控制终端
 //  网络接口相关命令 (Socket IOCTL)
@@ -861,6 +868,19 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 }
                 0 // 成功
             } else { EFAULT.as_isize() }
+        }
+        FIONBIO => {
+            let Some(nonblocking) = try_translated_read(token, argp as *const i32) else {
+                return EFAULT.as_isize();
+            };
+            const O_NONBLOCK: usize = 0o4000;
+            let mut fd_table = files.exclusive_access();
+            if nonblocking != 0 {
+                fd_table.fds[fd].status |= O_NONBLOCK;
+            } else {
+                fd_table.fds[fd].status &= !O_NONBLOCK;
+            }
+            0
         }
         TIOCGPGRP => {
             // 获取前台进程组 ID
@@ -1575,6 +1595,12 @@ pub fn sys_clone3(uargs: *const CloneArgs, size: usize) -> isize {
     if flags & CLONE_SIGHAND != 0 && flags & CLONE_VM == 0 {
         return EINVAL.as_isize();
     }
+    if flags & CLONE_VFORK != 0 && flags & CLONE_VM == 0 {
+        return EINVAL.as_isize();
+    }
+    if flags & CLONE_CLEAR_SIGHAND != 0 && flags & CLONE_SIGHAND != 0 {
+        return EINVAL.as_isize();
+    }
     if flags & CLONE_THREAD != 0 && flags & CLONE_SIGHAND == 0 {
         return EINVAL.as_isize();
     }
@@ -1614,6 +1640,7 @@ const CLONE_VM: usize = 0x00000100;              // 共享地址空间
 const CLONE_FS: usize = 0x00000200;              // 共享 fs_struct（根目录/工作目录）
 const CLONE_FILES: usize = 0x00000400;           // 共享文件描述符表
 const CLONE_SIGHAND: usize = 0x00000800;         // 共享信号处理函数表
+const CLONE_VFORK: usize = 0x00004000;           // 子进程 exec/exit 前挂起父进程
 const CLONE_SETTLS: usize = 0x00080000;          // 设置子任务 TLS 指针
 const CLONE_PARENT_SETTID: usize = 0x00100000;   // 向父地址空间写入子 TID
 const CLONE_CHILD_CLEARTID: usize = 0x00200000;  // 子任务退出时清零 ctid 并 futex 唤醒
@@ -1623,6 +1650,7 @@ const CLONE_SYSVSEM: usize = 0x00040000;           // 共享 System V 信号量�
 const CLONE_PIDFD: usize = 0x00001000;
 const CLONE_NEWNS: usize = 0x00020000; // 创建新的 mount namespace
 const CLONE_DETACHED: usize = 0x00400000; // 历史标志：父进程不关心子进程退出信号（已废弃但仍可能出现）
+const CLONE_CLEAR_SIGHAND: usize = 0x1_0000_0000; // 重置子进程的信号处理函数表（即子进程单独开设 sighand）
 pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usize) -> isize {
     #[cfg(target_arch = "riscv64")]
     let (tls, ctid) = (arg3, arg4);
@@ -1634,13 +1662,15 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usi
         | CLONE_FS
         | CLONE_FILES
         | CLONE_SIGHAND
+        | CLONE_VFORK
         | CLONE_THREAD
         | CLONE_SYSVSEM
         | CLONE_SETTLS
         | CLONE_PARENT_SETTID
         | CLONE_CHILD_CLEARTID
         | CLONE_CHILD_SETTID
-        | CLONE_DETACHED;
+        | CLONE_DETACHED
+        | CLONE_CLEAR_SIGHAND;
 
     if flags & !SUPPORTED_FLAGS != 0 {
         println!("sys_clone: unsupported flags {:#x}", flags);
@@ -1650,6 +1680,12 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usi
         return EINVAL.as_isize();
     }
     if flags & CLONE_SIGHAND != 0 && flags & CLONE_VM == 0 {
+        return EINVAL.as_isize();
+    }
+    if flags & CLONE_VFORK != 0 && flags & CLONE_VM == 0 {
+        return EINVAL.as_isize();
+    }
+    if flags & CLONE_CLEAR_SIGHAND != 0 && flags & CLONE_SIGHAND != 0 {
         return EINVAL.as_isize();
     }
     if flags & CLONE_THREAD != 0

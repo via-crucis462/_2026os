@@ -119,6 +119,7 @@ impl TaskStruct {
 				need_resched: false,
 				exec_exit_requested: false,
 				clear_child_tid: 0,
+				vfork_completion: None,
 				personality: 0,
 				locked_bytes: 0,
 				comm: [0; 10],
