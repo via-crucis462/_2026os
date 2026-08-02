@@ -97,7 +97,7 @@ impl Rqinner {
 			if inner.on_rq {
 				return;
 			}
-			if inner.exec_exit_requested || inner.state == TaskStatus::Zombie {
+			if inner.state == TaskStatus::Zombie {
 				inner.on_rq = false;
 				return;
 			}
@@ -142,7 +142,7 @@ impl Rqinner {
 		let task = self.pop_next_task()?;
 		{
 			let mut inner = task.inner_exclusive_access();
-			if inner.exec_exit_requested || inner.state == TaskStatus::Zombie {
+			if inner.state == TaskStatus::Zombie {
 				inner.on_rq = false;
 				return None;
 			}
@@ -179,7 +179,7 @@ pub fn enqueue_task_on_cpu(task: Arc<TaskControlBlock>, cpu_id: usize) {
 	let cpu_id = cpu_id.min(RQ_ARRAY.len().saturating_sub(1));
 	{
 		let mut inner = task.inner_exclusive_access();
-		if inner.exec_exit_requested || inner.state == TaskStatus::Zombie {
+		if inner.state == TaskStatus::Zombie {
 			inner.on_rq = false;
 			inner.on_cpu = false;
 			return;
@@ -228,7 +228,8 @@ pub(crate) fn advance_cfs_min_vruntime(cpu_id: usize) {
 		.advance_min_vruntime();
 }
 
-/// 唤醒阻塞任务，并重新加入它原先所属 CPU 的运行队列。
+/// 唤醒阻塞任务，并重新加入它原先所属 CPU 的运行队列。 
+/// 如果任务不是阻塞状态，则打印警告信息并忽略。
 pub fn wake_up_task(task: Arc<TaskControlBlock>) {
 	let should_enqueue = loop {
 		let mut inner = task.inner_exclusive_access();
@@ -265,7 +266,7 @@ pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
 		{
 			let mut inner = task.inner_exclusive_access();
 			inner.on_rq = false;
-			if inner.exec_exit_requested || inner.state == TaskStatus::Zombie {
+			if inner.state == TaskStatus::Zombie {
 				inner.on_cpu = false;
 				continue;
 			}

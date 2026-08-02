@@ -8,13 +8,12 @@ use crate::drivers::net::EthernetDevice;
 use crate::fs::{open_file, File, OpenFlags};
 use crate::process::FdFlags;
 use crate::mm::{translated_write, KERNEL_SPACE, MemorySet, VirtAddr};
-use crate::process::registry::{remove_from_tid2task, TID2TCB};
-use crate::process::scheduler::runqueue::{
-	lock_dispatch, remove_task_from_all_local_queues_unlocked,
-	remove_task_from_global_pool_unlocked,
+use crate::process::registry::{tid2task, TID2TCB};
+use crate::process::scheduler::runqueue::wake_up_task;
+use crate::process::signal::{
+	inner_has_pending_sigkill, SigHand, Signal, Sigpending, SignalFlags,
 };
-use crate::process::signal::{SigHand, Signal, Sigpending};
-use crate::process::task::{TaskControlBlock, TaskStatus, TaskStruct};
+use crate::process::task::{ExecUpdateGuard, TaskControlBlock, TaskStatus, TaskStruct};
 use crate::sync::MPSafeCell;
 use crate::syscall::errno::Errno;
 use alloc::{string::{String, ToString}, sync::Arc, vec, vec::Vec};
@@ -418,47 +417,54 @@ impl TaskStruct {
 		trap_cx.set_a0(args.len());
 		trap_cx.set_a1(argv_base);
 
-		let sibling_tasks = {
+		// 尝试获取 exec/clone 互斥锁，期间会检查 SIGKILL
+		let exec_guard: ExecUpdateGuard = match caller_task.wait_exec_update_lock() {
+			Ok(guard) => guard,
+			Err(()) => return,
+		};
+
+		let siblings: Vec<_> = {
 			let tasks = TID2TCB.exclusive_access();
 			tasks
 				.values()
 				.filter(|task| task.gettgid() == caller_task.gettgid())
 				.filter(|task| !Arc::ptr_eq(task, &caller_task))
 				.cloned()
-				.collect::<Vec<_>>()
+				.collect()
 		};
 
-		// 先等待所有同组线程离开 CPU
-		for sibling in &sibling_tasks {
+		// 向快照中的线程发送 SIGKILL 并唤醒。
+		// 
+		// ** 需要保证内核中所有轮询都加入信号检查 **
+		for sibling in &siblings {
 			let mut sibling_inner = sibling.inner_exclusive_access();
-			sibling_inner.exec_exit_requested = true;
+			sibling_inner.pending.insert(SignalFlags::SIGKILL);
+			sibling_inner.term_signal = Some(9);
+			if matches!(sibling_inner.state, TaskStatus::Blocked) {
+				sibling_inner.signal_interrupted = true;
+			}
 			sibling_inner.need_resched = true;
+			drop(sibling_inner);
+			wake_up_task(sibling.clone());
 		}
 
-		for sibling in sibling_tasks {
-			while sibling.inner_exclusive_access().on_cpu {
-				core::hint::spin_loop();
+		// 等待快照中的线程全部退出
+		for sibling in siblings {
+			while tid2task(sibling.gettid()).is_some() {
+				if crate::process::signal::has_pending_sigkill(&caller_task) {
+					return;
+				}
+				crate::process::suspend_current_and_run_next();
 			}
-
-			let mut sibling_inner = sibling.inner_exclusive_access();
-			#[cfg(target_arch = "riscv64")]
-			if let Some(mm) = sibling_inner.mm.as_ref() {
-				mm.exclusive_access().remove_trap_context_page(VirtAddr::from(
-					sibling_inner.thread.trap_ctx,
-				));
-			}
-			sibling_inner.state = TaskStatus::Zombie;
-			sibling_inner.on_rq = false;
-			sibling_inner.mm.take();
-			drop(sibling_inner);
-			let _dispatch = lock_dispatch();
-			remove_from_tid2task(sibling.gettid());
-			remove_task_from_all_local_queues_unlocked(sibling.gettid());
-			remove_task_from_global_pool_unlocked(sibling.gettid());
 		}
 
 		let (files, vfork_completion) = {
 			let mut inner = caller_task.inner_exclusive_access();
+			// 在一个临界区内清空 mm/signal 前再次检查 SIGKILL，
+			// 避免信号被吞掉。
+			if inner_has_pending_sigkill(&inner) {
+				return;
+			}
 			let old_signal = inner.signal.clone();
 			inner.thread.trap_ctx = trap_cx_addr;
 			inner.mm = Some(Arc::new(MPSafeCell::new(memory_set)));
@@ -477,7 +483,6 @@ impl TaskStruct {
 			inner.signal_alt_stack = crate::process::signal::SignalAltStack::default();
 			inner.term_signal = None;
 			inner.frozen = false;
-			inner.exec_exit_requested = false;
 			inner.clear_child_tid = 0;
 			let vfork_completion = inner.vfork_completion.take();
 			inner.start_time = get_time_us() as u64;
@@ -490,6 +495,8 @@ impl TaskStruct {
 			*inner.get_trap_cx() = trap_cx;
 			(inner.files.clone(), vfork_completion)
 		};
+		// 对进程 TS 的修改已完成
+		drop(exec_guard);
 		{
 			let mut files = files.exclusive_access();
 			for fd in 0..files.fds.len() {

@@ -113,26 +113,16 @@ pub fn run_tasks() {
         // 本地队列为空时，idle_task 才会从其他 CPU 窃取一个可迁移任务。
         let next_task = fetch_task().or_else(|| idle_tasks(hart_id));
         if let Some(task) = next_task {
-            let should_run = {
+            {
                 let mut inner = task.inner_exclusive_access();
-				if inner.exec_exit_requested {
-					inner.on_rq = false;
-					inner.on_cpu = false;
-					false
-				} else {
-					inner.cpu = hart_id;
-					inner.on_rq = false;
-					inner.on_cpu = true;
-					inner.state = TaskStatus::Running;
-					inner.need_resched = false;
-				// 使用单调微秒时钟记录本时间片起点；切回调度器时统一结算。
-					inner.se.exec_start = get_time_us() as u64;
-					true
-				}
-            };
-			if !should_run {
-				continue;
-			}
+                inner.cpu = hart_id;
+                inner.on_rq = false;
+                inner.on_cpu = true;
+                inner.state = TaskStatus::Running;
+                inner.need_resched = false;
+                // 使用单调微秒时钟记录本时间片起点；切回调度器时统一结算。
+                inner.se.exec_start = get_time_us() as u64;
+            }
             let mut processor = current_processor();
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             let task_inner = task.inner_exclusive_access();
@@ -172,7 +162,7 @@ pub fn run_tasks() {
                 processor.take_current()
             };
             if let Some(prev_task) = prev_task {
-				let (status, cpu_id, sched_policy, exec_exit_requested) = {
+				let (status, cpu_id, sched_policy) = {
 					let mut prev_inner = prev_task.inner_exclusive_access();
                     let now = get_time_us() as u64;
                     let delta_exec = now.saturating_sub(prev_inner.se.exec_start).max(1);
@@ -190,16 +180,15 @@ pub fn run_tasks() {
 						prev_inner.state,
 						prev_inner.cpu,
 						prev_inner.sched_policy,
-						prev_inner.exec_exit_requested,
 					)
 				};
-				if status == TaskStatus::Ready && !exec_exit_requested {
+				if status == TaskStatus::Ready {
 					enqueue_task_on_cpu(prev_task, cpu_id);
                 } else {
                     if matches!(sched_policy, SCHED_OTHER | SCHED_BATCH | SCHED_IDLE) {
                         advance_cfs_min_vruntime(cpu_id);
                     }
-                    if status == TaskStatus::BlockSaving && !exec_exit_requested {
+                    if status == TaskStatus::BlockSaving {
                         prev_task.inner_exclusive_access().state = TaskStatus::Blocked;
                     }
                 }

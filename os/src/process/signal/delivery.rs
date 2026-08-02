@@ -1,9 +1,22 @@
 use super::frame::push_signal_frame;
-use crate::process::{current_task, SignalFlags, TaskControlBlock};
+use crate::process::{current_task, SignalFlags, TaskControlBlock, TaskStructInner};
 use crate::process::trap::TrapContext;
 use alloc::sync::Arc;
 
-/// Add signal to the current task
+pub(crate) fn inner_has_pending_sigkill(inner: &TaskStructInner) -> bool {
+    inner.pending.contains(SignalFlags::SIGKILL)
+        || inner
+            .signal
+            .exclusive_access()
+            .pending_flags()
+            .contains(SignalFlags::SIGKILL)
+}
+
+pub(crate) fn has_pending_sigkill(task: &Arc<TaskControlBlock>) -> bool {
+    let inner = task.inner_exclusive_access();
+    inner_has_pending_sigkill(&inner)
+}
+
 /// 给当前任务加上信号
 pub fn current_add_signal(signal: SignalFlags) {
     let task = current_task().unwrap();

@@ -249,99 +249,96 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
     drop(task_inner);
 
     loop {
-        let task = current_task().unwrap();
-        // --- 检查信号 (使用当前的临时掩码) ---
-        let task_inner = task.inner_exclusive_access();
-        let pending_bits = task_inner.pending.bits();
-        let pending = pending_bits & !task_inner.blocked.bits();
-        // 特判 SIGKILL(9) 和 SIGSTOP(19) 这两个绝对不可屏蔽的信号
-        let unmaskable = pending_bits & ((1 << (9 - 1)) | (1 << (19 - 1)));
+        {
+            let task = current_task().unwrap();
+            // --- 检查信号 (使用当前的临时掩码) ---
+            let task_inner = task.inner_exclusive_access();
+            let pending_bits = task_inner.pending.bits()
+                | task_inner.signal.exclusive_access().pending_flags().bits();
+            let pending = pending_bits & !task_inner.blocked.bits();
+            // 特判 SIGKILL(9) 和 SIGSTOP(19) 这两个绝对不可屏蔽的信号
+            let unmaskable = pending_bits & ((1 << (9 - 1)) | (1 << (19 - 1)));
 
-        if (pending | unmaskable) != 0 {
-         
-            //task_inner.signal_mask = original_mask;
-            debug!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
-                     pending_bits, task_inner.blocked.bits());
-            drop(task_inner); // 放锁
-            return EINTR.as_isize(); // EINTR
-        }
-        drop(task_inner); 
-        // ----------------------------------------
+            if (pending | unmaskable) != 0 {
+                //task_inner.signal_mask = original_mask;
+                debug!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
+                         pending_bits, task_inner.blocked.bits());
+                drop(task_inner); // 放锁
+                return EINTR.as_isize(); // EINTR
+            }
+            drop(task_inner); 
+            // ----------------------------------------
 
-        // 提取 token 和 fd_table 后立即释放锁，防止 translated_* 死锁
-        let (token, fd_table) = {
-            let inner = task.inner_exclusive_access();
-            let token = inner.get_user_token();
-            let fd_table = inner.files.exclusive_access().fds.clone();
-            (token, fd_table)
-        }; // inner 在此释放
-
-        // 防止随机/恶意 nfds 导致死循环
-        const POLL_MAX: usize = 1024;
-        let nfds = nfds.min(POLL_MAX);
-        let mut ready_count = 0;
-        
-        // --- 🔵 遍历轮询所有的 fd ---
-        for i in 0..nfds {
-            let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
-            let mut pollfd = {
-                if let Some(pf) = try_translated_read(token, pollfd_ptr) {
-                    pf
+            // 提取 token 和 fd_table 后立即释放锁，防止 translated_* 死锁
+            let (token, fd_table) = {
+                let inner = task.inner_exclusive_access();
+                let token = inner.get_user_token();
+                let fd_table = inner.files.exclusive_access().fds.clone();
+                (token, fd_table)
+            }; // inner 在此释放
+            // 防止随机/恶意 nfds 导致死循环
+            const POLL_MAX: usize = 1024;
+            let nfds = nfds.min(POLL_MAX);
+            let mut ready_count = 0;
+            
+            // --- 遍历轮询所有 fd ---
+            for i in 0..nfds {
+                let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
+                let mut pollfd = {
+                    if let Some(pf) = try_translated_read(token, pollfd_ptr) {
+                        pf
+                    } else {
+                        return EFAULT.as_isize();
+                    }
+                };
+                
+                let fd = pollfd.fd;
+                pollfd.revents = 0;
+                
+                if fd < 0 { continue; }
+                let fd_usize = fd as usize;
+                
+                if fd_usize >= fd_table.len() || fd_table[fd_usize].file.is_none() {
+                    pollfd.revents = 0x008; // POLLERR
+                    ready_count += 1;
                 } else {
+                    let file = fd_table[fd_usize].file.as_ref().unwrap();
+                    
+                    // 检查读
+                    if (pollfd.events & POLLIN) != 0 && file.ready_to_read() {
+                        pollfd.revents |= POLLIN;
+                    }
+                    // 检查写
+                    if (pollfd.events & POLLOUT) != 0 && file.ready_to_write() {
+                        pollfd.revents |= POLLOUT;
+                    }
+                    
+                    if pollfd.revents != 0 {
+                        ready_count += 1;
+                    }
+                }
+                if !try_translated_write(token, pollfd_ptr, pollfd) {
                     return EFAULT.as_isize();
                 }
-            };
-            
-            let fd = pollfd.fd;
-            pollfd.revents = 0;
-            
-            if fd < 0 { continue; }
-            let fd_usize = fd as usize;
-            
-            if fd_usize >= fd_table.len() || fd_table[fd_usize].file.is_none() {
-                pollfd.revents = 0x008; // POLLERR
-                ready_count += 1;
-            } else {
-                let file = fd_table[fd_usize].file.as_ref().unwrap();
-                
-                // 检查读
-                if (pollfd.events & POLLIN) != 0 && file.ready_to_read() {
-                    pollfd.revents |= POLLIN;
-                }
-                // 检查写
-                if (pollfd.events & POLLOUT) != 0 && file.ready_to_write() {
-                    pollfd.revents |= POLLOUT;
-                }
-                
-                if pollfd.revents != 0 {
-                    ready_count += 1;
-                }
+                //trace!("[kernel] ppoll fd={} target_events=0x{:x} ready_revents=0x{:x}", pollfd.fd, pollfd.events, pollfd.revents);
             }
-            if !try_translated_write(token, pollfd_ptr, pollfd) {
-                return EFAULT.as_isize();
+            
+            // 如果找到了就绪事件，恢复掩码并返回
+            if ready_count > 0 {
+                let mut task_inner = task.inner_exclusive_access();
+                task_inner.blocked = original_mask; 
+                drop(task_inner);
+                return ready_count as isize;
             }
-            //trace!("[kernel] ppoll fd={} target_events=0x{:x} ready_revents=0x{:x}", pollfd.fd, pollfd.events, pollfd.revents);
-        }
-        
-        // 4. 如果找到了就绪事件，恢复掩码并返回！
-        if ready_count > 0 {
-            let mut task_inner = task.inner_exclusive_access();
-            task_inner.blocked = original_mask; 
-            drop(task_inner);
-            return ready_count as isize;
-        }
-        
-        // 5. 如果没找到事件，处理超时逻辑
-        if has_timeout {
-            if get_time_ms() >= deadline_ms {
+            
+            // 如果没找到事件，处理超时逻辑
+            if has_timeout && get_time_ms() >= deadline_ms {
                 let mut task_inner = task.inner_exclusive_access();
                 task_inner.blocked = original_mask; 
                 drop(task_inner);
                 return 0; // 超时返回 0
             }
         }
-        
-        // 继续等待
         suspend_current_and_run_next();
     }
 }
@@ -362,7 +359,6 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
         .filter(|thread| thread.getpid() == pid)
         .cloned()
         .collect::<alloc::vec::Vec<_>>();
-
     for thread in tasks.iter() {
         if thread.gettid() != task.gettid() {
             let mut inner = thread.inner_exclusive_access();
@@ -3127,12 +3123,11 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
         "[kernel] sys_epoll_wait: epfd={}, events_ptr=0x{:x}, maxevents={}, timeout={}ms",
         epfd, events_ptr, maxevents, timeout
     );
-    let task = current_task().unwrap();
     if events_ptr == 0 {
         return EFAULT.as_isize();
     }
     
-    //   2. 防御非法容量：POSIX 规定 maxevents 必须大于 0
+    // 防御非法容量
     if maxevents <= 0 {
         return EINVAL.as_isize();
     }
@@ -3140,46 +3135,59 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
     const EPOLL_MAX_EVENTS: i32 = 1024;
     let maxevents = maxevents.min(EPOLL_MAX_EVENTS);
 
-    //   1. 记录进来的起始时间（用于带超时的阻塞）
-    let start_time = get_time_ms(); 
-    let files = task.inner_exclusive_access().files.clone();
+    // 记录起始时间
+    let start_time = get_time_ms();
     let token = current_user_token();
     
     loop {
-        let inner = files.exclusive_access();
-        
-        if epfd >= inner.fds.len() { return EBADF.as_isize(); }
-        let epoll_file_dyn = match &inner.fds[epfd].file {
-            Some(f) => f.clone(),
-            None => return EBADF.as_isize(),
-        };
-        let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
-            Some(ef) => ef,
-            None => return EINVAL.as_isize(),
-        };
-        
-        let mut ready_events = alloc::vec::Vec::new();
-        let list = epoll_file.interest_list.lock();
-        
-        // 遍历所有被监控的 FD，检查就绪状态
-        for (&fd, &event) in list.iter() {
-            if fd < inner.fds.len() {
-                if let Some(file) = &inner.fds[fd].file {
-                    let mut revents = 0;
-                    if (event.events & 1) != 0 && file.ready_to_read() { revents |= 1; }
-                    if (event.events & 4) != 0 && file.ready_to_write() { revents |= 4; }
-                    
-                    if revents != 0 || event.events == 0 {
-                        let mut ready_ev = event;
-                        ready_ev.events = if revents != 0 { revents } else { event.events };
-                        ready_events.push((fd, ready_ev));
+        let ready_events = {
+            let task = current_task().unwrap();
+            let task_inner = task.inner_exclusive_access();
+            let pending_bits = task_inner.pending.bits()
+                | task_inner.signal.exclusive_access().pending_flags().bits();
+            let unmaskable =
+                pending_bits & ((1 << (9 - 1)) | (1 << (19 - 1)));
+            if (pending_bits & !task_inner.blocked.bits()) != 0 || unmaskable != 0 {
+                drop(task_inner);
+                return EINTR.as_isize();
+            }
+            drop(task_inner);
+            let files = task.inner_exclusive_access().files.clone();
+            let inner = files.exclusive_access();
+
+            if epfd >= inner.fds.len() { return EBADF.as_isize(); }
+            let epoll_file_dyn = match &inner.fds[epfd].file {
+                Some(f) => f.clone(),
+                None => return EBADF.as_isize(),
+            };
+            let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
+                Some(ef) => ef,
+                None => return EINVAL.as_isize(),
+            };
+
+            let mut ready_events = alloc::vec::Vec::new();
+            let list = epoll_file.interest_list.lock();
+            // 遍历所有被监控的 FD，检查就绪状态
+            for (&fd, &event) in list.iter() {
+                if fd < inner.fds.len() {
+                    if let Some(file) = &inner.fds[fd].file {
+                        let mut revents = 0;
+                        if (event.events & 1) != 0 && file.ready_to_read() { revents |= 1; }
+                        if (event.events & 4) != 0 && file.ready_to_write() { revents |= 4; }
+
+                        if revents != 0 || event.events == 0 {
+                            let mut ready_ev = event;
+                            ready_ev.events = if revents != 0 { revents } else { event.events };
+                            ready_events.push((fd, ready_ev));
+                        }
                     }
                 }
             }
-        }
-        drop(list); 
+            drop(list);
+            ready_events
+        };
         
-        //   2. 如果找到了就绪事件，立即处理并返回
+        // 如果找到了就绪事件，立即处理并返回
         if !ready_events.is_empty() {
             let mut count = 0;
             for (_fd, event) in ready_events.iter().take(maxevents as usize) {
@@ -3192,7 +3200,7 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
             return count as isize;
         }
         
-        //   3. 如果没找到事件，处理超时逻辑！
+        // 如果没找到事件，处理超时逻辑
         if timeout == 0 {
             // 非阻塞模式，直接返回 0 个事件
             return 0; 
@@ -3204,7 +3212,6 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
             }
         }
         
-        drop(inner); 
         suspend_current_and_run_next();
     }
 }

@@ -8,6 +8,7 @@ use crate::process::task::{context::ThreadStruct, *};
 use crate::sync::MPSafeCell;
 use crate::syscall::errno::Errno;
 use alloc::{sync::Arc, vec::Vec};
+use core::sync::atomic::AtomicBool;
 
 impl TaskStruct {
 	/// clone 系统调用的核心实现。
@@ -77,7 +78,18 @@ impl TaskStruct {
 			return Errno::EFAULT.as_isize();
 		}
 
-		// ── 3. 获取父任务 inner 锁，开始复制/共享各类资源 ──
+		// ── 3. 开始复制/共享各类资源 ──
+
+		// 先获取 exec/clone 互斥锁
+		let exec_lock: Option<ExecUpdateGuard> = if clone_thread {
+			Some(match self.wait_exec_update_lock() {
+				Ok(guard) => guard,
+				Err(()) => return Errno::EAGAIN.as_isize(),
+			})
+		} else {
+			None
+		};
+
 		let parent_inner = self.inner_exclusive_access();
 
 		// 3a. 地址空间（mm）
@@ -179,6 +191,12 @@ impl TaskStruct {
 		let sid = parent_inner.sid;
 		let oom_score_adj = parent_inner.oom_score_adj;
 		let exe_path = parent_inner.exe_path.clone();
+		// 线程与父共享 exec 互斥锁，独立进程新建。
+		let exec_update_lock = if clone_thread {
+			parent_inner.exec_update_lock.clone()
+		} else {
+			Arc::new(AtomicBool::new(false))
+		};
 		let signal_alt_stack = if flags & CLONE_VM != 0 {
 			SignalAltStack::default()
 		} else {
@@ -276,6 +294,7 @@ impl TaskStruct {
 					files: child_files,
 					exe_path,
 					signal: child_signal,
+					exec_update_lock,
 					signal_hand: child_signal_hand,
 					blocked,
 					pending: Sigpending::new(),             // 子任务的私有挂起信号为空
@@ -296,7 +315,6 @@ impl TaskStruct {
 					cpu: parent_cpu,
 					cpus_allowed,
 					need_resched: false,
-					exec_exit_requested: false,
 					clear_child_tid: if flags & CLONE_CHILD_CLEARTID != 0 {
 						ctid  // 退出时清零此地址并 futex 唤醒
 					} else {
@@ -377,6 +395,9 @@ impl TaskStruct {
 			);
 		}
 		add_task(child);
+
+		// 克隆对exec可能访问资源的访问已完成
+		drop(exec_lock);
 
 		// 如果是 CLONE_VFORK，则父任务阻塞等待子任务完成 exec/exit
 		if let Some(completion) = vfork_completion {

@@ -14,13 +14,14 @@ use crate::process::task::{
 };
 use crate::process::signal::{Signal, SignalAltStack, SigHand, Sigpending};
 use alloc::{string::String, sync::{Arc, Weak}, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 use crate::process::task::*;
 
 #[deny(non_camel_case_types)]
 pub struct TaskStruct {
     pub pid: Arc<PidHandle>,                // 全局唯一线程 ID
     pub tgid: Arc<PidHandle>,               // 线程组 ID，主线程 pid=tgid
-    pub group_leader: Weak<TaskStruct>, // 线程组领头进程
+    pub group_leader: Weak<TaskStruct>,     // 线程组领头进程
     pub inner: MPSafeCell<TaskStructInner>, // 内部可变结构体
 }
 impl TaskStruct {
@@ -59,7 +60,47 @@ impl TaskStruct {
         (inner.sched_policy, inner.sched_priority)
      }
 
+    /// 尝试获取线程组 exec 互斥锁
+    pub(crate) fn try_lock_exec_update(self: &Arc<Self>) -> Option<ExecUpdateGuard> {
+        let inner = self.inner_exclusive_access();
+        let lock = inner.exec_update_lock.clone();
+        if lock
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            Some(ExecUpdateGuard { lock })
+        } else {
+            None
+        }
+    }
+
+    /// 等待线程组 exec 互斥锁，等待期间每次挂起前检查 SIGKILL
+    pub(crate) fn wait_exec_update_lock(
+        self: &Arc<Self>,
+    ) -> Result<ExecUpdateGuard, ()> {
+        loop {
+            if crate::process::signal::has_pending_sigkill(self) {
+                return Err(());
+            }
+            if let Some(guard) = self.try_lock_exec_update() {
+                return Ok(guard);
+            }
+            crate::process::suspend_current_and_run_next();
+        }
+    }
+
 }
+
+pub(crate) struct ExecUpdateGuard {
+    lock: Arc<AtomicBool>,
+}
+
+impl Drop for ExecUpdateGuard {
+    fn drop(&mut self) {
+        self.lock.store(false, Ordering::Release);
+    }
+}
+
 pub struct TaskStructInner {
     pub on_main_hart: bool, // 是否在主核上运行
     // 命名空间
@@ -115,7 +156,8 @@ pub struct TaskStructInner {
     pub exe_path: String,
 
     /* 7. 信号处理相关 */
-    pub signal: Arc<MPSafeCell<Signal>>,  // 信号处理相关信息
+    pub signal: Arc<MPSafeCell<Signal>>, // 信号处理相关信息
+    pub exec_update_lock: Arc<AtomicBool>, // 线程组 exec 互斥锁
     pub signal_hand: Arc<MPSafeCell<SigHand>>, // 信号处理函数相关信息
     pub blocked: SignalFlags, // 当前阻塞（不允许接收）的信号集
     pub pending: Sigpending, // 当前挂起（收到但还未处理）的信号集 
@@ -146,9 +188,6 @@ pub struct TaskStructInner {
     pub cpus_allowed: usize,
     /// 是否请求在安全调度点重新调度当前任务。
     pub need_resched: bool,
-    /// 是否被 exec 系统调用请求退出。
-    /// 有此标记的线程将在被调度到时不执行。
-    pub exec_exit_requested: bool,
 
     /* 11. 杂项 */
     pub clear_child_tid: usize, // 线程清理指针

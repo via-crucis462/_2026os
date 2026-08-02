@@ -22,8 +22,6 @@ pub struct MPSafeCell<T> {
     inner: Mutex<T>,
 }
 
-unsafe impl<T> Sync for MPSafeCell<T> {}
-
 impl<T> MPSafeCell<T> {
     // 现已支持多核
     pub fn new(value: T) -> Self {

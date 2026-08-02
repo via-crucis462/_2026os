@@ -37,6 +37,11 @@ impl VforkCompletion {
 	/// 阻塞等待子进程完成 exec/exit 时由子进程调用 complete() 唤醒
 	pub fn wait(&self) {
 		while !self.done.load(Ordering::Acquire) {
+			// 每次循环先检查 SIGKILL
+			let task = crate::process::current_task().unwrap();
+			if crate::process::signal::has_pending_sigkill(&task) {
+				return;
+			}
 			block_current_and_run_next_if_mp(&self.waiters, || {
 				!self.done.load(Ordering::Acquire)
 			});

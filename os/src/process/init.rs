@@ -15,6 +15,7 @@ use crate::process::task::{
 use crate::process::{add_task, kstack_alloc, pid_alloc};
 use crate::sync::MPSafeCell;
 use alloc::{string::String, sync::{Arc, Weak}, vec::Vec};
+use core::sync::atomic::AtomicBool;
 use lazy_static::*;
 
 impl TaskStruct {
@@ -93,6 +94,7 @@ impl TaskStruct {
 				files: Arc::new(MPSafeCell::new(FileDescriptorTable::new())),
 				exe_path: String::from("/initproc"),
 				signal: Arc::new(MPSafeCell::new(Signal::new())),
+				exec_update_lock: Arc::new(AtomicBool::new(false)),
 				signal_hand: Arc::new(MPSafeCell::new(SigHand::new())),
 				blocked: SignalFlags::empty(),
 				pending: Sigpending::new(),
@@ -117,7 +119,6 @@ impl TaskStruct {
 					(1usize << crate::arch::config::CPU_CORE_NUM) - 1
 				},
 				need_resched: false,
-				exec_exit_requested: false,
 				clear_child_tid: 0,
 				vfork_completion: None,
 				personality: 0,
