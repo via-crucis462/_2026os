@@ -234,23 +234,36 @@ impl PageCacheManager {
         is_data: bool,
         load_from_disk: bool,
     ) -> (Arc<PageCache>, bool) {
-        let mut map = self.page_cache_map.lock();
-        if let Some(cache) = map.get(&block_id).cloned() {
-            drop(map);
-            self.touch_lru(block_id, is_data);
-            return (cache, false);
+        // 先尝试获取已存在的缓存
+        {
+            let map = self.page_cache_map.lock();
+            if let Some(cache) = map.get(&block_id).cloned() {
+                drop(map);
+                self.touch_lru(block_id, is_data);
+                return (cache, false);
+            }
         }
+        // 这里释放了 page_cache_map 锁，避免内存不足时回收缓存时死锁
 
+        // 旧实现持 page_cache_map 锁创建缓存，现在改为先创建缓存再插入 map
         let cache = Arc::new(PageCache::new_loading(
             block_id as usize,
             block_device.clone(),
         ));
-        let mut inner = cache.inner.lock();
+
+        let mut map = self.page_cache_map.lock();
+        if let Some(existing) = map.get(&block_id).cloned() {
+            // 防止并发重复插入
+            drop(map);
+            drop(cache);
+            self.touch_lru(block_id, is_data);
+            return (existing, false);
+        }
         map.insert(block_id, cache.clone());
-        // 新建 cache
         drop(map);
         self.touch_lru(block_id, is_data);
-        
+
+        let mut inner = cache.inner.lock();
         if load_from_disk {
             block_device.raw_read_block(block_id as usize, inner.frame.get_bytes_array());
             inner.state = CacheState::Clean;
