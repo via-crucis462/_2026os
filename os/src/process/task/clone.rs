@@ -156,6 +156,12 @@ impl TaskStruct {
 		let cpus_allowed = parent_inner.cpus_allowed;
 		let parent_cpu = parent_inner.cpu;
 		let blocked = parent_inner.blocked;               // 信号阻塞掩码
+		let signal_alt_stack = if flags & CLONE_VM != 0 {
+			// Linux 在 CLONE_VM 且非 vfork 的子任务中禁用继承的备用信号栈。
+			SignalAltStackState::default()
+		} else {
+			parent_inner.signal_alt_stack
+		};
 		let nsproxy = parent_inner.nsproxy.clone();       // 命名空间代理
 		let cred = parent_inner.cred.clone();              // 有效凭据
 		let real_cred = parent_inner.real_cred.clone();   // 真实凭据
@@ -257,6 +263,7 @@ impl TaskStruct {
 					signal_mask_backup: Vec::new(),
 					trap_ctx_backup: Vec::new(),
 					signal_user_context_backup: Vec::new(),
+					signal_alt_stack,
 					term_signal: None,
 					frozen: false,
 					cred,

@@ -1277,6 +1277,71 @@ pub fn sys_chdir(path: *const u8) -> isize {
     }
 }
 
+pub fn sys_fchdir(fd: usize) -> isize {
+    let file = {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if fd >= inner.fds.len() {
+            return EBADF.as_isize();
+        }
+        let Some(file) = inner.fds[fd].file.as_ref() else {
+            return EBADF.as_isize();
+        };
+        file.clone()
+    };
+
+    let Some(dentry) = file.get_dentry() else {
+        return ENOTDIR.as_isize();
+    };
+    if dentry.inode.get_stat().mode & S_IFMT != 0o040000 {
+        return ENOTDIR.as_isize();
+    }
+
+    let task = current_task().unwrap();
+    let fs = task.inner_exclusive_access().fs.clone();
+    fs.exclusive_access().set_pwd(dentry);
+    0
+}
+
+pub fn sys_fadvise64(fd: usize, _offset: usize, _len: usize, advice: i32) -> isize {
+    const POSIX_FADV_NORMAL: i32 = 0;
+    const POSIX_FADV_RANDOM: i32 = 1;
+    const POSIX_FADV_SEQUENTIAL: i32 = 2;
+    const POSIX_FADV_WILLNEED: i32 = 3;
+    const POSIX_FADV_DONTNEED: i32 = 4;
+    const POSIX_FADV_NOREUSE: i32 = 5;
+
+    let file = {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if fd >= inner.fds.len() {
+            return EBADF.as_isize();
+        }
+        let Some(file) = inner.fds[fd].file.as_ref() else {
+            return EBADF.as_isize();
+        };
+        file.clone()
+    };
+
+    if !matches!(
+        advice,
+        POSIX_FADV_NORMAL
+            | POSIX_FADV_RANDOM
+            | POSIX_FADV_SEQUENTIAL
+            | POSIX_FADV_WILLNEED
+            | POSIX_FADV_DONTNEED
+            | POSIX_FADV_NOREUSE
+    ) {
+        return EINVAL.as_isize();
+    }
+    if file.as_any().is::<crate::fs::Pipe>() {
+        return ESPIPE.as_isize();
+    }
+
+    // 最简兼容实现：接受合法提示，但暂不调整预读或页缓存策略。
+    0
+}
+
 pub fn sys_mount(source: *const u8, target: *const u8, filesystemtype: *const u8, mountflags: u32) -> isize {
     let token = current_user_token();
     let source_str = normalize_leading_dot_path(

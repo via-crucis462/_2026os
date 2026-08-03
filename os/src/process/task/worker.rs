@@ -69,6 +69,7 @@ impl TaskStruct {
                 signal_mask_backup: Vec::new(),
                 trap_ctx_backup: Vec::new(),
                 signal_user_context_backup: Vec::new(),
+                signal_alt_stack: SignalAltStackState::default(),
                 term_signal: None,
                 frozen: false,
                 cred: Arc::new(MPSafeCell::new(Cred::new(0, 0, 0, 0, 0, 0, 0, 0))),

@@ -14,6 +14,7 @@ use crate::process::{
 use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, USER_STACK_SIZE, get_hart_id};
 use crate::process::{FdFlags, FileDescriptor};    // 引入当前进程获取方法
+use crate::process::task::SignalAltStackState;
 use crate::net::socket::TcpSocket;
 use alloc::collections::btree_map::Values;
 use alloc::vec;
@@ -120,6 +121,82 @@ pub tms_utime: usize,  // 用户态时间
 pub tms_stime: usize,  // 内核态时间
 pub tms_cutime: usize, // 子进程用户态时间
 pub tms_cstime: usize, // 子进程内核态时间
+}
+
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SignalAltStack {
+    pub ss_sp: usize,
+    pub ss_flags: i32,
+    pub _pad: i32,
+    pub ss_size: usize,
+}
+
+pub fn sys_sigaltstack(ss: *const SignalAltStack, old_ss: *mut SignalAltStack) -> isize {
+    const SS_ONSTACK: u32 = 1;
+    const SS_DISABLE: u32 = 2;
+    const SS_AUTODISARM: u32 = 0x8000_0000;
+    const MINSIGSTKSZ: usize = 2048;
+
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    let token = inner.get_user_token();
+    let current = inner.signal_alt_stack;
+    let user_sp = inner.get_trap_cx().get_sp();
+    let on_stack = current.size != 0
+        && user_sp >= current.sp
+        && user_sp < current.sp.saturating_add(current.size);
+
+    if !old_ss.is_null() {
+        let old = SignalAltStack {
+            ss_sp: current.sp,
+            ss_flags: if current.size == 0 {
+                SS_DISABLE as i32
+            } else if on_stack {
+                SS_ONSTACK as i32
+            } else {
+                current.flags as i32
+            },
+            _pad: 0,
+            ss_size: current.size,
+        };
+        if !try_translated_write(token, old_ss, old) {
+            return EFAULT.as_isize();
+        }
+    }
+
+    if ss.is_null() {
+        return 0;
+    }
+    let Some(new_stack) = try_translated_read(token, ss) else {
+        return EFAULT.as_isize();
+    };
+    if on_stack {
+        return EPERM.as_isize();
+    }
+
+    let flags = new_stack.ss_flags as u32;
+    if flags == SS_DISABLE {
+        inner.signal_alt_stack = SignalAltStackState::default();
+        return 0;
+    }
+    if flags != 0 && flags != SS_AUTODISARM {
+        return EINVAL.as_isize();
+    }
+    if new_stack.ss_size < MINSIGSTKSZ {
+        return ENOMEM.as_isize();
+    }
+    if new_stack.ss_sp == 0 || new_stack.ss_sp.checked_add(new_stack.ss_size).is_none() {
+        return EINVAL.as_isize();
+    }
+
+    inner.signal_alt_stack = SignalAltStackState {
+        sp: new_stack.ss_sp,
+        size: new_stack.ss_size,
+        flags,
+    };
+    0
 }
 
 #[repr(C)]

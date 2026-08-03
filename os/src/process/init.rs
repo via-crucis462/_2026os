@@ -8,7 +8,7 @@ use crate::mm::{KERNEL_SPACE, MemorySet, VirtAddr};
 use crate::process::scheduler::runqueue::SCHED_IDLE;
 use crate::process::signal::{SigHand, Signal, Sigpending, SignalFlags};
 use crate::process::task::{
-	context::ThreadStruct, Cred, FileDescriptorTable, FsStruct, TaskContext,
+	context::ThreadStruct, Cred, FileDescriptorTable, FsStruct, SignalAltStackState, TaskContext,
 	SchedDlEntity, SchedEntity, SchedRtEntity, TaskControlBlock, TaskStatus,
 	TaskStruct, TaskStructInner,
 };
@@ -99,6 +99,7 @@ impl TaskStruct {
 				signal_mask_backup: Vec::new(),
 				trap_ctx_backup: Vec::new(),
 				signal_user_context_backup: Vec::new(),
+				signal_alt_stack: SignalAltStackState::default(),
 				term_signal: None,
 				frozen: false,
 				cred: Arc::new(MPSafeCell::new(Cred::new(0, 0, 0, 0, 0, 0, 0, 0))),

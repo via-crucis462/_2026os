@@ -220,6 +220,9 @@ const SYSCALL_BPF: usize = 280;
 const SYSCALL_RESQ: usize = 293;
 /// accessat syscall
 const SYSCALL_ACCESSAT: usize = 48;
+const SYSCALL_FCHDIR: usize = 50;
+const SYSCALL_SIGALTSTACK: usize = 132;
+const SYSCALL_FADVISE64: usize = 223;
 pub mod bpf;
 pub mod fs;
 pub mod errno;
@@ -351,6 +354,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_KILL => sys_kill(args[0] as isize, args[1] as i32),
         SYSCALL_RT_SIGSUSPEND => sys_rt_sigsuspend(args[0] as *const usize, args[1]),
+        SYSCALL_SIGALTSTACK => sys_sigaltstack(
+            args[0] as *const SignalAltStack,
+            args[1] as *mut SignalAltStack,
+        ),
         SYSCALL_SIGACTION => sys_rt_sigaction(
             args[0] as i32,
             args[1] as *const SignalAction,
@@ -468,6 +475,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETDENTS => sys_getdents(args[0], args[1] as *mut u8, args[2]),
         SYSCALL_GETCWD => sys_getcwd(args[0] as *mut u8, args[1]),
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
+        SYSCALL_FCHDIR => sys_fchdir(args[0]),
+        SYSCALL_FADVISE64 => sys_fadvise64(args[0], args[1], args[2], args[3] as i32),
         SYSCALL_MOUNT => sys_mount(args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3] as u32),
         SYSCALL_UMOUNT => sys_umount(args[0] as *const u8),
         SYSCALL_STATX => sys_statx(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32, args[4] as *mut Statx),

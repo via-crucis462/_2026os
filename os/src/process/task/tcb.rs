@@ -23,6 +23,14 @@ pub struct TaskStruct {
     pub group_leader: Weak<TaskStruct>, // 线程组领头进程
     pub inner: MPSafeCell<TaskStructInner>, // 内部可变结构体
 }
+
+#[derive(Clone, Copy, Default)]
+pub struct SignalAltStackState {
+    pub sp: usize,
+    pub size: usize,
+    pub flags: u32,
+}
+
 impl TaskStruct {
     /// Get the mutable reference of the inner TCB
     pub fn inner_exclusive_access(&self) -> MPSafeGuard<'_, TaskStructInner> {
@@ -122,6 +130,8 @@ pub struct TaskStructInner {
     pub signal_mask_backup: Vec<SignalFlags>,
     pub trap_ctx_backup: Vec<TrapContext>,
     pub signal_user_context_backup: Vec<usize>,
+    /// 当前线程通过 sigaltstack(2) 注册的备用信号栈。
+    pub signal_alt_stack: SignalAltStackState,
     pub term_signal: Option<i32>,
     pub frozen: bool,
 

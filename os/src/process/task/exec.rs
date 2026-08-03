@@ -14,7 +14,7 @@ use crate::process::scheduler::runqueue::{
 	remove_task_from_global_pool_unlocked,
 };
 use crate::process::signal::{SigHand, Signal, Sigpending};
-use crate::process::task::{TaskControlBlock, TaskStatus, TaskStruct};
+use crate::process::task::{SignalAltStackState, TaskControlBlock, TaskStatus, TaskStruct};
 use crate::sync::MPSafeCell;
 use crate::syscall::errno::Errno;
 use alloc::{string::{String, ToString}, sync::Arc, vec, vec::Vec};
@@ -417,6 +417,7 @@ impl TaskStruct {
 			inner.signal_mask_backup.clear();
 			inner.trap_ctx_backup.clear();
 			inner.signal_user_context_backup.clear();
+			inner.signal_alt_stack = SignalAltStackState::default();
 			inner.term_signal = None;
 			inner.frozen = false;
 			inner.clear_child_tid = 0;
