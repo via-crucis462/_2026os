@@ -134,11 +134,12 @@ impl File for Stdout {
         0
     }
     fn write(&self, user_buf: UserBuffer) -> usize {
-        //let _lock = STDOUT_LOCK.exclusive_access();
+        // 按字节直接转发，不解释为 UTF-8
         for buffer in user_buf.buffers.iter() {
-            print!("{}", core::str::from_utf8(*buffer).unwrap());
+            for &b in buffer.iter() {
+                crate::arch::sbi::console_putchar(b as usize);
+            }
         }
-        //drop(_lock);
         user_buf.len()
     }
     fn raw_read_at(&self, _offset: usize, buf: UserBuffer) -> usize {

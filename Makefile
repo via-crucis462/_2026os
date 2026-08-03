@@ -107,7 +107,7 @@ test-rv: build-user-rv copy-user-rv build-rv copy-rv
 	@rm -f kernel_output.log
 	@qemu-system-riscv64 -machine virt \
 	-kernel kernel-rv \
-	-m 1G -nographic -smp $(RV_SMP) \
+	-m 16G -nographic -smp $(RV_SMP) \
 	-bios default -drive file=sdcard-rv.img,if=none,format=raw,id=x0 \
 	-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 	-no-reboot \
