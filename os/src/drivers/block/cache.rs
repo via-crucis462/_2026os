@@ -190,6 +190,8 @@ impl PageCacheLruQueue {
 
 // 元数据缓存的最大数量，超过该数量时会尝试回收
 const META_CACHE_SIZE: usize = 256;
+/// 数据页缓存的最大页数，超过时从 LRU 队头回收
+const DATA_CACHE_SIZE: usize = 1 << 16;
 
 /// 页缓存管理器
 /// 
@@ -261,6 +263,8 @@ impl PageCacheManager {
 
         if !is_data {
             self.trim_meta_cache();
+        } else {
+            self.trim_data_cache();
         }
         (cache, true)
     }
@@ -292,6 +296,21 @@ impl PageCacheManager {
             }
         }
     }
+    /// 尝试回收超过限制的数据缓存
+    fn trim_data_cache(&self) {
+        let attempts = self.data_lru_queue.lock().len();
+        for _ in 0..attempts {
+            if self.data_lru_queue.lock().len() <= DATA_CACHE_SIZE {
+                break;
+            }
+            let Some(block_id) = self.data_lru_queue.lock().pop() else {
+                break;
+            };
+            if !self.try_evict(block_id) {
+                self.data_lru_queue.lock().update(block_id);
+            }
+        }
+    }
     /// 尝试回收指定物理块的缓存，返回是否成功回收
     fn try_evict(&self, block_id: u64) -> bool {
         let cache = {
@@ -318,6 +337,10 @@ impl PageCacheManager {
             .unwrap_or(false)
         {
             map.remove(&block_id);
+            // 同步清理 (ino, logical_block) -> block_id 映射，避免表项残留
+            self.page_cache_id_map
+                .lock()
+                .retain(|_, v| *v != block_id);
             true
         } else {
             false
@@ -422,6 +445,19 @@ impl PageCacheManager {
         for cache in caches {
             cache.sync();
         }
+    }
+    pub fn stats(&self) -> (Option<(usize, usize)>, Option<usize>, Option<usize>) {
+        (
+            self.page_cache_map.try_lock().map(|m| {
+                let pinned = m
+                    .values()
+                    .filter(|cache| Arc::strong_count(cache) > 1)
+                    .count();
+                (m.len(), pinned)
+            }),
+            self.page_cache_id_map.try_lock().map(|m| m.len()),
+            self.data_lru_queue.try_lock().map(|q| q.len()),
+        )
     }
     fn free_data_pages(&self, count: usize) -> usize {
         let attempts = self.data_lru_queue.lock().len();

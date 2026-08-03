@@ -602,9 +602,15 @@ pub fn trap_handler() -> ! {
                 badv,
                 badi
             );
-            if let Some(task) = current_task() {
-                let mm = task.inner_exclusive_access().mm.as_ref().cloned();
-                let Some(mm) = mm else {
+            // 将 pagefault 处理放在独立块中，保证锁和 Arc 自动释放
+            //
+            // 旧实现在每个分支处理成功后，drop 遗漏了 mm 的 Arc，
+            // 却直接调用 trap_return，导致出现内存泄露
+            'fault: {
+                let Some(task) = current_task() else {
+                    break 'fault;
+                };
+                let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
                     error!("[kernel] user fault without mm: pid={}, tid={}", task.getpid(), task.gettid());
                     exit_current_and_run_next(-11);
                     panic!("unreachable: exited task without mm");
@@ -617,9 +623,7 @@ pub fn trap_handler() -> ! {
                     memory_set.handle_cow_fault(badv);
                     if let Some(pte) = memory_set.translate(vpn) {
                         if pte.is_valid() && pte.writable() && memory_set.set_pte_dirty(vpn) {
-                            drop(memory_set);
-                            drop(task);
-                            trap_return();
+                            break 'fault;
                         } else {
                             warn!(
                                 "pte is not writable or cannot set dirty: vpn=0x{:x}, pte=0x{:x}",
@@ -631,14 +635,10 @@ pub fn trap_handler() -> ! {
                     }
                 }
                 if memory_set.handle_cow_fault(badv) {
-                    drop(memory_set);
-                    drop(task);
-                    trap_return();
+                    break 'fault;
                 }
                 if memory_set.handle_page_fault(badv, sp) {
-                    drop(memory_set);
-                    drop(task);
-                    trap_return();
+                    break 'fault;
                 }
                 match memory_set.translate(vpn) {
                     Some(pte) => {
@@ -726,7 +726,6 @@ pub fn trap_handler() -> ! {
                             }
                         }
                     }*/
-            }
             /*if is_brk_process() && (BRK_PRINTF_START..BRK_PRINTF_END).contains(&era) {
                 let cx = current_trap_cx();
                 debug_dump_brk_snapshot("fault_window", cx, current_user_token());
@@ -737,31 +736,33 @@ pub fn trap_handler() -> ! {
                 8,
                 );
             }*/
-            if let Some(task) = current_task() {
-                let mm = task.inner_exclusive_access().mm.as_ref().cloned();
-                let Some(mm) = mm else {
-                    trace!("[kernel] trap_handler: pid={}, tid={}, no user mm", task.getpid(), task.gettid());
-                    exit_current_and_run_next(-11);
-                    panic!("unreachable: exited task without mm");
-                };
-                let memory_set = mm.exclusive_access();
-                let heap_bottom = memory_set.areas()[memory_set.brk_index()]
-                    .get_vpn_range()
-                    .get_start()
-                    .0
-                    * PAGE_SIZE;
-                trace!(
-                    "[kernel] trap_handler: pid={}, tid={}, heap_bottom=0x{:x}, program_brk=0x{:x}",
-                    task.getpid(),
-                    task.gettid(),
-                    heap_bottom,
-                    memory_set.current_brk(),
-                );
-                // inner.memory_set.debug_dump_areas(Some(badv), Some(era));
-            } else {
-                trace!("[kernel] trap_handler: no current task");
+                // 未处理的异常，视为段错误
+                if let Some(task) = current_task() {
+                    let mm = task.inner_exclusive_access().mm.as_ref().cloned();
+                    let Some(mm) = mm else {
+                        trace!("[kernel] trap_handler: pid={}, tid={}, no user mm", task.getpid(), task.gettid());
+                        exit_current_and_run_next(-11);
+                        panic!("unreachable: exited task without mm");
+                    };
+                    let memory_set = mm.exclusive_access();
+                    let heap_bottom = memory_set.areas()[memory_set.brk_index()]
+                        .get_vpn_range()
+                        .get_start()
+                        .0
+                        * PAGE_SIZE;
+                    trace!(
+                        "[kernel] trap_handler: pid={}, tid={}, heap_bottom=0x{:x}, program_brk=0x{:x}",
+                        task.getpid(),
+                        task.gettid(),
+                        heap_bottom,
+                        memory_set.current_brk(),
+                    );
+                    // inner.memory_set.debug_dump_areas(Some(badv), Some(era));
+                } else {
+                    trace!("[kernel] trap_handler: no current task");
+                }
+                current_add_signal(SignalFlags::SIGSEGV);
             }
-            current_add_signal(SignalFlags::SIGSEGV);
         }
     }
     /*println!(

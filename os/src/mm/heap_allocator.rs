@@ -9,7 +9,15 @@ static HEAP_ALLOCATOR: LockedHeap = LockedHeap::empty();
 #[alloc_error_handler]
 /// panic when heap allocation error occurs
 pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
-    panic!("Heap allocation error, layout = {:?}", layout);
+    let heap = HEAP_ALLOCATOR.lock();
+    let (used, total) = (heap.stats_alloc_actual(), heap.stats_total_bytes());
+    drop(heap);
+    let (cache_pages, idmap, lru) =
+        crate::drivers::block::cache::SHARED_PAGE_CACHE_MANAGER.stats();
+    panic!(
+        "Heap allocation error, layout = {:?}, heap used = {}/{} bytes, cache_pages={:?} idmap={:?} lru={:?}",
+        layout, used, total, cache_pages, idmap, lru
+    );
 }
 /// heap space ([u8; KERNEL_HEAP_SIZE])
 /// 会被放到.bss段中
