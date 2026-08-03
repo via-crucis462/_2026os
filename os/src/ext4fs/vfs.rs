@@ -100,6 +100,13 @@ impl VfsInode for Ext4Inode {
         let page_size = crate::PAGE_SIZE;
         let file_size = self.get_size();
         if offset >= file_size { return 0; }
+
+        // ext4 fast symlink直接把目标路径保存在inode的i_block[60]中，
+        // 这里不能把其中的路径字节误当成extent header。
+        if self.is_symlink() && file_size < 60 {
+            return Ext4Inode::raw_read_at(self, offset, buf);
+        }
+
         let read_end = core::cmp::min(offset + buf.len(), file_size);
         let start_page = offset / page_size;
         let end_page = (read_end - 1) / page_size;
@@ -109,7 +116,14 @@ impl VfsInode for Ext4Inode {
             let page_off = if page_idx == start_page { offset % page_size } else { 0 };
             let copy_len = core::cmp::min(page_size - page_off, read_end - (page_idx * page_size + page_off));
 
-            let cache = self.get_shared_page(page_idx).unwrap();
+            let Some(cache) = self.get_shared_page(page_idx) else {
+                error!(
+                    "VFS: failed to obtain page cache for inode {} page {} while reading",
+                    self.inode_id,
+                    page_idx,
+                );
+                break;
+            };
             let page = cache.lock();
             // clone FrameTracker：持有期间物理页不会被释放
             let _guard = page.frame.clone();
@@ -132,7 +146,14 @@ impl VfsInode for Ext4Inode {
             let page_off = if page_idx == start_page { offset % page_size } else { 0 };
             let copy_len = core::cmp::min(page_size - page_off, write_end - (page_idx * page_size + page_off));
 
-            let cache = self.get_shared_page(page_idx).unwrap();
+            let Some(cache) = self.get_shared_page(page_idx) else {
+                error!(
+                    "VFS: failed to obtain page cache for inode {} page {} while writing",
+                    self.inode_id,
+                    page_idx,
+                );
+                break;
+            };
             let mut page = cache.lock();
             // clone FrameTracker：持有期间物理页不会被释放
             let _guard = page.frame.clone();

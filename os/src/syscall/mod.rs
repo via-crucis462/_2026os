@@ -179,6 +179,7 @@ const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MLOCK: usize = 228;
 const SYSCALL_MSYNC: usize = 227;
+const SYSCALL_MINCORE: usize = 232;
 const SYSCALL_GET_MEMPOLICY: usize = 236;
 /// madvise syscall
 const SYSCALL_MADVISE: usize = 233;
@@ -442,6 +443,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_FCNTL => sys_fcntl(args[0], args[1], args[2]),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
+        SYSCALL_MINCORE => sys_mincore(args[0], args[1], args[2] as *mut u8),
         SYSCALL_MADVISE => sys_madvise(args[0], args[1], args[2] as i32),
         SYSCALL_READLINKAT => sys_readlinkat(
         args[0] as isize, 
@@ -493,7 +495,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         #[cfg(target_arch = "riscv64")]
         SYSCALL_RISCV_HWPROBE => sys_riscv_hwprobe(args[0] as *mut RiscvHwprobe, args[1], args[2], args[3] as *const u8, args[4] as u32),
         SYSCALL_CLOCK_SETTIME => sys_clock_settime(args[0] as i32, args[1] as *const TimeSpec),
-        SYSCALL_WAITID => sys_waitid(args[0] as i32, args[1] as i32, args[2] as *mut SigInfo, args[3] as i32),
         SYSCALL_FUTEX => sys_futex(args[0] as *mut i32, args[1] as i32, args[2] as i32, args[3] as *const TimeSpec, args[4] as *mut i32, args[5] as i32),
         SYSCALL_GETRESGID => sys_getresgid(args[0] as *mut u32, args[1] as *mut u32, args[2] as *mut u32),
         SYSCALL_RT_SIGPENDING => sys_rt_sigpending(args[0] as *mut SigSet, args[1] as usize),

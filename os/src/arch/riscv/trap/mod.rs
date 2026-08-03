@@ -142,7 +142,6 @@ pub fn trap_handler() -> ! {
             }*/
             let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
             crate::process::check_posix_timers();
-            crate::process::check_posix_timers();
             for pid in expired_pids {
                 let tasks = crate::process::registry::TID2TCB
                     .exclusive_access()
