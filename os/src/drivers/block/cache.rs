@@ -264,7 +264,9 @@ impl PageCacheManager {
         if !is_data {
             self.trim_meta_cache();
         } else {
-            self.trim_data_cache();
+            // 避免频繁回收数据缓存
+            // 在 tick_sync 中会定期回收
+            // self.trim_data_cache();
         }
         (cache, true)
     }
@@ -441,9 +443,27 @@ impl PageCacheManager {
         }
     }
     pub fn sync_all(&self) {
-        let caches: Vec<_> = self.page_cache_map.lock().values().cloned().collect();
-        for cache in caches {
-            cache.sync();
+        // 分批收集
+        use core::ops::Bound;
+        const SYNC_BATCH: usize = 1024;
+        let mut cursor = 0u64;
+        loop {
+            let batch: Vec<Arc<PageCache>> = {
+                let map = self.page_cache_map.lock();
+                map.range((Bound::Excluded(cursor), Bound::Unbounded))
+                    .take(SYNC_BATCH)
+                    .map(|(id, cache)| {
+                        cursor = *id;
+                        cache.clone()
+                    })
+                    .collect()
+            };
+            if batch.is_empty() {
+                break;
+            }
+            for cache in batch {
+                cache.sync();
+            }
         }
     }
     pub fn stats(&self) -> (Option<(usize, usize)>, Option<usize>, Option<usize>) {
@@ -495,6 +515,11 @@ pub fn invalidate_block_cache(block_id: usize) {
     SHARED_PAGE_CACHE_MANAGER.invalidate_block(block_id as u64);
 }
 
+pub fn trim_cache() {
+    SHARED_PAGE_CACHE_MANAGER.trim_data_cache();
+    SHARED_PAGE_CACHE_MANAGER.trim_meta_cache();
+}
+
 pub fn block_cache_sync_all() {
     SHARED_PAGE_CACHE_MANAGER.sync_all();
 }
@@ -516,6 +541,7 @@ pub fn tick_sync() {
             .is_ok()
     {
         sync_shared_page_cache();
+        trim_cache();
     }
 }
 
