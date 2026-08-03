@@ -619,11 +619,12 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
             (total_ns / 1_000_000_000, total_ns % 1_000_000_000)
             
         }
-        CLOCK_MONOTONIC | CLOCK_MONOTONIC_COARSE | _ => {
+        CLOCK_MONOTONIC | CLOCK_MONOTONIC_COARSE => {
             // 默认：返回系统运行时间 (Uptime)
             let total_us = get_time_us();
             (total_us / 1_000_000, (total_us % 1_000_000) * 1_000)
         }
+        _ => return EINVAL.as_isize(),
     };
     let token = current_user_token();
     let mut time_spec = {
@@ -1546,6 +1547,7 @@ const CLONE_CHILD_SETTID: usize = 0x01000000;    // 向子地址空间写入 TID
 const CLONE_THREAD: usize = 0x00010000;           // 创建线程（共享 tgid）
 const CLONE_SYSVSEM: usize = 0x00040000;           // 共享 System V 信号量（todo）
 const CLONE_PIDFD: usize = 0x00001000;
+const CLONE_VFORK: usize = 0x00004000;
 const CLONE_NEWNS: usize = 0x00020000; // 创建新的 mount namespace
 const CLONE_DETACHED: usize = 0x00400000; // 历史标志：父进程不关心子进程退出信号（已废弃但仍可能出现）
 pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usize) -> isize {
@@ -1565,26 +1567,47 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usi
         | CLONE_PARENT_SETTID
         | CLONE_CHILD_CLEARTID
         | CLONE_CHILD_SETTID
+        | CLONE_VFORK
         | CLONE_DETACHED;
 
-    if flags & !SUPPORTED_FLAGS != 0 {
-        println!("sys_clone: unsupported flags {:#x}", flags);
+    let unsupported_flags = flags & !SUPPORTED_FLAGS;
+    if unsupported_flags != 0 {
+        warn!(
+            "sys_clone: ignoring unsupported flags {:#x} from flags {:#x}",
+            unsupported_flags,
+            flags
+        );
+    }
+    // 简化的 vfork 兼容实现：当前内核没有 vfork completion，无法保证
+    // 父进程一直阻塞到子进程 execve/_exit。若直接保留 CLONE_VM，父子会
+    // 在多核上并发使用同一用户栈，子进程修改栈帧后会导致双方持续缺页。
+    // 因此将 CLONE_VFORK | CLONE_VM 降级成普通 COW fork；语义安全，只是
+    // 暂时失去 vfork 的地址空间共享性能优化。
+    let effective_flags = if flags & CLONE_VFORK != 0 {
+        warn!(
+            "sys_clone: emulating CLONE_VFORK {:#x} with COW fork",
+            flags
+        );
+        flags & !(CLONE_VFORK | CLONE_VM)
+    } else {
+        flags
+    };
+    // 未实现的附加语义不阻断通用 do_clone 流程；do_clone 只解释其已
+    // 实现的标志位，其他位保持原样传入并自然被忽略。
+    if effective_flags & CSIGNAL > MAX_SIG {
         return EINVAL.as_isize();
     }
-    if flags & CSIGNAL > MAX_SIG {
+    if effective_flags & CLONE_SIGHAND != 0 && effective_flags & CLONE_VM == 0 {
         return EINVAL.as_isize();
     }
-    if flags & CLONE_SIGHAND != 0 && flags & CLONE_VM == 0 {
-        return EINVAL.as_isize();
-    }
-    if flags & CLONE_THREAD != 0
-        && (flags & CLONE_SIGHAND == 0 || flags & CSIGNAL != 0)
+    if effective_flags & CLONE_THREAD != 0
+        && (effective_flags & CLONE_SIGHAND == 0 || effective_flags & CSIGNAL != 0)
     {
         return EINVAL.as_isize();
     }
 
     let task = current_task().unwrap();
-    task.do_clone(flags, stack, ptid, ctid, tls)
+    task.do_clone(effective_flags, stack, ptid, ctid, tls)
 }
 /// Return the effective NUMA memory policy. This kernel currently exposes one
 /// memory node, so every address uses node 0 and the default policy.
@@ -2308,9 +2331,15 @@ pub fn sys_tgkill(tgid: usize, tid: usize, signum: i32) -> isize {
 
 /// 获取当前时间
 pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
-    let total_us = get_time_us();
-    let sec = total_us / 1_000_000;
-    let usec = total_us % 1_000_000;
+    if ts.is_null() {
+        return EFAULT.as_isize();
+    }
+    // gettimeofday 返回自 Unix epoch 起的 CLOCK_REALTIME，而不是开机后的
+    // CLOCK_MONOTONIC。两者混用会让两次 date +%s%3N 的差值接近整个 Unix
+    // 时间戳（约 1.8e12 ms），并破坏 glibc 的日期换算。
+    let total_ns = current_wallclock_ns();
+    let sec = (total_ns / 1_000_000_000) as usize;
+    let usec = ((total_ns % 1_000_000_000) / 1_000) as usize;
     let token = current_user_token();
 
     // 校验 tz 指针

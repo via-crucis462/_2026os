@@ -33,6 +33,9 @@ use crate::task::suspend_current_and_run_next;
 
 pub struct TcpSocket {
     pub handle: SocketHandle,
+    /// smoltcp 的单个 TCP socket 只能承接一条握手；监听 socket 使用
+    /// 多个同端口 handle 实现 listen(2) backlog。
+    pub backlog_handles: Mutex<Vec<SocketHandle>>,
     // 暂存 bind 分配或指定的本地端口
     pub local_port: Mutex<Option<u16>>,
     pub read_waiters: Arc<crate::sync::MPSafeCell<WaitQueue>>,
@@ -40,11 +43,10 @@ pub struct TcpSocket {
 }
 
 impl TcpSocket {
-    pub fn new() -> Self {
+    fn allocate_handle() -> SocketHandle {
         let rx_buffer = SocketBuffer::new(vec![0; 8192]);
         let tx_buffer = SocketBuffer::new(vec![0; 8192]);
         let socket = TcpSocketSmol::new(rx_buffer, tx_buffer);
-        let waiters = Arc::new(crate::sync::MPSafeCell::new(WaitQueue::new()));
         // 注册 handle 与等待队列时保持与 net_poll 相同的锁顺序。
         // 否则 net_poll 可能在 add 和 insert 之间看到一个 Closed 且无队列的
         // socket，把它当作孤儿删除，随后首次 get(handle) 就会 panic。
@@ -54,10 +56,44 @@ impl TcpSocket {
         queues.insert(handle, SocketWaitQueue::new());
         drop(queues);
         drop(sockets);
+        handle
+    }
+
+    pub fn new() -> Self {
+        let handle = Self::allocate_handle();
+        let waiters = Arc::new(crate::sync::MPSafeCell::new(WaitQueue::new()));
         Self {
             handle,
+            backlog_handles: Mutex::new(Vec::new()),
             local_port: Mutex::new(None),
             read_waiters: waiters,
+            is_listener: AtomicBool::new(false),
+        }
+    }
+
+    pub fn add_backlog_listener(&self, port: u16) -> Result<(), ()> {
+        let handle = Self::allocate_handle();
+        let listen_result = {
+            let mut sockets = SOCKET_SET.exclusive_access();
+            sockets.get_mut::<TcpSocketSmol>(handle).listen(port)
+        };
+        if listen_result.is_err() {
+            let mut sockets = SOCKET_SET.exclusive_access();
+            let mut queues = SOCKET_WAIT_QUEUES.lock();
+            sockets.remove(handle);
+            queues.remove(&handle);
+            return Err(());
+        }
+        self.backlog_handles.lock().push(handle);
+        Ok(())
+    }
+
+    pub fn from_accepted_handle(handle: SocketHandle) -> Self {
+        Self {
+            handle,
+            backlog_handles: Mutex::new(Vec::new()),
+            local_port: Mutex::new(None),
+            read_waiters: Arc::new(crate::sync::MPSafeCell::new(WaitQueue::new())),
             is_listener: AtomicBool::new(false),
         }
     }
@@ -117,11 +153,29 @@ impl Drop for TcpSocket {
     fn drop(&mut self) {
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let mut queues = crate::net::SOCKET_WAIT_QUEUES.lock();
-        let exists = sockets.iter().any(|(h, _)| h == self.handle);
-        if exists {
-            sockets.remove(self.handle);
+        let mut orphaned_tcp = crate::net::ORPHANED_TCP_SOCKETS.lock();
+        let mut handles = self.backlog_handles.lock();
+        handles.push(self.handle);
+        for handle in handles.drain(..) {
+            let exists = sockets.iter().any(|(h, _)| h == handle);
+            if exists {
+                let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+                let state = socket.state();
+                if matches!(state, State::Closed | State::Listen) {
+                    sockets.remove(handle);
+                    orphaned_tcp.remove(&handle);
+                } else {
+                    // close() 会先排空发送缓冲区再发送 FIN。不能在这里直接
+                    // remove handle，否则对端可能永远收不到 EOF，只能等 timeout。
+                    socket.close();
+                    orphaned_tcp.insert(handle);
+                }
+            }
+            // 文件对象已经消失，不会再有新的 syscall 等待；后续只由
+            // net_poll 推进协议状态并在 Closed 后回收 handle。
+            queues.remove(&handle);
         }
-        queues.remove(&self.handle);
+        drop(orphaned_tcp);
         drop(queues);
         drop(sockets);
         crate::net::net_poll();
