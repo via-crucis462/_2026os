@@ -21,10 +21,9 @@ impl Write for Stdout {
 }
 
 pub fn print(args: fmt::Arguments) {
-    // 诊断用：通过 NO_CONSOLE_LOCK=1 环境变量可跳过此锁
-    // #[cfg(not(no_console_lock))]
-    // let _lock = CONSOLE_LOCK.exclusive_access();
-    // 这行会把fmt全部输出完
+    // 一次格式化输出必须在多核间保持原子性，否则不同 hart 会按字符交错，
+    // 不仅无法还原事件顺序，还可能把 PID、系统调用号等字段拼成错误值。
+    let _lock = CONSOLE_LOCK.exclusive_access();
     Stdout.write_fmt(args).unwrap();
 }
 

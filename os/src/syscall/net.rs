@@ -422,13 +422,34 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
     if let Some(tcp_socket) = file.as_any().downcast_ref::<TcpSocket>() {
         let connect_res = tcp_socket.connect(endpoint);
         if connect_res < 0 {
+            warn!(
+                "[net/connect] pid={} fd={} remote={} start_failed={}",
+                task.getpid(), fd, endpoint, connect_res
+            );
             return connect_res;
         }
+        warn!(
+            "[net/connect] pid={} fd={} local={:?} remote={} state=SynSent",
+            task.getpid(), fd, tcp_socket.local_endpoint(), endpoint
+        );
+        let interrupting_signals = crate::task::SignalFlags::SIGALRM
+            | crate::task::SignalFlags::SIGTERM
+            | crate::task::SignalFlags::SIGINT
+            | crate::task::SignalFlags::SIGKILL;
+        let mut previous_state = smoltcp::socket::tcp::State::SynSent;
         loop {
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_socket.handle);
             let state = smol_socket.state();
             drop(sockets);
+            if state != previous_state {
+                warn!(
+                    "[net/connect] pid={} fd={} local={:?} remote={} {:?}->{:?}",
+                    task.getpid(), fd, tcp_socket.local_endpoint(), endpoint,
+                    previous_state, state
+                );
+                previous_state = state;
+            }
             if state == smoltcp::socket::tcp::State::Established {
                 break; 
             }
@@ -437,7 +458,7 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
             }
             net_poll();
             crate::timer::check_timer_cooperative();
-            if get_pending_signals().contains(crate::task::SignalFlags::SIGALRM) {
+            if get_pending_signals().intersects(interrupting_signals) {
                 return Errno::EINTR.as_isize();
             }
             crate::task::suspend_current_and_run_next();
@@ -536,6 +557,9 @@ pub fn sys_sendto(
             continue;
         }
         net_poll(); 
+        if file.as_any().downcast_ref::<TcpSocket>().is_some() {
+            warn!("[net/send] pid={} fd={} requested={} sent={}", task.getpid(), fd, len, ret);
+        }
         return ret;
     }
 }
@@ -635,6 +659,12 @@ pub fn sys_recvfrom(
     }
     let user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, len));
     let read_len = file.read(user_buf);
+    if file.as_any().downcast_ref::<TcpSocket>().is_some() {
+        warn!(
+            "[net/recv] pid={} fd={} requested={} received={}",
+            task.getpid(), fd, len, read_len as isize
+        );
+    }
     //用户提供了 src_addr 和 addrlen填入对端的 IP 和端口信息
     if src_addr as usize != 0 && addrlen as usize != 0 {
         if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
@@ -879,6 +909,10 @@ pub fn sys_listen(fd: usize, _backlog: i32) -> isize {
         match smol_socket.listen(port) {
            Ok(_) => {
                 socket.is_listener.store(true, Ordering::SeqCst);
+                warn!(
+                    "[net/listen] pid={} fd={} local_port={} state=Listen",
+                    task.getpid(), fd, port
+                );
                 0
             },
             Err(_) => crate::syscall::errno::Errno::EINVAL.as_isize(), // 可能是因为 socket 已经连接或关闭
