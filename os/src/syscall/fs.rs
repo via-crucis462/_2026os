@@ -208,6 +208,12 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
         if (status & (O_NONBLOCK | O_NDELAY)) != 0 && !file.ready_to_read() {
             return EAGAIN.as_isize();
         }
+        if let Some(pipe) = file.as_any().downcast_ref::<crate::fs::Pipe>() {
+            return match pipe.read_for_syscall(UserBuffer::new(translated_byte_buffer(token, buf, len))) {
+                Ok(read) => read as isize,
+                Err(err) => err.as_isize(),
+            };
+        }
         //file.info_type();
         file.read(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
     } else {
