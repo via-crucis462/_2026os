@@ -57,17 +57,14 @@ impl VfsInode for Ext4Inode {
     }
 
     fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize {
+        let _write_guard = self.write_lock.lock();
+        let _block_map_guard = self.block_map_lock.lock();
         let written = self.raw_write_at(offset, buf); // 调用 Ext4Inode 的底层磁盘写入
-        // 底层可能扩展了文件大小，同步更新缓存的 size
-        let new_end = (offset + written) as u64;
-        let old = self.size.load(Ordering::Relaxed);
-        if new_end > old {
-            self.size.store(new_end, Ordering::Relaxed);
-        }
         written
     }
 
     fn get_shared_page(&self, logical_block: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
+        let _block_map_guard = self.block_map_lock.lock();
         let disk_inode = self.fs.get_disk_inode(self.inode_id);
         if self.is_symlink() && disk_inode.size() <= 60 {
             // Fast symlinks keep their target directly in i_block. Treating a
@@ -84,8 +81,30 @@ impl VfsInode for Ext4Inode {
 
         let mut physical_block = self.find_physical_block(logical_block as u32);
         if physical_block == 0 {
-            let new_block = self.fs.alloc_block()?;
-            physical_block = self.add_extent_entry(logical_block as u32, new_block)?;
+            if disk_inode.i_flags & EXT4_EXTENTS_FL == 0 {
+                // Newly created inodes can use classic direct blocks.  Match
+                // raw_write_at here instead of unconditionally treating
+                // i_block as an extent tree.
+                if logical_block >= 12 {
+                    return None;
+                }
+                let new_block = self.fs.alloc_block()?;
+                block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
+                    let base = logical_block * 4;
+                    disk_inode.i_block[base..base + 4].copy_from_slice(&new_block.to_le_bytes());
+                    disk_inode.i_blocks_lo += (BLOCK_SZ / 512) as u32;
+                });
+                physical_block = new_block;
+            } else {
+                let new_block = self.fs.alloc_block()?;
+                physical_block = match self.add_extent_entry(logical_block as u32, new_block) {
+                    Some(block) => block,
+                    None => {
+                        self.fs.dealloc_block(new_block);
+                        return None;
+                    }
+                };
+            }
             return Some(crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
                 .get_new_page_cache(
                     self.inode_id as u64,
@@ -157,6 +176,7 @@ impl VfsInode for Ext4Inode {
 
     /// 带页缓存的写入
     fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+        let _write_guard = self.write_lock.lock();
         if buf.is_empty() {
             return 0;
         }
@@ -167,7 +187,7 @@ impl VfsInode for Ext4Inode {
             let written = self.raw_write_at(offset, buf);
             let new_end = offset + written;
             if new_end > old_size {
-                self.size.store(new_end as u64, Ordering::Relaxed);
+                self.size.fetch_max(new_end as u64, Ordering::Relaxed);
             }
             return written;
         }
@@ -200,7 +220,7 @@ impl VfsInode for Ext4Inode {
         let new_end = offset + buf_offset;
         let old_size = self.get_size();
         if new_end > old_size {
-            self.size.store(new_end as u64, Ordering::Relaxed);
+            self.size.fetch_max(new_end as u64, Ordering::Relaxed);
             block_modify_inode(&self.fs, self.inode_id, |disk_inode: &mut Ext4InodeDisk| {
                 disk_inode.i_size_lo = new_end as u32;
                 disk_inode.i_size_high = (new_end >> 32) as u32;
@@ -215,6 +235,8 @@ impl VfsInode for Ext4Inode {
     }
 
     fn truncate(&self, len: usize) -> bool {
+        let _write_guard = self.write_lock.lock();
+        let _block_map_guard = self.block_map_lock.lock();
         let truncated = Ext4Inode::truncate(self, len);
         if truncated {
             self.size.store(len as u64, Ordering::Relaxed);
@@ -321,8 +343,24 @@ impl VfsInode for Ext4Inode {
             disk_inode.i_dtime = 0;
             disk_inode.i_links_count = 2;
             disk_inode.i_blocks_lo = 0;
-            disk_inode.i_flags = 0;
-            disk_inode.i_block.fill(0);
+            if (self.fs.superblock.incompat_features & 0x40) != 0 {
+                disk_inode.i_flags = EXT4_EXTENTS_FL;
+                disk_inode.i_block.fill(0);
+                let header = Ext4ExtentHeader {
+                    eh_magic: 0xF30A,
+                    eh_entries: 0,
+                    eh_max: 4,
+                    eh_depth: 0,
+                    eh_generation: 0,
+                };
+                unsafe {
+                    (disk_inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader)
+                        .write_unaligned(header);
+                }
+            } else {
+                disk_inode.i_flags = 0;
+                disk_inode.i_block.fill(0);
+            }
         });
 
         // 4. 在父目录的数据块中写入目录项 (文件类型 2)

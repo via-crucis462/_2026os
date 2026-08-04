@@ -24,9 +24,13 @@ impl Ext4FS {
         let group_num = superblock.group_num();
         let mut block_groups = Vec::new();
 
-        let mut buf = [0u8; BLOCK_SZ];
-        block_dev.read_block(1, &mut buf);
         let desc_size = superblock.desc_size as usize;
+        // 组描述符表可能跨多个块，全部读入内核缓冲区再解析
+        let desc_blocks = (group_num as usize * desc_size + BLOCK_SZ - 1) / BLOCK_SZ;
+        let mut buf = alloc::vec![0u8; desc_blocks * BLOCK_SZ];
+        for b in 0..desc_blocks {
+            block_dev.read_block(1 + b, &mut buf[b * BLOCK_SZ..(b + 1) * BLOCK_SZ]);
+        }
 
         for i in 0..group_num {
             let x = unsafe { &*(buf.as_ptr().add(i as usize * desc_size) as *const Ext4GroupDescDisk) };
@@ -186,6 +190,16 @@ impl Ext4FS {
         let relative_block_id = block_id - first_data_block;
         let group_idx = relative_block_id / blocks_per_group;
         let block_idx = relative_block_id % blocks_per_group;
+        if group_idx as usize >= self.block_groups.len() {
+            panic!(
+                "dealloc_block out of range: block_id={} first_data_block={} blocks_per_group={} group_idx={} groups={}",
+                block_id,
+                first_data_block,
+                blocks_per_group,
+                group_idx,
+                self.block_groups.len()
+            );
+        }
 
         let mut group = self.block_groups[group_idx as usize].lock();
         let bitmap_block = group.block_bitmap_id;
