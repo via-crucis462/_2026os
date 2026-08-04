@@ -765,6 +765,9 @@ impl Ext4Inode {
                     disk_inode.i_size_high = 0;
                 }
             });
+            if !buf.is_empty() && end > old_size_bytes {
+                self.size.fetch_max(end as u64, Ordering::Release);
+            }
             return buf.len();
         }
         while curr_offset < end {
@@ -825,11 +828,13 @@ impl Ext4Inode {
         let new_size_bytes = offset + actual_write;
         info!("raw_write_at: done actual_write={} new_size={}", actual_write, new_size_bytes);
         
-        if new_size_bytes > old_size_bytes {
+        if actual_write > 0 && new_size_bytes > old_size_bytes {
             block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
                 disk_inode.i_size_lo = new_size_bytes as u32;
                 disk_inode.i_size_high = (new_size_bytes >> 32) as u32;
             });
+            self.size
+                .fetch_max(new_size_bytes as u64, Ordering::Release);
         }
 
         actual_write
@@ -888,9 +893,9 @@ impl Ext4Inode {
                     buf[new_offset..new_offset + new_dirent_bytes.len()].copy_from_slice(new_dirent_bytes);
 
                     self.update_dir_block_checksum_if_needed(&mut buf);
-                    
-                    self.raw_write_at(offset, &buf); 
-                    return true;
+
+                    let written = self.raw_write_at(offset, &buf);
+                    return written == BLOCK_SZ;
                 }
                 
                 block_offset += rec_len;
@@ -1065,10 +1070,12 @@ impl Ext4Inode {
             disk_inode.i_size_lo = len as u32;
             disk_inode.i_size_high = (len >> 32) as u32;
             self.fs.block_dev.write_block(block_id as usize, &buf);
+            self.size.store(len as u64, Ordering::Release);
             return true;
         }
 
         if len == old_size {
+            self.size.store(len as u64, Ordering::Release);
             return true;
         }
 
@@ -1087,6 +1094,7 @@ impl Ext4Inode {
                 disk_inode.i_size_lo = len as u32;
                 disk_inode.i_size_high = (len >> 32) as u32;
                 self.fs.block_dev.write_block(block_id as usize, &buf);
+                self.size.store(len as u64, Ordering::Release);
                 return true;
             }
             if header.eh_depth != 0 {
@@ -1193,6 +1201,7 @@ impl Ext4Inode {
         disk_inode.i_size_high = (len >> 32) as u32;
 
         self.fs.block_dev.write_block(block_id as usize, &buf);
+        self.size.store(len as u64, Ordering::Release);
 
         // 第二阶段：释放收集到的物理块
         for phys in blocks_to_free {

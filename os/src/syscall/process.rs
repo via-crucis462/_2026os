@@ -800,14 +800,19 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
         return EBADF.as_isize();
     }
     let file = fd_table[fd].file.as_ref().unwrap();
-    let mut is_tty = false;
-    if fd <= 2 || fd == 255 {
-        is_tty = true; 
-    } else if let Some(dentry) = file.get_dentry() {
-        // 如果 fd > 2，检查它的文件名，只要包含 tty 或 console，是合法的终端 fd
-        let name = dentry.name();
-        if name.contains("tty") || name.contains("console") {
-            is_tty = true;
+    // TTY 属性属于打开的文件对象，而不属于 fd 数字。dup2(pipe, 1) 后 fd 1
+    // 已经是 Pipe，必须让 TCGETS 返回 ENOTTY，否则 isatty(1) 会误报为真，
+    // BusyBox ls 会向管道输出多列内容，使 `ls | wc -l` 得到错误计数。
+    let mut is_tty = file.as_any().is::<crate::fs::Stdin>()
+        || file.as_any().is::<crate::fs::Stdout>()
+        || file.as_any().is::<crate::fs::Stderr>();
+    if !is_tty {
+        if let Some(dentry) = file.get_dentry() {
+            // 设备节点名包含 tty 或 console 时视为终端。
+            let name = dentry.name();
+            if name.contains("tty") || name.contains("console") {
+                is_tty = true;
+            }
         }
     }
     let token = current_user_token();

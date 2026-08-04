@@ -10,13 +10,27 @@ use crate::fs::{RenameError, VfsInode};
 use crate::syscall::fs::Statfs;
 use super::block_modify_inode;
 
+/// ext4 磁盘目录项的 EXT4_FT_* 编码与 Linux dirent 的 DT_* 编码不同。
+fn ext4_file_type_to_linux_d_type(file_type: u8) -> u8 {
+    match file_type {
+        1 => 8,  // EXT4_FT_REG_FILE -> DT_REG
+        2 => 4,  // EXT4_FT_DIR      -> DT_DIR
+        3 => 2,  // EXT4_FT_CHRDEV   -> DT_CHR
+        4 => 6,  // EXT4_FT_BLKDEV   -> DT_BLK
+        5 => 1,  // EXT4_FT_FIFO     -> DT_FIFO
+        6 => 12, // EXT4_FT_SOCK     -> DT_SOCK
+        7 => 10, // EXT4_FT_SYMLINK  -> DT_LNK
+        _ => 0,  // EXT4_FT_UNKNOWN  -> DT_UNKNOWN
+    }
+}
+
 impl VfsInode for Ext4Inode {
      fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
         if !self.is_dir() {
             return None;
         }
         let mut offset = 0;
-        let file_size_bytes = self.size.load(Ordering::Relaxed) as usize;
+        let file_size_bytes = self.size.load(Ordering::Acquire) as usize;
 
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; 4096];
@@ -53,18 +67,11 @@ impl VfsInode for Ext4Inode {
     }
 
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        self.raw_read_at(offset, buf) // 调用 Ext4Inode 的底层磁盘读取
+        Ext4Inode::raw_read_at(self, offset, buf)
     }
 
     fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize {
-        let written = self.raw_write_at(offset, buf); // 调用 Ext4Inode 的底层磁盘写入
-        // 底层可能扩展了文件大小，同步更新缓存的 size
-        let new_end = (offset + written) as u64;
-        let old = self.size.load(Ordering::Relaxed);
-        if new_end > old {
-            self.size.store(new_end, Ordering::Relaxed);
-        }
-        written
+        Ext4Inode::raw_write_at(self, offset, buf)
     }
 
     fn get_shared_page(&self, logical_block: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
@@ -178,7 +185,7 @@ impl VfsInode for Ext4Inode {
     }
 
     fn get_size(&self) -> usize {
-        self.size.load(Ordering::Relaxed) as usize
+        self.size.load(Ordering::Acquire) as usize
     }
 
     fn truncate(&self, len: usize) -> bool {
@@ -317,7 +324,7 @@ impl VfsInode for Ext4Inode {
             return -1;
         }
         let mut buf_offset = 0;
-        let file_size_bytes = self.size.load(Ordering::Relaxed) as usize;
+        let file_size_bytes = self.size.load(Ordering::Acquire) as usize;
         let buf_len = buf.len();
         let mut last_name = String::new();
 
@@ -380,7 +387,7 @@ impl VfsInode for Ext4Inode {
                         buf[buf_offset+16..buf_offset+18].copy_from_slice(&reclen_u16.to_ne_bytes());
                         
 
-                        let d_type: u8 = ext4_dirent.file_type;
+                        let d_type = ext4_file_type_to_linux_d_type(ext4_dirent.file_type);
                         buf[buf_offset+18] = d_type;
                         
 
