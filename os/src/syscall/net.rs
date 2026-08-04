@@ -18,7 +18,6 @@ use core::sync::atomic::{AtomicU16, Ordering};
 use crate::fs::{OpenFlags, create_fifo_in_dentry};
 use crate::timer::TimeVal;
 use crate::get_time_ms;
-use crate::timer::check_timer_cooperative;
 use smoltcp::socket::tcp::State;
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -457,7 +456,7 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
                 return Errno::ECONNREFUSED.as_isize();
             }
             net_poll();
-            crate::timer::check_timer_cooperative();
+            crate::timer::check_timers();
             if get_pending_signals().intersects(interrupting_signals) {
                 return Errno::EINTR.as_isize();
             }
@@ -648,7 +647,6 @@ pub fn sys_recvfrom(
                         return crate::syscall::errno::Errno::EAGAIN.as_isize(); 
                     }
                 }
-                crate::timer::check_timer_cooperative();
                 if get_pending_signals().contains(crate::task::SignalFlags::SIGALRM) {
                     return crate::syscall::errno::Errno::EINTR.as_isize(); 
                 }
@@ -764,6 +762,7 @@ pub fn sys_socketpair(domain: usize, socket_type: usize, protocol: usize, sv: *m
     const AF_UNIX: usize = 1;
     const SOCK_STREAM: usize = 1;
     const SOCK_DGRAM: usize = 2;
+    const SOCK_SEQPACKET: usize = 5;
     const SOCK_NONBLOCK: usize = 0o4000;
     const SOCK_CLOEXEC: usize = 0o2000000;
 
@@ -781,7 +780,7 @@ pub fn sys_socketpair(domain: usize, socket_type: usize, protocol: usize, sv: *m
     let real_type = socket_type & 0xff;
     let socket_kind = match real_type {
         SOCK_STREAM => UnixSocketType::Stream,
-        SOCK_DGRAM => UnixSocketType::Datagram,
+        SOCK_DGRAM | SOCK_SEQPACKET => UnixSocketType::Datagram,
         _ => return Errno::EPROTOTYPE.as_isize(),
     };
 

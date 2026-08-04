@@ -3,11 +3,12 @@
 use crate::arch::{timer::get_time_us, trap::TrapContext};
 use crate::mm::{KERNEL_SPACE, MemorySet, VirtAddr};
 use crate::process::{add_task, kstack_alloc, pid_alloc};
-use crate::process::signal::{SigHand, Signal, Sigpending};
+use crate::process::signal::{SigHand, Signal, SignalAltStack, Sigpending};
 use crate::process::task::{context::ThreadStruct, *};
 use crate::sync::MPSafeCell;
 use crate::syscall::errno::Errno;
 use alloc::{sync::Arc, vec::Vec};
+use core::sync::atomic::AtomicBool;
 
 impl TaskStruct {
 	/// clone 系统调用的核心实现。
@@ -31,12 +32,14 @@ impl TaskStruct {
 		const CLONE_FS: usize = 0x00000200;              // 共享 fs_struct（根目录/工作目录）
 		const CLONE_FILES: usize = 0x00000400;           // 共享文件描述符表
 		const CLONE_SIGHAND: usize = 0x00000800;         // 共享信号处理函数表
+		const CLONE_VFORK: usize = 0x00004000;           // 子进程 exec/exit 前挂起父进程
 		const CLONE_SETTLS: usize = 0x00080000;          // 设置子任务 TLS 指针
 		const CLONE_PARENT_SETTID: usize = 0x00100000;   // 向父地址空间写入子 TID
 		const CLONE_CHILD_CLEARTID: usize = 0x00200000;  // 子任务退出时清零 ctid 并 futex 唤醒
 		const CLONE_CHILD_SETTID: usize = 0x01000000;    // 向子地址空间写入 TID
 		const CLONE_THREAD: usize = 0x00010000;           // 创建线程（共享 tgid）
 		const CLONE_SYSVSEM: usize = 0x00040000;           // 共享 System V 信号量（todo）
+		const CLONE_CLEAR_SIGHAND: usize = 0x1_0000_0000; // 清空子进程信号处理函数表
 
 		// ── 0. 判断是创建线程还是独立进程 ──
 		let clone_thread = flags & CLONE_THREAD != 0;
@@ -75,7 +78,18 @@ impl TaskStruct {
 			return Errno::EFAULT.as_isize();
 		}
 
-		// ── 3. 获取父任务 inner 锁，开始复制/共享各类资源 ──
+		// ── 3. 开始复制/共享各类资源 ──
+
+		// 先获取 exec/clone 互斥锁
+		let exec_lock: Option<ExecUpdateGuard> = if clone_thread {
+			Some(match self.wait_exec_update_lock() {
+				Ok(guard) => guard,
+				Err(()) => return Errno::EAGAIN.as_isize(),
+			})
+		} else {
+			None
+		};
+
 		let parent_inner = self.inner_exclusive_access();
 
 		// 3a. 地址空间（mm）
@@ -110,7 +124,9 @@ impl TaskStruct {
 		};
 
 		// 3d. 信号处理函数表（SigHand）
-		let child_signal_hand = if flags & CLONE_SIGHAND != 0 {
+		let child_signal_hand = if flags & CLONE_CLEAR_SIGHAND != 0 {
+			Arc::new(MPSafeCell::new(SigHand::new()))
+		} else if flags & CLONE_SIGHAND != 0 {
 			// 共享信号处理函数（线程必须；Linux 要求 CLONE_SIGHAND ⇒ CLONE_VM）
 			parent_inner.signal_hand.clone()
 		} else {
@@ -156,20 +172,42 @@ impl TaskStruct {
 		let cpus_allowed = parent_inner.cpus_allowed;
 		let parent_cpu = parent_inner.cpu;
 		let blocked = parent_inner.blocked;               // 信号阻塞掩码
-		let signal_alt_stack = if flags & CLONE_VM != 0 {
-			// Linux 在 CLONE_VM 且非 vfork 的子任务中禁用继承的备用信号栈。
-			SignalAltStackState::default()
-		} else {
-			parent_inner.signal_alt_stack
-		};
 		let nsproxy = parent_inner.nsproxy.clone();       // 命名空间代理
-		let cred = parent_inner.cred.clone();              // 有效凭据
-		let real_cred = parent_inner.real_cred.clone();   // 真实凭据
+		// 凭据：CLONE_THREAD 共享 cred（与 Linux 一致）；独立进程必须复制。
+		// 否则子进程 setuid/seteuid 会通过共享的 Arc 把父进程/兄弟进程的 uid
+		// 一起改掉，导致后续 fork 出的测试进程变成非 root，chmod/chown 报 EPERM。
+		let (cred, real_cred) = if clone_thread {
+			(parent_inner.cred.clone(), parent_inner.real_cred.clone())
+		} else {
+			(
+				Arc::new(MPSafeCell::new(parent_inner.cred.exclusive_access().clone())),
+				Arc::new(MPSafeCell::new(parent_inner.real_cred.exclusive_access().clone())),
+			)
+		};
 		let personality = parent_inner.personality;
 		let locked_bytes = parent_inner.locked_bytes;
 		let comm = parent_inner.comm;
 		let pgid = parent_inner.pgid;
 		let sid = parent_inner.sid;
+		let oom_score_adj = parent_inner.oom_score_adj;
+		let exe_path = parent_inner.exe_path.clone();
+		// 线程与父共享 exec 互斥锁，独立进程新建。
+		let exec_update_lock = if clone_thread {
+			parent_inner.exec_update_lock.clone()
+		} else {
+			Arc::new(AtomicBool::new(false))
+		};
+		let signal_alt_stack = if flags & CLONE_VM != 0 && flags & CLONE_VFORK == 0 {
+			// Linux 仅在普通 CLONE_VM 子任务中禁用备用栈；vfork 是例外。
+			SignalAltStack::default()
+		} else {
+			parent_inner.signal_alt_stack
+		};
+		let vfork_completion = if flags & CLONE_VFORK != 0 {
+			Some(Arc::new(VforkCompletion::new()))
+		} else {
+			None
+		};
 		drop(parent_inner); // 释放父任务锁，避免后续分配 PID/内核栈时持锁
 
 		// ── 4. 分配新任务标识 ──
@@ -243,6 +281,7 @@ impl TaskStruct {
 					exit_signal: (flags & CSIGNAL) as i32, // 退出时向父进程发送的信号
 					flags: 0,
 					errno: 0,
+					oom_score_adj,
 					sched_policy,
 					sched_priority,
 					prio,
@@ -254,7 +293,9 @@ impl TaskStruct {
 					mm: Some(child_mm),
 					fs: child_fs,
 					files: child_files,
+					exe_path,
 					signal: child_signal,
+					exec_update_lock,
 					signal_hand: child_signal_hand,
 					blocked,
 					pending: Sigpending::new(),             // 子任务的私有挂起信号为空
@@ -280,6 +321,7 @@ impl TaskStruct {
 					} else {
 						0
 					},
+					vfork_completion: vfork_completion.clone(),
 					personality,
 					locked_bytes,
 					comm,
@@ -354,6 +396,14 @@ impl TaskStruct {
 			);
 		}
 		add_task(child);
+
+		// 克隆对exec可能访问资源的访问已完成
+		drop(exec_lock);
+
+		// 如果是 CLONE_VFORK，则父任务阻塞等待子任务完成 exec/exit
+		if let Some(completion) = vfork_completion {
+			completion.wait();
+		}
 
 		// 返回子任务的 PID（父任务视角）
 		pid.0 as isize

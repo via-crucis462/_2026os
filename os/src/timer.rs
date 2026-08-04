@@ -1,10 +1,13 @@
 pub use crate::arch::timer::*;
 
 use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
-use spin::Mutex;
-use lazy_static::lazy_static;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
+use lazy_static::lazy_static;
+use spin::Mutex;
+
+use crate::process::scheduler::runqueue::wake_up_task;
+use crate::process::{SignalFlags, TaskControlBlock, TaskStatus};
 
 /// 当前实现接受的 `Timex.modes` 位定义。
 pub const ADJ_OFFSET: u32 = 0x0001;
@@ -91,11 +94,34 @@ lazy_static! {
     /// 叠加在平台 realtime 时钟之上的软件偏移量，单位为纳秒。
     pub static ref CLOCK_REALTIME_OFFSET_NS: Mutex<i64> = Mutex::new(0);
 }
-pub fn check_timer_cooperative() {
+
+/// Queue a timer-generated signal and wake a task when it is immediately deliverable.
+pub(crate) fn queue_timer_signal(task: Arc<TaskControlBlock>, signal: SignalFlags) {
+    let should_wake = {
+        let mut inner = task.inner_exclusive_access();
+        inner.pending.insert(signal);
+
+        let deliverable = !inner.blocked.contains(signal)
+            || signal.intersects(SignalFlags::SIGKILL | SignalFlags::SIGSTOP);
+        let should_wake =
+            deliverable && matches!(inner.state, TaskStatus::Blocked | TaskStatus::BlockSaving);
+        if should_wake {
+            inner.signal_interrupted = true;
+        }
+        should_wake
+    };
+
+    if should_wake {
+        wake_up_task(task);
+    }
+}
+
+/// 检查到期的闹钟，并向相关进程发送 SIGALRM 信号
+pub(crate) fn check_timers() {
     let current_ms = get_time_ms();
     let expired_pids = TIMER_MANAGER.lock().tick(current_ms);
     crate::process::check_posix_timers();
-    
+
     for pid in expired_pids {
         if let Some(process) = crate::task::get_process(pid) {
             let tasks = crate::process::registry::TID2TCB
@@ -105,18 +131,12 @@ pub fn check_timer_cooperative() {
                 .cloned()
                 .collect::<Vec<_>>();
             for task in tasks {
-                let mut task_inner = task.inner_exclusive_access();
-                task_inner.pending.insert(crate::task::SignalFlags::SIGALRM);
-                if task_inner.state == crate::task::TaskStatus::Blocked {
-                    task_inner.signal_interrupted = true;
-                    task_inner.state = crate::task::TaskStatus::Ready;
-                    drop(task_inner);
-                    crate::task::add_task(task); 
-                }
+                queue_timer_signal(task, SignalFlags::SIGALRM);
             }
         }
     }
 }
+
 pub struct TimerManager {
     // 正向索引：到期时间(ms) -> 挂在该时间点的进程 PID 列表
     events: BTreeMap<usize, Vec<usize>>,

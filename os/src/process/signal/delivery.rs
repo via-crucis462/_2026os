@@ -1,9 +1,22 @@
 use super::frame::push_signal_frame;
-use crate::process::{current_task, SignalFlags, TaskControlBlock};
+use crate::process::{current_task, SignalFlags, TaskControlBlock, TaskStructInner};
 use crate::process::trap::TrapContext;
 use alloc::sync::Arc;
 
-/// Add signal to the current task
+pub(crate) fn inner_has_pending_sigkill(inner: &TaskStructInner) -> bool {
+    inner.pending.contains(SignalFlags::SIGKILL)
+        || inner
+            .signal
+            .exclusive_access()
+            .pending_flags()
+            .contains(SignalFlags::SIGKILL)
+}
+
+pub(crate) fn has_pending_sigkill(task: &Arc<TaskControlBlock>) -> bool {
+    let inner = task.inner_exclusive_access();
+    inner_has_pending_sigkill(&inner)
+}
+
 /// 给当前任务加上信号
 pub fn current_add_signal(signal: SignalFlags) {
     let task = current_task().unwrap();
@@ -139,7 +152,13 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
             trap_ctx.get_rt(),
             trap_ctx.get_sp()
         );
-        let Some((info_ptr, ucontext_ptr)) = push_signal_frame(&mut task_inner, sig, saved_mask) else {
+        const SA_ONSTACK: usize = 0x08000000;
+        let Some((info_ptr, ucontext_ptr)) = push_signal_frame(
+            &mut task_inner,
+            sig,
+            saved_mask,
+            action.flags & SA_ONSTACK != 0,
+        ) else {
             warn!("[SIG PROBE] Failed to write signal frame");
             task_inner.term_signal = Some(sig as i32 + 1);
             return;

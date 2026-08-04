@@ -232,7 +232,7 @@ impl Ext4Inode {
         let flags = disk_inode.i_flags;
         let i_block = disk_inode.i_block;
 
-        if self.is_symlink() && (disk_inode.size() as usize) < 60 {
+        if self.is_symlink() && (disk_inode.size() as usize) <= 60 {
             return 0;
         }
 
@@ -713,7 +713,7 @@ impl Ext4Inode {
         let end = core::cmp::min(offset + buf.len(), disk_size_bytes);
         if curr_offset >= end { return 0; }
 
-        if self.is_symlink() && disk_size_bytes < 60 {
+        if self.is_symlink() && disk_size_bytes <= 60 {
             // i_block 已经是 [u8; 60]，直接复制
             let i_block_bytes = disk_inode.i_block;
             let read_len = end - curr_offset;
@@ -754,7 +754,7 @@ impl Ext4Inode {
         let old_size_bytes = self.fs.get_disk_inode(self.inode_id).size() as usize;
         let end = offset + buf.len();
         info!("raw_write_at: ino={} offset={} len={} old_size={}", self.inode_id, offset, buf.len(), old_size_bytes);
-        if self.is_symlink() && end <= 60 {
+        if self.is_symlink() && old_size_bytes <= 60 && end <= 60 {
             block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
                 let mut i_block_bytes = disk_inode.i_block;
                 i_block_bytes[offset..end].copy_from_slice(buf);
@@ -1226,12 +1226,10 @@ impl Drop for Ext4Inode {
             return;
         }
 
-        // 真正内联的快速符号链接（目标存于 i_block、i_blocks_lo 为 0）没有占用
-        // 数据块，不能走 truncate，否则直接块路径会把 i_block 里的文本误当成
-        // 物理块号释放。注意：本内核通过 write_at 创建的短符号链接虽然 size<60，
-        // 但会额外分配一个数据块（i_blocks_lo>0），这种情况必须走 truncate。
+        // Fast symlinks store their target in i_block and own no data blocks.
+        // Running truncate on one would interpret target text as block IDs.
         let inline_symlink = self.is_symlink()
-            && disk_inode.size() < 60
+            && disk_inode.size() <= 60
             && disk_inode.i_blocks_lo == 0;
         if !inline_symlink {
             // 释放全部数据块并清空 extent 树（i_size / i_blocks 一并归零）

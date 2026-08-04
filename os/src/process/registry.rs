@@ -107,9 +107,8 @@ pub fn tid2task(tid: usize) -> Option<Arc<TaskStruct>> {
 
 pub fn remove_from_tid2task(tid: usize) {
     let mut map = TID2TCB.exclusive_access();
-    if map.remove(&tid).is_none() {
-        panic!("cannot find tid {} in tid2task!", tid);
-    }
+    // 已不在表中则视为已移除，直接返回
+    map.remove(&tid);
 }
 
 pub fn task_count_in_mng() -> usize {

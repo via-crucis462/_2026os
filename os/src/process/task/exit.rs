@@ -115,11 +115,15 @@ impl TaskStruct {
 		inner.state = TaskStatus::Zombie;
 		inner.pending = Sigpending::new();
 		inner.mm.take();
+		let vfork_completion = inner.vfork_completion.take();
 		let files = core::mem::replace(
 			&mut inner.files,
 			Arc::new(MPSafeCell::new(FileDescriptorTable::empty())),
 		);
 		drop(inner);
 		drop(files);
+		if let Some(completion) = vfork_completion {
+			completion.complete();
+		}
 	}
 }

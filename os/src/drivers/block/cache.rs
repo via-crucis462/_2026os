@@ -190,6 +190,8 @@ impl PageCacheLruQueue {
 
 // 元数据缓存的最大数量，超过该数量时会尝试回收
 const META_CACHE_SIZE: usize = 256;
+/// 数据页缓存的最大页数，超过时从 LRU 队头回收
+const DATA_CACHE_SIZE: usize = 1 << 16;
 
 /// 页缓存管理器
 /// 
@@ -261,6 +263,10 @@ impl PageCacheManager {
 
         if !is_data {
             self.trim_meta_cache();
+        } else {
+            // 避免频繁回收数据缓存
+            // 在 tick_sync 中会定期回收
+            // self.trim_data_cache();
         }
         (cache, true)
     }
@@ -292,6 +298,21 @@ impl PageCacheManager {
             }
         }
     }
+    /// 尝试回收超过限制的数据缓存
+    fn trim_data_cache(&self) {
+        let attempts = self.data_lru_queue.lock().len();
+        for _ in 0..attempts {
+            if self.data_lru_queue.lock().len() <= DATA_CACHE_SIZE {
+                break;
+            }
+            let Some(block_id) = self.data_lru_queue.lock().pop() else {
+                break;
+            };
+            if !self.try_evict(block_id) {
+                self.data_lru_queue.lock().update(block_id);
+            }
+        }
+    }
     /// 尝试回收指定物理块的缓存，返回是否成功回收
     fn try_evict(&self, block_id: u64) -> bool {
         let cache = {
@@ -318,6 +339,10 @@ impl PageCacheManager {
             .unwrap_or(false)
         {
             map.remove(&block_id);
+            // 同步清理 (ino, logical_block) -> block_id 映射，避免表项残留
+            self.page_cache_id_map
+                .lock()
+                .retain(|_, v| *v != block_id);
             true
         } else {
             false
@@ -418,10 +443,41 @@ impl PageCacheManager {
         }
     }
     pub fn sync_all(&self) {
-        let caches: Vec<_> = self.page_cache_map.lock().values().cloned().collect();
-        for cache in caches {
-            cache.sync();
+        // 分批收集
+        use core::ops::Bound;
+        const SYNC_BATCH: usize = 1024;
+        let mut cursor = 0u64;
+        loop {
+            let batch: Vec<Arc<PageCache>> = {
+                let map = self.page_cache_map.lock();
+                map.range((Bound::Excluded(cursor), Bound::Unbounded))
+                    .take(SYNC_BATCH)
+                    .map(|(id, cache)| {
+                        cursor = *id;
+                        cache.clone()
+                    })
+                    .collect()
+            };
+            if batch.is_empty() {
+                break;
+            }
+            for cache in batch {
+                cache.sync();
+            }
         }
+    }
+    pub fn stats(&self) -> (Option<(usize, usize)>, Option<usize>, Option<usize>) {
+        (
+            self.page_cache_map.try_lock().map(|m| {
+                let pinned = m
+                    .values()
+                    .filter(|cache| Arc::strong_count(cache) > 1)
+                    .count();
+                (m.len(), pinned)
+            }),
+            self.page_cache_id_map.try_lock().map(|m| m.len()),
+            self.data_lru_queue.try_lock().map(|q| q.len()),
+        )
     }
     fn free_data_pages(&self, count: usize) -> usize {
         let attempts = self.data_lru_queue.lock().len();
@@ -459,6 +515,11 @@ pub fn invalidate_block_cache(block_id: usize) {
     SHARED_PAGE_CACHE_MANAGER.invalidate_block(block_id as u64);
 }
 
+pub fn trim_cache() {
+    SHARED_PAGE_CACHE_MANAGER.trim_data_cache();
+    SHARED_PAGE_CACHE_MANAGER.trim_meta_cache();
+}
+
 pub fn block_cache_sync_all() {
     SHARED_PAGE_CACHE_MANAGER.sync_all();
 }
@@ -480,7 +541,14 @@ pub fn tick_sync() {
             .is_ok()
     {
         sync_shared_page_cache();
+        trim_cache();
     }
+}
+
+pub fn next_sync_delay_ms() -> usize {
+    let elapsed = crate::arch::timer::get_time_ms()
+        .wrapping_sub(LAST_SYNC_TIME.load(Ordering::Relaxed));
+    SYNC_INTERVAL_MS.saturating_sub(elapsed.min(SYNC_INTERVAL_MS))
 }
 
 pub fn free_up_mem_space(std_pages: usize) -> usize {

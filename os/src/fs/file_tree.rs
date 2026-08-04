@@ -6,6 +6,7 @@ use lazy_static::*;
 use super::{VfsInode};
 
 use crate::drivers::block::BLOCK_DEVICE;
+use crate::process::current_task;
 
 pub struct Dentry {
     pub inode: Arc<dyn VfsInode>,
@@ -309,6 +310,21 @@ pub fn file_name(path: &str) -> String {
     }
 }
 
+/// 将新建 inode 的属主设为当前进程的 fsuid/fsgid（Linux 语义）。
+/// 无当前任务（如内核初始化阶段）时保持默认 uid=0。
+fn set_owner_from_current(inode: &Arc<dyn VfsInode>) {
+    let Some(task) = current_task() else { return };
+    let cred = task.inner_exclusive_access().cred.clone();
+    let (uid, gid) = {
+        let c = cred.exclusive_access();
+        (c.euid(), c.egid())
+    };
+    let mut perm = inode.get_perm();
+    perm.uid = uid;
+    perm.gid = gid;
+    inode.set_perm(perm);
+}
+
 pub fn create_file_in_dentry(parent: &Arc<Dentry>, name: String, mode: u32) -> Arc<Dentry> {
     let _namespace_guard = parent.namespace_lock.lock();
     if let Some(child) = parent.mounted_children.lock().get(&name).cloned() {
@@ -322,7 +338,9 @@ pub fn create_file_in_dentry(parent: &Arc<Dentry>, name: String, mode: u32) -> A
     let mode = (mode & 0o7777) | 0o100000;
     let vfs_inode = parent.inode.create_file(&name, mode)
         .expect("VFS: Failed to create file in disk");
-    
+
+    set_owner_from_current(&vfs_inode);
+
     // 将新创建的 Inode 插入 Dentry 缓存树
     parent.insert_locked(name, vfs_inode)
 }
@@ -339,7 +357,9 @@ pub fn create_dir_in_dentry(parent: &Arc<Dentry>, name: String, _mode: u32) -> A
     let mode = (_mode & 0o777) | 0o040000;
     let vfs_inode = parent.inode.create_dir(&name, mode)
         .expect("VFS: Failed to create directory in disk");
-    
+
+    set_owner_from_current(&vfs_inode);
+
     // 将新创建的 Inode 插入 Dentry 缓存树
     parent.insert_locked(name, vfs_inode)
 }

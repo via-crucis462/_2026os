@@ -272,7 +272,7 @@ impl File for TcpSocket {
             }
             drop(sockets);
             crate::net::net_poll();
-            crate::timer::check_timer_cooperative();
+            crate::timer::check_timers();
             let interrupting_signals = crate::task::SignalFlags::SIGALRM
                 | crate::task::SignalFlags::SIGTERM
                 | crate::task::SignalFlags::SIGINT
@@ -313,7 +313,7 @@ impl File for TcpSocket {
             }
             drop(sockets);
             crate::net::net_poll();
-            crate::timer::check_timer_cooperative();
+            crate::timer::check_timers();
             let interrupting_signals = crate::task::SignalFlags::SIGALRM
                 | crate::task::SignalFlags::SIGTERM
                 | crate::task::SignalFlags::SIGINT

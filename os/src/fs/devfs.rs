@@ -4,7 +4,7 @@ use alloc::string::String;
 use crate::fs::tmpfs::TmpfsDirInode;
 use crate::mm::UserBuffer;
 use crate::fs::File;
-use crate::arch::sbi::console_getchar;
+use crate::console::console_read_char;
 use crate::task::suspend_current_and_run_next;
 use crate::fs::ino::get_next_ino;
 use spin::Mutex;
@@ -110,20 +110,14 @@ impl super::VfsInode for TtyInode {
     // 读取终端输入
     fn raw_read_at(&self, _offset: usize, buf: &mut [u8]) -> usize {
         if buf.is_empty() { return 0; }
-        let mut c: usize;
-        loop {
-            c = console_getchar();
-            if c == 13 || c == '\r' as usize {
-                c = 10; // 回车转换行
+        // ICRNL 转换 + ECHO 回显在 console 层完成
+        let ch = loop {
+            if let Some(ch) = console_read_char() {
+                break ch;
             }
-            if c == 0 || c == 0xffffffffffffffff {
-                suspend_current_and_run_next(); // 非阻塞挂起
-                continue;
-            } else {
-                break;
-            }
-        }
-        buf[0] = c as u8;
+            suspend_current_and_run_next(); // 无输入时挂起
+        };
+        buf[0] = ch;
         1
     }
     // 终端输出

@@ -12,6 +12,22 @@ impl Ext4DirEntry {
     pub fn name_len(&self) -> u8 { self.name_len }
     pub fn rec_len(&self) -> u16 { self.rec_len }
 
+    /// 将 ext4 文件类型转换为 Linux dirent 文件类型
+    /// 
+    /// 用于返回正确的文件类型给用户空间
+    pub fn linux_dirent_type(&self) -> u8 {
+        match self.file_type {
+            1 => 8,  // EXT4_FT_REG_FILE -> DT_REG
+            2 => 4,  // EXT4_FT_DIR      -> DT_DIR
+            3 => 2,  // EXT4_FT_CHRDEV   -> DT_CHR
+            4 => 6,  // EXT4_FT_BLKDEV   -> DT_BLK
+            5 => 1,  // EXT4_FT_FIFO     -> DT_FIFO
+            6 => 12, // EXT4_FT_SOCK     -> DT_SOCK
+            7 => 10, // EXT4_FT_SYMLINK  -> DT_LNK
+            _ => 0,  // EXT4_FT_UNKNOWN  -> DT_UNKNOWN
+        }
+    }
+
     /// 计算目录项实际需要的最小长度（头部8字节 + 文件名长度，4字节对齐）
     pub fn real_len(&self) -> u16 {
         let len = 8 + self.name_len as u16;
@@ -59,5 +75,23 @@ impl Ext4DirEntry {
             return "";
         }
         core::str::from_utf8(&self.name[0..len]).unwrap_or("")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Ext4DirEntry;
+
+    #[test]
+    fn converts_ext4_file_types_to_linux_dirent_types() {
+        let expected = [0, 8, 4, 2, 6, 1, 12, 10];
+
+        for (ext4_type, linux_type) in expected.iter().copied().enumerate() {
+            let entry = Ext4DirEntry::new_disk(1, 12, "x", ext4_type as u8);
+            assert_eq!(entry.linux_dirent_type(), linux_type);
+        }
+
+        let invalid = Ext4DirEntry::new_disk(1, 12, "x", u8::MAX);
+        assert_eq!(invalid.linux_dirent_type(), 0);
     }
 }

@@ -341,6 +341,14 @@ impl File for Pipe {
         ring_buffer.available_write() > 0 || ring_buffer.all_read_ends_closed()
         
     }
+    /// 检查管道读是否被打断（例如收到信号）或无法继续读取（例如写端关闭）
+    fn check_read_error(&self) -> Option<Errno> {
+        if self.readable && check_pending_signal() && !self.ready_to_read() {
+            Some(Errno::EINTR)
+        } else {
+            None
+        }
+    }
     fn check_write_error(&self) -> Option<Errno> {
         self.broken_pipe_error()
     }

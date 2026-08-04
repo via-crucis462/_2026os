@@ -5,20 +5,26 @@ use super::*;
 use crate::fs::ROOT_DENTRY;
 use crate::ipc::namespace::{IPCNamespace, NsProxy};
 use crate::process::scheduler::runqueue::SCHED_IDLE;
-use crate::process::signal::{SigHand, Signal, SignalFlags, Sigpending};
+use crate::process::signal::{SigHand, Signal, SignalAltStack, SignalFlags, Sigpending};
 use crate::process::{self, kstack_alloc, pid_alloc};
 use crate::sync::MPSafeCell;
 use alloc::{
+    string::String,
     sync::{Arc, Weak},
     vec::Vec,
 };
+use core::sync::atomic::AtomicBool;
 
 impl TaskStruct {
     /// 创建一个新的内核工作线程
-    pub fn new_kernel_worker(entry: fn() -> !) -> Arc<Self> {
+    pub fn new_kernel_worker(entry: fn() -> !, sched_policy: isize) -> Arc<Self> {
         let pid = Arc::new(pid_alloc());
         let kernel_stack = kstack_alloc();
         let kernel_stack_top = kernel_stack.get_top();
+        let mut sched_entity = SchedEntity::new();
+        if sched_policy == SCHED_IDLE {
+            sched_entity.load_weight = 3;
+        }
 
         Arc::new_cyclic(|task_weak| Self {
             pid: pid.clone(),
@@ -46,12 +52,13 @@ impl TaskStruct {
                 exit_signal: 0,
                 flags: 0,
                 errno: 0,
-                sched_policy: SCHED_IDLE,
+                oom_score_adj: 0,
+                sched_policy,
                 sched_priority: 0,
                 prio: 120,
                 static_prio: 120,
                 normal_prio: 120,
-                se: SchedEntity::new(),
+                se: sched_entity,
                 rt: SchedRtEntity::new(),
                 dl: SchedDlEntity::new(),
                 mm: None,
@@ -60,7 +67,9 @@ impl TaskStruct {
                     ROOT_DENTRY.clone(),
                 ))),
                 files: Arc::new(MPSafeCell::new(FileDescriptorTable::new())),
+                exe_path: String::new(),
                 signal: Arc::new(MPSafeCell::new(Signal::new())),
+                exec_update_lock: Arc::new(AtomicBool::new(false)),
                 signal_hand: Arc::new(MPSafeCell::new(SigHand::new())),
                 blocked: SignalFlags::empty(),
                 pending: Sigpending::new(),
@@ -69,7 +78,7 @@ impl TaskStruct {
                 signal_mask_backup: Vec::new(),
                 trap_ctx_backup: Vec::new(),
                 signal_user_context_backup: Vec::new(),
-                signal_alt_stack: SignalAltStackState::default(),
+                signal_alt_stack: SignalAltStack::default(),
                 term_signal: None,
                 frozen: false,
                 cred: Arc::new(MPSafeCell::new(Cred::new(0, 0, 0, 0, 0, 0, 0, 0))),
@@ -82,6 +91,7 @@ impl TaskStruct {
                 cpus_allowed: (1usize << crate::arch::config::CPU_CORE_NUM) - 1,
                 need_resched: false,
                 clear_child_tid: 0,
+                vfork_completion: None,
                 personality: 0,
                 locked_bytes: 0,
                 comm: [0; 10],
@@ -98,6 +108,41 @@ pub fn test_kernel_worker() -> ! {
             println!("Kernel worker is running, counter: {}", counter);
         }
         suspend_current_and_run_next();
+    }
+}
+
+fn sleep_current_for_us(delay_us: usize) {
+    let deadline_ns = crate::arch::timer::get_time_us()
+        .saturating_add(delay_us)
+        .saturating_mul(1_000);
+    crate::process::scheduler::nanosleep::sleep_current_until(deadline_ns);
+}
+
+pub fn timer_kernel_worker() -> ! {
+    const TIMER_CHECK_INTERVAL_US: usize = 10_000;
+
+    loop {
+        crate::timer::check_timers();
+        sleep_current_for_us(TIMER_CHECK_INTERVAL_US);
+    }
+}
+
+pub fn net_kernel_worker() -> ! {
+    const NET_POLL_INTERVAL_US: usize = 10_000;
+
+    loop {
+        crate::net::net_poll();
+        sleep_current_for_us(NET_POLL_INTERVAL_US);
+    }
+}
+
+pub fn writeback_kernel_worker() -> ! {
+    loop {
+        crate::drivers::block::cache::tick_sync();
+        let delay_us = crate::drivers::block::cache::next_sync_delay_ms()
+            .max(1)
+            .saturating_mul(1_000);
+        sleep_current_for_us(delay_us);
     }
 }
 

@@ -33,14 +33,10 @@ impl BlockDevice for VirtIOBlock {
         for i in 0..sectors {
             let offset = i * SECTOR_SIZE;
             let sub_buf = &mut buf[offset..offset + SECTOR_SIZE];
-            #[cfg (target_arch = "loongarch64")]
-            driver
-                .read_blocks(start_sector + i, sub_buf)
-                .expect("Error when reading VirtIOBlk");
-            #[cfg (target_arch = "riscv64")]
-            driver
-                .read_block(start_sector + i, sub_buf)
-                .expect("Error when reading VirtIOBlk");
+            match driver.read_blocks(start_sector + i, sub_buf) {
+                Ok(()) => {},
+                Err(e) => panic!("Error when reading VirtIOBlk: {}", e),
+            }
         }
     }
     fn raw_write_block(&self, block_id: usize, buf: &[u8]) {

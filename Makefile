@@ -107,7 +107,7 @@ test-rv: build-user-rv copy-user-rv build-rv copy-rv
 	@rm -f kernel_output.log
 	@qemu-system-riscv64 -machine virt \
 	-kernel kernel-rv \
-	-m 1G -nographic -smp $(RV_SMP) \
+	-m 16G -nographic -smp $(RV_SMP) \
 	-bios default -drive file=sdcard-rv.img,if=none,format=raw,id=x0 \
 	-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 	-no-reboot \
@@ -121,7 +121,7 @@ test-la: build-user-la copy-user-la build-la copy-la
 	@rm -f kernel_output.log
 	@qemu-system-loongarch64 \
 	-kernel kernel-la \
-	-m 1G -nographic \
+	-m 16G -nographic \
 	-smp $(LA_SMP) \
 	-drive file=sdcard-la.img,if=none,format=raw,id=x0 \
 	-device virtio-blk-pci,drive=x0 \
@@ -172,7 +172,7 @@ debug-la: build-user-la copy-user-la build-la copy-la
 	@qemu-system-loongarch64 \
 	-machine virt \
 	-kernel kernel-la \
-	-m 1G -nographic \
+	-m 16G -nographic \
 	-smp $(LA_SMP) \
 	-drive file=sdcard-la.img,if=none,format=raw,id=x0 \
 	-device virtio-blk-pci,drive=x0 \

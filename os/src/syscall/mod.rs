@@ -20,9 +20,10 @@ const SYSCALL_EPOLL_CTL: usize = 21;
 const SYSCALL_EPOLL_WAIT: usize = 22;
 const SYSCALL_DUP: usize = 23;
 /// dup2 syscall
-const SYSCALL_DUP2: usize = 24;
+const SYSCALL_DUP3: usize = 24;
 const SYSCALL_FCNTL: usize = 25;    
 const SYSCALL_IOCTL: usize = 29;
+const SYSCALL_FLOCK: usize = 32;
 const SYSCALL_MKNOD: usize = 33;
 /// unlinkat syscall
 const SYSCALL_UNLINKAT: usize = 35;
@@ -77,6 +78,7 @@ const SYSCALL_GET_ROBUST_LIST: usize = 100;
 const SYSCALL_CLOCK_NANOSLEEP: usize = 115;
 const SYSCALL_TKILL: usize = 130;
 const SYSCALL_TGKILL: usize = 131;
+const SYSCALL_SIGALTSTACK: usize = 132;
 
 const SYSCALL_SLEEP:usize =101;
 const SYSCALL_SETITIMER: usize = 103;
@@ -173,6 +175,7 @@ const SYSCALL_KEYCTL: usize = 219;
 /// clone syscall
 const SYSCALL_CLONE: usize = 220;
 const SYSCALL_CLONE3: usize = 435;
+const SYSCALL_FACCESSAT2: usize = 439;
 /// exec syscall
 const SYSCALL_EXEC: usize = 221;
 /// mmap syscall
@@ -222,7 +225,6 @@ const SYSCALL_RESQ: usize = 293;
 /// accessat syscall
 const SYSCALL_ACCESSAT: usize = 48;
 const SYSCALL_FCHDIR: usize = 50;
-const SYSCALL_SIGALTSTACK: usize = 132;
 const SYSCALL_FADVISE64: usize = 223;
 pub mod bpf;
 pub mod fs;
@@ -336,12 +338,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     info!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().getpid(), current_task().unwrap().gettid(), syscall_id);
     let ret =match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
-        SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
+        SYSCALL_DUP3 => sys_dup3(args[0], args[1], args[2]),
         SYSCALL_MKNOD => sys_mknod(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u64),
         SYSCALL_OPENAT => sys_openat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_CLOSE => sys_close(args[0]),
+        SYSCALL_FLOCK => sys_flock(args[0], args[1]),
         SYSCALL_ACCESSAT => sys_accessat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
-        SYSCALL_PIPE => sys_pipe(args[0] as *mut usize),
+        SYSCALL_FACCESSAT2 => sys_accessat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
+        SYSCALL_PIPE => sys_pipe(args[0] as *mut usize, args[1]),
         SYSCALL_LINKAT => sys_linkat(args[1] as *const u8, args[3] as *const u8),
         SYSCALL_FCHMOD => sys_fchmod(args[0], args[1] as u32),
         // SYSCALL_FCHOWN => sys_fchown(args[0], args[1] as u32, args[2] as u32),
@@ -355,10 +359,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_KILL => sys_kill(args[0] as isize, args[1] as i32),
         SYSCALL_RT_SIGSUSPEND => sys_rt_sigsuspend(args[0] as *const usize, args[1]),
-        SYSCALL_SIGALTSTACK => sys_sigaltstack(
-            args[0] as *const SignalAltStack,
-            args[1] as *mut SignalAltStack,
-        ),
         SYSCALL_SIGACTION => sys_rt_sigaction(
             args[0] as i32,
             args[1] as *const SignalAction,
@@ -401,6 +401,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SETGID => sys_setgid(args[0] as u32),
         SYSCALL_TKILL => sys_tkill(args[0], args[1] as i32),
         SYSCALL_TGKILL => sys_tgkill(args[0], args[1], args[2] as i32),
+        SYSCALL_SIGALTSTACK => sys_sigaltstack(
+            args[0] as *const crate::process::signal::SignalAltStack,
+            args[1] as *mut crate::process::signal::SignalAltStack,
+        ),
         SYSCALL_GETRESUID => sys_getresuid(args[0] as *mut u32, args[1] as *mut u32, args[2] as *mut u32),
         SYSCALL_UMASK => sys_umask(args[0] as u32),
         SYSCALL_GETPID => sys_getpid(),

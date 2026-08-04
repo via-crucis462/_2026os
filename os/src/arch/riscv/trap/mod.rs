@@ -13,7 +13,6 @@
 //! to [`syscall()`].
 mod context;
 use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
-use crate::arch::timer::get_time_ms;
 use crate::mm::VirtAddr;
 use crate::net::net_poll;
 use crate::syscall::syscall;
@@ -22,19 +21,15 @@ use crate::task::{
     exit_current_and_run_next, handle_signals, suspend_current_and_run_next, KernelStack,
     SignalFlags, TaskStatus,
 };
-use crate::{get_hart_id, KERNEL_STACK_SIZE, PAGE_SIZE};
+use crate::{get_hart_id, get_time_ms, KERNEL_STACK_SIZE, PAGE_SIZE};
 use alloc::sync::Arc;
 
 use core::arch::{asm, global_asm};
-use core::sync::atomic::{AtomicUsize, Ordering};
 use riscv::register::{scause, stval, stvec, sie};
 use scause::{Exception, Interrupt, Trap};
 use stvec::TrapMode;
 
 global_asm!(include_str!("trap.S"));
-
-const CLONE_COUNT_PRINT_INTERVAL_MS: usize = 1000;
-static LAST_CLONE_COUNT_PRINT_MS: AtomicUsize = AtomicUsize::new(0);
 
 /// Initialize trap handling
 pub fn init() {
@@ -166,76 +161,65 @@ pub fn trap_handler() -> ! {
         Trap::Exception(Exception::StorePageFault)
         | Trap::Exception(Exception::LoadPageFault)
         | Trap::Exception(Exception::InstructionPageFault) => {
-            /*println!(
-                "[kernel] error  0x{:x},  0x{:x}",
-                stval, sepc
-            );*/
-            let task = current_task().unwrap();
-            let (mm, files) = {
-                let task_inner = task.inner_exclusive_access();
-                let Some(mm) = task_inner.mm.as_ref() else {
-                    current_add_signal(SignalFlags::SIGSEGV);
-                    trap_return();
-                };
-                (mm.clone(), task_inner.files.clone())
-            };
-            let mut memory = mm.exclusive_access();
-            
-            // 【修改 1】：获取当前的栈指针 SP
-            let sp = current_trap_cx().x[2];
-            let vpn = VirtAddr::from(stval).std_floor();
+            // 将 pagefault 处理放在独立块中，保证锁和 Arc 自动释放
             //
-            if scause.cause() == Trap::Exception(Exception::StorePageFault)
-                && memory.set_pte_dirty(vpn)
-            {
-                drop(memory);
-                drop(task);
-            } else if memory.handle_cow_fault(stval) {
-                info!("[WATCHDOG][COW] : {:#x}, PC: {:#x}", stval, sepc);
-                drop(memory);
-                drop(task);
-            } else if memory.handle_page_fault(stval, sp) {
-                info!("[WATCHDOG] : {:#x}, PC: {:#x}", stval, sepc);
-                // 修复成功！释放锁
-                drop(memory);
-                drop(task);
-            } else if memory.check_mmap_page_fault(stval){
-                error!("[WATCHDOG][BUS] : {:#x}, PC: {:#x}", stval, sepc);
-                error!(
-                    "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
+            // 龙芯的旧实现在每个分支处理成功后，drop 遗漏了 mm 的 Arc，
+            // 却直接调用 trap_return，导致出现内存泄露
+            //
+            // riscv 旧实现无此问题，但统一修改一下，避免未来遗忘
+            'fault: {
+                let Some(task) = current_task() else {
+                    break 'fault;
+                };
+                let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
+                    current_add_signal(SignalFlags::SIGSEGV);
+                    break 'fault;
+                };
+                let files = task.inner_exclusive_access().files.clone();
+                let mut memory = mm.exclusive_access();
+
+                // 【修改 1】：获取当前的栈指针 SP
+                let sp = current_trap_cx().x[2];
+                let vpn = VirtAddr::from(stval).std_floor();
+                //
+                if scause.cause() == Trap::Exception(Exception::StorePageFault)
+                    && memory.set_pte_dirty(vpn)
+                {
+                    break 'fault;
+                } else if memory.handle_cow_fault(stval) {
+                    info!("[WATCHDOG][COW] : {:#x}, PC: {:#x}", stval, sepc);
+                    break 'fault;
+                } else if memory.handle_page_fault(stval, sp) {
+                    info!("[WATCHDOG] : {:#x}, PC: {:#x}", stval, sepc);
+                    break 'fault;
+                } else if memory.check_mmap_page_fault(stval){
+                    error!("[WATCHDOG][BUS] : {:#x}, PC: {:#x}", stval, sepc);
+                    error!(
+                        "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
+                        task.getpid(),
+                        scause.cause(),
+                        current_trap_cx().get_rt(),
+                        stval
+                    );
+                    error!("[kernel] Trap! Source: User");
+                    error!(
+                        "[kernel] Scause: {:?} (Code: {})",
+                        scause.cause(),
+                        scause.bits()
+                    );
+                    error!("[kernel] Stval:  {:#x} (Bad Address)", stval);
+                    error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, bad instruction = {:#x}",
+                    scause.cause(),
                     task.getpid(),
-                    scause.cause(),
-                    current_trap_cx().get_rt(),
-                    stval
-                );
-                error!("[kernel] Trap! Source: User");
-                error!(
-                    "[kernel] Scause: {:?} (Code: {})",
-                    scause.cause(),
-                    scause.bits()
-                );
-                error!("[kernel] Stval:  {:#x} (Bad Address)", stval);
-                error!("[kernel] trap_handler: {:?} in PID {}, bad addr = {:#x}, bad instruction = {:#x}",
-                scause.cause(),
-                task.getpid(),
-                stval,
-                current_trap_cx().get_rt(),
-            );
-                // 触发了文件映射区域的page fault，说明是超出文件大小访问了，发送SIGBUS信号
-                drop(memory);
-                drop(task);
-                current_add_signal(SignalFlags::SIGBUS);
-            } else {
-                // 【新增】检查 userfaultfd 注册范围
-                /*println!(
-                    "[kernel] user_fault: pid={}, cause={:?}, pc=0x{:x}, badaddr=0x{:x}, sp=0x{:x}",
-                    process.pid.0,
-                    scause.cause(),
-                    current_trap_cx().get_rt(),
                     stval,
-                    sp
-                );*/
-                drop(memory);
+                    current_trap_cx().get_rt(),
+                );
+                    // 触发了文件映射区域的page fault，说明是超出文件大小访问了，发送SIGBUS信号
+                    current_add_signal(SignalFlags::SIGBUS);
+                    break 'fault;
+                } else {
+                    // 【新增】检查 userfaultfd 注册范围
+                    drop(memory);
                 let files_guard = files.exclusive_access();
                 let fd_table = &files_guard.fds;
                 let mut uffd_handled = false;
@@ -296,6 +280,8 @@ pub fn trap_handler() -> ! {
                 if uffd_handled {
                     // 释放所有锁，挂起当前缺页线程，等待 UFFDIO_COPY 唤醒
                     drop(files_guard);
+                    drop(mm);
+                    drop(files);
                     drop(task);
                     suspend_current_and_run_next();
                 } else {
@@ -316,8 +302,8 @@ pub fn trap_handler() -> ! {
                         sp
                     );
                     drop(files_guard);
-                    drop(task);
                     current_add_signal(SignalFlags::SIGSEGV);
+                }
                 }
             }
         }
@@ -381,26 +367,6 @@ pub fn trap_cx_va_by_kernel_stack(kernel_stack: &KernelStack) -> usize {
 #[no_mangle]
 /// return to user space
 pub fn trap_return() -> ! {
-    let current_ms = get_time_ms();
-    let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
-    
-    for pid in expired_pids {
-        let tasks = crate::process::registry::TID2TCB
-            .exclusive_access()
-            .values()
-            .filter(|task| task.getpid() == pid)
-            .cloned()
-            .collect::<alloc::vec::Vec<_>>();
-        for task in tasks {
-            let mut task_inner = task.inner_exclusive_access();
-            task_inner.pending.insert(crate::task::SignalFlags::SIGALRM);
-            if task_inner.state == crate::task::TaskStatus::Blocked {
-                task_inner.state = crate::task::TaskStatus::Ready;
-                drop(task_inner);
-                crate::task::add_task(task);
-            }
-        }
-    }
     handle_signals();
     let term_signal = current_task()
         .unwrap()

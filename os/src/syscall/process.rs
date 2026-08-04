@@ -14,7 +14,6 @@ use crate::process::{
 use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, USER_STACK_SIZE, get_hart_id};
 use crate::process::{FdFlags, FileDescriptor};    // 引入当前进程获取方法
-use crate::process::task::SignalAltStackState;
 use crate::net::socket::TcpSocket;
 use alloc::collections::btree_map::Values;
 use alloc::vec;
@@ -72,6 +71,60 @@ pub(crate) fn clear_child_tid_and_wake(token: usize, clear_child_tid: usize) {
         }
     }
 }
+
+pub fn sys_sigaltstack(
+    new_stack: *const SignalAltStack,
+    old_stack: *mut SignalAltStack,
+) -> isize {
+    const MINSIGSTKSZ: usize = 2048;
+
+    let token = current_user_token();
+    let requested = if new_stack.is_null() {
+        None
+    } else {
+        let Some(stack) = try_translated_read(token, new_stack) else {
+            return EFAULT.as_isize();
+        };
+        Some(stack)
+    };
+
+    let task = current_task().unwrap();
+    let (current, current_sp) = {
+        let inner = task.inner_exclusive_access();
+        (inner.signal_alt_stack, inner.get_trap_cx().get_sp())
+    };
+
+    if !old_stack.is_null()
+        && !try_translated_write(token, old_stack, current.status_for_sp(current_sp))
+    {
+        return EFAULT.as_isize();
+    }
+
+    let Some(mut stack) = requested else {
+        return 0;
+    };
+    if current.contains(current_sp) {
+        return EPERM.as_isize();
+    }
+    if stack.ss_flags == SS_DISABLE {
+        stack = SignalAltStack::default();
+    } else {
+        if stack.ss_flags != 0 && stack.ss_flags != SS_AUTODISARM {
+            return EINVAL.as_isize();
+        }
+        if stack.ss_size < MINSIGSTKSZ {
+            return ENOMEM.as_isize();
+        }
+        if stack.ss_sp == 0 || stack.ss_sp.checked_add(stack.ss_size).is_none() {
+            return EINVAL.as_isize();
+        }
+        stack._pad = 0;
+    }
+
+    task.inner_exclusive_access().signal_alt_stack = stack;
+    0
+}
+
 pub use crate::{
     timer::*,
     fs::*, 
@@ -92,6 +145,7 @@ pub use crate::process::timer::{
 use alloc::task;
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 use crate::fs::{open_file, OpenFlags, RenameError};
+use crate::process::signal::{SignalAltStack, SS_AUTODISARM, SS_DISABLE};
 use super::{errno::Errno::*, normalize_leading_dot_path};
 
 use crate::syscall::epoll::{EpollFile, EventFile, EpollEvent};
@@ -123,81 +177,6 @@ pub tms_cutime: usize, // 子进程用户态时间
 pub tms_cstime: usize, // 子进程内核态时间
 }
 
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct SignalAltStack {
-    pub ss_sp: usize,
-    pub ss_flags: i32,
-    pub _pad: i32,
-    pub ss_size: usize,
-}
-
-pub fn sys_sigaltstack(ss: *const SignalAltStack, old_ss: *mut SignalAltStack) -> isize {
-    const SS_ONSTACK: u32 = 1;
-    const SS_DISABLE: u32 = 2;
-    const SS_AUTODISARM: u32 = 0x8000_0000;
-    const MINSIGSTKSZ: usize = 2048;
-
-    let task = current_task().unwrap();
-    let mut inner = task.inner_exclusive_access();
-    let token = inner.get_user_token();
-    let current = inner.signal_alt_stack;
-    let user_sp = inner.get_trap_cx().get_sp();
-    let on_stack = current.size != 0
-        && user_sp >= current.sp
-        && user_sp < current.sp.saturating_add(current.size);
-
-    if !old_ss.is_null() {
-        let old = SignalAltStack {
-            ss_sp: current.sp,
-            ss_flags: if current.size == 0 {
-                SS_DISABLE as i32
-            } else if on_stack {
-                SS_ONSTACK as i32
-            } else {
-                current.flags as i32
-            },
-            _pad: 0,
-            ss_size: current.size,
-        };
-        if !try_translated_write(token, old_ss, old) {
-            return EFAULT.as_isize();
-        }
-    }
-
-    if ss.is_null() {
-        return 0;
-    }
-    let Some(new_stack) = try_translated_read(token, ss) else {
-        return EFAULT.as_isize();
-    };
-    if on_stack {
-        return EPERM.as_isize();
-    }
-
-    let flags = new_stack.ss_flags as u32;
-    if flags == SS_DISABLE {
-        inner.signal_alt_stack = SignalAltStackState::default();
-        return 0;
-    }
-    if flags != 0 && flags != SS_AUTODISARM {
-        return EINVAL.as_isize();
-    }
-    if new_stack.ss_size < MINSIGSTKSZ {
-        return ENOMEM.as_isize();
-    }
-    if new_stack.ss_sp == 0 || new_stack.ss_sp.checked_add(new_stack.ss_size).is_none() {
-        return EINVAL.as_isize();
-    }
-
-    inner.signal_alt_stack = SignalAltStackState {
-        sp: new_stack.ss_sp,
-        size: new_stack.ss_size,
-        flags,
-    };
-    0
-}
 
 #[repr(C)]
 pub struct UtsName {
@@ -270,99 +249,96 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
     drop(task_inner);
 
     loop {
-        let task = current_task().unwrap();
-        // --- 检查信号 (使用当前的临时掩码) ---
-        let task_inner = task.inner_exclusive_access();
-        let pending_bits = task_inner.pending.bits();
-        let pending = pending_bits & !task_inner.blocked.bits();
-        // 特判 SIGKILL(9) 和 SIGSTOP(19) 这两个绝对不可屏蔽的信号
-        let unmaskable = pending_bits & ((1 << (9 - 1)) | (1 << (19 - 1)));
+        {
+            let task = current_task().unwrap();
+            // --- 检查信号 (使用当前的临时掩码) ---
+            let task_inner = task.inner_exclusive_access();
+            let pending_bits = task_inner.pending.bits()
+                | task_inner.signal.exclusive_access().pending_flags().bits();
+            let pending = pending_bits & !task_inner.blocked.bits();
+            // 特判 SIGKILL(9) 和 SIGSTOP(19) 这两个绝对不可屏蔽的信号
+            let unmaskable = pending_bits & ((1 << (9 - 1)) | (1 << (19 - 1)));
 
-        if (pending | unmaskable) != 0 {
-         
-            //task_inner.signal_mask = original_mask;
-            debug!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
-                     pending_bits, task_inner.blocked.bits());
-            drop(task_inner); // 放锁
-            return EINTR.as_isize(); // EINTR
-        }
-        drop(task_inner); 
-        // ----------------------------------------
+            if (pending | unmaskable) != 0 {
+                //task_inner.signal_mask = original_mask;
+                debug!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
+                         pending_bits, task_inner.blocked.bits());
+                drop(task_inner); // 放锁
+                return EINTR.as_isize(); // EINTR
+            }
+            drop(task_inner); 
+            // ----------------------------------------
 
-        // 提取 token 和 fd_table 后立即释放锁，防止 translated_* 死锁
-        let (token, fd_table) = {
-            let inner = task.inner_exclusive_access();
-            let token = inner.get_user_token();
-            let fd_table = inner.files.exclusive_access().fds.clone();
-            (token, fd_table)
-        }; // inner 在此释放
-
-        // 防止随机/恶意 nfds 导致死循环
-        const POLL_MAX: usize = 1024;
-        let nfds = nfds.min(POLL_MAX);
-        let mut ready_count = 0;
-        
-        // --- 🔵 遍历轮询所有的 fd ---
-        for i in 0..nfds {
-            let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
-            let mut pollfd = {
-                if let Some(pf) = try_translated_read(token, pollfd_ptr) {
-                    pf
+            // 提取 token 和 fd_table 后立即释放锁，防止 translated_* 死锁
+            let (token, fd_table) = {
+                let inner = task.inner_exclusive_access();
+                let token = inner.get_user_token();
+                let fd_table = inner.files.exclusive_access().fds.clone();
+                (token, fd_table)
+            }; // inner 在此释放
+            // 防止随机/恶意 nfds 导致死循环
+            const POLL_MAX: usize = 1024;
+            let nfds = nfds.min(POLL_MAX);
+            let mut ready_count = 0;
+            
+            // --- 遍历轮询所有 fd ---
+            for i in 0..nfds {
+                let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
+                let mut pollfd = {
+                    if let Some(pf) = try_translated_read(token, pollfd_ptr) {
+                        pf
+                    } else {
+                        return EFAULT.as_isize();
+                    }
+                };
+                
+                let fd = pollfd.fd;
+                pollfd.revents = 0;
+                
+                if fd < 0 { continue; }
+                let fd_usize = fd as usize;
+                
+                if fd_usize >= fd_table.len() || fd_table[fd_usize].file.is_none() {
+                    pollfd.revents = 0x008; // POLLERR
+                    ready_count += 1;
                 } else {
+                    let file = fd_table[fd_usize].file.as_ref().unwrap();
+                    
+                    // 检查读
+                    if (pollfd.events & POLLIN) != 0 && file.ready_to_read() {
+                        pollfd.revents |= POLLIN;
+                    }
+                    // 检查写
+                    if (pollfd.events & POLLOUT) != 0 && file.ready_to_write() {
+                        pollfd.revents |= POLLOUT;
+                    }
+                    
+                    if pollfd.revents != 0 {
+                        ready_count += 1;
+                    }
+                }
+                if !try_translated_write(token, pollfd_ptr, pollfd) {
                     return EFAULT.as_isize();
                 }
-            };
-            
-            let fd = pollfd.fd;
-            pollfd.revents = 0;
-            
-            if fd < 0 { continue; }
-            let fd_usize = fd as usize;
-            
-            if fd_usize >= fd_table.len() || fd_table[fd_usize].file.is_none() {
-                pollfd.revents = 0x008; // POLLERR
-                ready_count += 1;
-            } else {
-                let file = fd_table[fd_usize].file.as_ref().unwrap();
-                
-                // 检查读
-                if (pollfd.events & POLLIN) != 0 && file.ready_to_read() {
-                    pollfd.revents |= POLLIN;
-                }
-                // 检查写
-                if (pollfd.events & POLLOUT) != 0 && file.ready_to_write() {
-                    pollfd.revents |= POLLOUT;
-                }
-                
-                if pollfd.revents != 0 {
-                    ready_count += 1;
-                }
+                //trace!("[kernel] ppoll fd={} target_events=0x{:x} ready_revents=0x{:x}", pollfd.fd, pollfd.events, pollfd.revents);
             }
-            if !try_translated_write(token, pollfd_ptr, pollfd) {
-                return EFAULT.as_isize();
+            
+            // 如果找到了就绪事件，恢复掩码并返回
+            if ready_count > 0 {
+                let mut task_inner = task.inner_exclusive_access();
+                task_inner.blocked = original_mask; 
+                drop(task_inner);
+                return ready_count as isize;
             }
-            //trace!("[kernel] ppoll fd={} target_events=0x{:x} ready_revents=0x{:x}", pollfd.fd, pollfd.events, pollfd.revents);
-        }
-        
-        // 4. 如果找到了就绪事件，恢复掩码并返回！
-        if ready_count > 0 {
-            let mut task_inner = task.inner_exclusive_access();
-            task_inner.blocked = original_mask; 
-            drop(task_inner);
-            return ready_count as isize;
-        }
-        
-        // 5. 如果没找到事件，处理超时逻辑
-        if has_timeout {
-            if get_time_ms() >= deadline_ms {
+            
+            // 如果没找到事件，处理超时逻辑
+            if has_timeout && get_time_ms() >= deadline_ms {
                 let mut task_inner = task.inner_exclusive_access();
                 task_inner.blocked = original_mask; 
                 drop(task_inner);
                 return 0; // 超时返回 0
             }
         }
-        
-        // 继续等待
         suspend_current_and_run_next();
     }
 }
@@ -376,28 +352,33 @@ pub fn sys_exit(exit_code: i32) -> ! {
 pub fn sys_exit_group(exit_code: i32) -> ! {
     let task = current_task().unwrap();
     let pid = task.getpid();
+
     let tasks = crate::process::registry::TID2TCB
         .exclusive_access()
         .values()
         .filter(|thread| thread.getpid() == pid)
         .cloned()
         .collect::<alloc::vec::Vec<_>>();
-
-    // 遍历当前进程的所有线程（tasks 列表）
     for thread in tasks.iter() {
         if thread.gettid() != task.gettid() {
-            let mut t_inner = thread.inner_exclusive_access();
-            t_inner.pending.insert(SignalFlags::SIGKILL);
-            t_inner.term_signal = Some(9);
-            if matches!(t_inner.state, crate::task::TaskStatus::Blocked) {
-                t_inner.signal_interrupted = true;
+            let mut inner = thread.inner_exclusive_access();
+            let files = core::mem::replace(
+                &mut inner.files,
+                Arc::new(crate::sync::MPSafeCell::new(
+                    crate::process::FileDescriptorTable::empty(),
+                )),
+            );
+            inner.pending.insert(SignalFlags::SIGKILL);
+            inner.term_signal = Some(9);
+            if matches!(inner.state, crate::task::TaskStatus::Blocked) {
+                inner.signal_interrupted = true;
             }
-            drop(t_inner);
+            drop(inner);
+            drop(files);
             crate::process::wake_up_task(thread.clone());
         }
     }
-    
-    drop(tasks); // 先前没有这行，会导致内存泄露
+    drop(tasks);
 
     // 退出进程  // 先放掉锁，避免后续迭代时死锁
     task.inner_exclusive_access().exit_code = exit_code;
@@ -739,6 +720,7 @@ const TCGETS: u32 = 0x5401;
 const TIOCGPGRP: u32 = 0x540F;   // 获取前台进程组 ID
 const TIOCSPGRP: u32 = 0x5410;   // 设置前台进程组 ID
 const TIOCGWINSZ: u32 = 0x5413;
+const FIONBIO: u32 = 0x5421;
 const RTC_RD_TIME: u32 = 0x80247009; // 真实的 RTC 读取指令号
 const TIOCSCTTY: u32 = 0x540E; // 设置控制终端
 //  网络接口相关命令 (Socket IOCTL)
@@ -822,13 +804,13 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 warn!("[kernel] sys_ioctl: TCGETS request on non-tty fd {}", fd);
                 return ENOTTY.as_isize();
             }
-            let mut termios = Termios {
-                c_iflag: 0o012402, c_oflag: 0o000005,
-                c_cflag: 0o002277, c_lflag: 0o0105011,
-                c_line: 0, c_cc: [0; 19],
+            // 返回全局存储的 termios（ECHO 等标志由它控制）
+            let t = crate::console::get_termios();
+            let termios = Termios {
+                c_iflag: t.c_iflag, c_oflag: t.c_oflag,
+                c_cflag: t.c_cflag, c_lflag: t.c_lflag,
+                c_line: t.c_line, c_cc: t.c_cc,
             };
-            termios.c_cc[0] = 3; termios.c_cc[1] = 28;
-            termios.c_cc[2] = 127; termios.c_cc[4] = 4;
             if argp != 0 {
                 if !try_translated_write(token, argp as *mut Termios, termios) {
                     return EFAULT.as_isize();
@@ -888,6 +870,19 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 }
                 0 // 成功
             } else { EFAULT.as_isize() }
+        }
+        FIONBIO => {
+            let Some(nonblocking) = try_translated_read(token, argp as *const i32) else {
+                return EFAULT.as_isize();
+            };
+            const O_NONBLOCK: usize = 0o4000;
+            let mut fd_table = files.exclusive_access();
+            if nonblocking != 0 {
+                fd_table.fds[fd].status |= O_NONBLOCK;
+            } else {
+                fd_table.fds[fd].status &= !O_NONBLOCK;
+            }
+            0
         }
         TIOCGPGRP => {
             // 获取前台进程组 ID
@@ -1096,8 +1091,24 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             }
             0
         }
-        0x5402 => { /* TCSETS */
-            0
+        0x5402 | 0x5403 | 0x5404 => { /* TCSETS / TCSETSW / TCSETSF */
+            if !is_tty {
+                warn!("[kernel] sys_ioctl: TCSETS request on non-tty fd {}", fd);
+                return ENOTTY.as_isize();
+            }
+            if argp == 0 {
+                return EFAULT.as_isize();
+            }
+            if let Some(t) = try_translated_read(token, argp as *const Termios) {
+                crate::console::set_termios(crate::console::ConsoleTermios {
+                    c_iflag: t.c_iflag, c_oflag: t.c_oflag,
+                    c_cflag: t.c_cflag, c_lflag: t.c_lflag,
+                    c_line: t.c_line, c_cc: t.c_cc,
+                });
+                0
+            } else {
+                EFAULT.as_isize()
+            }
         }
         SIOCGIFFLAGS => { // 获取网卡运行状态
         if let Some(mut ifr) = try_translated_read::<IfReq>(token, argp as *const IfReq) {
@@ -1406,13 +1417,16 @@ pub fn sys_uname(uts: *mut UtsName) -> isize {
 
     // 填充系统信息
     let sysname = b"Linux";
-    let nodename = b"rCore-Nodename";
-    let version = b"v0.1.0";
+    let nodename = b"ShellCore";
+    let version = b"5.10.0";
+    #[cfg(target_arch = "riscv64")]
     let machine = b"riscv64";
-    let domainname = b"rcore.os";
+    #[cfg(target_arch = "loongarch64")]
+    let machine = b"loongarch64";
+    let domainname = b"shell.core";
 
     // UNAME26: release 字段只保留前 3 个 '.' 分隔的版本段
-    let full_release = b"5.10.0-rcore";
+    let full_release = b"5.10.0-ShellCore";
     let release: &[u8] = if uname26 {
         // 找第 3 个 '.' 出现的位置，或直接到字符串末尾
         let mut dot_count = 0;
@@ -1583,6 +1597,12 @@ pub fn sys_clone3(uargs: *const CloneArgs, size: usize) -> isize {
     if flags & CLONE_SIGHAND != 0 && flags & CLONE_VM == 0 {
         return EINVAL.as_isize();
     }
+    if flags & CLONE_VFORK != 0 && flags & CLONE_VM == 0 {
+        return EINVAL.as_isize();
+    }
+    if flags & CLONE_CLEAR_SIGHAND != 0 && flags & CLONE_SIGHAND != 0 {
+        return EINVAL.as_isize();
+    }
     if flags & CLONE_THREAD != 0 && flags & CLONE_SIGHAND == 0 {
         return EINVAL.as_isize();
     }
@@ -1622,6 +1642,7 @@ const CLONE_VM: usize = 0x00000100;              // 共享地址空间
 const CLONE_FS: usize = 0x00000200;              // 共享 fs_struct（根目录/工作目录）
 const CLONE_FILES: usize = 0x00000400;           // 共享文件描述符表
 const CLONE_SIGHAND: usize = 0x00000800;         // 共享信号处理函数表
+const CLONE_VFORK: usize = 0x00004000;           // 子进程 exec/exit 前挂起父进程
 const CLONE_SETTLS: usize = 0x00080000;          // 设置子任务 TLS 指针
 const CLONE_PARENT_SETTID: usize = 0x00100000;   // 向父地址空间写入子 TID
 const CLONE_CHILD_CLEARTID: usize = 0x00200000;  // 子任务退出时清零 ctid 并 futex 唤醒
@@ -1629,9 +1650,9 @@ const CLONE_CHILD_SETTID: usize = 0x01000000;    // 向子地址空间写入 TID
 const CLONE_THREAD: usize = 0x00010000;           // 创建线程（共享 tgid）
 const CLONE_SYSVSEM: usize = 0x00040000;           // 共享 System V 信号量（todo）
 const CLONE_PIDFD: usize = 0x00001000;
-const CLONE_VFORK: usize = 0x00004000;
 const CLONE_NEWNS: usize = 0x00020000; // 创建新的 mount namespace
 const CLONE_DETACHED: usize = 0x00400000; // 历史标志：父进程不关心子进程退出信号（已废弃但仍可能出现）
+const CLONE_CLEAR_SIGHAND: usize = 0x1_0000_0000; // 重置子进程的信号处理函数表（即子进程单独开设 sighand）
 pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usize) -> isize {
     #[cfg(target_arch = "riscv64")]
     let (tls, ctid) = (arg3, arg4);
@@ -1643,14 +1664,15 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usi
         | CLONE_FS
         | CLONE_FILES
         | CLONE_SIGHAND
+        | CLONE_VFORK
         | CLONE_THREAD
         | CLONE_SYSVSEM
         | CLONE_SETTLS
         | CLONE_PARENT_SETTID
         | CLONE_CHILD_CLEARTID
         | CLONE_CHILD_SETTID
-        | CLONE_VFORK
-        | CLONE_DETACHED;
+        | CLONE_DETACHED
+        | CLONE_CLEAR_SIGHAND;
 
     let unsupported_flags = flags & !SUPPORTED_FLAGS;
     if unsupported_flags != 0 {
@@ -1660,36 +1682,26 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usi
             flags
         );
     }
-    // 简化的 vfork 兼容实现：当前内核没有 vfork completion，无法保证
-    // 父进程一直阻塞到子进程 execve/_exit。若直接保留 CLONE_VM，父子会
-    // 在多核上并发使用同一用户栈，子进程修改栈帧后会导致双方持续缺页。
-    // 因此将 CLONE_VFORK | CLONE_VM 降级成普通 COW fork；语义安全，只是
-    // 暂时失去 vfork 的地址空间共享性能优化。
-    let effective_flags = if flags & CLONE_VFORK != 0 {
-        warn!(
-            "sys_clone: emulating CLONE_VFORK {:#x} with COW fork",
-            flags
-        );
-        flags & !(CLONE_VFORK | CLONE_VM)
-    } else {
-        flags
-    };
-    // 未实现的附加语义不阻断通用 do_clone 流程；do_clone 只解释其已
-    // 实现的标志位，其他位保持原样传入并自然被忽略。
-    if effective_flags & CSIGNAL > MAX_SIG {
+    if flags & CSIGNAL > MAX_SIG {
         return EINVAL.as_isize();
     }
-    if effective_flags & CLONE_SIGHAND != 0 && effective_flags & CLONE_VM == 0 {
+    if flags & CLONE_SIGHAND != 0 && flags & CLONE_VM == 0 {
         return EINVAL.as_isize();
     }
-    if effective_flags & CLONE_THREAD != 0
-        && (effective_flags & CLONE_SIGHAND == 0 || effective_flags & CSIGNAL != 0)
+    if flags & CLONE_VFORK != 0 && flags & CLONE_VM == 0 {
+        return EINVAL.as_isize();
+    }
+    if flags & CLONE_CLEAR_SIGHAND != 0 && flags & CLONE_SIGHAND != 0 {
+        return EINVAL.as_isize();
+    }
+    if flags & CLONE_THREAD != 0
+        && (flags & CLONE_SIGHAND == 0 || flags & CSIGNAL != 0)
     {
         return EINVAL.as_isize();
     }
 
     let task = current_task().unwrap();
-    task.do_clone(effective_flags, stack, ptid, ctid, tls)
+    task.do_clone(flags, stack, ptid, ctid, tls)
 }
 /// Return the effective NUMA memory policy. This kernel currently exposes one
 /// memory node, so every address uses node 0 and the default policy.
@@ -3127,12 +3139,11 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
         "[kernel] sys_epoll_wait: epfd={}, events_ptr=0x{:x}, maxevents={}, timeout={}ms",
         epfd, events_ptr, maxevents, timeout
     );
-    let task = current_task().unwrap();
     if events_ptr == 0 {
         return EFAULT.as_isize();
     }
     
-    //   2. 防御非法容量：POSIX 规定 maxevents 必须大于 0
+    // 防御非法容量
     if maxevents <= 0 {
         return EINVAL.as_isize();
     }
@@ -3140,46 +3151,59 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
     const EPOLL_MAX_EVENTS: i32 = 1024;
     let maxevents = maxevents.min(EPOLL_MAX_EVENTS);
 
-    //   1. 记录进来的起始时间（用于带超时的阻塞）
-    let start_time = get_time_ms(); 
-    let files = task.inner_exclusive_access().files.clone();
+    // 记录起始时间
+    let start_time = get_time_ms();
     let token = current_user_token();
     
     loop {
-        let inner = files.exclusive_access();
-        
-        if epfd >= inner.fds.len() { return EBADF.as_isize(); }
-        let epoll_file_dyn = match &inner.fds[epfd].file {
-            Some(f) => f.clone(),
-            None => return EBADF.as_isize(),
-        };
-        let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
-            Some(ef) => ef,
-            None => return EINVAL.as_isize(),
-        };
-        
-        let mut ready_events = alloc::vec::Vec::new();
-        let list = epoll_file.interest_list.lock();
-        
-        // 遍历所有被监控的 FD，检查就绪状态
-        for (&fd, &event) in list.iter() {
-            if fd < inner.fds.len() {
-                if let Some(file) = &inner.fds[fd].file {
-                    let mut revents = 0;
-                    if (event.events & 1) != 0 && file.ready_to_read() { revents |= 1; }
-                    if (event.events & 4) != 0 && file.ready_to_write() { revents |= 4; }
-                    
-                    if revents != 0 || event.events == 0 {
-                        let mut ready_ev = event;
-                        ready_ev.events = if revents != 0 { revents } else { event.events };
-                        ready_events.push((fd, ready_ev));
+        let ready_events = {
+            let task = current_task().unwrap();
+            let task_inner = task.inner_exclusive_access();
+            let pending_bits = task_inner.pending.bits()
+                | task_inner.signal.exclusive_access().pending_flags().bits();
+            let unmaskable =
+                pending_bits & ((1 << (9 - 1)) | (1 << (19 - 1)));
+            if (pending_bits & !task_inner.blocked.bits()) != 0 || unmaskable != 0 {
+                drop(task_inner);
+                return EINTR.as_isize();
+            }
+            drop(task_inner);
+            let files = task.inner_exclusive_access().files.clone();
+            let inner = files.exclusive_access();
+
+            if epfd >= inner.fds.len() { return EBADF.as_isize(); }
+            let epoll_file_dyn = match &inner.fds[epfd].file {
+                Some(f) => f.clone(),
+                None => return EBADF.as_isize(),
+            };
+            let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
+                Some(ef) => ef,
+                None => return EINVAL.as_isize(),
+            };
+
+            let mut ready_events = alloc::vec::Vec::new();
+            let list = epoll_file.interest_list.lock();
+            // 遍历所有被监控的 FD，检查就绪状态
+            for (&fd, &event) in list.iter() {
+                if fd < inner.fds.len() {
+                    if let Some(file) = &inner.fds[fd].file {
+                        let mut revents = 0;
+                        if (event.events & 1) != 0 && file.ready_to_read() { revents |= 1; }
+                        if (event.events & 4) != 0 && file.ready_to_write() { revents |= 4; }
+
+                        if revents != 0 || event.events == 0 {
+                            let mut ready_ev = event;
+                            ready_ev.events = if revents != 0 { revents } else { event.events };
+                            ready_events.push((fd, ready_ev));
+                        }
                     }
                 }
             }
-        }
-        drop(list); 
+            drop(list);
+            ready_events
+        };
         
-        //   2. 如果找到了就绪事件，立即处理并返回
+        // 如果找到了就绪事件，立即处理并返回
         if !ready_events.is_empty() {
             let mut count = 0;
             for (_fd, event) in ready_events.iter().take(maxevents as usize) {
@@ -3192,7 +3216,7 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
             return count as isize;
         }
         
-        //   3. 如果没找到事件，处理超时逻辑！
+        // 如果没找到事件，处理超时逻辑
         if timeout == 0 {
             // 非阻塞模式，直接返回 0 个事件
             return 0; 
@@ -3204,7 +3228,6 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
             }
         }
         
-        drop(inner); 
         suspend_current_and_run_next();
     }
 }

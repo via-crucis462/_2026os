@@ -42,7 +42,7 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: u
 
 
     // 检查并提取文件对象
-    let mut file_inner = if !is_anonymous {
+    let file_inner = if !is_anonymous {
         if fd < 0 {
             return Errno::EBADF.as_isize();
         }
@@ -92,26 +92,8 @@ pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: u
     //将 file_inner 和 off 逐层转发给 do_mmap
     let ret = match mmap::do_mmap(start, len, mmap_prot, mmap_flags, file_inner.clone(), off) {
         Ok(addr) => addr,
-        Err(errno) => {
-            return errno; // 直接返回错误码
-        }
+        Err(errno) => return errno,
     };
-
-    // 只有在非匿名且非共享才读取
-    if !is_anonymous && !is_shared {
-        if let Some(file) = file_inner {
-            if file.readable() {
-                let token = current_user_token();
-                // 构造 UserBuffer，指向刚刚映射出来的用户态虚地址
-                let user_buf = UserBuffer::new(translated_byte_buffer(token, ret as *const u8, len));
-                // 使用 read_at 确保不受 FD 当前 offset 影响
-                file.read_at(off, user_buf);
-            }
-        }
-    }
-    #[cfg(target_arch = "loongarch64")]
-    // 手动刷新指令缓存
-    unsafe { core::arch::asm!("ibar 0"); }
     
     debug!("[kernel] sys_mmap: mapped addr=0x{:x} for start=0x{:x}, len=0x{:x}, prot={:?}, flags={:?}", ret, start, len, mmap_prot, mmap_flags);
 
@@ -238,11 +220,10 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> isize {
 
     match advice {
         MADV_DONTNEED => {
-            // MADV_DONTNEED: 告知内核这些页不再需要，可以释放
-            // 对于匿名映射，等同于 munmap；内核会释放物理页
-            match mmap::do_munmap(addr, len) {
-                Ok(_) => 0,
-                Err(_) => 0, // 不必报错，静默忽略
+            // Discard physical pages without removing the virtual mapping.
+            match mmap::do_madvise_dontneed(addr, len) {
+                Ok(()) => 0,
+                Err(errno) => errno,
             }
         }
         MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_FREE => {
