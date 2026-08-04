@@ -251,9 +251,24 @@ impl PageCacheManager {
             block_device.clone(),
         ));
 
+        // 条目公开到全局 map 前必须完成初始化，否则并发查找可能把
+        // Loading 状态下的空白 frame 当作文件内容。
+        {
+            let mut inner = cache.inner.lock();
+            if load_from_disk {
+                block_device.raw_read_block(block_id as usize, inner.frame.get_bytes_array());
+                inner.state = CacheState::Clean;
+            } else {
+                inner.frame.get_bytes_array().fill(0);
+                inner.dirty = true;
+                inner.state = CacheState::Dirty;
+            }
+        }
+
         let mut map = self.page_cache_map.lock();
         if let Some(existing) = map.get(&block_id).cloned() {
             // 防止并发重复插入
+            cache.inner.lock().discarded = true;
             drop(map);
             drop(cache);
             self.touch_lru(block_id, is_data);
@@ -262,17 +277,6 @@ impl PageCacheManager {
         map.insert(block_id, cache.clone());
         drop(map);
         self.touch_lru(block_id, is_data);
-
-        let mut inner = cache.inner.lock();
-        if load_from_disk {
-            block_device.raw_read_block(block_id as usize, inner.frame.get_bytes_array());
-            inner.state = CacheState::Clean;
-        } else {
-            inner.frame.get_bytes_array().fill(0);
-            inner.dirty = true;
-            inner.state = CacheState::Dirty;
-        }
-        drop(inner);
 
         if !is_data {
             self.trim_meta_cache();

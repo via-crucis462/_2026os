@@ -5,7 +5,8 @@ use alloc::sync::{Arc, Weak};
 use crate::mm::{frame_alloc, FrameTracker}; 
 use crate::auth::{PermStat, FileMode};
 use crate::process::{
-    block_current_and_run_next_if, check_pending_signal, wake_up_one, wake_up_task, SignalFlags,
+    block_current_and_run_next_if, check_pending_signal, pending_signal_should_restart,
+    wake_up_one, wake_up_task, SignalFlags,
 };
 use crate::sync::WaitQueue;
 use crate::syscall::errno::Errno;
@@ -140,7 +141,11 @@ impl Pipe {
                     }
                     if check_pending_signal() {
                         return if already_read == 0 {
-                            Err(Errno::EINTR)
+                            Err(if pending_signal_should_restart() {
+                                Errno::ERESTART
+                            } else {
+                                Errno::EINTR
+                            })
                         } else {
                             Ok(already_read)
                         };

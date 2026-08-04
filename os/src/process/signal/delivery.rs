@@ -275,6 +275,42 @@ pub fn check_pending_signal() -> bool {
     false
 }
 
+/// 当前首个会实际递送的信号是否要求重启被中断的系统调用。
+pub fn pending_signal_should_restart() -> bool {
+    const SIG_DFL: usize = 0;
+    const SIG_IGN: usize = 1;
+    const SA_RESTART: usize = 0x1000_0000;
+
+    let pending = get_pending_signals();
+    let task = current_task().unwrap();
+    let signal_hand = task.inner_exclusive_access().signal_hand.clone();
+    let actions = signal_hand.exclusive_access();
+    let mut bits = pending.bits();
+
+    while bits != 0 {
+        let sig = bits.trailing_zeros() as usize;
+        bits &= !(1u64 << sig);
+        let action = actions.action(sig);
+        if action.handler == SIG_IGN {
+            continue;
+        }
+        if action.handler == SIG_DFL {
+            let flag = SignalFlags::from_bits(1u64 << sig)
+                .unwrap_or(SignalFlags::empty());
+            if matches!(
+                flag,
+                SignalFlags::SIGCHLD | SignalFlags::SIGURG | SignalFlags::SIGWINCH
+            ) {
+                continue;
+            }
+            return false;
+        }
+        return action.flags & SA_RESTART != 0;
+    }
+
+    false
+}
+
 /// 返回当前私有和共享的未屏蔽的挂起信号集
 pub fn get_pending_signals() -> SignalFlags {
     let task = current_task().unwrap();
