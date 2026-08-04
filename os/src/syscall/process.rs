@@ -3393,6 +3393,8 @@ pub fn sys_sched_setparam(pid: isize, param_ptr: *const SchedParam) -> isize {
 }
 
 pub fn sys_sched_setaffinity(pid: isize, cpusetsize: usize, mask_ptr: *const u8) -> isize {
+    const KERNEL_CPUSET_BYTES: usize = 8;
+
     if pid < 0 {
         return EINVAL.as_isize();
     }
@@ -3400,26 +3402,44 @@ pub fn sys_sched_setaffinity(pid: isize, cpusetsize: usize, mask_ptr: *const u8)
         return EFAULT.as_isize();
     }
 
-    let task = crate::task::current_task().unwrap();
-    let target_exists = pid == 0
-        || pid as usize == task.getpid()
-        || pid as usize == task.gettid()
-        || get_process(pid as usize).is_some()
-        || tid2task(pid as usize).is_some();
-    if !target_exists {
-        return ESRCH.as_isize();
-    }
-
     let token = current_user_token();
-    if try_translated_read::<u8>(token, mask_ptr).is_none() {
-        return EFAULT.as_isize();
-    }
-    if cpusetsize > 1 && try_translated_read::<u8>(token, unsafe { mask_ptr.add(cpusetsize - 1) }).is_none() {
-        return EFAULT.as_isize();
+    // 读取用户 mask（最多取内核 cpumask 大小的字节数）
+    let mut mask_bytes = [0u8; KERNEL_CPUSET_BYTES];
+    let read_len = core::cmp::min(cpusetsize, KERNEL_CPUSET_BYTES);
+    for i in 0..read_len {
+        match try_translated_read::<u8>(token, unsafe { mask_ptr.add(i) }) {
+            Some(v) => mask_bytes[i] = v,
+            None => return EFAULT.as_isize(),
+        }
     }
 
-    0
+    // 只允许设置到在线 hart 上；全 0 视为非法
+    let mut new_allowed = usize::from_le_bytes(mask_bytes);
+    let online_mask = if crate::arch::config::CPU_CORE_NUM >= usize::BITS as usize {
+        usize::MAX
+    } else {
+        (1usize << crate::arch::config::CPU_CORE_NUM) - 1
+    };
+    new_allowed &= online_mask;
+    if new_allowed == 0 {
+        return EINVAL.as_isize();
+    }
+
+    let task = crate::task::current_task().unwrap();
+    let target = if pid == 0 || pid as usize == task.getpid() || pid as usize == task.gettid() {
+        Some(task)
+    } else {
+        get_process(pid as usize).or_else(|| tid2task(pid as usize))
+    };
+    match target {
+        Some(t) => {
+            t.inner_exclusive_access().cpus_allowed = new_allowed;
+            0
+        }
+        None => ESRCH.as_isize(),
+    }
 }
+
 pub fn sys_sched_getaffinity(pid: isize, cpusetsize: usize, mask_ptr: *mut u8) -> isize {
     const KERNEL_CPUSET_BYTES: usize = 8;
 
@@ -3434,18 +3454,22 @@ pub fn sys_sched_getaffinity(pid: isize, cpusetsize: usize, mask_ptr: *mut u8) -
     }
 
     let task = crate::task::current_task().unwrap();
-    if pid != 0 && pid as usize != task.getpid() && get_process(pid as usize).is_none() {
+    let target = if pid == 0 || pid as usize == task.getpid() || pid as usize == task.gettid() {
+        Some(task)
+    } else {
+        get_process(pid as usize).or_else(|| tid2task(pid as usize))
+    };
+    let Some(target) = target else {
         return ESRCH.as_isize();
-    }
+    };
 
+    let allowed = target.inner_exclusive_access().cpus_allowed;
     let token = current_user_token();
+    let bytes = allowed.to_le_bytes();
     for i in 0..KERNEL_CPUSET_BYTES {
-        if !try_translated_write(token, unsafe { mask_ptr.add(i) }, 0u8) {
+        if !try_translated_write(token, unsafe { mask_ptr.add(i) }, bytes[i]) {
             return EFAULT.as_isize();
         }
-    }
-    if !try_translated_write(token, mask_ptr, 1u8) {
-        return EFAULT.as_isize();
     }
 
     KERNEL_CPUSET_BYTES as isize

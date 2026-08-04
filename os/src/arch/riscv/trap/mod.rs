@@ -218,6 +218,27 @@ pub fn trap_handler() -> ! {
                     current_add_signal(SignalFlags::SIGBUS);
                     break 'fault;
                 } else {
+                    // 处理并发缺页
+                    //
+                    // 另一个线程可能刚刚处理了缺页，但此线程已经触发了缺页异常：
+                    // 检查页表，如果页存在且已经满足了访问权限要求，直接返回。
+                    let bad_vpn = VirtAddr::from(stval).std_floor();
+                    let retry = match scause.cause() {
+                        Trap::Exception(Exception::InstructionPageFault) => {
+                            memory.pte_satisfies(bad_vpn, false, false, true)
+                        }
+                        Trap::Exception(Exception::LoadPageFault) => {
+                            memory.pte_satisfies(bad_vpn, true, false, false)
+                        }
+                        Trap::Exception(Exception::StorePageFault) => {
+                            memory.pte_satisfies(bad_vpn, false, true, false)
+                        }
+                        _ => false,
+                    };
+                    if retry {
+                        break 'fault;
+                    }
+
                     // 【新增】检查 userfaultfd 注册范围
                     drop(memory);
                 let files_guard = files.exclusive_access();

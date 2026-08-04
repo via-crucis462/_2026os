@@ -111,6 +111,11 @@ impl PageTableEntry {
     pub fn is_valid(&self) -> bool {
         (self.flags() & PTEFlagsLA64::V) != PTEFlagsLA64::empty()
     }
+    /// The page is accessible from U-mode (PLV3).
+    pub fn user_accessible(&self) -> bool {
+        self.flags()
+            .contains(PTEFlagsLA64::PLV0 | PTEFlagsLA64::PLV1)
+    }
     /// The page pointered by page table entry is readable?
     pub fn readable(&self) -> bool {
         (self.flags() & PTEFlagsLA64::NR) == PTEFlagsLA64::empty()
@@ -135,4 +140,3 @@ impl PageTableEntry {
         self.bits |= PTEFlagsLA64::H.bits() as usize;
     }
 }
-

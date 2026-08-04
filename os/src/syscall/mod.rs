@@ -171,6 +171,8 @@ const SYSCALL_RECVMSG: usize = 212;
 const SYSCALL_BRK: usize = 214;
 /// munmap syscall
 const SYSCALL_MUNMAP: usize = 215;
+/// mremap syscall
+const SYSCALL_MREMAP: usize = 216;
 const SYSCALL_ADD_KEY: usize = 217;
 const SYSCALL_REQUEST_KEY: usize = 218;
 const SYSCALL_KEYCTL: usize = 219;
@@ -454,6 +456,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[0], args[1], args[2] as i32, 
             args[3] as i32, args[4] as i32, args[5]
         ),
+        SYSCALL_MREMAP => sys_mremap(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_SENDMSG => sys_sendmsg(args[0], args[1] as *const MsgHdr, args[2] as i32),
         SYSCALL_RECVMSG => sys_recvmsg(args[0], args[1] as *mut MsgHdr, args[2] as i32),
         SYSCALL_PRLIMIT64 => {use crate::process::Rlimit64; sys_prlimit64(args[0], args[1] as i32, args[2] as *const Rlimit64, args[3] as *mut Rlimit64)},

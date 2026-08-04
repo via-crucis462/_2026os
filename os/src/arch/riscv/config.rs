@@ -18,7 +18,7 @@ pub const USER_STACK_SIZE: usize = 0x80_0000; // 8MB
 /// kernel stack size
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 32; // 128KB
 /// kernel heap size
-pub const KERNEL_HEAP_SIZE: usize = 0x2000_0000; // 512MB
+pub const KERNEL_HEAP_SIZE: usize = 0x6000_0000; // 1.5GB
 
 /// the virtual addr of trapoline
 pub const TRAMPOLINE: usize = usize::MAX - PAGE_SIZE + 1;

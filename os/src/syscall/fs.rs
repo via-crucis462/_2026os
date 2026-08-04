@@ -14,6 +14,7 @@ use crate::syscall::TmpfsFileInode;
 use crate::syscall::OSInode;
 
 use alloc::string::String;
+
 const F_DUPFD: usize = 0;
 const F_GETFD: usize = 1;
 const F_SETFD: usize = 2;
@@ -1333,7 +1334,59 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
         if bufs.is_empty() {
             return EFAULT.as_isize();
         }
-        file.getdents(bufs.remove(0)) as isize
+
+        // The user buffer can cross page boundaries.  Stage each VFS read in
+        // a contiguous buffer, but never ask the VFS for more data than we
+        // can copy back to userspace in this syscall.
+        const CHUNK: usize = 32768;
+        let user_len = core::cmp::min(
+            count,
+            bufs.iter().fold(0usize, |len, buf| len.saturating_add(buf.len())),
+        );
+        if user_len == 0 {
+            return EFAULT.as_isize();
+        }
+        let mut chunk = alloc::vec![0u8; core::cmp::min(CHUNK, user_len)];
+        let mut seg_idx = 0usize;
+        let mut seg_off = 0usize;
+        let mut total: usize = 0;
+        while total < user_len {
+            let request_len = core::cmp::min(chunk.len(), user_len - total);
+            let n = file.getdents(&mut chunk[..request_len]);
+            if n <= 0 {
+                if total == 0 {
+                    return n;
+                }
+                break;
+            }
+            let n = n as usize;
+            if n > request_len {
+                // A VFS implementation must not return more than its input
+                // buffer.  Returning such a length would expose uninitialised
+                // userspace bytes as directory records.
+                return EIO.as_isize();
+            }
+            let mut copied = 0usize;
+            while copied < n && seg_idx < bufs.len() {
+                if seg_off == bufs[seg_idx].len() {
+                    seg_idx += 1;
+                    seg_off = 0;
+                    continue;
+                }
+                let c = core::cmp::min(n - copied, bufs[seg_idx].len() - seg_off);
+                bufs[seg_idx][seg_off..seg_off + c].copy_from_slice(&chunk[copied..copied + c]);
+                copied += c;
+                seg_off += c;
+            }
+            if copied != n {
+                return EFAULT.as_isize();
+            }
+            total += copied;
+            if total == user_len {
+                break;
+            }
+        }
+        total as isize
     } else {
         return EBADF.as_isize();
     }
@@ -1467,6 +1520,7 @@ pub fn sys_fadvise64(fd: usize, _offset: usize, _len: usize, advice: i32) -> isi
     0
 }
 
+/// 挂载，目前是伪实现
 pub fn sys_mount(source: *const u8, target: *const u8, filesystemtype: *const u8, mountflags: u32) -> isize {
     let token = current_user_token();
     let source_str = normalize_leading_dot_path(
@@ -1482,9 +1536,10 @@ pub fn sys_mount(source: *const u8, target: *const u8, filesystemtype: *const u8
             return EFAULT.as_isize();
         }
     };
-    return 0; // 目前仅支持 ext4 文件系统的挂载
+    return 0;
 }
 
+/// 取消挂载，目前是伪实现
 pub fn sys_umount(target: *const u8) -> isize {
     let token = current_user_token();
     let target_str = normalize_leading_dot_path(
@@ -1493,7 +1548,7 @@ pub fn sys_umount(target: *const u8) -> isize {
     return 0;
 }
 
-/// 移除
+/// 移除，目前是伪实现
 pub fn sys_fremovexattr(_fd: isize, _name: *const u8) -> isize {
     let name_str = if _name.is_null() {
         String::new()
@@ -1567,8 +1622,16 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usiz
         if dirfd < 0 || (dirfd as usize) >= inner.fds.len() || inner.fds[dirfd as usize].file.is_none() {
             return EBADF.as_isize();
         }
-        // 待实现
-        cwd.clone()
+        let file = inner.fds[dirfd as usize].file.as_ref().unwrap().clone();
+        drop(inner);
+        if let Some(dentry) = file.get_dentry() {
+            if (dentry.inode.get_stat().mode & 0o170000) != 0o040000 {
+                return ENOTDIR.as_isize();
+            }
+            dentry
+        } else {
+            return ENOTDIR.as_isize();
+        }
     };
 
     // 查找文件（follow_links: stat 跟随符号链接，lstat 不跟随）
@@ -2352,7 +2415,7 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
 /// 
 /// TODO: 完全实现 fsync 语义
 pub fn sys_fsync(_fd: usize) -> isize {
-    crate::mm::mmap::sync_shared_page_cache();
+    // crate::mm::mmap::sync_shared_page_cache();
     0
 }
 

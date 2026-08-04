@@ -282,6 +282,13 @@ impl TaskStruct {
 			}
 		}
 
+		// 尝试获取 exec/clone 互斥锁，期间会检查 SIGKILL
+		// guard 会在函数返回时自动释放
+		let exec_guard: ExecUpdateGuard = match caller_task.wait_exec_update_lock() {
+			Ok(guard) => guard,
+			Err(()) => return,
+		};
+
 		let cwd = self.inner_exclusive_access().fs.exclusive_access().get_pwd();
 		let mut has_interp = false;
 		let Some((
@@ -352,7 +359,7 @@ impl TaskStruct {
 		}
 
 		user_sp -= 16;
-	prepare_stack_pages(&mut memory_set, user_sp, user_sp + 16);
+		prepare_stack_pages(&mut memory_set, user_sp, user_sp + 16);
 		let random_at = user_sp;
 		for offset in 0..16 {
 			translated_write(token, (random_at + offset) as *mut u8, 0x23);
@@ -417,11 +424,6 @@ impl TaskStruct {
 		trap_cx.set_a0(args.len());
 		trap_cx.set_a1(argv_base);
 
-		// 尝试获取 exec/clone 互斥锁，期间会检查 SIGKILL
-		let exec_guard: ExecUpdateGuard = match caller_task.wait_exec_update_lock() {
-			Ok(guard) => guard,
-			Err(()) => return,
-		};
 
 		let siblings: Vec<_> = {
 			let tasks = TID2TCB.exclusive_access();
@@ -465,11 +467,14 @@ impl TaskStruct {
 			if inner_has_pending_sigkill(&inner) {
 				return;
 			}
+			// riscv 移除 exec 前的内核栈映射，否则后续如果有线程在旧 mm 上分配同一个内核栈会报重复映射。
+			//
+			// ## 针对下面这种情况：
+			// 进程 A vfork（会单开进程，但共享 mm） 出进程 B，B 分到了内核栈 1 后执行 exec 走到这，
+			// 如果此处没有移除内核栈映射，该内核栈 1 会泄露到旧 mm 中。
+			// 在 B 退出后，A 开的新线程 C 可能分配到同一个内核栈 1。
 			#[cfg(target_arch = "riscv64")]
 			if let Some(old_mm) = inner.mm.as_ref() {
-				// 每个任务的 TrapContext 借映射属于任务本身，而不是 mm。
-				// vfork 子进程与父进程共享旧 mm；exec 若不先删除自己的
-				// 借映射，内核栈复用后会在旧 mm 中留下同 VPN 的悬挂 PTE。
 				old_mm
 					.exclusive_access()
 					.remove_trap_context_page(VirtAddr::from(inner.thread.trap_ctx));
@@ -504,8 +509,6 @@ impl TaskStruct {
 			*inner.get_trap_cx() = trap_cx;
 			(inner.files.clone(), vfork_completion)
 		};
-		// 对进程 TS 的修改已完成
-		drop(exec_guard);
 		{
 			let mut files = files.exclusive_access();
 			for fd in 0..files.fds.len() {
@@ -514,6 +517,7 @@ impl TaskStruct {
 				}
 			}
 		}
+
 		if let Some(completion) = vfork_completion {
 			completion.complete();
 		}

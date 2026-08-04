@@ -11,7 +11,7 @@ use super::*;
 /// 2. 非匿名映射必须提供合法文件，且检查优先级高于长度
 /// 3. 匿名映射不保证地址，且不允许提供文件
 /// 4. 如果是非匿名，要求prot必须至少有PROT_READ
-/// 5
+/// 
 /// 
 /// 参数检查由sys_mmap完成
 pub fn sys_mmap(start: usize, len: usize, port: i32, flags: i32, fd: i32, off: usize) -> isize {
@@ -126,6 +126,108 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
     } else {
         EINVAL.as_isize()
     }
+}
+
+const MREMAP_MAYMOVE: usize = 1;
+const MREMAP_FIXED: usize = 2;
+
+/// mremap - 扩大/缩小/移动内存映射
+///
+/// 目前实现：
+/// - 缩小：直接 munmap 尾部；
+/// - 扩大且尾部空闲：原地扩展（匿名映射）；
+/// - 否则若带 MREMAP_MAYMOVE：新映射 + 拷贝 + 解除旧映射；
+/// - MREMAP_FIXED 暂未实现，返回 EINVAL。
+pub fn sys_mremap(
+    old_addr: usize,
+    old_size: usize,
+    new_size: usize,
+    flags: usize,
+    new_addr: usize,
+) -> isize {
+    let page = PAGE_SIZE;
+    if old_addr % page != 0
+        || old_size == 0
+        || new_size == 0
+        || old_addr.checked_add(old_size).map_or(true, |e| e >= USER_APP_MAX_SIZE)
+        || old_addr.checked_add(new_size).map_or(true, |e| e >= USER_APP_MAX_SIZE)
+        || (flags & !(MREMAP_MAYMOVE | MREMAP_FIXED)) != 0
+    {
+        return EINVAL.as_isize();
+    }
+    if flags & MREMAP_FIXED != 0 {
+        // 固定地址重映射暂不支持
+        return EINVAL.as_isize();
+    }
+
+    let old_sz = (old_size + page - 1) & !(page - 1);
+    let new_sz = (new_size + page - 1) & !(page - 1);
+    if old_sz == new_sz {
+        return old_addr as isize;
+    }
+
+    // 缩小：解除尾部映射
+    if new_sz < old_sz {
+        if mmap::do_munmap(old_addr + new_sz, old_sz - new_sz).is_ok() {
+            return old_addr as isize;
+        }
+        return EINVAL.as_isize();
+    }
+
+    // 扩大：优先原地扩展
+    {
+        let task = current_task().unwrap();
+        let mm = task
+            .inner_exclusive_access()
+            .mm
+            .as_ref()
+            .cloned()
+            .ok_or(EINVAL.as_isize());
+        if let Ok(mm) = mm {
+            let ret = mm.exclusive_access().mremap_inplace(old_addr, old_sz, new_sz);
+            if let Ok(addr) = ret {
+                return addr as isize;
+            }
+        }
+    }
+
+    if flags & MREMAP_MAYMOVE == 0 {
+        return ENOMEM.as_isize();
+    }
+
+    // 移动：新映射 + 拷贝 + 解除旧映射
+    let new_addr = match mmap::do_mmap(
+        0,
+        new_sz,
+        mmap::MMapProt::PROT_READ | mmap::MMapProt::PROT_WRITE,
+        mmap::MMapFlags::MAP_PRIVATE | mmap::MMapFlags::MAP_ANONYMOUS,
+        None,
+        0,
+    ) {
+        Ok(addr) => addr,
+        Err(errno) => return errno,
+    };
+
+    let copy_len = old_sz;
+    let token = current_user_token();
+    let src = crate::mm::page_table::translated_byte_buffer(token, old_addr as *const u8, copy_len);
+    let dst = crate::mm::page_table::translated_byte_buffer_mut(
+        token,
+        new_addr as *mut u8,
+        copy_len,
+    );
+    let mut copied = 0usize;
+    for (s, d) in src.into_iter().zip(dst.into_iter()) {
+        let c = core::cmp::min(s.len(), d.len());
+        d[..c].copy_from_slice(&s[..c]);
+        copied += c;
+        if copied >= copy_len {
+            break;
+        }
+    }
+
+    mmap::do_munmap(old_addr, old_sz).ok();
+    new_addr as isize
 }
 
 // 回写内存映射区域到文件

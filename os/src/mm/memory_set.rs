@@ -834,22 +834,33 @@ impl MemorySet {
                 user_space.areas[idx].vpn_range.get_start(),
                 user_space.areas[idx].vpn_range.get_end(),
             );
-            // Framed/File areas may now be sparse. This also includes an
-            // anonymous PROT_NONE area, which has no U bit but must remain
-            // metadata-only across fork. Copy only PTEs that actually exist;
-            // absent pages stay lazy in both parent and child.
+            // 优化：空的 PROT_NONE 区域不需要复制页表，跳过页表访问
+            if (!map_perm.contains(MapPermission::U)
+                || !map_perm.intersects(
+                    MapPermission::R | MapPermission::W | MapPermission::X,
+                ))
+                && user_space.areas[idx].data_frames.is_empty()
+            {
+                memory_set
+                    .areas
+                    .push(MapArea::from_another(&user_space.areas[idx]));
+                continue;
+            }
             let share_user_pages = matches!(map_type, MapType::Framed | MapType::File);
             if share_user_pages {
                 let mut new_area = MapArea::from_another(&user_space.areas[idx]);
-                let step = page_size.num_pages();
-                let mut vpn = vpn_range.get_start();
-                while vpn < vpn_range.get_end() {
+                // 只遍历父进程实际已分配的页
+                let mapped_vpns: Vec<VirtPageNum> = user_space.areas[idx]
+                    .data_frames
+                    .keys()
+                    .copied()
+                    .filter(|vpn| *vpn >= vpn_range.get_start() && *vpn < vpn_range.get_end())
+                    .collect();
+                for vpn in mapped_vpns {
                     let Some(src_pte) = user_space.page_table.translate(vpn) else {
-                        vpn.step_by(step);
                         continue;
                     };
                     if !src_pte.is_valid() {
-                        vpn.step_by(step);
                         continue;
                     }
                     let writable_cow = map_perm.contains(MapPermission::W) && !is_shared;
@@ -875,7 +886,6 @@ impl MemorySet {
                             .page_table
                             .set_flags(vpn, parent_flags, page_size);
                     }
-                    vpn.step_by(step);
                 }
                 memory_set.areas.push(new_area);
             } else {
@@ -1439,6 +1449,41 @@ impl MemorySet {
         Ok(())
     }
 
+    /// mremap 的就地扩容（仅匿名映射）
+    ///
+    /// 调用方保证 old_addr/new_size/old_size 均已按页对齐、new_size > old_size。
+    /// 仅当 old 区域是匿名映射且扩展区间无冲突时才能原地扩大；
+    /// 其余情况返回 ENOMEM，由 sys_mremap 回退到“新映射 + 拷贝 + 解除旧映射”。
+    pub fn mremap_inplace(
+        &mut self,
+        old_addr: usize,
+        old_size: usize,
+        new_size: usize,
+    ) -> Result<usize, isize> {
+        let old_start_vpn = VirtAddr::from(old_addr).std_floor();
+        let old_end_vpn = VirtAddr::from(old_addr + old_size).std_ceil();
+        let new_end_vpn = VirtAddr::from(old_addr + new_size).std_ceil();
+
+        let idx = self
+            .areas
+            .iter()
+            .position(|area| {
+                area.vpn_range.get_start().0 * PAGE_SIZE <= old_addr
+                    && old_addr + old_size <= area.vpn_range.get_end().0 * PAGE_SIZE
+                    && area.map_type == MapType::Framed
+                    && area.map_type != MapType::Guard
+            })
+            .ok_or(Errno::ENOMEM.as_isize())?;
+
+        // 扩展区间必须空闲，否则无法原地扩大
+        if self.has_conflict(old_addr + old_size, new_size - old_size) {
+            return Err(Errno::ENOMEM.as_isize());
+        }
+
+        self.areas[idx].resize(old_start_vpn, new_end_vpn);
+        Ok(old_addr)
+    }
+
     fn split_area_at(
         &mut self,
         idx: usize,
@@ -1773,6 +1818,25 @@ impl MemorySet {
             );
         }
     }
+
+    /// 判断已有 PTE 是否已满足本次用户访问所需权限。
+    /// 用于并发缺页竞态：另一个 hart 刚完成映射/COW 时，直接重试即可。
+    pub fn pte_satisfies(
+        &self,
+        vpn: VirtPageNum,
+        need_read: bool,
+        need_write: bool,
+        need_exec: bool,
+    ) -> bool {
+        self.page_table.translate(vpn).map_or(false, |pte| {
+            pte.is_valid()
+                && pte.user_accessible()
+                && (!need_read || pte.readable())
+                && (!need_write || pte.writable())
+                && (!need_exec || pte.executable())
+        })
+    }
+
     /// 检查是否是超出文件大小导致的pagefault，如果是，返回后触发SIGBUS信号
     pub fn check_mmap_page_fault(&self, bad_addr: usize) -> bool {
         let vpn = VirtAddr::from(bad_addr).std_floor();
