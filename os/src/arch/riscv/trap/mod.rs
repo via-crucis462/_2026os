@@ -366,9 +366,9 @@ pub fn trap_handler() -> ! {
     trap_return();
 }
 
-// The TrapContext lives on the real kernel stack. Its containing page is also
-// borrowed into the current user page table without PTE_U so the trampoline
-// can save registers before switching SATP.
+// The TrapContext lives on the real kernel stack. Every user page table shares
+// the kernel's supervisor-only high-half mappings, so trap entry can save
+// registers before switching SATP.
 pub fn current_trap_cx_user_va() -> usize {
     current_task()
         .unwrap()
@@ -399,6 +399,7 @@ pub fn trap_return() -> ! {
     set_user_trap_entry();
     let trap_cx_ptr = current_trap_cx_user_va();
     let user_satp = current_user_token();
+    crate::mm::switch_mm(user_satp);
     // println!("[kernel] trap_return: to user mode");
     extern "C" {
         fn __alltraps();
@@ -413,7 +414,6 @@ pub fn trap_return() -> ! {
             "jr {restore_va}",
             restore_va = in(reg) restore_va,
             in("a0") trap_cx_ptr,
-            in("a1") user_satp,
             options(noreturn)
         );
     }

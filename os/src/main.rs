@@ -292,7 +292,6 @@ fn init_other_hart(hart_id: usize) {
     }
 }
 
-use mm::KERNEL_SPACE;
 fn other_init() {
     // 调试用，先把其他核关了
     /*
@@ -302,7 +301,7 @@ fn other_init() {
         );
     } */
     #[cfg(target_arch = "riscv64")]
-    KERNEL_SPACE.exclusive_access().activate();
+    mm::switch_mm(mm::kernel_token());
     #[cfg(target_arch = "loongarch64")]
     la::mm::la_kernel_init_mem(); // 设置映射窗口
     arch::trap::init();

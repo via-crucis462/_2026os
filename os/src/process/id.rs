@@ -5,12 +5,13 @@
 
 use crate::arch::config::*;
 use crate::mm::{MapPermission, VirtAddr, KERNEL_SPACE, PageSize};
+#[cfg(target_arch = "riscv64")]
+use crate::mm::flush_kernel_tlb_targets;
 use crate::sync::MPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
 #[allow(unused)]
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum number of unused kernel stacks whose mappings are kept alive.
 ///
@@ -19,17 +20,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// cover the peak concurrency of the pthread create/join benchmark while
 /// keeping the retained memory bounded.
 const KSTACK_CACHE_LIMIT: usize = 64;
-
-/// Incremented whenever the kernel page table's stack mappings change.
-static KERNEL_MAPPING_GENERATION: AtomicU64 = AtomicU64::new(0);
-
-pub fn kernel_mapping_generation() -> u64 {
-    KERNEL_MAPPING_GENERATION.load(Ordering::Acquire)
-}
-
-fn kernel_mapping_changed() {
-    KERNEL_MAPPING_GENERATION.fetch_add(1, Ordering::Release);
-}
 
 pub struct RecycleAllocator {
     current: usize,
@@ -122,10 +112,25 @@ pub fn kernel_stack_position(app_id: usize) -> (usize, usize) {
     (bottom, top)
 }
 #[cfg(target_arch = "riscv64")]
-// 内核空间地址
+/// 保留最高 1GB 内核栈空间，在 map_trampoline 时会为在根页表分配第 511 个页表项，
+/// 后续不能修改内核根页表，所以让内核栈始终使用第 511 个页表项映射的 1GB 内核栈空间
+const KSTACK_LOWEST: usize = 0xffff_ffff_c000_0000;
+
+#[cfg(target_arch = "riscv64")]
 pub fn kernel_stack_position(app_id: usize) -> (usize, usize) {
-    let top = TRAMPOLINE - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE);
-    let bottom = top - KERNEL_STACK_SIZE;
+    let stride = KERNEL_STACK_SIZE + PAGE_SIZE;
+    let offset = app_id
+        .checked_mul(stride)
+        .expect("kernel stack id overflow");
+    let top = TRAMPOLINE
+        .checked_sub(offset)
+        .expect("kernel stack id exceeds the stack region");
+    let bottom = top
+        .checked_sub(KERNEL_STACK_SIZE)
+        .expect("kernel stack id exceeds the stack region");
+    if bottom < KSTACK_LOWEST {
+        panic!("kernel stack id {} exceeds root entry 511 stack region", app_id);
+    }
     (bottom, top)
 }
 
@@ -155,7 +160,6 @@ pub fn kstack_alloc() -> KernelStack {
         MapPermission::R | MapPermission::W,
         PageSize::Page4K, // 内核栈用标准页
     );
-    kernel_mapping_changed();
     KernelStack(kstack_id)
 }
 
@@ -170,10 +174,12 @@ impl Drop for KernelStack {
 
         let (kernel_stack_bottom, _) = kernel_stack_position(self.0);
         let kernel_stack_bottom_va: VirtAddr = kernel_stack_bottom.into();
-        KERNEL_SPACE
+        let frames = KERNEL_SPACE
             .exclusive_access()
             .remove_area_with_start_vpn(kernel_stack_bottom_va.into());
-        kernel_mapping_changed();
+        #[cfg(target_arch = "riscv64")]
+        flush_kernel_tlb_targets();
+        drop(frames);
         KSTACK_ALLOCATOR.exclusive_access().dealloc(self.0);
     }
 }

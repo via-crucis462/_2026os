@@ -7,8 +7,8 @@ use crate::process::scheduler::runqueue::{
     SCHED_OTHER,
 };
 use crate::process::{TaskContext, TaskControlBlock, TaskStatus};
-use crate::process::id::kernel_mapping_generation;
-use crate::mm::kernel_asid;
+#[cfg(target_arch = "riscv64")]
+use crate::mm::{kernel_token, switch_mm};
 use crate::arch::timer::get_time_us;
 use crate::get_hart_id;
 use crate::sync::*;
@@ -34,7 +34,6 @@ extern "C" {
 pub struct Processor {
     pub(crate) current: Option<Arc<TaskControlBlock>>,
     idle_task_cx: TaskContext,
-    kernel_mapping_generation: u64,
 }
 
 impl Processor {
@@ -42,7 +41,6 @@ impl Processor {
         Self {
             current: None,
             idle_task_cx: TaskContext::zero_init(),
-            kernel_mapping_generation: 0,
         }
     }
 
@@ -126,6 +124,12 @@ pub fn run_tasks() {
             let mut processor = current_processor();
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             let task_inner = task.inner_exclusive_access();
+            #[cfg(target_arch = "riscv64")]
+            let next_token = task_inner
+                .mm
+                .as_ref()
+                .map(|mm| mm.exclusive_access().token())
+                .unwrap_or_else(kernel_token);
             let next_task_cx_ptr = &task_inner.thread.task_ctx as *const TaskContext;
             drop(task_inner);
             processor.current = Some(task);
@@ -134,25 +138,8 @@ pub fn run_tasks() {
                 .map(|task| task.inner_exclusive_access().sched_policy)
                 .unwrap_or(SCHED_OTHER);
             crate::arch::timer::set_next_trigger(sched_policy);
-            // Stack mappings live in the shared kernel page table. Only flush
-            // this hart when that page table changed since its last switch.
-            // Cached stacks do not change mappings and therefore need no flush.
-            let generation = kernel_mapping_generation();
-            let needs_kernel_tlb_flush = {
-                let mut processor = current_processor();
-                if processor.kernel_mapping_generation == generation {
-                    false
-                } else {
-                    processor.kernel_mapping_generation = generation;
-                    true
-                }
-            };
-            if needs_kernel_tlb_flush {
-                // ASIDs tag an address space, not one stack range. All kernel
-                // stacks belong to KERNEL_SPACE, whose dedicated ASID lets us
-                // preserve unrelated user-ASID translations on this hart.
-                crate::arch::mm::flush_tlb_for_asid(kernel_asid());
-            }
+            #[cfg(target_arch = "riscv64")]
+            switch_mm(next_token);
             unsafe {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }

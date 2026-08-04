@@ -40,6 +40,8 @@ extern "C" {
 
 lazy_static! {
     /// The kernel's initial memory mapping(kernel address space)
+    ///
+    /// 不含内核栈的映射，内核栈由栈分配器在每个线程创建时单独映射
     pub static ref KERNEL_SPACE: Arc<MPSafeCell<MemorySet>> =
         Arc::new(MPSafeCell::new(MemorySet::new_kernel()));
 }
@@ -57,6 +59,25 @@ pub fn kernel_asid() -> usize {
     KERNEL_SPACE.exclusive_access().asid()
 }
 
+/// Invalidate shared kernel mappings under every active user ASID.
+#[cfg(target_arch = "riscv64")]
+pub fn flush_kernel_tlb_targets() {
+    use core::sync::atomic::{fence, Ordering};
+
+    fence(Ordering::SeqCst);
+    let local_bit = 1usize << crate::get_hart_id();
+    for (token, harts) in crate::mm::active_tokens() {
+        let asid = (token >> 44) & 0xffff;
+        if harts & local_bit != 0 {
+            crate::arch::mm::flush_tlb_for_asid(asid);
+        }
+        let remote_harts = harts & !local_bit;
+        if remote_harts != 0 {
+            crate::arch::sbi::remote_sfence_vma_asid(remote_harts, asid);
+        }
+    }
+}
+
 /// address space
 /// 注意维护brk_index
 pub struct MemorySet {
@@ -67,41 +88,14 @@ pub struct MemorySet {
 }
 
 impl MemorySet {
-    /// Map one page owned by the kernel into this address space for trap entry.
+    /// Share the kernel's Sv39 upper half with this user page table.
     ///
-    /// The mapping is supervisor-only and does not own `ppn`; the corresponding
-    /// kernel stack remains the sole owner of the physical frame.
+    /// The copied root entries point at kernel-owned lower-level page tables;
+    /// this MemorySet owns only its lower-half page table frames and mappings.
     #[cfg(target_arch = "riscv64")]
-    pub fn install_trap_context_page(&mut self, va: VirtAddr, ppn: PhysPageNum) {
-        let vpn = va.std_floor();
-        self.page_table
-            .map(vpn, ppn, PTEFlags::R | PTEFlags::W, PageSize::Page4K);
-        self.areas.push(MapArea::new(
-            VirtAddr::from(vpn),
-            VirtAddr::from((vpn.0 + 1) * PAGE_SIZE),
-            MapType::BorrowedKernel,
-            MapPermission::R | MapPermission::W,
-            PageSize::Page4K,
-        ));
-        unsafe {
-            asm!("sfence.vma {va}, {asid}", va = in(reg) va.0, asid = in(reg) self.asid());
-        }
-    }
-
-    /// Remove a borrowed trap-context mapping without freeing its kernel-owned
-    /// physical frame.
-    #[cfg(target_arch = "riscv64")]
-    pub fn remove_trap_context_page(&mut self, va: VirtAddr) {
-        let vpn = va.std_floor();
-        if self.page_table.translate(vpn).is_some() {
-            self.page_table.unmap(vpn);
-        }
-        self.areas.retain(|area| {
-            area.map_type != MapType::BorrowedKernel || area.vpn_range.get_start() != vpn
-        });
-        unsafe {
-            asm!("sfence.vma {va}, {asid}", va = in(reg) va.0, asid = in(reg) self.asid());
-        }
+    pub fn install_kernel_space(&mut self) {
+        let kernel_space = KERNEL_SPACE.exclusive_access();
+        self.page_table.share_kernel_half(&kernel_space.page_table);
     }
 
     #[cfg(target_arch = "loongarch64")]
@@ -160,6 +154,32 @@ impl MemorySet {
     }
     pub fn asid(&self) -> usize {
         self.asid.0
+    }
+    /// Invalidate this address space on every hart currently running it.
+    ///
+    /// Call this after changing a PTE and before releasing a frame that used
+    /// to be reachable through that PTE. OpenSBI completes remote fences before
+    /// returning, so callers may safely drop such frames afterwards.
+    #[cfg(target_arch = "riscv64")]
+    pub fn flush_tlb_targets(&self) {
+        use core::sync::atomic::{fence, Ordering};
+
+        // Publish the PTE update before observing the active-hart set. A hart
+        // published afterwards enters only after the new PTE is visible.
+        fence(Ordering::SeqCst);
+        let targets = crate::mm::running_harts(self.token());
+        if targets == 0 {
+            return;
+        }
+
+        let local_bit = 1usize << crate::get_hart_id();
+        if targets & local_bit != 0 {
+            crate::arch::mm::flush_tlb_for_asid(self.asid());
+        }
+        let remote_targets = targets & !local_bit;
+        if remote_targets != 0 {
+            crate::arch::sbi::remote_sfence_vma_asid(remote_targets, self.asid());
+        }
     }
     pub fn areas(&self) -> &Vec<MapArea> {
         &self.areas
@@ -233,15 +253,19 @@ impl MemorySet {
         self.areas.push(area);
     }
     /// remove a area
-    pub fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) {
-        if let Some((idx, area)) = self
+    pub fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) -> Vec<FrameTracker> {
+        if let Some(idx) = self
             .areas
-            .iter_mut()
+            .iter()
             .enumerate()
             .find(|(_, area)| area.vpn_range.get_start() == start_vpn)
+            .map(|(idx, _)| idx)
         {
-            area.unmap(&mut self.page_table);
+            let frames = self.areas[idx].unmap(&mut self.page_table);
             self.areas.remove(idx);
+            frames
+        } else {
+            Vec::new()
         }
     }
     /// Add a new MapArea into this MemorySet.
@@ -502,10 +526,6 @@ impl MemorySet {
         }
 
         let mut memory_set = Self::new_bare();
-
-        // riscv映射跳板
-        #[cfg(target_arch = "riscv64")]
-        memory_set.map_trampoline();
 
         // 用户态信号处理后恢复跳板
         memory_set.map_user_trampoline();
@@ -795,6 +815,9 @@ impl MemorySet {
             None,
             TRAP_CONTEXT_BASE,
         ); */
+        #[cfg(target_arch = "riscv64")]
+        memory_set.install_kernel_space();
+
         debug!("MemorySet::from_elf: mapped all areas");
         Some((
             memory_set,
@@ -811,17 +834,13 @@ impl MemorySet {
     /// Create a new address space by copy code&data from a exited process's address space.
     pub fn from_existed_user(user_space: &mut Self) -> Self {
         let mut memory_set = Self::new_bare();
-        // map trampoline
-        #[cfg(target_arch = "riscv64")]
-        memory_set.map_trampoline();
         // 用户态信号恢复跳板
         memory_set.map_user_trampoline();
 
-        // copy data sections/trap_context/user_stack
+        // 复制用户拥有的段
         for idx in 0..user_space.areas.len() {
             let map_type = user_space.areas[idx].map_type;
-            // TrapContext belongs to a task's KernelStack. A forked task gets
-            // its own borrowed mapping after its kernel stack is allocated.
+            // 采用共享内核页表之后实际上弃用，暂时保留接口
             if map_type == MapType::BorrowedKernel {
                 continue;
             }
@@ -926,6 +945,8 @@ impl MemorySet {
         }
         // 复制brk_index
         memory_set.brk_index = user_space.brk_index;
+        #[cfg(target_arch = "riscv64")]
+        memory_set.install_kernel_space();
         memory_set
     }
     pub fn handle_cow_fault(&mut self, bad_addr: usize) -> bool {
@@ -956,11 +977,12 @@ impl MemorySet {
                     }
                     let pte_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
                     page_table.set_entry(vpn, new_ppn, pte_flags);
-                    area.data_frames.insert(vpn, new_frame);
+                    let old_frame = area.data_frames.insert(vpn, new_frame);
                     #[cfg(target_arch = "loongarch64")]
                     Self::flush_tlb_after_mapping_change();
                     #[cfg(target_arch = "riscv64")]
-                    crate::arch::mm::flush_tlb_for_asid(self.asid());
+                    self.flush_tlb_targets();
+                    drop(old_frame);
                     return true;
                 }
             }
@@ -1120,7 +1142,7 @@ impl MemorySet {
             let flags = pte.flags();
             if pte.is_valid() && pte.writable() && !flags.contains(PTEFlags::D) {
                 pte.set_dirty();
-                crate::arch::mm::flush_tlb_for_asid(self.asid());
+                self.flush_tlb_targets();
                 return true;
             }
         }
@@ -1134,9 +1156,13 @@ impl MemorySet {
     }
     /// Remove all `MapArea`
     pub fn recycle_data_pages(&mut self) {
+        let mut frames = Vec::new();
         for area in self.areas.iter_mut() {
-            area.unmap(&mut self.page_table);
+            frames.extend(area.unmap(&mut self.page_table));
         }
+        #[cfg(target_arch = "riscv64")]
+        self.flush_tlb_targets();
+        drop(frames);
         self.areas.clear();
     }
     /// shrink the area to new_end
@@ -1147,9 +1173,12 @@ impl MemorySet {
             .iter_mut()
             .find(|area| area.vpn_range.get_start() == start.std_floor())
         {
-            area.shrink_to(&mut self.page_table, new_end.std_ceil());
+            let frames = area.shrink_to(&mut self.page_table, new_end.std_ceil());
             #[cfg(target_arch = "loongarch64")]
             Self::flush_tlb_after_mapping_change();
+            #[cfg(target_arch = "riscv64")]
+            self.flush_tlb_targets();
+            drop(frames);
             true
         } else {
             false
@@ -1353,6 +1382,7 @@ impl MemorySet {
 
         // 收集因从中间截断而产生的新右半部分区域
         let mut new_areas: Vec<MapArea> = Vec::new();
+        let mut released_frames = Vec::new();
 
         for area in self.areas.iter_mut() {
             let a_start = area.vpn_range.get_start();
@@ -1368,7 +1398,9 @@ impl MemorySet {
                     // 情况1：All（当前块被目标区域完全包裹，全部删掉）
                     let mut vpn = a_start;
                     while vpn < a_end {
-                        area.unmap_one(&mut self.page_table, vpn);
+                        if let Some(frame) = area.unmap_one(&mut self.page_table, vpn) {
+                            released_frames.push(frame);
+                        }
                         vpn.step_by(step);
                     }
                     area.resize(a_start, a_start); // 长度设为0，稍后统一 retain 清理
@@ -1377,7 +1409,9 @@ impl MemorySet {
                     // 情况2：Split（目标区域在当前块中间，一分为二）
                     // 2.1 清理中间被 unmap 的页表和物理页
                     for vpn in VPNRange::new(start_vpn, end_vpn) {
-                        area.unmap_one(&mut self.page_table, vpn);
+                        if let Some(frame) = area.unmap_one(&mut self.page_table, vpn) {
+                            released_frames.push(frame);
+                        }
                     }
                     // 2.2 切出右半部分保留的物理帧
                     let right_frames = area.data_frames.split_off(&end_vpn);
@@ -1391,7 +1425,9 @@ impl MemorySet {
                     // 情况3：Inc_Left（删掉左边部分）
                     let mut vpn = a_start;
                     while vpn < end_vpn {
-                        area.unmap_one(&mut self.page_table, vpn);
+                        if let Some(frame) = area.unmap_one(&mut self.page_table, vpn) {
+                            released_frames.push(frame);
+                        }
                         vpn.step_by(step);
                     }
                     area.resize(end_vpn, a_end);
@@ -1399,7 +1435,9 @@ impl MemorySet {
                     // 情况4：Inc_Right（删掉右边部分）
                     let mut vpn = start_vpn;
                     while vpn < a_end {
-                        area.unmap_one(&mut self.page_table, vpn);
+                        if let Some(frame) = area.unmap_one(&mut self.page_table, vpn) {
+                            released_frames.push(frame);
+                        }
                         vpn.step_by(step);
                     }
                     area.resize(a_start, start_vpn);
@@ -1418,6 +1456,9 @@ impl MemorySet {
 
         #[cfg(target_arch = "loongarch64")]
         Self::flush_tlb_after_mapping_change();
+        #[cfg(target_arch = "riscv64")]
+        self.flush_tlb_targets();
+        drop(released_frames);
 
         Ok(())
     }
@@ -1431,6 +1472,7 @@ impl MemorySet {
         let start_vpn = VirtAddr::from(start).std_floor();
         let end_vpn = VirtAddr::from(end).std_ceil();
 
+        let mut released_frames = Vec::new();
         for area in self.areas.iter_mut() {
             let area_start = area.vpn_range.get_start();
             let area_end = area.vpn_range.get_end();
@@ -1443,7 +1485,9 @@ impl MemorySet {
             let step = area.page_size.num_pages();
             let mut vpn = discard_start;
             while vpn < discard_end {
-                area.unmap_one(&mut self.page_table, vpn);
+                if let Some(frame) = area.unmap_one(&mut self.page_table, vpn) {
+                    released_frames.push(frame);
+                }
                 vpn.step_by(step);
             }
         }
@@ -1451,7 +1495,8 @@ impl MemorySet {
         #[cfg(target_arch = "loongarch64")]
         Self::flush_tlb_after_mapping_change();
         #[cfg(target_arch = "riscv64")]
-        crate::arch::mm::flush_tlb_for_asid(self.asid());
+        self.flush_tlb_targets();
+        drop(released_frames);
 
         Ok(())
     }
@@ -1596,6 +1641,10 @@ impl MemorySet {
             return Err(Errno::ENOMEM.as_isize());
         }
 
+        let permissions_tightened = affected.iter().any(|idx| {
+            !(self.areas[*idx].map_perm & !permission).is_empty()
+        });
+
         for &idx in affected.iter().rev() {
             self.split_area_at(idx, end_vpn)?;
             self.split_area_at(idx, start_vpn)?;
@@ -1621,8 +1670,8 @@ impl MemorySet {
         }
 
         #[cfg(target_arch = "riscv64")]
-        unsafe {
-            asm!("sfence.vma x0, {asid}", asid = in(reg) self.asid());
+        if permissions_tightened {
+            self.flush_tlb_targets();
         }
         #[cfg(target_arch = "loongarch64")]
         Self::flush_tlb_after_mapping_change();
@@ -1744,9 +1793,6 @@ impl MemorySet {
                 Self::flush_tlb_after_mapping_change();
                 unsafe { asm!("ibar 0") };
             }
-            #[cfg(target_arch = "riscv64")]
-            crate::arch::mm::flush_tlb_for_asid(self.asid());
-
             return true; // 惰性分配修复成功
         }
 
@@ -1788,9 +1834,6 @@ impl MemorySet {
 
             #[cfg(target_arch = "loongarch64")]
             Self::flush_tlb_after_mapping_change();
-            #[cfg(target_arch = "riscv64")]
-            crate::arch::mm::flush_tlb_for_asid(self.asid());
-
             // trace!("[kernel] User stack dynamically expanded down to {:#x}", bad_addr);
             return true; // 栈扩张修复成功！
         }
@@ -1866,6 +1909,17 @@ impl MemorySet {
         false
     }
 }
+
+impl Drop for MemorySet {
+    fn drop(&mut self) {
+        #[cfg(target_arch = "riscv64")]
+        {
+            let token = self.token();
+            self.flush_tlb_targets();
+            crate::mm::tlb::remove_token(token);
+        }
+    }
+}
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
     pub vpn_range: VPNRange,
@@ -1919,8 +1973,14 @@ impl MapArea {
             page_size: another.page_size,
         }
     }
-    /// 解除单页映射并释放物理帧
-    pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+    /// Remove one PTE and return its frame without dropping it.
+    ///
+    /// The caller must invalidate every active TLB before dropping the frame.
+    pub fn unmap_one(
+        &mut self,
+        page_table: &mut PageTable,
+        vpn: VirtPageNum,
+    ) -> Option<FrameTracker> {
         match self.map_type {
             MapType::Framed | MapType::File => {
                 // 共享文件映射需要先写回内容
@@ -1933,23 +1993,24 @@ impl MapArea {
                     }
                 }
 
-                // 先 drop FrameTracker，主要针对 clone_vm 子进程继承父进程页表的情况
-                // 调了好久才发现这种情况，如果不判断是否有frame就改页表，会炸掉:(
-                if self.data_frames.remove(&vpn).is_some() {
-                    // 解除映射页表
+                let frame = self.data_frames.remove(&vpn);
+                if frame.is_some() {
                     page_table.unmap(vpn);
                 }
+                frame
             }
             MapType::Identical | MapType::Windowed => {
                 page_table.unmap(vpn);
+                None
             }
             // BorrowedKernel contains no FrameTracker; only remove its PTE.
             MapType::BorrowedKernel => {
                 if page_table.translate(vpn).is_some() {
                     page_table.unmap(vpn);
                 }
+                None
             }
-            MapType::Guard => {}
+            MapType::Guard => None,
         }
     }
 
@@ -2144,31 +2205,6 @@ impl MapArea {
             vpn,
         );
     }
-    /* pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
-        match self.map_type {
-            MapType::Framed | MapType::File => {
-                if self.data_frames.remove(&vpn).is_some() {
-                    // 共享映射的 PTE 可能已被 munmap 解除，先检查
-                    if page_table.translate(vpn).is_some() {
-                        page_table.unmap(vpn);
-                    }
-                } else if self.is_shared {
-                    if page_table.translate(vpn).is_some() && page_table.translate(vpn).unwrap().is_valid() {
-                        page_table.unmap(vpn);
-                    }
-                }
-            }
-            MapType::Identical => {
-                page_table.unmap(vpn);
-            }
-            MapType::BorrowedKernel => {
-                if page_table.translate(vpn).is_some() {
-                    page_table.unmap(vpn);
-                }
-            }
-            MapType::Guard => {}
-        }
-    }*/
     pub fn map(&mut self, page_table: &mut PageTable) {
         let step = self.page_size.num_pages();
         let mut vpn = self.vpn_range.get_start();
@@ -2177,23 +2213,35 @@ impl MapArea {
             vpn.step_by(step);
         }
     }
-    pub fn unmap(&mut self, page_table: &mut PageTable) {
+    pub fn unmap(&mut self, page_table: &mut PageTable) -> Vec<FrameTracker> {
+        let mut frames = Vec::new();
         let step = self.page_size.num_pages();
         let mut vpn = self.vpn_range.get_start();
         while vpn < self.vpn_range.get_end() {
-            self.unmap_one(page_table, vpn);
+            if let Some(frame) = self.unmap_one(page_table, vpn) {
+                frames.push(frame);
+            }
             vpn.step_by(step);
         }
+        frames
     }
     #[allow(unused)]
-    pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
+    pub fn shrink_to(
+        &mut self,
+        page_table: &mut PageTable,
+        new_end: VirtPageNum,
+    ) -> Vec<FrameTracker> {
+        let mut frames = Vec::new();
         let step = self.page_size.num_pages();
         let mut vpn = new_end;
         while vpn < self.vpn_range.get_end() {
-            self.unmap_one(page_table, vpn);
+            if let Some(frame) = self.unmap_one(page_table, vpn) {
+                frames.push(frame);
+            }
             vpn.step_by(step);
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
+        frames
     }
     #[allow(unused)]
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {

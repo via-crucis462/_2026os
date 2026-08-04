@@ -4,7 +4,7 @@ use crate::arch::{
 };
 use crate::fs::ROOT_DENTRY;
 use crate::ipc::namespace::{IPCNamespace, NsProxy};
-use crate::mm::{KERNEL_SPACE, MemorySet, VirtAddr};
+use crate::mm::{KERNEL_SPACE, MemorySet};
 use crate::process::scheduler::runqueue::{SCHED_IDLE, SCHED_OTHER};
 use crate::process::signal::{SigHand, Signal, SignalAltStack, Sigpending, SignalFlags};
 use crate::process::task::{
@@ -23,7 +23,7 @@ impl TaskStruct {
 		//println!("[kernel] TaskControlBlock::new: start creating a new process");
 
 		//处理 ELF 文件，创建内存空间，返回的memory_set中已经包含了用户程序的代码段、数据段、bss段以及长度为1的堆段
-		let Some((mut memory_set, heap_bottom, user_sp, entry_point, _main_entry, _phdr, _phnum, _phent, _interp_base))
+		let Some((memory_set, heap_bottom, user_sp, entry_point, _main_entry, _phdr, _phnum, _phent, _interp_base))
 			= MemorySet::from_elf(elf_data) else {
 				panic!("TaskControlBlock::new: invalid ELF for init process");
 			};
@@ -42,16 +42,6 @@ impl TaskStruct {
 		let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
 		let kernel_stack_top = trap_cx_addr;
 		let initial_user_sp = user_sp;
-		#[cfg(target_arch = "riscv64")]{
-			let trap_cx_va = VirtAddr::from(trap_cx_addr);
-			let trap_cx_ppn = KERNEL_SPACE
-				.exclusive_access()
-				.translate(trap_cx_va.std_floor())
-				.expect("kernel TrapContext is not mapped")
-				.ppn();
-			memory_set.install_trap_context_page(trap_cx_va, trap_cx_ppn);
-		}
-
 		debug!("TaskControlBlock::new: kernel_stack_top={:#x}", kernel_stack.get_top());
 		// 进程控制块
 

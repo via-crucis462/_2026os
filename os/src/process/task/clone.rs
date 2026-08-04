@@ -1,7 +1,7 @@
 //! Task cloning implementation is exposed through `TaskStruct::do_clone`.
 
 use crate::arch::{timer::get_time_us, trap::TrapContext};
-use crate::mm::{KERNEL_SPACE, MemorySet, VirtAddr};
+use crate::mm::MemorySet;
 use crate::process::{add_task, kstack_alloc, pid_alloc};
 use crate::process::signal::{SigHand, Signal, SignalAltStack, Sigpending};
 use crate::process::task::{context::ThreadStruct, *};
@@ -101,6 +101,9 @@ impl TaskStruct {
 			// 无 CLONE_VM：写时复制（COW），创建独立的地址空间副本
 			let mut parent_memory = parent_mm.exclusive_access();
 			let child_memory = MemorySet::from_existed_user(&mut parent_memory);
+			#[cfg(target_arch = "riscv64")]
+			parent_memory.flush_tlb_targets();
+			#[cfg(target_arch = "loongarch64")]
 			crate::arch::mm::flush_tlb_for_asid(parent_memory.asid());
 			Arc::new(MPSafeCell::new(child_memory))
 		};
@@ -225,20 +228,6 @@ impl TaskStruct {
 		let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
 		let kernel_stack_top = trap_cx_addr;
 
-		// RISC-V 陷入时仍使用用户页表，因此只借用映射包含真实内核
-		// TrapContext 的栈顶页；物理页始终由 KernelStack 所有。
-		#[cfg(target_arch = "riscv64")]
-		{
-			let trap_cx_va = VirtAddr::from(trap_cx_addr);
-			let trap_cx_ppn = KERNEL_SPACE
-				.exclusive_access()
-				.translate(trap_cx_va.std_floor())
-				.expect("kernel TrapContext is not mapped")
-				.ppn();
-			let mut memory = child_mm.exclusive_access();
-			memory.install_trap_context_page(trap_cx_va, trap_cx_ppn);
-		}
-
 		// ── 6. 构造子任务 TaskStruct ──
 		let thread_group_leader = self.group_leader.clone();
 		let child = Arc::new_cyclic(|child_weak| {
@@ -358,11 +347,6 @@ impl TaskStruct {
 		if flags & CLONE_PARENT_SETTID != 0
 			&& !crate::mm::try_translated_write(parent_token, ptid as *mut u32, child_tid)
 		{
-			#[cfg(target_arch = "riscv64")]
-			if let Some(mm) = child.inner_exclusive_access().mm.as_ref().cloned() {
-				mm.exclusive_access()
-					.remove_trap_context_page(VirtAddr::from(trap_cx_addr));
-			}
 			return Errno::EFAULT.as_isize();
 		}
 		// CLONE_CHILD_SETTID：向子地址空间的 *ctid 写入自身 TID
@@ -373,11 +357,6 @@ impl TaskStruct {
 				child_memory.token()
 			};
 			if !crate::mm::try_translated_write(child_token, ctid as *mut u32, child_tid) {
-				#[cfg(target_arch = "riscv64")]
-				if let Some(mm) = child.inner_exclusive_access().mm.as_ref().cloned() {
-					mm.exclusive_access()
-						.remove_trap_context_page(VirtAddr::from(trap_cx_addr));
-				}
 				return Errno::EFAULT.as_isize();
 			}
 		}

@@ -7,7 +7,7 @@ use crate::arch::trap::{trap_handler, TrapContext};
 use crate::drivers::net::EthernetDevice;
 use crate::fs::{open_file, File, OpenFlags};
 use crate::process::FdFlags;
-use crate::mm::{translated_write, KERNEL_SPACE, MemorySet, VirtAddr};
+use crate::mm::{translated_write, KERNEL_SPACE, MemorySet};
 use crate::process::registry::{tid2task, TID2TCB};
 use crate::process::scheduler::runqueue::wake_up_task;
 use crate::process::signal::{
@@ -313,13 +313,6 @@ impl TaskStruct {
 		#[cfg(target_arch = "riscv64")]
 		let (trap_cx_addr, kernel_stack_top) = {
 			let trap_cx_addr = caller_task.inner_exclusive_access().thread.trap_ctx;
-			let trap_cx_va = VirtAddr::from(trap_cx_addr);
-			let trap_cx_ppn = KERNEL_SPACE
-				.exclusive_access()
-				.translate(trap_cx_va.std_floor())
-				.expect("kernel TrapContext is not mapped")
-				.ppn();
-			memory_set.install_trap_context_page(trap_cx_va, trap_cx_ppn);
 			(trap_cx_addr, trap_cx_addr)
 		};
 
@@ -467,18 +460,12 @@ impl TaskStruct {
 			if inner_has_pending_sigkill(&inner) {
 				return;
 			}
-			// riscv 移除 exec 前的内核栈映射，否则后续如果有线程在旧 mm 上分配同一个内核栈会报重复映射。
-			//
-			// ## 针对下面这种情况：
-			// 进程 A vfork（会单开进程，但共享 mm） 出进程 B，B 分到了内核栈 1 后执行 exec 走到这，
-			// 如果此处没有移除内核栈映射，该内核栈 1 会泄露到旧 mm 中。
-			// 在 B 退出后，A 开的新线程 C 可能分配到同一个内核栈 1。
 			#[cfg(target_arch = "riscv64")]
 			if let Some(old_mm) = inner.mm.as_ref() {
-				old_mm
-					.exclusive_access()
-					.remove_trap_context_page(VirtAddr::from(inner.thread.trap_ctx));
+				old_mm.exclusive_access().flush_tlb_targets();
 			}
+			#[cfg(target_arch = "riscv64")]
+			crate::mm::switch_mm(memory_set.token());
 			let old_signal = inner.signal.clone();
 			inner.thread.trap_ctx = trap_cx_addr;
 			inner.mm = Some(Arc::new(MPSafeCell::new(memory_set)));
