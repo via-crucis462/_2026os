@@ -6,6 +6,20 @@
 .macro LOAD_GP n
     ld.d $r\n, $sp, \n*8
 .endm
+.macro SAVE_VR n
+    vst $vr\n, $sp, 272+\n*16
+.endm
+.macro LOAD_VR n
+    vld $vr\n, $sp, 272+\n*16
+.endm
+.macro SAVE_FCC n
+    movcf2gr $t0, $fcc\n
+    st.b $t0, $sp, 788+\n
+.endm
+.macro LOAD_FCC n
+    ld.b $t0, $sp, 788+\n
+    movgr2cf $fcc\n, $t0
+.endm
     .section .text.trampoline
     .globl __alltraps
     .globl __restore
@@ -40,6 +54,23 @@ __alltraps:
     csrrd $t2, 0x502 #读出用户栈指针
     st.d $t2, $sp, 8*3
 
+    # 保存 LSX 向量寄存器。用户态启用 SXE 后，任务切换必须保存完整
+    # vr0-vr31，否则不同进程会相互覆盖动态加载器和 libc 的向量状态。
+    .set n, 0
+    .rept 32
+        SAVE_VR %n
+        .set n, n+1
+    .endr
+
+    # 保存 FCSR0 和 FCC0-FCC7。
+    movfcsr2gr $t0, $fcsr0
+    st.w $t0, $sp, 784
+    .set n, 0
+    .rept 8
+        SAVE_FCC %n
+        .set n, n+1
+    .endr
+
     move $a0, $sp
     bl trap_handler
 
@@ -69,6 +100,21 @@ __restore:
     # 放置内核栈（tc）指针到0x502寄存器
     ld.d $t2, $sp, 8*3
     csrwr $t2, 0x502
+
+    # 恢复 FCSR0、FCC 和 LSX 向量寄存器。必须在恢复通用寄存器之前
+    # 使用 t0，避免覆盖用户态保存的临时寄存器值。
+    ld.w $t0, $sp, 784
+    movgr2fcsr $fcsr0, $t0
+    .set n, 0
+    .rept 8
+        LOAD_FCC %n
+        .set n, n+1
+    .endr
+    .set n, 0
+    .rept 32
+        LOAD_VR %n
+        .set n, n+1
+    .endr
 
     # 恢复之前保存的通用寄存器
     ld.d $r1, $sp, 8*1
