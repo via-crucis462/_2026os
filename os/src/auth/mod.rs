@@ -31,7 +31,7 @@ impl PermStat {
         let cred = task.inner_exclusive_access().cred.clone();
         let (uid, gid) = {
             let cred = cred.exclusive_access();
-            (cred.euid(), cred.egid())
+            (cred.fsuid(), cred.fsgid())
         };
         PermSet {
             w: self.can_write(uid, gid),

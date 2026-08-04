@@ -43,6 +43,18 @@ impl Cred{
         self.sgid
     }
 
+    pub fn suid(&self) -> u32 {
+        self.suid
+    }
+
+    pub fn fsuid(&self) -> u32 {
+        self.fsuid
+    }
+
+    pub fn fsgid(&self) -> u32 {
+        self.fsgid
+    }
+
     pub fn set_ruid(&mut self, uid: u32) {
         self.uid = uid;
     }
@@ -50,14 +62,25 @@ impl Cred{
     pub fn set_uid(&mut self, uid: u32) {
         self.uid = uid;
         self.euid = uid;
+        self.fsuid = uid;
     }
 
     pub fn set_gid(&mut self, gid: u32) {
         self.gid = gid;
         self.egid = gid;
+        self.fsgid = gid;
     }
 
     pub fn set_euid(&mut self, euid: u32) {
         self.euid = euid;
+        self.fsuid = euid;
+    }
+
+    pub fn set_fsuid(&mut self, fsuid: u32) {
+        self.fsuid = fsuid;
+    }
+
+    pub fn set_fsgid(&mut self, fsgid: u32) {
+        self.fsgid = fsgid;
     }
 }

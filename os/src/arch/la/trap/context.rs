@@ -1,5 +1,5 @@
 //! 按照loongarch64架构修改
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
 /// 复用riscv的设计，小幅度修改
 pub struct TrapContext {
@@ -10,7 +10,20 @@ pub struct TrapContext {
     prmd: usize,
     /// era, trap返回后下一步执行的地址
     era: usize,
+    /// LoongArch LSX 128-bit vector registers vr0-vr31.
+    pub vr: [u128; 32],
+    /// Floating-point control/status register FCSR0.
+    pub fcsr: u32,
+    /// Floating-point condition-code registers FCC0-FCC7.
+    pub fcc: [u8; 8],
 }
+
+const _: () = {
+    assert!(core::mem::offset_of!(TrapContext, vr) == 272);
+    assert!(core::mem::offset_of!(TrapContext, fcsr) == 784);
+    assert!(core::mem::offset_of!(TrapContext, fcc) == 788);
+    assert!(core::mem::size_of::<TrapContext>() == 800);
+};
 
 // 封装了对两平台名称不同寄存器的访问为同名接口
 impl TrapContext {
@@ -20,6 +33,9 @@ impl TrapContext {
             r: [0; 32],
             prmd: 0,
             era: 0,
+            vr: [0; 32],
+            fcsr: 0,
+            fcc: [0; 8],
         }
     }
     /// 将sp存入r3
@@ -81,6 +97,9 @@ impl TrapContext {
             r: [0; 32],
             prmd: default_status,
             era: entry,  // entry point of app
+            vr: [0; 32],
+            fcsr: 0,
+            fcc: [0; 8],
         };
         cx.set_sp(sp); // app's user stack pointer
         cx // return initial Trap Context of app

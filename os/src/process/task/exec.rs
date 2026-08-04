@@ -68,7 +68,7 @@ impl TaskStruct {
 		let cwd = fs.exclusive_access().get_pwd();
 		let (uid, gid) = {
 			let cred = cred.exclusive_access();
-			(cred.uid(), cred.gid())
+			(cred.fsuid(), cred.fsgid())
 		};
 
 		let mut path_exists = false;
