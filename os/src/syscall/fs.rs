@@ -2316,7 +2316,7 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
 /// 
 /// TODO: 完全实现 fsync 语义
 pub fn sys_fsync(_fd: usize) -> isize {
-    crate::mm::mmap::sync_shared_page_cache();
+    // crate::mm::mmap::sync_shared_page_cache();
     0
 }
 

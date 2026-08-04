@@ -189,7 +189,7 @@ impl PageCacheLruQueue {
 }
 
 // 元数据缓存的最大数量，超过该数量时会尝试回收
-const META_CACHE_SIZE: usize = 256;
+const META_CACHE_SIZE: usize = 1 << 12; // 16MB
 /// 数据页缓存的最大页数，超过时从 LRU 队头回收
 const DATA_CACHE_SIZE: usize = 1 << 21; // 8GB
 
