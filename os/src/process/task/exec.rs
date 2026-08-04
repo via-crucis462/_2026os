@@ -465,6 +465,15 @@ impl TaskStruct {
 			if inner_has_pending_sigkill(&inner) {
 				return;
 			}
+			#[cfg(target_arch = "riscv64")]
+			if let Some(old_mm) = inner.mm.as_ref() {
+				// 每个任务的 TrapContext 借映射属于任务本身，而不是 mm。
+				// vfork 子进程与父进程共享旧 mm；exec 若不先删除自己的
+				// 借映射，内核栈复用后会在旧 mm 中留下同 VPN 的悬挂 PTE。
+				old_mm
+					.exclusive_access()
+					.remove_trap_context_page(VirtAddr::from(inner.thread.trap_ctx));
+			}
 			let old_signal = inner.signal.clone();
 			inner.thread.trap_ctx = trap_cx_addr;
 			inner.mm = Some(Arc::new(MPSafeCell::new(memory_set)));

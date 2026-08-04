@@ -358,6 +358,11 @@ impl TaskStruct {
 		if flags & CLONE_PARENT_SETTID != 0
 			&& !crate::mm::try_translated_write(parent_token, ptid as *mut u32, child_tid)
 		{
+			#[cfg(target_arch = "riscv64")]
+			if let Some(mm) = child.inner_exclusive_access().mm.as_ref().cloned() {
+				mm.exclusive_access()
+					.remove_trap_context_page(VirtAddr::from(trap_cx_addr));
+			}
 			return Errno::EFAULT.as_isize();
 		}
 		// CLONE_CHILD_SETTID：向子地址空间的 *ctid 写入自身 TID
@@ -368,6 +373,11 @@ impl TaskStruct {
 				child_memory.token()
 			};
 			if !crate::mm::try_translated_write(child_token, ctid as *mut u32, child_tid) {
+				#[cfg(target_arch = "riscv64")]
+				if let Some(mm) = child.inner_exclusive_access().mm.as_ref().cloned() {
+					mm.exclusive_access()
+						.remove_trap_context_page(VirtAddr::from(trap_cx_addr));
+				}
 				return Errno::EFAULT.as_isize();
 			}
 		}
