@@ -117,6 +117,34 @@ pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
     0 // Success!
 }
 
+/// 返回打开文件的stat
+pub fn sys_fstatfs(fd: usize, buf: *mut Statfs) -> isize {
+    if buf.is_null() {
+        return EFAULT.as_isize();
+    }
+
+    let file = {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if fd >= inner.fds.len() {
+            return EBADF.as_isize();
+        }
+        let Some(file) = inner.fds[fd].file.as_ref() else {
+            return EBADF.as_isize();
+        };
+        file.clone()
+    };
+
+    let Some(dentry) = file.get_dentry() else {
+        return ENOSYS.as_isize();
+    };
+    let stat = dentry.inode.statfs();
+    if !try_translated_write(current_user_token(), buf, stat) {
+        return EFAULT.as_isize();
+    }
+    0
+}
+
 fn ensure_fd_slots(files: &mut crate::process::FileDescriptorTable, target_len: usize) -> bool {
     files.ensure_slots(target_len, current_nofile_limit())
 }
@@ -207,6 +235,12 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
         }
         if (status & (O_NONBLOCK | O_NDELAY)) != 0 && !file.ready_to_read() {
             return EAGAIN.as_isize();
+        }
+        if let Some(pipe) = file.as_any().downcast_ref::<crate::fs::Pipe>() {
+            return match pipe.read_for_syscall(UserBuffer::new(translated_byte_buffer(token, buf, len))) {
+                Ok(read) => read as isize,
+                Err(err) => err.as_isize(),
+            };
         }
         //file.info_type();
         let read = file.read(UserBuffer::new(translated_byte_buffer(token, buf, len)));
@@ -1366,6 +1400,71 @@ pub fn sys_chdir(path: *const u8) -> isize {
     } else {
         ENOENT.as_isize() // 目录不存在
     }
+}
+
+pub fn sys_fchdir(fd: usize) -> isize {
+    let file = {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if fd >= inner.fds.len() {
+            return EBADF.as_isize();
+        }
+        let Some(file) = inner.fds[fd].file.as_ref() else {
+            return EBADF.as_isize();
+        };
+        file.clone()
+    };
+
+    let Some(dentry) = file.get_dentry() else {
+        return ENOTDIR.as_isize();
+    };
+    if dentry.inode.get_stat().mode & S_IFMT != 0o040000 {
+        return ENOTDIR.as_isize();
+    }
+
+    let task = current_task().unwrap();
+    let fs = task.inner_exclusive_access().fs.clone();
+    fs.exclusive_access().set_pwd(dentry);
+    0
+}
+
+pub fn sys_fadvise64(fd: usize, _offset: usize, _len: usize, advice: i32) -> isize {
+    const POSIX_FADV_NORMAL: i32 = 0;
+    const POSIX_FADV_RANDOM: i32 = 1;
+    const POSIX_FADV_SEQUENTIAL: i32 = 2;
+    const POSIX_FADV_WILLNEED: i32 = 3;
+    const POSIX_FADV_DONTNEED: i32 = 4;
+    const POSIX_FADV_NOREUSE: i32 = 5;
+
+    let file = {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if fd >= inner.fds.len() {
+            return EBADF.as_isize();
+        }
+        let Some(file) = inner.fds[fd].file.as_ref() else {
+            return EBADF.as_isize();
+        };
+        file.clone()
+    };
+
+    if !matches!(
+        advice,
+        POSIX_FADV_NORMAL
+            | POSIX_FADV_RANDOM
+            | POSIX_FADV_SEQUENTIAL
+            | POSIX_FADV_WILLNEED
+            | POSIX_FADV_DONTNEED
+            | POSIX_FADV_NOREUSE
+    ) {
+        return EINVAL.as_isize();
+    }
+    if file.as_any().is::<crate::fs::Pipe>() {
+        return ESPIPE.as_isize();
+    }
+
+    // 最简兼容实现：接受合法提示，但暂不调整预读或页缓存策略。
+    0
 }
 
 pub fn sys_mount(source: *const u8, target: *const u8, filesystemtype: *const u8, mountflags: u32) -> isize {

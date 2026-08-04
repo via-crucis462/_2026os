@@ -16,7 +16,7 @@ impl VfsInode for Ext4Inode {
             return None;
         }
         let mut offset = 0;
-        let file_size_bytes = self.size.load(Ordering::Relaxed) as usize;
+        let file_size_bytes = self.size.load(Ordering::Acquire) as usize;
 
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; 4096];
@@ -53,18 +53,11 @@ impl VfsInode for Ext4Inode {
     }
 
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        self.raw_read_at(offset, buf) // 调用 Ext4Inode 的底层磁盘读取
+        Ext4Inode::raw_read_at(self, offset, buf)
     }
 
     fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize {
-        let written = self.raw_write_at(offset, buf); // 调用 Ext4Inode 的底层磁盘写入
-        // 底层可能扩展了文件大小，同步更新缓存的 size
-        let new_end = (offset + written) as u64;
-        let old = self.size.load(Ordering::Relaxed);
-        if new_end > old {
-            self.size.store(new_end, Ordering::Relaxed);
-        }
-        written
+        Ext4Inode::raw_write_at(self, offset, buf)
     }
 
     fn get_shared_page(&self, logical_block: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
@@ -183,7 +176,11 @@ impl VfsInode for Ext4Inode {
             let copy_len = core::cmp::min(page_size - page_off, write_end - (page_idx * page_size + page_off));
 
             let Some(cache) = self.get_shared_page(page_idx) else {
-                error!("VFS: write_at - failed to get page ino={} page={}", self.inode_id, page_idx);
+                error!(
+                    "VFS: failed to obtain page cache for inode {} page {} while writing",
+                    self.inode_id,
+                    page_idx,
+                );
                 break;
             };
             let mut page = cache.lock();
@@ -211,7 +208,7 @@ impl VfsInode for Ext4Inode {
     }
 
     fn get_size(&self) -> usize {
-        self.size.load(Ordering::Relaxed) as usize
+        self.size.load(Ordering::Acquire) as usize
     }
 
     fn truncate(&self, len: usize) -> bool {
@@ -356,7 +353,7 @@ impl VfsInode for Ext4Inode {
             return -1;
         }
         let mut buf_offset = 0;
-        let file_size_bytes = self.size.load(Ordering::Relaxed) as usize;
+        let file_size_bytes = self.size.load(Ordering::Acquire) as usize;
         let buf_len = buf.len();
         let mut last_name = String::new();
 

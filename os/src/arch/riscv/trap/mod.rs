@@ -14,13 +14,14 @@
 mod context;
 use crate::arch::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 use crate::mm::VirtAddr;
+use crate::net::net_poll;
 use crate::syscall::syscall;
 use crate::task::{
     add_task, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token,
     exit_current_and_run_next, handle_signals, suspend_current_and_run_next, KernelStack,
     SignalFlags, TaskStatus,
 };
-use crate::{get_hart_id, KERNEL_STACK_SIZE, PAGE_SIZE};
+use crate::{get_hart_id, get_time_ms, KERNEL_STACK_SIZE, PAGE_SIZE};
 use alloc::sync::Arc;
 
 use core::arch::{asm, global_asm};
@@ -104,6 +105,57 @@ pub fn trap_handler() -> ! {
             cx.set_a0(result as usize);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
+            let current_ms = get_time_ms();
+            //定时打印clone的子进程数量
+            /*let last_print_ms = LAST_CLONE_COUNT_PRINT_MS.load(Ordering::Relaxed);
+            if current_ms.saturating_sub(last_print_ms) >= CLONE_COUNT_PRINT_INTERVAL_MS
+                && LAST_CLONE_COUNT_PRINT_MS
+                    .compare_exchange(
+                        last_print_ms,
+                        current_ms,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                if let Some(current) = current_task() {
+                    let pid = current.getpid();
+                    let current_tid = current.gettid();
+                    let live_tasks = crate::process::registry::TID2TCB
+                        .exclusive_access()
+                        .values()
+                        .filter(|task| task.getpid() == pid)
+                        .count();
+                    println!(
+                        "[CLONE COUNT] pid={} current_tid={} live_tasks={} clone_children={}",
+                        pid,
+                        current_tid,
+                        live_tasks,
+                        live_tasks.saturating_sub(1)
+                    );
+                }
+            }*/
+            let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
+            crate::process::check_posix_timers();
+            for pid in expired_pids {
+                let tasks = crate::process::registry::TID2TCB
+                    .exclusive_access()
+                    .values()
+                    .filter(|task| task.getpid() == pid)
+                    .cloned()
+                    .collect::<alloc::vec::Vec<_>>();
+                for task in tasks {
+                    let mut task_inner = task.inner_exclusive_access();
+                    task_inner.pending.insert(crate::task::SignalFlags::SIGALRM);
+                    if task_inner.state == crate::task::TaskStatus::Blocked {
+                        task_inner.state = crate::task::TaskStatus::Ready;
+                        drop(task_inner);
+                        crate::task::add_task(task);
+                    }
+                }
+            }
+            net_poll();
+            crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
         }
         Trap::Exception(Exception::StorePageFault)

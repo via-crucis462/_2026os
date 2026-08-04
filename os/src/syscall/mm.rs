@@ -135,6 +135,64 @@ pub fn sys_msync(_addr: usize, _len: usize, _flags: u32) -> isize {
     0
 }
 
+/// mincore - 查询虚拟地址范围内各页当前是否驻留。
+///
+/// 匿名 mmap 采用惰性分配，因此只有已经建立有效 PTE 的页返回驻留位 1；
+/// 地址范围仍必须完整落在现有 VMA 中，否则按 Linux 语义返回 ENOMEM。
+pub fn sys_mincore(addr: usize, len: usize, vec: *mut u8) -> isize {
+    if addr % PAGE_SIZE != 0 {
+        return EINVAL.as_isize();
+    }
+    if len == 0 {
+        return 0;
+    }
+    let Some(end) = addr.checked_add(len) else {
+        return ENOMEM.as_isize();
+    };
+    if end > USER_APP_MAX_SIZE || vec.is_null() {
+        return if vec.is_null() {
+            EFAULT.as_isize()
+        } else {
+            ENOMEM.as_isize()
+        };
+    }
+
+    let page_count = len.saturating_add(PAGE_SIZE - 1) / PAGE_SIZE;
+    let task = current_task().unwrap();
+    let mm = {
+        let inner = task.inner_exclusive_access();
+        let Some(mm) = inner.mm.as_ref() else {
+            return ENOMEM.as_isize();
+        };
+        mm.clone()
+    };
+    let residency = {
+        let memory = mm.exclusive_access();
+        let mut result = alloc::vec::Vec::with_capacity(page_count);
+        for index in 0..page_count {
+            let page_addr = addr + index * PAGE_SIZE;
+            let vpn = crate::mm::VirtAddr::from(page_addr).std_floor();
+            if !memory.areas().iter().any(|area| area.contains(vpn)) {
+                return ENOMEM.as_isize();
+            }
+            let resident = memory
+                .translate(vpn)
+                .map(|pte| pte.is_valid())
+                .unwrap_or(false);
+            result.push(resident as u8);
+        }
+        result
+    };
+
+    let token = current_user_token();
+    for (index, resident) in residency.into_iter().enumerate() {
+        if !crate::mm::try_translated_write(token, unsafe { vec.add(index) }, resident) {
+            return EFAULT.as_isize();
+        }
+    }
+    0
+}
+
 /// madvise - 给内核关于内存使用的建议
 ///
 /// 参数:

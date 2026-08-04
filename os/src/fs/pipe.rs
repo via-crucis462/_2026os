@@ -98,6 +98,79 @@ impl Pipe {
     fn wake_all(queue: &Mutex<WaitQueue>) {
         while wake_up_one(queue) {}
     }
+
+    /// pipe 专用的 read(2) 实现，能够区分真实 EOF 与信号中断。
+    /// File trait 的历史接口只返回 usize，无法表达 EINTR，因此系统调用层
+    /// 在识别到 Pipe 后直接调用此方法。
+    pub fn read_for_syscall(&self, buf: UserBuffer) -> Result<usize, Errno> {
+        assert!(self.readable);
+        let want_to_read = buf.len();
+        let mut buf_iter = buf.into_iter();
+        let mut already_read = 0usize;
+        loop {
+            let mut ring_buffer = self.buffer.exclusive_access();
+            let loop_read = ring_buffer.available_read();
+            if loop_read == 0 {
+                let eof = ring_buffer.all_write_ends_closed();
+                drop(ring_buffer);
+                if eof {
+                    return Ok(already_read);
+                }
+
+                let blocked = block_current_and_run_next_if(&self.read_waiters, || {
+                    let ring_buffer = self.buffer.exclusive_access();
+                    ring_buffer.available_read() == 0 && !ring_buffer.all_write_ends_closed()
+                });
+                if blocked {
+                    let tid = crate::task::current_task().unwrap().gettid();
+                    self.read_waiters.lock().remove_by_tid(tid);
+
+                    // 数据、EOF 和信号可能在唤醒前后同时到达。POSIX read 在已经
+                    // 有数据可读时应优先返回数据，不能让并发的 SIGCHLD 抢先变成
+                    // EINTR，否则 popen("echo ...") 的输出会被调用方当作空结果。
+                    let ring_buffer = self.buffer.exclusive_access();
+                    let has_data = ring_buffer.available_read() > 0;
+                    let eof = ring_buffer.all_write_ends_closed();
+                    drop(ring_buffer);
+                    if has_data {
+                        continue;
+                    }
+                    if eof {
+                        return Ok(already_read);
+                    }
+                    if check_pending_signal() {
+                        return if already_read == 0 {
+                            Err(Errno::EINTR)
+                        } else {
+                            Ok(already_read)
+                        };
+                    }
+                }
+                continue;
+            }
+
+            for _ in 0..loop_read {
+                let Some(byte_ref) = buf_iter.next() else {
+                    drop(ring_buffer);
+                    wake_up_one(&self.write_waiters);
+                    return Ok(already_read);
+                };
+                unsafe {
+                    *byte_ref = ring_buffer.read_byte();
+                }
+                already_read += 1;
+                if already_read == want_to_read {
+                    drop(ring_buffer);
+                    wake_up_one(&self.write_waiters);
+                    return Ok(want_to_read);
+                }
+            }
+
+            drop(ring_buffer);
+            wake_up_one(&self.write_waiters);
+            return Ok(already_read);
+        }
+    }
 }
 
 impl Drop for Pipe {
@@ -280,65 +353,7 @@ impl File for Pipe {
         self.broken_pipe_error()
     }
     fn read(&self, buf: UserBuffer) -> usize {
-        assert!(self.readable());
-        let want_to_read = buf.len();
-        let mut buf_iter = buf.into_iter();
-        let mut already_read = 0usize;
-        loop {
-            let mut ring_buffer = self.buffer.exclusive_access();
-            let loop_read = ring_buffer.available_read();
-            if loop_read == 0 {
-                let eof = ring_buffer.all_write_ends_closed();
-                drop(ring_buffer);
-                if eof {
-                    return already_read;
-                }
-
-                let blocked = block_current_and_run_next_if(&self.read_waiters, || {
-                    let ring_buffer = self.buffer.exclusive_access();
-                    ring_buffer.available_read() == 0 && !ring_buffer.all_write_ends_closed()
-                });
-                if blocked {
-                    let tid = crate::task::current_task().unwrap().gettid();
-                    self.read_waiters.lock().remove_by_tid(tid);
-                    if check_pending_signal() {
-                        let ring_buffer = self.buffer.exclusive_access();
-                        let readable_now = ring_buffer.available_read() > 0;
-                        let eof = ring_buffer.all_write_ends_closed();
-                        drop(ring_buffer);
-                        if !readable_now && !eof {
-                            return already_read;
-                        }
-                    }
-                }
-                continue;
-            }
-            for _ in 0..loop_read {
-                if let Some(byte_ref) = buf_iter.next() {
-                    unsafe {
-                        *byte_ref = ring_buffer.read_byte();
-                    }
-                   
-                    already_read += 1;
-                    if already_read % 1024 == 0 {
-                     //   println!("[kernel] Pipe Read Progress: {} / {}", already_read, want_to_read);
-                    }
-                    if already_read == want_to_read {
-                        drop(ring_buffer);
-                        wake_up_one(&self.write_waiters);
-                        return want_to_read;
-                    }
-                } else {
-                    drop(ring_buffer);
-                    wake_up_one(&self.write_waiters);
-                    return already_read;
-                }
-            }
-            // 不阻塞，返回已经读到的字节数
-            drop(ring_buffer);
-            wake_up_one(&self.write_waiters);
-            return already_read;
-        }
+        self.read_for_syscall(buf).unwrap_or(0)
     }
     fn write(&self, buf: UserBuffer) -> usize {
         assert!(self.writable());

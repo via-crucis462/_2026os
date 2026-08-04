@@ -109,16 +109,15 @@ pub fn sys_sigaltstack(
     if stack.ss_flags == SS_DISABLE {
         stack = SignalAltStack::default();
     } else {
-        if stack.ss_flags != 0 {
+        if stack.ss_flags != 0 && stack.ss_flags != SS_AUTODISARM {
             return EINVAL.as_isize();
         }
         if stack.ss_size < MINSIGSTKSZ {
             return ENOMEM.as_isize();
         }
-        if stack.ss_sp.checked_add(stack.ss_size).is_none() {
+        if stack.ss_sp == 0 || stack.ss_sp.checked_add(stack.ss_size).is_none() {
             return EINVAL.as_isize();
         }
-        stack.ss_flags = 0;
         stack._pad = 0;
     }
 
@@ -146,7 +145,7 @@ pub use crate::process::timer::{
 use alloc::task;
 pub use alloc::{string::{String,ToString}, sync::Arc, vec::Vec};
 use crate::fs::{open_file, OpenFlags, RenameError};
-use crate::process::signal::{SignalAltStack, SS_DISABLE};
+use crate::process::signal::{SignalAltStack, SS_AUTODISARM, SS_DISABLE};
 use super::{errno::Errno::*, normalize_leading_dot_path};
 
 use crate::syscall::epoll::{EpollFile, EventFile, EpollEvent};
@@ -177,6 +176,7 @@ pub tms_stime: usize,  // 内核态时间
 pub tms_cutime: usize, // 子进程用户态时间
 pub tms_cstime: usize, // 子进程内核态时间
 }
+
 
 #[repr(C)]
 pub struct UtsName {
@@ -677,11 +677,12 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
             (total_ns / 1_000_000_000, total_ns % 1_000_000_000)
             
         }
-        CLOCK_MONOTONIC | CLOCK_MONOTONIC_COARSE | _ => {
+        CLOCK_MONOTONIC | CLOCK_MONOTONIC_COARSE => {
             // 默认：返回系统运行时间 (Uptime)
             let total_us = get_time_us();
             (total_us / 1_000_000, (total_us % 1_000_000) * 1_000)
         }
+        _ => return EINVAL.as_isize(),
     };
     let token = current_user_token();
     let mut time_spec = {
@@ -781,14 +782,19 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
         return EBADF.as_isize();
     }
     let file = fd_table[fd].file.as_ref().unwrap();
-    let mut is_tty = false;
-    if fd <= 2 || fd == 255 {
-        is_tty = true; 
-    } else if let Some(dentry) = file.get_dentry() {
-        // 如果 fd > 2，检查它的文件名，只要包含 tty 或 console，是合法的终端 fd
-        let name = dentry.name();
-        if name.contains("tty") || name.contains("console") {
-            is_tty = true;
+    // TTY 属性属于打开的文件对象，而不属于 fd 数字。dup2(pipe, 1) 后 fd 1
+    // 已经是 Pipe，必须让 TCGETS 返回 ENOTTY，否则 isatty(1) 会误报为真，
+    // BusyBox ls 会向管道输出多列内容，使 `ls | wc -l` 得到错误计数。
+    let mut is_tty = file.as_any().is::<crate::fs::Stdin>()
+        || file.as_any().is::<crate::fs::Stdout>()
+        || file.as_any().is::<crate::fs::Stderr>();
+    if !is_tty {
+        if let Some(dentry) = file.get_dentry() {
+            // 设备节点名包含 tty 或 console 时视为终端。
+            let name = dentry.name();
+            if name.contains("tty") || name.contains("console") {
+                is_tty = true;
+            }
         }
     }
     let token = current_user_token();
@@ -1668,9 +1674,13 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, arg3: usize, arg4: usi
         | CLONE_DETACHED
         | CLONE_CLEAR_SIGHAND;
 
-    if flags & !SUPPORTED_FLAGS != 0 {
-        println!("sys_clone: unsupported flags {:#x}", flags);
-        return EINVAL.as_isize();
+    let unsupported_flags = flags & !SUPPORTED_FLAGS;
+    if unsupported_flags != 0 {
+        warn!(
+            "sys_clone: ignoring unsupported flags {:#x} from flags {:#x}",
+            unsupported_flags,
+            flags
+        );
     }
     if flags & CSIGNAL > MAX_SIG {
         return EINVAL.as_isize();
@@ -2415,9 +2425,15 @@ pub fn sys_tgkill(tgid: usize, tid: usize, signum: i32) -> isize {
 
 /// 获取当前时间
 pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
-    let total_us = get_time_us();
-    let sec = total_us / 1_000_000;
-    let usec = total_us % 1_000_000;
+    if ts.is_null() {
+        return EFAULT.as_isize();
+    }
+    // gettimeofday 返回自 Unix epoch 起的 CLOCK_REALTIME，而不是开机后的
+    // CLOCK_MONOTONIC。两者混用会让两次 date +%s%3N 的差值接近整个 Unix
+    // 时间戳（约 1.8e12 ms），并破坏 glibc 的日期换算。
+    let total_ns = current_wallclock_ns();
+    let sec = (total_ns / 1_000_000_000) as usize;
+    let usec = ((total_ns % 1_000_000_000) / 1_000) as usize;
     let token = current_user_token();
 
     // 校验 tz 指针

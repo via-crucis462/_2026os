@@ -13,6 +13,7 @@ pub struct SignalAltStack {
 
 pub const SS_ONSTACK: i32 = 1;
 pub const SS_DISABLE: i32 = 2;
+pub const SS_AUTODISARM: i32 = 0x8000_0000u32 as i32;
 
 impl Default for SignalAltStack {
 	fn default() -> Self {
@@ -28,6 +29,10 @@ impl Default for SignalAltStack {
 impl SignalAltStack {
 	pub fn is_enabled(&self) -> bool {
 		self.ss_flags & SS_DISABLE == 0
+	}
+
+	pub fn is_autodisarm(&self) -> bool {
+		self.ss_flags & SS_AUTODISARM != 0
 	}
 
 	pub fn contains(&self, sp: usize) -> bool {
@@ -131,6 +136,10 @@ impl SignalUserContext {
 		trap_ctx.x[0] = 0;
 		trap_ctx.set_rt(self.program_counter());
 	}
+
+	fn ucontext_stack(&self) -> SignalAltStack {
+		self.uc_stack
+	}
 }
 
 #[cfg(target_arch = "loongarch64")]
@@ -162,6 +171,10 @@ impl SignalUserContext {
 		trap_ctx.r.copy_from_slice(&self.uc_mcontext_gregs);
 		trap_ctx.set_rt(self.program_counter());
 	}
+
+	fn ucontext_stack(&self) -> SignalAltStack {
+		self.uc_stack
+	}
 }
 
 #[repr(C)]
@@ -181,7 +194,9 @@ pub(super) fn push_signal_frame(
 	let frame_size = core::mem::size_of::<SignalFrame>();
 	let interrupted_sp = trap_ctx.get_sp();
 	let alt_stack = task_inner.signal_alt_stack;
-	let user_sp = if use_alt_stack && alt_stack.is_enabled() && !alt_stack.contains(interrupted_sp) {
+	let switching_to_alt_stack =
+		use_alt_stack && alt_stack.is_enabled() && !alt_stack.contains(interrupted_sp);
+	let user_sp = if switching_to_alt_stack {
 		alt_stack.ss_sp.checked_add(alt_stack.ss_size)?
 	} else {
 		interrupted_sp
@@ -221,6 +236,11 @@ pub(super) fn push_signal_frame(
 	let info_ptr = frame_sp;
 	let ucontext_ptr = frame_sp + core::mem::size_of::<crate::syscall::process::SigInfo>();
 	task_inner.signal_user_context_backup.push(ucontext_ptr);
+	if switching_to_alt_stack && alt_stack.is_autodisarm() {
+		// SS_AUTODISARM 只在 handler 执行期间禁用备用栈；sigreturn
+		// 会从 ucontext.uc_stack 恢复原配置。
+		task_inner.signal_alt_stack = SignalAltStack::default();
+	}
 	Some((info_ptr, ucontext_ptr))
 }
 
@@ -247,6 +267,7 @@ pub(crate) fn restore_signal_context(task_inner: &mut TaskControlBlockInner) -> 
 	);
 	user_ctx.apply_to_trap_ctx(&mut trap_ctx);
 	task_inner.blocked = SignalFlags::from_bits_truncate(user_ctx.uc_sigmask[0] as u64);
+	task_inner.signal_alt_stack = user_ctx.ucontext_stack();
 	*task_inner.get_trap_cx() = trap_ctx;
 	#[cfg(target_arch = "riscv64")]
 	warn!(

@@ -421,13 +421,34 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
     if let Some(tcp_socket) = file.as_any().downcast_ref::<TcpSocket>() {
         let connect_res = tcp_socket.connect(endpoint);
         if connect_res < 0 {
+            warn!(
+                "[net/connect] pid={} fd={} remote={} start_failed={}",
+                task.getpid(), fd, endpoint, connect_res
+            );
             return connect_res;
         }
+        warn!(
+            "[net/connect] pid={} fd={} local={:?} remote={} state=SynSent",
+            task.getpid(), fd, tcp_socket.local_endpoint(), endpoint
+        );
+        let interrupting_signals = crate::task::SignalFlags::SIGALRM
+            | crate::task::SignalFlags::SIGTERM
+            | crate::task::SignalFlags::SIGINT
+            | crate::task::SignalFlags::SIGKILL;
+        let mut previous_state = smoltcp::socket::tcp::State::SynSent;
         loop {
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
             let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_socket.handle);
             let state = smol_socket.state();
             drop(sockets);
+            if state != previous_state {
+                warn!(
+                    "[net/connect] pid={} fd={} local={:?} remote={} {:?}->{:?}",
+                    task.getpid(), fd, tcp_socket.local_endpoint(), endpoint,
+                    previous_state, state
+                );
+                previous_state = state;
+            }
             if state == smoltcp::socket::tcp::State::Established {
                 break; 
             }
@@ -435,7 +456,8 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
                 return Errno::ECONNREFUSED.as_isize();
             }
             net_poll();
-            if get_pending_signals().contains(crate::task::SignalFlags::SIGALRM) {
+            crate::timer::check_timers();
+            if get_pending_signals().intersects(interrupting_signals) {
                 return Errno::EINTR.as_isize();
             }
             crate::task::suspend_current_and_run_next();
@@ -534,6 +556,9 @@ pub fn sys_sendto(
             continue;
         }
         net_poll(); 
+        if file.as_any().downcast_ref::<TcpSocket>().is_some() {
+            warn!("[net/send] pid={} fd={} requested={} sent={}", task.getpid(), fd, len, ret);
+        }
         return ret;
     }
 }
@@ -632,6 +657,12 @@ pub fn sys_recvfrom(
     }
     let user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, len));
     let read_len = file.read(user_buf);
+    if file.as_any().downcast_ref::<TcpSocket>().is_some() {
+        warn!(
+            "[net/recv] pid={} fd={} requested={} received={}",
+            task.getpid(), fd, len, read_len as isize
+        );
+    }
     //用户提供了 src_addr 和 addrlen填入对端的 IP 和端口信息
     if src_addr as usize != 0 && addrlen as usize != 0 {
         if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
@@ -847,7 +878,7 @@ pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
     }
 }
 
-pub fn sys_listen(fd: usize, _backlog: i32) -> isize {
+pub fn sys_listen(fd: usize, backlog: i32) -> isize {
     let task = current_task().unwrap();
     let files = task.inner_exclusive_access().files.clone();
     let inner = files.exclusive_access();
@@ -876,7 +907,20 @@ pub fn sys_listen(fd: usize, _backlog: i32) -> isize {
         // smoltcp 会在此刻将状态机切换为 Listen
         match smol_socket.listen(port) {
            Ok(_) => {
+            // add_backlog_listener 会自行获取 SOCKET_SET；这里必须先释放，
+            // 否则 syscall 201 会在同一 hart 上递归申请非可重入锁而死锁。
+            drop(sockets);
                 socket.is_listener.store(true, Ordering::SeqCst);
+                let slot_count = backlog.max(1).min(32) as usize;
+                for _ in 1..slot_count {
+                    if socket.add_backlog_listener(port).is_err() {
+                        break;
+                    }
+                }
+                warn!(
+                    "[net/listen] pid={} fd={} local_port={} state=Listen backlog={}",
+                    task.getpid(), fd, port, slot_count
+                );
                 0
             },
             Err(_) => crate::syscall::errno::Errno::EINVAL.as_isize(), // 可能是因为 socket 已经连接或关闭
@@ -917,6 +961,7 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     if let Some(orig_socket) = file.as_any().downcast_ref::<TcpSocket>() {
         let mut local_port = 0;
         let mut remote_ep = None;
+        let mut accepted_handle = orig_socket.handle;
         // 阻塞式 accept 没有隐含超时：除非连接到达、收到可递送信号，或 fd 为非阻塞，
         // 否则应持续等待。心跳只用于证明任务仍在被调度，不改变系统调用语义。
         let wait_started_ms = crate::timer::get_time_ms();
@@ -934,16 +979,23 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
             let state;
             {
                 let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-                let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(orig_socket.handle);
-                state = smol_socket.state();
-                if state == State::Established || state == State::SynReceived|| state == State::CloseWait {
-                    is_established = true;
-                    if let Some(ep) = smol_socket.local_endpoint() {
-                        local_port = ep.port;
+                let mut handles = alloc::vec![orig_socket.handle];
+                handles.extend(orig_socket.backlog_handles.lock().iter().copied());
+                let mut observed_state = State::Listen;
+                for handle in handles {
+                    let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+                    observed_state = smol_socket.state();
+                    if matches!(observed_state, State::Established | State::SynReceived | State::CloseWait) {
+                        is_established = true;
+                        accepted_handle = handle;
+                        if let Some(ep) = smol_socket.local_endpoint() {
+                            local_port = ep.port;
+                        }
+                        remote_ep = smol_socket.remote_endpoint();
+                        break;
                     }
-                    remote_ep = smol_socket.remote_endpoint();
                 }
-                   
+                state = observed_state;
             }
             if is_established {
                 warn!(
@@ -979,18 +1031,34 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
             Some(idx) => idx,
             None => return crate::syscall::errno::Errno::EMFILE.as_isize(), 
         };
-        let new_listener = Arc::new(TcpSocket::new());
-        {
-            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-            let smol_socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(new_listener.handle);
+        let accepted_file: Arc<dyn crate::fs::File>;
+        if accepted_handle == orig_socket.handle {
+            let new_listener = Arc::new(TcpSocket::new());
+            {
+                let mut old_backlog = orig_socket.backlog_handles.lock();
+                let mut new_backlog = new_listener.backlog_handles.lock();
+                core::mem::swap(&mut *old_backlog, &mut *new_backlog);
+            }
             if local_port != 0 {
-                let _ = smol_socket.listen(local_port); // 让新 Socket 接管并监听原端口
+                let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+                let _ = sockets
+                    .get_mut::<smoltcp::socket::tcp::Socket>(new_listener.handle)
+                    .listen(local_port);
+            }
+            new_listener.is_listener.store(true, Ordering::SeqCst);
+            *new_listener.local_port.lock() = Some(local_port);
+            orig_socket.is_listener.store(false, Ordering::SeqCst);
+            inner.fds[fd].file = Some(new_listener);
+            accepted_file = file.clone();
+        } else {
+            orig_socket.backlog_handles.lock().retain(|&h| h != accepted_handle);
+            accepted_file = Arc::new(TcpSocket::from_accepted_handle(accepted_handle));
+            if local_port != 0 {
+                let _ = orig_socket.add_backlog_listener(local_port);
             }
         }
-        orig_socket.is_listener.store(false, core::sync::atomic::Ordering::SeqCst);
-        inner.fds[fd].file = Some(new_listener); 
         inner.fds[new_fd] = FileDescriptor {
-            file: Some(file.clone()),
+            file: Some(accepted_file),
             flags: FdFlags::empty(),
             status:O_RDWR as usize ,
         };
