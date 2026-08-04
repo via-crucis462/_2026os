@@ -124,6 +124,20 @@ impl Pipe {
                 if blocked {
                     let tid = crate::task::current_task().unwrap().gettid();
                     self.read_waiters.lock().remove_by_tid(tid);
+
+                    // 数据、EOF 和信号可能在唤醒前后同时到达。POSIX read 在已经
+                    // 有数据可读时应优先返回数据，不能让并发的 SIGCHLD 抢先变成
+                    // EINTR，否则 popen("echo ...") 的输出会被调用方当作空结果。
+                    let ring_buffer = self.buffer.exclusive_access();
+                    let has_data = ring_buffer.available_read() > 0;
+                    let eof = ring_buffer.all_write_ends_closed();
+                    drop(ring_buffer);
+                    if has_data {
+                        continue;
+                    }
+                    if eof {
+                        return Ok(already_read);
+                    }
                     if check_pending_signal() {
                         return if already_read == 0 {
                             Err(Errno::EINTR)

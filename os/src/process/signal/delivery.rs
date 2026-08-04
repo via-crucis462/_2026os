@@ -220,7 +220,40 @@ fn set_sig_ret(trap_ctx: &mut TrapContext) {
 
 /// 检查当前任务是否有未屏蔽的挂起信号
 pub fn check_pending_signal() -> bool {
-    get_pending_signals().bits() != 0
+    let pending = get_pending_signals();
+    if pending.is_empty() {
+        return false;
+    }
+
+    const SIG_DFL: usize = 0;
+    const SIG_IGN: usize = 1;
+    let task = current_task().unwrap();
+    let signal_hand = task.inner_exclusive_access().signal_hand.clone();
+    let actions = signal_hand.exclusive_access();
+    let mut bits = pending.bits();
+
+    while bits != 0 {
+        let sig = bits.trailing_zeros() as usize;
+        bits &= !(1u64 << sig);
+        let action = actions.action(sig);
+
+        if action.handler == SIG_IGN {
+            continue;
+        }
+        if action.handler == SIG_DFL {
+            let flag = SignalFlags::from_bits(1u64 << sig)
+                .unwrap_or(SignalFlags::empty());
+            if matches!(
+                flag,
+                SignalFlags::SIGCHLD | SignalFlags::SIGURG | SignalFlags::SIGWINCH
+            ) {
+                continue;
+            }
+        }
+        return true;
+    }
+
+    false
 }
 
 /// 返回当前私有和共享的未屏蔽的挂起信号集
