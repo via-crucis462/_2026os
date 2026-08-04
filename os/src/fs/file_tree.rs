@@ -317,7 +317,7 @@ fn set_owner_from_current(inode: &Arc<dyn VfsInode>) {
     let cred = task.inner_exclusive_access().cred.clone();
     let (uid, gid) = {
         let c = cred.exclusive_access();
-        (c.euid(), c.egid())
+        (c.fsuid(), c.fsgid())
     };
     let mut perm = inode.get_perm();
     perm.uid = uid;

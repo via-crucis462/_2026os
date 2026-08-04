@@ -551,6 +551,40 @@ pub fn sys_seteuid(euid: u32) -> isize {
     cred.exclusive_access().set_euid(euid);
     0 
 }
+
+/// setfsuid(2): 修改文件权限检查使用的用户 ID，并始终返回旧 FSUID。
+pub fn sys_setfsuid(fsuid: u32) -> isize {
+    let task = current_task().unwrap();
+    let cred = task.inner_exclusive_access().cred.clone();
+    let mut cred = cred.exclusive_access();
+    let old = cred.fsuid();
+    if cred.euid() == 0
+        || fsuid == cred.uid()
+        || fsuid == cred.euid()
+        || fsuid == cred.suid()
+        || fsuid == old
+    {
+        cred.set_fsuid(fsuid);
+    }
+    old as isize
+}
+
+/// setfsgid(2): 修改文件权限检查使用的组 ID，并始终返回旧 FSGID。
+pub fn sys_setfsgid(fsgid: u32) -> isize {
+    let task = current_task().unwrap();
+    let cred = task.inner_exclusive_access().cred.clone();
+    let mut cred = cred.exclusive_access();
+    let old = cred.fsgid();
+    if cred.euid() == 0
+        || fsgid == cred.gid()
+        || fsgid == cred.egid()
+        || fsgid == cred.sgid()
+        || fsgid == old
+    {
+        cred.set_fsgid(fsgid);
+    }
+    old as isize
+}
 /// umask: 设置进程文件模式创建掩码，返回旧掩码
 pub fn sys_umask(mask: u32) -> isize {
     let task = current_task().unwrap();
