@@ -117,6 +117,34 @@ pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
     0 // Success!
 }
 
+/// 返回打开文件的stat
+pub fn sys_fstatfs(fd: usize, buf: *mut Statfs) -> isize {
+    if buf.is_null() {
+        return EFAULT.as_isize();
+    }
+
+    let file = {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        if fd >= inner.fds.len() {
+            return EBADF.as_isize();
+        }
+        let Some(file) = inner.fds[fd].file.as_ref() else {
+            return EBADF.as_isize();
+        };
+        file.clone()
+    };
+
+    let Some(dentry) = file.get_dentry() else {
+        return ENOSYS.as_isize();
+    };
+    let stat = dentry.inode.statfs();
+    if !try_translated_write(current_user_token(), buf, stat) {
+        return EFAULT.as_isize();
+    }
+    0
+}
+
 fn ensure_fd_slots(files: &mut crate::process::FileDescriptorTable, target_len: usize) -> bool {
     files.ensure_slots(target_len, current_nofile_limit())
 }

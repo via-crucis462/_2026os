@@ -30,6 +30,7 @@ const SYSCALL_SYMLINK: usize = 36;
 /// linkat syscall
 const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_STATFS: usize = 43;
+const SYSCALL_FSTATFS: usize = 44;
 const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FALLOCATE: usize = 47;
 const SYSCALL_CHROOT: usize = 51;
@@ -424,7 +425,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_ACCEPT    => sys_accept(args[0], args[1] as *mut u8, args[2] as *mut u32),
         SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0] as isize, args[1], args[2] as *mut u8),
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as i32, args[1] as *const usize, args[2] as *mut usize, args[3] as usize),
-        SYSCALL_STATFS=> sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
+        SYSCALL_STATFS => sys_statfs(args[0] as *const u8, args[1] as *mut Statfs),
+        SYSCALL_FSTATFS => sys_fstatfs(args[0], args[1] as *mut Statfs),
         SYSCALL_SOCKETPAIR => sys_socketpair(args[0], args[1], args[2], args[3] as *mut u8),
         SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
         SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
