@@ -191,9 +191,9 @@ impl MemorySet {
         }
 
         let changed = if size < 0 {
-            self.shrink_to(VirtAddr(heap_bottom), VirtAddr(addr))
+            self.shrink_to(VirtAddr::from(heap_bottom), VirtAddr::from(addr))
         } else {
-            self.append_to(VirtAddr(heap_bottom), VirtAddr(addr));
+            self.append_to(VirtAddr::from(heap_bottom), VirtAddr::from(addr));
             true
         };
         if changed {
@@ -276,7 +276,7 @@ impl MemorySet {
         info!("mapping trampoline");
         self.page_table.map(
             VirtAddr::from(TRAMPOLINE).into(),
-            PhysAddr::from(strampoline as *const () as usize).into(), // 高位0x9...被截断
+            PhysAddr::from(strampoline as *const () as usize & !crate::CACHED_KERNEL_BASE).into(),
             PTEFlags::R | PTEFlags::X,
             PageSize::Page4K, // 默认标准页大小
         );
@@ -287,13 +287,16 @@ impl MemorySet {
         info!("mapping user trampoline");
         self.page_table.map(
             VirtAddr::from(USER_TRAMPOLINE).into(),
-            PhysAddr::from(strampoline as *const () as usize).into(), // 高位0x9...被截断
+            PhysAddr::from(strampoline as *const () as usize & !crate::CACHED_KERNEL_BASE).into(),
             PTEFlags::R | PTEFlags::X | PTEFlags::U,
             PageSize::Page4K, // 默认标准页大小
         );
     }
-    /// Without kernel stacks.
-    /// Without kernel stacks.
+    /// 创建并映射内核空间
+    /// 
+    /// 不含页帧，仅映射到页表(rv)，初始化时映射，后续不再修改。
+    /// 主要针对 riscv，la 下内核使用 MMU 的映射窗口，
+    /// 所以对于 la 这部分无意义，只 push 段。
     pub fn new_kernel() -> Self {
         let mut memory_set = Self::new_bare();
 
@@ -325,7 +328,7 @@ impl MemorySet {
             MapArea::new(
                 (stext as *const () as usize).into(),
                 (etext as *const () as usize).into(),
-                MapType::Identical,
+                MapType::Windowed,
                 MapPermission::R | MapPermission::X,
                 PageSize::Page2M,
             ),
@@ -338,7 +341,7 @@ impl MemorySet {
             MapArea::new(
                 (srodata as *const () as usize).into(),
                 (erodata as *const () as usize).into(),
-                MapType::Identical,
+                MapType::Windowed,
                 MapPermission::R,
                 PageSize::Page2M,
             ),
@@ -351,7 +354,7 @@ impl MemorySet {
             MapArea::new(
                 (sdata as *const () as usize).into(),
                 (edata as *const () as usize).into(),
-                MapType::Identical,
+                MapType::Windowed,
                 MapPermission::R | MapPermission::W,
                 PageSize::Page2M,
             ),
@@ -364,7 +367,7 @@ impl MemorySet {
             MapArea::new(
                 (sbss_with_stack as *const () as usize).into(),
                 (ebss as *const () as usize).into(),
-                MapType::Identical,
+                MapType::Windowed,
                 MapPermission::R | MapPermission::W,
                 PageSize::Page2M,
             ),
@@ -409,13 +412,15 @@ impl MemorySet {
         {
             info!("mapping physical memory");
 
+            // Windowed 的 VA = CACHED_KERNEL_BASE + PA：起点直接是 ekernel（已在窗口内），
+            // 终点需要把物理 MEMORY_END 抬进窗口，否则 VPNRange 起点大于终点会 panic。
             let start = ekernel as *const () as usize;
 
             memory_set.push(
                 MapArea::new(
                     start.into(),
-                    MEMORY_END.into(),
-                    MapType::Identical,
+                    (MEMORY_END | CACHED_KERNEL_BASE).into(),
+                    MapType::Windowed,
                     MapPermission::R | MapPermission::W,
                     PageSize::Page2M,
                 ),
@@ -426,11 +431,13 @@ impl MemorySet {
 
         info!("mapping memory-mapped registers");
         for &(base, size) in MMIO {
+            // MMIO 物理地址抬进窗口（设备访问按 UNCACHED 窗口约定，
+            // rv 下与 CACHED_KERNEL_BASE 同值）；保持 4K 页以免 2M 页对齐问题。
             memory_set.push(
                 MapArea::new(
-                    base.into(),
-                    (base + size).into(),
-                    MapType::Identical,
+                    (base | UNCACHED_KERNEL_BASE).into(),
+                    ((base + size) | UNCACHED_KERNEL_BASE).into(),
+                    MapType::Windowed,
                     MapPermission::R | MapPermission::W,
                     PageSize::Page4K,
                 ),
@@ -1200,7 +1207,7 @@ impl MemorySet {
         let page_offset = offset / PAGE_SIZE;
 
         // 计算需要的物理页数
-        let needing_std_pages = VirtAddr(addr + length).std_ceil().0 - VirtAddr(addr).std_floor().0;
+        let needing_std_pages = VirtAddr::from(addr + length).std_ceil().0 - VirtAddr::from(addr).std_floor().0;
         let is_anonymous = mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS);
         let is_shared = mmap_flags.contains(mmap::MMapFlags::MAP_SHARED);
         let free_std_pages = get_free_frames();
@@ -1933,7 +1940,7 @@ impl MapArea {
                     page_table.unmap(vpn);
                 }
             }
-            MapType::Identical => {
+            MapType::Identical | MapType::Windowed => {
                 page_table.unmap(vpn);
             }
             // BorrowedKernel contains no FrameTracker; only remove its PTE.
@@ -1978,6 +1985,15 @@ impl MapArea {
             MapType::Identical => {
                 ppn = PhysPageNum(vpn.0);
             }
+            MapType::Windowed => {
+                // `VirtPageNum` is always expressed in 4 KiB pages, including
+                // when this PTE is a 2 MiB or 1 GiB leaf.  Remove the window
+                // from the byte address before converting it back to a PPN;
+                // shifting the window by `page_size` would clear the wrong VPN
+                // bit for huge pages and encode a high-half address as a PA.
+                let va = usize::from(VirtAddr::from(vpn));
+                ppn = PhysAddr::from(va & !CACHED_KERNEL_BASE).std_floor();
+            }
             MapType::Framed => {
                 if let Some(shared_frames) = &self.anonymous_shared_frames {
                     let mut shared_frames = shared_frames.exclusive_access();
@@ -2018,7 +2034,7 @@ impl MapArea {
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         #[cfg(target_arch = "loongarch64")]
         // la64在内核态不需要用页表
-        if self.map_type != MapType::Identical {
+        if self.map_type != MapType::Identical && self.map_type != MapType::Windowed {
             page_table.map(vpn, ppn, pte_flags, page_size);
         }
         #[cfg(target_arch = "riscv64")]
@@ -2281,6 +2297,8 @@ pub enum MapType {
     File,
     // 共享页表
     BorrowedKernel,
+    // 用于内核与用户共享页表，将内核放到高半地址空间
+    Windowed,
     Guard,
 }
 
@@ -2302,12 +2320,16 @@ bitflags! {
 #[allow(unused)]
 pub fn remap_test() {
     let mut kernel_space = KERNEL_SPACE.exclusive_access();
-    let mid_text: VirtAddr =
-        ((stext as *const () as usize + etext as *const () as usize) / 2).into();
-    let mid_rodata: VirtAddr =
-        ((srodata as *const () as usize + erodata as *const () as usize) / 2).into();
-    let mid_data: VirtAddr =
-        ((sdata as *const () as usize + edata as *const () as usize) / 2).into();
+    // 高半地址相加会溢出 usize，用 start + (end - start) / 2 求中点
+    let mid_text: VirtAddr = (stext as *const () as usize
+        + (etext as *const () as usize - stext as *const () as usize) / 2)
+        .into();
+    let mid_rodata: VirtAddr = (srodata as *const () as usize
+        + (erodata as *const () as usize - srodata as *const () as usize) / 2)
+        .into();
+    let mid_data: VirtAddr = (sdata as *const () as usize
+        + (edata as *const () as usize - sdata as *const () as usize) / 2)
+        .into();
     assert!(!kernel_space
         .page_table
         .translate(mid_text.std_floor())

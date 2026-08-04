@@ -46,7 +46,7 @@ prev-la:
 
 build: build-rv build-la
 build-rv:
-	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT)
+	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD)
 ifeq ($(BOARD),visionfive2)
 	@echo "  -> Packing uImage for VisionFive2..."
 	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv-$(BOARD)

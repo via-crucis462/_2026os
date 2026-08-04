@@ -258,10 +258,11 @@ fn init_other_hart(hart_id: usize) {
     }*/
     MAIN_HART_ID.store(hart_id, Ordering::Release);
     for i in 0..hart_id {
-        start_hart(i, _start as *const () as usize, 0);
+        // SBI hsm 启动地址需要物理地址，_start 是链接出的高半窗口 VA
+        start_hart(i, _start as *const () as usize & !CACHED_KERNEL_BASE, 0);
     }
     for i in hart_id + 1..CPU_CORE_NUM {
-        start_hart(i, _start as *const () as usize, 0);
+        start_hart(i, _start as *const () as usize & !CACHED_KERNEL_BASE, 0);
     }
 }
 

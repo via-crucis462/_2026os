@@ -287,8 +287,9 @@ impl PageTable {
                 size.size()
             );
             let offset = va.actual_page_offset(size);
-            let aligned_pa_usize: usize = aligned_pa.get_cached_addr();
-            (aligned_pa_usize + offset).into()
+            // PhysAddr 约定存放真实物理地址；需要访存时由调用方自行
+            // get_cached_addr()/get_uncached_addr()
+            (aligned_pa.0 + offset).into()
         })
     }
     /// get the token from the page table
@@ -298,7 +299,7 @@ impl PageTable {
     }
     #[cfg(target_arch = "loongarch64")]
     pub fn token(&self) -> usize {
-        PhysAddr::from(self.root_ppn).0 // 
+        PhysAddr::from(self.root_ppn).0
     }
 }
 

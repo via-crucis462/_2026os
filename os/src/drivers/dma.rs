@@ -4,9 +4,7 @@ use alloc::vec::Vec;
 use lazy_static::lazy_static;
 
 use crate::{
-    arch::config::{DMA_SIZE, MEMORY_END, PAGE_SIZE},
-    mm::{address::SimpleRange, PhysAddr, PhysPageNum},
-    sync::MPSafeCell,
+    CACHED_KERNEL_BASE, arch::config::{DMA_SIZE, MEMORY_END, PAGE_SIZE}, mm::{PhysAddr, PhysPageNum, address::SimpleRange}, sync::MPSafeCell
 };
 
 extern "C" {
@@ -126,7 +124,7 @@ impl DmaBuffer {
 lazy_static! {
     /// 固定的DMA区域物理页管理器
     pub static ref DMA_MEMORY: MPSafeCell<DmaMemManager> = {
-        let start = PhysAddr::from(ekernel as *const () as usize);
+        let start = PhysAddr::from(ekernel as *const () as usize & ! CACHED_KERNEL_BASE);
         let end = PhysAddr::from(start.0 + DMA_SIZE);
         assert!(end.0 <= MEMORY_END, "DMA region exceeds physical memory");
         MPSafeCell::new(DmaMemManager::new(start, end))

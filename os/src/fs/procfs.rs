@@ -436,8 +436,8 @@ impl VfsInode for ProcMapsInode {
             if let Some(mm) = mm {
                 let memory = mm.exclusive_access();
                 for area in memory.areas.iter() {
-                let start_va: usize = area.vpn_range.get_start().into();
-                let end_va: usize = area.vpn_range.get_end().into();
+                let start_va: usize = area.vpn_range.get_start().start_addr();
+                let end_va: usize = area.vpn_range.get_end().start_addr();
                 
                 let perm = area.get_map_permission();
 

@@ -3,6 +3,7 @@ use core::ptr::NonNull;
 use super::virtio_blk::VirtioHal;
 use crate::drivers::net::{EthernetDevice, EthernetError};
 use crate::sync::MPSafeCell;
+use crate::UNCACHED_KERNEL_BASE;
 use crate::MMIO_SLOT_SIZE;
 use spin::Mutex;
 use virtio_drivers::{
@@ -26,7 +27,8 @@ impl VirtIONetWrapper {
     pub fn new() -> Self {
         let transport = (0..VIRTIO_MMIO_SLOTS)
             .find_map(|index| {
-                let addr = VIRTIO_MMIO_BASE + index * MMIO_SLOT_SIZE;
+                // MMIO 物理地址要抬进不可缓存窗口才能访问
+                let addr = (VIRTIO_MMIO_BASE + index * MMIO_SLOT_SIZE) | UNCACHED_KERNEL_BASE;
                 let transport = unsafe {
                     MmioTransport::new(
                         NonNull::new(addr as *mut VirtIOHeader).unwrap(),
