@@ -555,13 +555,21 @@ pub fn trap_handler() -> ! {
                 [cx.r[4], cx.r[5], cx.r[6], cx.r[7], cx.r[8], cx.r[9]]
             );
             current_task().unwrap().inner_exclusive_access().errno = if result < 0 {
-                (-result) as i32
+                if result == crate::syscall::errno::Errno::ERESTART.as_isize() {
+                    0
+                } else {
+                    (-result) as i32
+                }
             } else {
                 0
             };
             // cx is changed during sys_exec, so we have to call it again
             cx = current_trap_cx();
-            cx.r[4] = result as usize;
+            if result == crate::syscall::errno::Errno::ERESTART.as_isize() {
+                cx.set_rt(cx.get_rt() - 4);
+            } else {
+                cx.r[4] = result as usize;
+            }
             if should_trace {
                 //debug_dump_brk_snapshot("after_syscall", cx, current_user_token());
             }

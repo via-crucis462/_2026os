@@ -90,7 +90,13 @@ pub fn trap_handler() -> ! {
                 [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]],
             );
             current_task().unwrap().inner_exclusive_access().errno =
-                if result < 0 { (-result) as i32 } else { 0 };
+                if result == crate::syscall::errno::Errno::ERESTART.as_isize() {
+                    0
+                } else if result < 0 {
+                    (-result) as i32
+                } else {
+                    0
+                };
             if result < 0 {
                 warn!(
                     "pid[{}] syscall {} returned error code {}",
@@ -102,7 +108,11 @@ pub fn trap_handler() -> ! {
             // cx is changed during sys_exec, so we have to call it again
             //println!("[kernel] syscall: id={}, args={:x?}, ret=0x{:x}", cx.x[17], [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]], result);
             cx = current_trap_cx();
-            cx.set_a0(result as usize);
+            if result == crate::syscall::errno::Errno::ERESTART.as_isize() {
+                cx.set_rt(cx.get_rt() - 4);
+            } else {
+                cx.set_a0(result as usize);
+            }
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             let current_ms = get_time_ms();
@@ -135,25 +145,7 @@ pub fn trap_handler() -> ! {
                     );
                 }
             }*/
-            let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
-            crate::process::check_posix_timers();
-            for pid in expired_pids {
-                let tasks = crate::process::registry::TID2TCB
-                    .exclusive_access()
-                    .values()
-                    .filter(|task| task.getpid() == pid)
-                    .cloned()
-                    .collect::<alloc::vec::Vec<_>>();
-                for task in tasks {
-                    let mut task_inner = task.inner_exclusive_access();
-                    task_inner.pending.insert(crate::task::SignalFlags::SIGALRM);
-                    if task_inner.state == crate::task::TaskStatus::Blocked {
-                        task_inner.state = crate::task::TaskStatus::Ready;
-                        drop(task_inner);
-                        crate::task::add_task(task);
-                    }
-                }
-            }
+            crate::timer::check_timers();
             net_poll();
             crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
@@ -306,9 +298,12 @@ pub fn trap_handler() -> ! {
                     drop(task);
                     suspend_current_and_run_next();
                 } else {
+                    let exe_path = task.inner_exclusive_access().exe_path.clone();
                     println!(
-                        "[user-fault] pid={} cause={:?} pc={:#x} badaddr={:#x} sp={:#x}",
-                        crate::task::current_task().unwrap().getpid(),
+                        "[user-fault] pid={} tid={} exe={} cause={:?} pc={:#x} badaddr={:#x} sp={:#x}",
+                        task.getpid(),
+                        task.gettid(),
+                        exe_path,
                         scause.cause(),
                         current_trap_cx().get_rt(),
                         stval,
@@ -329,16 +324,20 @@ pub fn trap_handler() -> ! {
             }
         }
         _ => {
+            let task = crate::task::current_task().unwrap();
+            let exe_path = task.inner_exclusive_access().exe_path.clone();
             println!(
-                "[user-fault] pid={} cause={:?} pc={:#x} badaddr={:#x}",
-                crate::task::current_task().unwrap().getpid(),
+                "[user-fault] pid={} tid={} exe={} cause={:?} pc={:#x} badaddr={:#x}",
+                task.getpid(),
+                task.gettid(),
+                exe_path,
                 scause.cause(),
                 current_trap_cx().get_rt(),
                 stval,
             );
             error!(
                 "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
-                crate::task::current_task().unwrap().getpid(),
+                task.getpid(),
                 scause.cause(),
                 current_trap_cx().get_rt(),
                 stval
