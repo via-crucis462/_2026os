@@ -2,10 +2,13 @@
 
 use crate::process::scheduler::idle_tasks;
 use crate::process::scheduler::nanosleep::wake_expired_sleep_tasks;
-use crate::process::scheduler::runqueue::{enqueue_task_on_cpu, fetch_task, SCHED_OTHER};
+use crate::process::scheduler::runqueue::{
+    advance_cfs_min_vruntime, enqueue_task_on_cpu, fetch_task, SCHED_BATCH, SCHED_IDLE,
+    SCHED_OTHER,
+};
 use crate::process::{TaskContext, TaskControlBlock, TaskStatus};
-use crate::process::id::kernel_mapping_generation;
-use crate::mm::kernel_asid;
+#[cfg(target_arch = "riscv64")]
+use crate::mm::{kernel_token, switch_mm};
 use crate::arch::timer::get_time_us;
 use crate::get_hart_id;
 use crate::sync::*;
@@ -31,7 +34,6 @@ extern "C" {
 pub struct Processor {
     pub(crate) current: Option<Arc<TaskControlBlock>>,
     idle_task_cx: TaskContext,
-    kernel_mapping_generation: u64,
 }
 
 impl Processor {
@@ -39,7 +41,6 @@ impl Processor {
         Self {
             current: None,
             idle_task_cx: TaskContext::zero_init(),
-            kernel_mapping_generation: 0,
         }
     }
 
@@ -117,12 +118,18 @@ pub fn run_tasks() {
                 inner.on_cpu = true;
                 inner.state = TaskStatus::Running;
                 inner.need_resched = false;
-				// 使用单调微秒时钟记录本时间片起点；切回调度器时统一结算。
-				inner.se.exec_start = get_time_us() as u64;
+                // 使用单调微秒时钟记录本时间片起点；切回调度器时统一结算。
+                inner.se.exec_start = get_time_us() as u64;
             }
             let mut processor = current_processor();
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             let task_inner = task.inner_exclusive_access();
+            #[cfg(target_arch = "riscv64")]
+            let next_token = task_inner
+                .mm
+                .as_ref()
+                .map(|mm| mm.exclusive_access().token())
+                .unwrap_or_else(kernel_token);
             let next_task_cx_ptr = &task_inner.thread.task_ctx as *const TaskContext;
             drop(task_inner);
             processor.current = Some(task);
@@ -131,25 +138,8 @@ pub fn run_tasks() {
                 .map(|task| task.inner_exclusive_access().sched_policy)
                 .unwrap_or(SCHED_OTHER);
             crate::arch::timer::set_next_trigger(sched_policy);
-            // Stack mappings live in the shared kernel page table. Only flush
-            // this hart when that page table changed since its last switch.
-            // Cached stacks do not change mappings and therefore need no flush.
-            let generation = kernel_mapping_generation();
-            let needs_kernel_tlb_flush = {
-                let mut processor = current_processor();
-                if processor.kernel_mapping_generation == generation {
-                    false
-                } else {
-                    processor.kernel_mapping_generation = generation;
-                    true
-                }
-            };
-            if needs_kernel_tlb_flush {
-                // ASIDs tag an address space, not one stack range. All kernel
-                // stacks belong to KERNEL_SPACE, whose dedicated ASID lets us
-                // preserve unrelated user-ASID translations on this hart.
-                crate::arch::mm::flush_tlb_for_asid(kernel_asid());
-            }
+            #[cfg(target_arch = "riscv64")]
+            switch_mm(next_token);
             unsafe {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
@@ -159,7 +149,7 @@ pub fn run_tasks() {
                 processor.take_current()
             };
             if let Some(prev_task) = prev_task {
-				let (status, cpu_id) = {
+				let (status, cpu_id, sched_policy) = {
 					let mut prev_inner = prev_task.inner_exclusive_access();
                     let now = get_time_us() as u64;
                     let delta_exec = now.saturating_sub(prev_inner.se.exec_start).max(1);
@@ -171,14 +161,23 @@ pub fn run_tasks() {
                     let delta_vruntime = delta_exec.saturating_mul(1024) / weight;
                     prev_inner.se.vruntime = prev_inner.se.vruntime
                         .saturating_add(delta_vruntime.max(1));
-                    prev_inner.se.exec_start = 0;
+					prev_inner.se.exec_start = 0;
 					prev_inner.on_cpu = false;
-					(prev_inner.state, prev_inner.cpu)
+					(
+						prev_inner.state,
+						prev_inner.cpu,
+						prev_inner.sched_policy,
+					)
 				};
-                if status == TaskStatus::Ready {
+				if status == TaskStatus::Ready {
 					enqueue_task_on_cpu(prev_task, cpu_id);
-                } else if status == TaskStatus::BlockSaving {
-                    prev_task.inner_exclusive_access().state = TaskStatus::Blocked;
+                } else {
+                    if matches!(sched_policy, SCHED_OTHER | SCHED_BATCH | SCHED_IDLE) {
+                        advance_cfs_min_vruntime(cpu_id);
+                    }
+                    if status == TaskStatus::BlockSaving {
+                        prev_task.inner_exclusive_access().state = TaskStatus::Blocked;
+                    }
                 }
             }
         } else {
@@ -202,8 +201,10 @@ pub fn run_tasks() {
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     let mut processor = current_processor();
     let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
+    // debug!("[kernel] task_ctx {:p} - hart {} scheduled", switched_task_cx_ptr, get_hart_id());
     drop(processor);
     unsafe {
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
+    // debug!("[kernel] task_ctx {:p} - hart {} back to scheduler", idle_task_cx_ptr, get_hart_id());
 }

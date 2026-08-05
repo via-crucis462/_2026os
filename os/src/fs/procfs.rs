@@ -151,6 +151,7 @@ impl VfsInode for ProcPidDirInode {
         match name {
             // 当查找 oom_score_adj 时，返回一个绑定了该 PID 的特殊文件
             "oom_score_adj" => Some(Arc::new(OomScoreAdjInode::new(self.pid))),
+            "exe" => Some(Arc::new(ProcExeSymlinkInode::new(self.pid))),
             "stat" => Some(Arc::new(ProcStatInode::new(self.pid))),
             "status" => Some(Arc::new(ProcStatusInode::new(self.pid))),
             "ns" => Some(Arc::new(ProcNsDirInode::new(self.pid))),
@@ -191,6 +192,7 @@ impl VfsInode for ProcPidDirInode {
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
         let entries = [
+            (String::from("exe"), (12000 + self.pid) as u32, 10u8),
             (String::from("maps"), 8888u32, 8u8),
             (String::from("ns"), 2u32, 4u8),
             (String::from("oom_score_adj"), 998u32, 8u8),
@@ -200,6 +202,68 @@ impl VfsInode for ProcPidDirInode {
         write_dirents(offset, buf, &entries)
     }
 }
+
+pub struct ProcExeSymlinkInode {
+    pid: usize,
+    ino: u64,
+}
+
+impl ProcExeSymlinkInode {
+    pub fn new(pid: usize) -> Self {
+        Self { pid, ino: get_next_ino() }
+    }
+
+    fn target(&self) -> String {
+        get_task(self.pid)
+            .map(|task| task.inner_exclusive_access().exe_path.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl VfsInode for ProcExeSymlinkInode {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        let target = self.target();
+        let data = target.as_bytes();
+        if offset >= data.len() {
+            return 0;
+        }
+        let read_len = core::cmp::min(buf.len(), data.len() - offset);
+        buf[..read_len].copy_from_slice(&data[offset..offset + read_len]);
+        read_len
+    }
+
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn get_size(&self) -> usize { self.target().len() }
+    fn ino(&self) -> u64 { self.ino }
+    fn get_stat(&self) -> Stat {
+        let size = self.target().len() as i64;
+        Stat {
+            dev: 0,
+            ino: self.ino,
+            mode: 0o120777,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            __pad: 0,
+            size,
+            blksize: 512,
+            __pad2: 0,
+            blocks: 0,
+            atime_sec: 0,
+            atime_nsec: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            __unused: [0; 2],
+        }
+    }
+    fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
+    impl_default_statx!();
+    impl_unsupported_ops!(-1);
+}
+
 pub struct ProcStatInode {
     pub pid: usize,
     pub ino: u64,
@@ -277,14 +341,16 @@ impl VfsInode for OomScoreAdjInode {
         None 
     }
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        // 新 TaskStruct 暂未保存 oom_score_adj，兼容性返回默认值 0。
-        let score = 0;
+        // 从进程 TCB 中读取 oom_score_adj，进程不存在时按默认值 0 处理
+        let score = get_task(self.pid)
+            .map(|task| task.inner_exclusive_access().oom_score_adj)
+            .unwrap_or(0);
 
-        // 2. 格式化为字符串
+        // 格式化为字符串
         let score_str = format!("{}\n", score);
         let score_bytes = score_str.as_bytes();
-        
-        // 3. 处理偏移和复制给用户态
+
+        // 处理偏移和复制给用户态
         if offset >= score_bytes.len() {
             return 0;
         }
@@ -294,13 +360,23 @@ impl VfsInode for OomScoreAdjInode {
     }
 
     fn raw_write_at(&self, _offset: usize, buf: &[u8]) -> usize {
-        // 1. 解析 LTP 传进来的 "-1000" 等字符串
+        // 解析 LTP 传进来的 "-1000" 等字符串并保存到进程 TCB
         let s = core::str::from_utf8(buf).unwrap_or("").trim();
-        let _ = s.parse::<i32>();
-        // 返回写入长度，告知系统调用成功
-        buf.len()
+        match s.parse::<i32>() {
+            Ok(v) => {
+                // 与 Linux 一致：合法范围 [-1000, 1000]，超过 1000 截断
+                if let Some(task) = get_task(self.pid) {
+                    task.inner_exclusive_access().oom_score_adj = v.clamp(-1000, 1000);
+                }
+                // 返回写入长度，告知系统调用成功
+                buf.len()
+            }
+            // 非法输入，写入失败
+            Err(_) => 0,
+        }
     }
     fn get_size(&self) -> usize { 0 }
+    fn truncate(&self, _len: usize) -> bool { true } // O_TRUNC 打开对该伪文件无意义，直接成功
     fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> super::Stat {
         super::Stat {
@@ -360,8 +436,8 @@ impl VfsInode for ProcMapsInode {
             if let Some(mm) = mm {
                 let memory = mm.exclusive_access();
                 for area in memory.areas.iter() {
-                let start_va: usize = area.vpn_range.get_start().into();
-                let end_va: usize = area.vpn_range.get_end().into();
+                let start_va: usize = area.vpn_range.get_start().start_addr();
+                let end_va: usize = area.vpn_range.get_end().start_addr();
                 
                 let perm = area.get_map_permission();
 

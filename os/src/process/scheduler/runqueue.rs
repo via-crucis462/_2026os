@@ -92,12 +92,15 @@ impl Rqinner {
 
 	/// 按任务策略入队并更新本 CPU 的可运行任务计数。
 	pub fn enqueue_task(&mut self, task: Arc<TaskControlBlock>) {
-		if task.inner_exclusive_access().on_rq {
-			return;
-		}
-		self.nr_running += 1;
 		let (sched_policy, prio, vruntime, load_weight, absolute_deadline) = {
 			let mut inner = task.inner_exclusive_access();
+			if inner.on_rq {
+				return;
+			}
+			if inner.state == TaskStatus::Zombie {
+				inner.on_rq = false;
+				return;
+			}
 			inner.on_rq = true;
 			inner.on_cpu = false;
 			(
@@ -108,6 +111,7 @@ impl Rqinner {
 				inner.dl.absolute_deadline,
 			)
 		};
+		self.nr_running += 1;
 		// 根据调度策略将任务加入相应的调度类队列
 		match sched_policy {
 			SCHED_OTHER | SCHED_BATCH | SCHED_IDLE => {
@@ -138,6 +142,10 @@ impl Rqinner {
 		let task = self.pop_next_task()?;
 		{
 			let mut inner = task.inner_exclusive_access();
+			if inner.state == TaskStatus::Zombie {
+				inner.on_rq = false;
+				return None;
+			}
 			let target_allowed = target_cpu < usize::BITS as usize
 				&& inner.cpus_allowed & (1usize << target_cpu) != 0;
 			if inner.on_main_hart || !target_allowed || !inner.rt.migratable {
@@ -171,6 +179,11 @@ pub fn enqueue_task_on_cpu(task: Arc<TaskControlBlock>, cpu_id: usize) {
 	let cpu_id = cpu_id.min(RQ_ARRAY.len().saturating_sub(1));
 	{
 		let mut inner = task.inner_exclusive_access();
+		if inner.state == TaskStatus::Zombie {
+			inner.on_rq = false;
+			inner.on_cpu = false;
+			return;
+		}
 		inner.cpu = cpu_id;
 		inner.state = TaskStatus::Ready;
 		inner.on_cpu = false;
@@ -205,7 +218,18 @@ pub(crate) fn remove_task_from_all_local_queues_unlocked(tid: usize) {
 /// 新框架没有全局任务池，保留为空操作以兼容迁移中的清理路径。
 pub(crate) fn remove_task_from_global_pool_unlocked(_tid: usize) {}
 
-/// 唤醒阻塞任务，并重新加入它原先所属 CPU 的运行队列。
+/// 当前 CFS 实体不再可运行时，推进对应 CPU 的最小虚拟运行时间。
+pub(crate) fn advance_cfs_min_vruntime(cpu_id: usize) {
+	let cpu_id = cpu_id.min(RQ_ARRAY.len().saturating_sub(1));
+	RQ_ARRAY[cpu_id]
+		.inner_exclusive_access()
+		.cfs
+		.exclusive_access()
+		.advance_min_vruntime();
+}
+
+/// 唤醒阻塞任务，并重新加入它原先所属 CPU 的运行队列。 
+/// 如果任务不是阻塞状态，则打印警告信息并忽略。
 pub fn wake_up_task(task: Arc<TaskControlBlock>) {
 	let should_enqueue = loop {
 		let mut inner = task.inner_exclusive_access();
@@ -235,16 +259,22 @@ pub fn wake_up_task(task: Arc<TaskControlBlock>) {
 /// 从当前 CPU 自己的运行队列获取任务，不执行跨核窃取。
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
 	let cpu_id = get_hart_id();
-	let task = RQ_ARRAY[cpu_id]
-		.inner_exclusive_access()
-		.pop_next_task()?;
-	{
-		let mut inner = task.inner_exclusive_access();
-		inner.cpu = cpu_id;
-		inner.on_rq = false;
-		inner.on_cpu = true;
-		inner.state = TaskStatus::Running;
-		inner.need_resched = false;
+	loop {
+		let task = RQ_ARRAY[cpu_id]
+			.inner_exclusive_access()
+			.pop_next_task()?;
+		{
+			let mut inner = task.inner_exclusive_access();
+			inner.on_rq = false;
+			if inner.state == TaskStatus::Zombie {
+				inner.on_cpu = false;
+				continue;
+			}
+			inner.cpu = cpu_id;
+			inner.on_cpu = true;
+			inner.state = TaskStatus::Running;
+			inner.need_resched = false;
+		}
+		return Some(task);
 	}
-	Some(task)
 }

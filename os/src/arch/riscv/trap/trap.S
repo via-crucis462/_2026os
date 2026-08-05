@@ -13,9 +13,7 @@
     .align 2
 __alltraps:
     csrrw sp, sscratch, sp
-    # sp points to the TrapContext on the real kernel stack. Its page is
-    # supervisor-only mapped in the current user page table for this short
-    # transition; sscratch now holds the user stack pointer.
+    # 这时 sp 指向TrapContext，sscratch 指向用户栈
     sd x1, 1*8(sp)
     # x2是栈指针，要等数据都压入栈再最后压
     sd x3, 3*8(sp)
@@ -36,28 +34,15 @@ __alltraps:
     # read user stack from sscratch and save it in TrapContext
     csrr t2, sscratch
     sd t2, 2*8(sp)
-    # load kernel_satp into t0
-    ld t0, 34*8(sp)
     # load trap_handler into t1
     ld t1, 36*8(sp)
     # move to kernel_sp 实际上是内核栈顶，初始化后不再变化，所以restore时不需要保存
     ld sp, 35*8(sp)
-    # switch to kernel space
-    slli t2, t0, 4
-    srli t2, t2, 48
-    csrw satp, t0
-    sfence.vma zero, t2
     # jump to trap_handler
     jr t1
 
 __restore:
-    # a0: TrapContext on the real kernel stack (also supervisor-only mapped
-    # in the target user page table); a1: user space token
-    # switch to user space
-    slli t2, a1, 4
-    srli t2, t2, 48
-    csrw   satp, a1
-    sfence.vma zero, t2
+    # trap_return 内已经 switch_mm，这里不需要也不能再切换 satp
     csrw sscratch, a0
     mv sp, a0
     # restore from the kernel-owned TrapContext through its transition mapping

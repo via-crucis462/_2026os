@@ -1,9 +1,22 @@
 use super::frame::push_signal_frame;
-use crate::process::{current_task, SignalFlags, TaskControlBlock};
+use crate::process::{current_task, SignalFlags, TaskControlBlock, TaskStructInner};
 use crate::process::trap::TrapContext;
 use alloc::sync::Arc;
 
-/// Add signal to the current task
+pub(crate) fn inner_has_pending_sigkill(inner: &TaskStructInner) -> bool {
+    inner.pending.contains(SignalFlags::SIGKILL)
+        || inner
+            .signal
+            .exclusive_access()
+            .pending_flags()
+            .contains(SignalFlags::SIGKILL)
+}
+
+pub(crate) fn has_pending_sigkill(task: &Arc<TaskControlBlock>) -> bool {
+    let inner = task.inner_exclusive_access();
+    inner_has_pending_sigkill(&inner)
+}
+
 /// 给当前任务加上信号
 pub fn current_add_signal(signal: SignalFlags) {
     let task = current_task().unwrap();
@@ -139,7 +152,13 @@ fn  call_signal_handler(sig: usize, signal: SignalFlags) {
             trap_ctx.get_rt(),
             trap_ctx.get_sp()
         );
-        let Some((info_ptr, ucontext_ptr)) = push_signal_frame(&mut task_inner, sig, saved_mask) else {
+        const SA_ONSTACK: usize = 0x08000000;
+        let Some((info_ptr, ucontext_ptr)) = push_signal_frame(
+            &mut task_inner,
+            sig,
+            saved_mask,
+            action.flags & SA_ONSTACK != 0,
+        ) else {
             warn!("[SIG PROBE] Failed to write signal frame");
             task_inner.term_signal = Some(sig as i32 + 1);
             return;
@@ -220,7 +239,76 @@ fn set_sig_ret(trap_ctx: &mut TrapContext) {
 
 /// 检查当前任务是否有未屏蔽的挂起信号
 pub fn check_pending_signal() -> bool {
-    get_pending_signals().bits() != 0
+    let pending = get_pending_signals();
+    if pending.is_empty() {
+        return false;
+    }
+
+    const SIG_DFL: usize = 0;
+    const SIG_IGN: usize = 1;
+    let task = current_task().unwrap();
+    let signal_hand = task.inner_exclusive_access().signal_hand.clone();
+    let actions = signal_hand.exclusive_access();
+    let mut bits = pending.bits();
+
+    while bits != 0 {
+        let sig = bits.trailing_zeros() as usize;
+        bits &= !(1u64 << sig);
+        let action = actions.action(sig);
+
+        if action.handler == SIG_IGN {
+            continue;
+        }
+        if action.handler == SIG_DFL {
+            let flag = SignalFlags::from_bits(1u64 << sig)
+                .unwrap_or(SignalFlags::empty());
+            if matches!(
+                flag,
+                SignalFlags::SIGCHLD | SignalFlags::SIGURG | SignalFlags::SIGWINCH
+            ) {
+                continue;
+            }
+        }
+        return true;
+    }
+
+    false
+}
+
+/// 当前首个会实际递送的信号是否要求重启被中断的系统调用。
+pub fn pending_signal_should_restart() -> bool {
+    const SIG_DFL: usize = 0;
+    const SIG_IGN: usize = 1;
+    const SA_RESTART: usize = 0x1000_0000;
+
+    let pending = get_pending_signals();
+    let task = current_task().unwrap();
+    let signal_hand = task.inner_exclusive_access().signal_hand.clone();
+    let actions = signal_hand.exclusive_access();
+    let mut bits = pending.bits();
+
+    while bits != 0 {
+        let sig = bits.trailing_zeros() as usize;
+        bits &= !(1u64 << sig);
+        let action = actions.action(sig);
+        if action.handler == SIG_IGN {
+            continue;
+        }
+        if action.handler == SIG_DFL {
+            let flag = SignalFlags::from_bits(1u64 << sig)
+                .unwrap_or(SignalFlags::empty());
+            if matches!(
+                flag,
+                SignalFlags::SIGCHLD | SignalFlags::SIGURG | SignalFlags::SIGWINCH
+            ) {
+                continue;
+            }
+            return false;
+        }
+        return action.flags & SA_RESTART != 0;
+    }
+
+    false
 }
 
 /// 返回当前私有和共享的未屏蔽的挂起信号集

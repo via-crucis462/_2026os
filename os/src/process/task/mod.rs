@@ -10,6 +10,7 @@ pub mod exec;
 pub mod exit;
 pub mod sched;
 pub mod worker;
+pub mod vfork;
 
 pub use tcb::*;
 pub use context::*;
@@ -19,6 +20,7 @@ pub use fs::*;
 pub use limits::*;
 pub use files::*;
 pub use sched::*;
+pub use vfork::VforkCompletion;
 
 // Explicit compatibility surface for legacy `crate::task::*` callers.
 pub use crate::process::{

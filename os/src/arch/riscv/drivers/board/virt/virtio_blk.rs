@@ -1,6 +1,6 @@
 use core::ptr::NonNull;
 
-use crate::{MEMORY_END, MMIO_SLOT_SIZE};
+use crate::{ MEMORY_END, MMIO_SLOT_SIZE, UNCACHED_KERNEL_BASE};
 use crate::mm::{
     kernel_token, PageTable, PhysAddr, VirtAddr,
 };
@@ -12,7 +12,7 @@ use virtio_drivers::transport::Transport;
 use virtio_drivers::transport::DeviceType;
 
 #[allow(unused)]
-const VIRTIO0: usize = 0x10001000;
+const VIRTIO0: usize = 0x10001000 | UNCACHED_KERNEL_BASE;
 /// VirtIOBlock device driver strcuture for virtio_blk device
 pub struct VirtIOBlock{
     pub inner: MPSafeCell<VirtIOBlk<VirtioHal, MmioTransport<'static>>>
@@ -89,12 +89,15 @@ unsafe impl Hal for VirtioHal {
     unsafe fn share(buffer: NonNull<[u8]>, _direction: BufferDirection) -> VirtioPhysAddr {
         let vaddr = buffer.as_ptr() as *mut u8 as usize;
 
-        if vaddr >= 0x8000_0000
+        if vaddr >= 0x8000_0000 | UNCACHED_KERNEL_BASE
             && vaddr
                 .checked_add(buffer.len())
-                .is_some_and(|end| end <= MEMORY_END)
+                .is_some_and(|end| end <= MEMORY_END | UNCACHED_KERNEL_BASE)
         {
-            return vaddr as VirtioPhysAddr;
+            // VirtIO queue addresses are physical.  The buffer is directly
+            // mapped in the high-half kernel window, so do not give the device
+            // its CPU virtual address.
+            return (vaddr & !UNCACHED_KERNEL_BASE) as VirtioPhysAddr;
         }
         
         PageTable::from_token(kernel_token())

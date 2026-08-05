@@ -33,6 +33,9 @@ use crate::task::suspend_current_and_run_next;
 
 pub struct TcpSocket {
     pub handle: SocketHandle,
+    /// smoltcp 的单个 TCP socket 只能承接一条握手；监听 socket 使用
+    /// 多个同端口 handle 实现 listen(2) backlog。
+    pub backlog_handles: Mutex<Vec<SocketHandle>>,
     // 暂存 bind 分配或指定的本地端口
     pub local_port: Mutex<Option<u16>>,
     pub read_waiters: Arc<crate::sync::MPSafeCell<WaitQueue>>,
@@ -40,21 +43,57 @@ pub struct TcpSocket {
 }
 
 impl TcpSocket {
-    pub fn new() -> Self {
+    fn allocate_handle() -> SocketHandle {
         let rx_buffer = SocketBuffer::new(vec![0; 8192]);
         let tx_buffer = SocketBuffer::new(vec![0; 8192]);
         let socket = TcpSocketSmol::new(rx_buffer, tx_buffer);
-        let waiters = Arc::new(crate::sync::MPSafeCell::new(WaitQueue::new()));
+        // 注册 handle 与等待队列时保持与 net_poll 相同的锁顺序。
+        // 否则 net_poll 可能在 add 和 insert 之间看到一个 Closed 且无队列的
+        // socket，把它当作孤儿删除，随后首次 get(handle) 就会 panic。
         let mut sockets = SOCKET_SET.exclusive_access();
-        let mut socket_wait_queues = SOCKET_WAIT_QUEUES.lock();
+        let mut queues = SOCKET_WAIT_QUEUES.lock();
         let handle = sockets.add(socket);
-        socket_wait_queues.insert(handle, SocketWaitQueue::new());
-        drop(socket_wait_queues);
+        queues.insert(handle, SocketWaitQueue::new());
+        drop(queues);
         drop(sockets);
+        handle
+    }
+
+    pub fn new() -> Self {
+        let handle = Self::allocate_handle();
+        let waiters = Arc::new(crate::sync::MPSafeCell::new(WaitQueue::new()));
         Self {
             handle,
+            backlog_handles: Mutex::new(Vec::new()),
             local_port: Mutex::new(None),
             read_waiters: waiters,
+            is_listener: AtomicBool::new(false),
+        }
+    }
+
+    pub fn add_backlog_listener(&self, port: u16) -> Result<(), ()> {
+        let handle = Self::allocate_handle();
+        let listen_result = {
+            let mut sockets = SOCKET_SET.exclusive_access();
+            sockets.get_mut::<TcpSocketSmol>(handle).listen(port)
+        };
+        if listen_result.is_err() {
+            let mut sockets = SOCKET_SET.exclusive_access();
+            let mut queues = SOCKET_WAIT_QUEUES.lock();
+            sockets.remove(handle);
+            queues.remove(&handle);
+            return Err(());
+        }
+        self.backlog_handles.lock().push(handle);
+        Ok(())
+    }
+
+    pub fn from_accepted_handle(handle: SocketHandle) -> Self {
+        Self {
+            handle,
+            backlog_handles: Mutex::new(Vec::new()),
+            local_port: Mutex::new(None),
+            read_waiters: Arc::new(crate::sync::MPSafeCell::new(WaitQueue::new())),
             is_listener: AtomicBool::new(false),
         }
     }
@@ -87,6 +126,9 @@ impl TcpSocket {
             new_port
         };
 
+        // net_poll 的顺序是 interface -> SOCKET_SET。这里必须保持相同顺序；
+        // 旧实现先锁 SOCKET_SET 再锁 LO_IFACE，会与 accept 中的 net_poll
+
         let res = if is_loopback {
             let mut lo_iface = crate::net::LO_IFACE.exclusive_access();
             let mut sockets = crate::net::SOCKET_SET.exclusive_access();
@@ -102,38 +144,40 @@ impl TcpSocket {
             Ok(_) => 0,
             Err(_) => crate::syscall::errno::Errno::ECONNREFUSED.as_isize(),
         };
-
-        loop {
-            crate::net::net_poll();
-            let sockets = crate::net::SOCKET_SET.exclusive_access();
-            let socket = sockets.get::<smoltcp::socket::tcp::Socket>(self.handle);
-            use smoltcp::socket::tcp::State;
-            match socket.state() {
-                State::Established => {
-                    return 0;
-                }
-                State::SynSent | State::SynReceived => {
-                    drop(sockets);
-                    crate::task::suspend_current_and_run_next();
-                }
-                _ => {
-                    return crate::syscall::errno::Errno::ECONNREFUSED.as_isize();
-                }
-            }
-        }
+        // 这里只启动握手。阻塞等待、网络轮询和信号中断由 sys_connect
+        // 统一处理，避免在 socket 层形成无法被 timeout/kill 打断的循环。
+        connect_status
     }
 }
 impl Drop for TcpSocket {
     fn drop(&mut self) {
-        {
-            let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-            let exists = sockets.iter().any(|(h, _)| h == self.handle);
+        let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        let mut queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+        let mut orphaned_tcp = crate::net::ORPHANED_TCP_SOCKETS.lock();
+        let mut handles = self.backlog_handles.lock();
+        handles.push(self.handle);
+        for handle in handles.drain(..) {
+            let exists = sockets.iter().any(|(h, _)| h == handle);
             if exists {
-                let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
-                socket.close();
+                let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+                let state = socket.state();
+                if matches!(state, State::Closed | State::Listen) {
+                    sockets.remove(handle);
+                    orphaned_tcp.remove(&handle);
+                } else {
+                    // close() 会先排空发送缓冲区再发送 FIN。不能在这里直接
+                    // remove handle，否则对端可能永远收不到 EOF，只能等 timeout。
+                    socket.close();
+                    orphaned_tcp.insert(handle);
+                }
             }
+            // 文件对象已经消失，不会再有新的 syscall 等待；后续只由
+            // net_poll 推进协议状态并在 Closed 后回收 handle。
+            queues.remove(&handle);
         }
-        crate::net::SOCKET_WAIT_QUEUES.lock().remove(&self.handle);
+        drop(orphaned_tcp);
+        drop(queues);
+        drop(sockets);
         crate::net::net_poll();
     }
 }
@@ -228,8 +272,12 @@ impl File for TcpSocket {
             }
             drop(sockets);
             crate::net::net_poll();
-            crate::timer::check_timer_cooperative();
-            if get_pending_signals().contains(crate::task::SignalFlags::SIGALRM) {
+            crate::timer::check_timers();
+            let interrupting_signals = crate::task::SignalFlags::SIGALRM
+                | crate::task::SignalFlags::SIGTERM
+                | crate::task::SignalFlags::SIGINT
+                | crate::task::SignalFlags::SIGKILL;
+            if get_pending_signals().intersects(interrupting_signals) {
                 return EINTR.as_isize() as usize;
             }
             crate::task::suspend_current_and_run_next();
@@ -265,8 +313,12 @@ impl File for TcpSocket {
             }
             drop(sockets);
             crate::net::net_poll();
-            crate::timer::check_timer_cooperative();
-            if get_pending_signals().contains(crate::task::SignalFlags::SIGALRM) {
+            crate::timer::check_timers();
+            let interrupting_signals = crate::task::SignalFlags::SIGALRM
+                | crate::task::SignalFlags::SIGTERM
+                | crate::task::SignalFlags::SIGINT
+                | crate::task::SignalFlags::SIGKILL;
+            if get_pending_signals().intersects(interrupting_signals) {
                 return EINTR.as_isize() as usize;
             }
 
@@ -331,8 +383,10 @@ pub struct UdpSocket {
 impl Drop for UdpSocket {
     fn drop(&mut self) {
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        let mut queues = crate::net::SOCKET_WAIT_QUEUES.lock();
         sockets.remove(self.handle);
-        crate::net::SOCKET_WAIT_QUEUES.lock().remove(&self.handle);
+        queues.remove(&self.handle);
+        drop(queues);
         drop(sockets);
         crate::net::net_poll();
     }
@@ -349,10 +403,10 @@ impl UdpSocket {
         let rx_waiters = wait_queues.rx_queue.clone();
         let tx_waiters = wait_queues.tx_queue.clone();
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
-        let mut socket_wait_queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+        let mut queues = crate::net::SOCKET_WAIT_QUEUES.lock();
         let handle = sockets.add(socket);
-        socket_wait_queues.insert(handle, wait_queues);
-        drop(socket_wait_queues);
+        queues.insert(handle, wait_queues);
+        drop(queues);
         drop(sockets);
         Self {
             handle,
@@ -849,10 +903,10 @@ impl RawSocket {
         let rx_waiters = wait_queues.rx_queue.clone();
         let tx_waiters = wait_queues.tx_queue.clone();
         let mut sockets = SOCKET_SET.exclusive_access();
-        let mut socket_wait_queues = SOCKET_WAIT_QUEUES.lock();
+        let mut queues = SOCKET_WAIT_QUEUES.lock();
         let handle = sockets.add(socket);
-        socket_wait_queues.insert(handle, wait_queues);
-        drop(socket_wait_queues);
+        queues.insert(handle, wait_queues);
+        drop(queues);
         drop(sockets);
         Self {
             handle,

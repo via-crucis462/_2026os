@@ -7,7 +7,7 @@ use crate::process::wake_up_one;
 use crate::process::TaskStatus;
 use crate::sync::MPSafeCell;
 use crate::sync::WaitQueue;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::sync::Arc;
@@ -148,6 +148,10 @@ lazy_static! {
     pub static ref SOCKET_SET: MPSafeCell<SocketSet<'static>> = MPSafeCell::new(SocketSet::new(vec![]));
     // 原本是 Arc<Mutex<WaitQueue>>，现在统一改为 Arc<MPSafeCell<WaitQueue>>
     pub static ref SOCKET_WAIT_QUEUES: Mutex<BTreeMap<SocketHandle, SocketWaitQueue>> = Mutex::new(BTreeMap::new());
+    /// 用户态最后一个文件引用关闭、但仍需完成 TCP FIN 握手的 socket。
+    /// 这些 handle 不再有 syscall 等待者，由 net_poll 在 Closed 后回收。
+    pub static ref ORPHANED_TCP_SOCKETS: Mutex<BTreeSet<SocketHandle>> =
+        Mutex::new(BTreeSet::new());
     pub static ref LOOPBACK_DEVICE: MPSafeCell<smoltcp::phy::Loopback> = {
         MPSafeCell::new(smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ethernet))
     };
@@ -209,6 +213,7 @@ pub fn net_poll() {
 
     let mut dead_handles = alloc::vec::Vec::new();
     let queues = crate::net::SOCKET_WAIT_QUEUES.lock();
+    let mut orphaned_tcp = crate::net::ORPHANED_TCP_SOCKETS.lock();
     for (handle, socket) in sockets.iter_mut() {
         let mut can_read = false;
         let mut can_write = false;
@@ -255,7 +260,7 @@ pub fn net_poll() {
         }
         if let smoltcp::socket::Socket::Tcp(tcp_socket) = socket {
             if tcp_socket.state() == smoltcp::socket::tcp::State::Closed {
-                if !queues.contains_key(&handle) {
+                if orphaned_tcp.contains(&handle) || !queues.contains_key(&handle) {
                     dead_handles.push(handle);
                 }
             }
@@ -263,6 +268,7 @@ pub fn net_poll() {
     }
     for handle in dead_handles {
         sockets.remove(handle);
+        orphaned_tcp.remove(&handle);
     }
     debug!(
         "net_poll finished, state_changed={}, loop_count={}, budget={}",

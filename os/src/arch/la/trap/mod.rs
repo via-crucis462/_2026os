@@ -6,7 +6,6 @@ mod context;
 use crate::{KERNEL_STACK_SIZE, PAGE_SIZE, get_hart_id};
 use crate::mm::{translated_read, translated_write, PageTable, VirtAddr};
 use crate::syscall::syscall;
-use crate::arch::timer::get_time_ms;
 use crate::arch::mm::flush_tlb_for_asid;
 use crate::task::{
     KernelStack, SignalFlags,
@@ -14,8 +13,6 @@ use crate::task::{
     current_user_token, exit_current_and_run_next,
     suspend_current_and_run_next, handle_signals
 };
-#[cfg(board = "virt")]
-use crate::net::net_poll;
 use alloc::sync::Arc;
 use core::arch::{asm, global_asm};
 global_asm!(include_str!("trap.S"));
@@ -558,13 +555,21 @@ pub fn trap_handler() -> ! {
                 [cx.r[4], cx.r[5], cx.r[6], cx.r[7], cx.r[8], cx.r[9]]
             );
             current_task().unwrap().inner_exclusive_access().errno = if result < 0 {
-                (-result) as i32
+                if result == crate::syscall::errno::Errno::ERESTART.as_isize() {
+                    0
+                } else {
+                    (-result) as i32
+                }
             } else {
                 0
             };
             // cx is changed during sys_exec, so we have to call it again
             cx = current_trap_cx();
-            cx.r[4] = result as usize;
+            if result == crate::syscall::errno::Errno::ERESTART.as_isize() {
+                cx.set_rt(cx.get_rt() - 4);
+            } else {
+                cx.r[4] = result as usize;
+            }
             if should_trace {
                 //debug_dump_brk_snapshot("after_syscall", cx, current_user_token());
             }
@@ -573,32 +578,6 @@ pub fn trap_handler() -> ! {
             unsafe {
                 asm!("csrwr {}, 0x44", inout(reg) 1 => _);// 清除定时器中断
             }
-            let current_ms = get_time_ms();
-            let expired_pids = crate::timer::TIMER_MANAGER.lock().tick(current_ms);
-            // 处理 POSIX 定时器
-            crate::process::check_posix_timers();
-            for pid in expired_pids {
-                if let Some(process) = crate::task::get_process(pid) {
-                    let tasks = crate::process::registry::TID2TCB
-                        .exclusive_access()
-                        .values()
-                        .filter(|task| task.gettgid() == process.gettgid())
-                        .cloned()
-                        .collect::<alloc::vec::Vec<_>>();
-                    for task in tasks {
-                        let mut task_inner = task.inner_exclusive_access();
-                        task_inner.pending.insert(crate::task::SignalFlags::SIGALRM);
-                        if task_inner.state == crate::task::TaskStatus::Blocked {
-                            task_inner.signal_interrupted = true;
-                            task_inner.state = crate::task::TaskStatus::Ready;
-                            drop(task_inner);
-                            crate::task::add_task(task);
-                        }
-                    }
-                }
-            }
-            crate::net::net_poll();
-            // crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
         }
         _ => {
@@ -631,9 +610,15 @@ pub fn trap_handler() -> ! {
                 badv,
                 badi
             );
-            if let Some(task) = current_task() {
-                let mm = task.inner_exclusive_access().mm.as_ref().cloned();
-                let Some(mm) = mm else {
+            // 将 pagefault 处理放在独立块中，保证锁和 Arc 自动释放
+            //
+            // 旧实现在每个分支处理成功后，drop 遗漏了 mm 的 Arc，
+            // 却直接调用 trap_return，导致出现内存泄露
+            'fault: {
+                let Some(task) = current_task() else {
+                    break 'fault;
+                };
+                let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
                     error!("[kernel] user fault without mm: pid={}, tid={}", task.getpid(), task.gettid());
                     exit_current_and_run_next(-11);
                     panic!("unreachable: exited task without mm");
@@ -646,9 +631,7 @@ pub fn trap_handler() -> ! {
                     memory_set.handle_cow_fault(badv);
                     if let Some(pte) = memory_set.translate(vpn) {
                         if pte.is_valid() && pte.writable() && memory_set.set_pte_dirty(vpn) {
-                            drop(memory_set);
-                            drop(task);
-                            trap_return();
+                            break 'fault;
                         } else {
                             warn!(
                                 "pte is not writable or cannot set dirty: vpn=0x{:x}, pte=0x{:x}",
@@ -660,14 +643,10 @@ pub fn trap_handler() -> ! {
                     }
                 }
                 if memory_set.handle_cow_fault(badv) {
-                    drop(memory_set);
-                    drop(task);
-                    trap_return();
+                    break 'fault;
                 }
                 if memory_set.handle_page_fault(badv, sp) {
-                    drop(memory_set);
-                    drop(task);
-                    trap_return();
+                    break 'fault;
                 }
                 match memory_set.translate(vpn) {
                     Some(pte) => {
@@ -755,7 +734,6 @@ pub fn trap_handler() -> ! {
                             }
                         }
                     }*/
-            }
             /*if is_brk_process() && (BRK_PRINTF_START..BRK_PRINTF_END).contains(&era) {
                 let cx = current_trap_cx();
                 debug_dump_brk_snapshot("fault_window", cx, current_user_token());
@@ -766,31 +744,33 @@ pub fn trap_handler() -> ! {
                 8,
                 );
             }*/
-            if let Some(task) = current_task() {
-                let mm = task.inner_exclusive_access().mm.as_ref().cloned();
-                let Some(mm) = mm else {
-                    trace!("[kernel] trap_handler: pid={}, tid={}, no user mm", task.getpid(), task.gettid());
-                    exit_current_and_run_next(-11);
-                    panic!("unreachable: exited task without mm");
-                };
-                let memory_set = mm.exclusive_access();
-                let heap_bottom = memory_set.areas()[memory_set.brk_index()]
-                    .get_vpn_range()
-                    .get_start()
-                    .0
-                    * PAGE_SIZE;
-                trace!(
-                    "[kernel] trap_handler: pid={}, tid={}, heap_bottom=0x{:x}, program_brk=0x{:x}",
-                    task.getpid(),
-                    task.gettid(),
-                    heap_bottom,
-                    memory_set.current_brk(),
-                );
-                // inner.memory_set.debug_dump_areas(Some(badv), Some(era));
-            } else {
-                trace!("[kernel] trap_handler: no current task");
+                // 未处理的异常，视为段错误
+                if let Some(task) = current_task() {
+                    let mm = task.inner_exclusive_access().mm.as_ref().cloned();
+                    let Some(mm) = mm else {
+                        trace!("[kernel] trap_handler: pid={}, tid={}, no user mm", task.getpid(), task.gettid());
+                        exit_current_and_run_next(-11);
+                        panic!("unreachable: exited task without mm");
+                    };
+                    let memory_set = mm.exclusive_access();
+                    let heap_bottom = memory_set.areas()[memory_set.brk_index()]
+                        .get_vpn_range()
+                        .get_start()
+                        .0
+                        * PAGE_SIZE;
+                    trace!(
+                        "[kernel] trap_handler: pid={}, tid={}, heap_bottom=0x{:x}, program_brk=0x{:x}",
+                        task.getpid(),
+                        task.gettid(),
+                        heap_bottom,
+                        memory_set.current_brk(),
+                    );
+                    // inner.memory_set.debug_dump_areas(Some(badv), Some(era));
+                } else {
+                    trace!("[kernel] trap_handler: no current task");
+                }
+                current_add_signal(SignalFlags::SIGSEGV);
             }
-            current_add_signal(SignalFlags::SIGSEGV);
         }
     }
     /*println!(
@@ -845,7 +825,9 @@ pub fn trap_return() -> ! {
     unsafe {
         let mut euen: usize;
         asm!("csrrd {}, 0x2", out(reg) euen);
-        euen |= 0x1;
+        // FPE (bit 0) and SXE/LSX (bit 1) must be enabled before returning
+        // to glibc: its dynamic loader uses LSX vector loads during startup.
+        euen |= 0x3;
         asm!("csrwr {}, 0x2", inout(reg) euen => _);
     }
     crate::mm::MemorySet::flush_tlb_after_mapping_change();

@@ -8,8 +8,7 @@ use spin::Mutex;
 use crate::arch::timer::get_time_us;
 use crate::process::registry::{get_process, tid2task, TID2TCB};
 use crate::process::signal::SignalFlags;
-use crate::process::task::TaskStatus;
-use crate::timer::{TimeSpec, CLOCK_REALTIME_OFFSET_NS};
+use crate::timer::{queue_timer_signal, TimeSpec, CLOCK_REALTIME_OFFSET_NS};
 
 /// Linux内核使用的sigevent布局；只保留timer_create需要读取的字段。
 #[repr(C)]
@@ -78,6 +77,13 @@ pub fn add_posix_timer(timer: PosixTimer) -> i32 {
 /// 从全局注册表删除指定POSIX定时器。
 pub fn remove_posix_timer(id: i32) {
     POSIX_TIMERS.lock().remove(&id);
+}
+
+/// 删除属于退出进程的全部 POSIX 定时器，避免 PID 复用后误投递信号。
+pub fn remove_process_posix_timers(owner_pid: usize) {
+    POSIX_TIMERS
+        .lock()
+        .retain(|_, timer| timer.owner_pid != owner_pid);
 }
 
 fn timespec_to_ns(value: TimeSpec) -> Option<u128> {
@@ -211,14 +217,7 @@ pub fn check_posix_timers() {
         };
 
         for task in tasks {
-            let mut inner = task.inner_exclusive_access();
-            inner.pending.insert(signal);
-            if inner.state == TaskStatus::Blocked {
-                inner.signal_interrupted = true;
-                inner.state = TaskStatus::Ready;
-                drop(inner);
-                crate::process::add_task(task);
-            }
+            queue_timer_signal(task, signal);
             if timer.notify == SIGEV_THREAD_ID {
                 break;
             }

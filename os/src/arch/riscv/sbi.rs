@@ -16,6 +16,11 @@ const SBI_SHUTDOWN: usize = 0x53525354;//qemu8
 
 const SBI_IPI_SEND: usize = 0x735049;// sPI
 
+// 跨核 TLB 刷新
+const SBI_EXT_RFENCE: usize = 0x52464E43; // "RFNC"
+const SBI_EXT_RFENCE_REMOTE_SFENCE_VMA: usize = 1;
+const SBI_EXT_RFENCE_REMOTE_SFENCE_VMA_ASID: usize = 2;
+
 // HSM (Hart State Management) 扩展 ID, "HSM"
 const SBI_HSM: usize = 0x48534D;
 
@@ -40,6 +45,45 @@ impl SBICaller {
         }
         ret
     }
+    pub fn call_ext(&mut self, which: usize, ext: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
+        let mut ret;
+        unsafe {
+            asm!(
+                "ecall",
+                inlateout("x10") arg0 => ret,
+                in("x11") arg1,
+                in("x12") arg2,
+                in("x16") ext,
+                in("x17") which,
+            );
+        }
+        ret
+    }
+    pub fn call_ext5(
+        &mut self,
+        which: usize,
+        ext: usize,
+        arg0: usize,
+        arg1: usize,
+        arg2: usize,
+        arg3: usize,
+        arg4: usize,
+    ) -> usize {
+        let mut ret;
+        unsafe {
+            asm!(
+                "ecall",
+                inlateout("x10") arg0 => ret,
+                in("x11") arg1,
+                in("x12") arg2,
+                in("x13") arg3,
+                in("x14") arg4,
+                in("x16") ext,
+                in("x17") which,
+            );
+        }
+        ret
+    }
 }
 
 lazy_static! {
@@ -51,6 +95,27 @@ lazy_static! {
 pub fn sbi_call(which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
     SBI_CALLER.exclusive_access().call(which, arg0, arg1, arg2)
 }
+
+#[inline(always)]
+pub fn sbi_call_ext(which: usize, ext: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
+    SBI_CALLER.exclusive_access().call_ext(which, ext, arg0, arg1, arg2)
+}
+
+#[inline(always)]
+pub fn sbi_call_ext5(
+    which: usize,
+    ext: usize,
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+) -> usize {
+    SBI_CALLER
+        .exclusive_access()
+        .call_ext5(which, ext, arg0, arg1, arg2, arg3, arg4)
+}
+
 
 /// use sbi call to set timer
 pub fn set_timer(timer: usize) {
@@ -90,4 +155,39 @@ pub fn sbi_wakeup_hart(hart_id: usize) {
 pub fn sbi_wakeup_harts(hart_mask: usize) {
     let hart_mask_base = 0;
     sbi_call(SBI_EXT_IPI, SBI_IPI_SEND_IPI, hart_mask, hart_mask_base);
+}
+
+/// 让 mask 指定的核刷新 [start, start+size) 区间。
+///
+/// 全部完成后返回
+pub fn remote_sfence_vma(hart_mask: usize, start: usize, size: usize) {
+    let error = sbi_call_ext5(
+        SBI_EXT_RFENCE,
+        SBI_EXT_RFENCE_REMOTE_SFENCE_VMA,
+        hart_mask,
+        0,
+        start,
+        size,
+        0,
+    );
+    assert_eq!(error, 0, "SBI remote_sfence_vma failed: {:#x}", error);
+}
+
+/// Synchronously invalidate every translation tagged with `asid` on `hart_mask`.
+pub fn remote_sfence_vma_asid(hart_mask: usize, asid: usize) {
+    let error = sbi_call_ext5(
+        SBI_EXT_RFENCE,
+        SBI_EXT_RFENCE_REMOTE_SFENCE_VMA_ASID,
+        hart_mask,
+        0,
+        0,
+        0,
+        asid,
+    );
+    assert_eq!(
+        error,
+        0,
+        "SBI remote_sfence_vma_asid failed: {:#x}",
+        error
+    );
 }

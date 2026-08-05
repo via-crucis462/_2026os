@@ -10,33 +10,49 @@ use crate::arch::mm::*;
 const PPN_WIDTH: usize = PA_WIDTH - PAGE_SIZE_BITS;
 const VPN_WIDTH: usize = VA_WIDTH - PAGE_SIZE_BITS;
 
-/// Definitions
 #[repr(C)]
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 /// 物理地址
 /// 
+/// 物理地址一定是无符号的
+/// 
+/// 规定无论是 rv 还是 la，这里的物理地址都存放真正的“物理”地址，而不是内核虚拟地址
+/// 
 /// 当需要用裸 usize 值时，特别规定：
 /// pa.0 代表物理地址的实际值
-/// --- 下列只针对龙芯，但 riscv 也保留接口并与la对齐 --
+/// --- 现行实现下 riscv64 无是否带缓存的区分，但内核仍需用窗口虚拟地址访存 ---
 /// pa.get_cached_addr() 代表带缓存窗口映射值（内核用指针访存应一律使用该值）
 /// pa.get_uncached_addr() 代表不可缓存窗口映射值
+/// 
 pub struct PhysAddr(pub usize);
 
-/// Virtual Address
+/// 虚拟地址
+/// 
+/// 虚拟地址为有符号值，可以理解为 VA_WIDTH 长的补码
+/// 
+/// 规定其 .0 值为 39 位有符号值（即忽略高位0），转为 usize 时符号扩展为 64 位
+/// 
+/// 特别规定：
+/// 内核函数在不需要保持和用户态虚拟地址对齐时，可以使用位运算计算地址来使语义更清晰，
+/// 这里的虚拟地址类型主要用于访问和管理用户页表
+/// 
 #[repr(C)]
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 ///virtual address
 pub struct VirtAddr(pub usize);
 
-/// Physical Page Number PPN
 /// 按标准页计算的物理页号
+/// 
+/// 物理页号一定是无符号的
+/// 
 #[repr(C)]
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
-///phiscal page number
 pub struct PhysPageNum(pub usize);
 
-/// Virtual Page Number VPN
 /// 按标准页计算的虚拟页号
+///
+/// 虚拟页号本质上是三级页表的索引值，所以是无符号值，这点与 VA 不同
+/// 
 #[repr(C)]
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct VirtPageNum(pub usize);
@@ -83,7 +99,9 @@ impl From<usize> for VirtAddr {
         Self(v & ((1 << VA_WIDTH) - 1))
     }
 }
+
 impl From<usize> for VirtPageNum {
+    /// 注意：这里的输入为虚拟页号值，不是地址
     fn from(v: usize) -> Self {
         Self(v & ((1 << VPN_WIDTH) - 1))
     }
@@ -93,7 +111,7 @@ impl From<PhysPageNum> for usize {
         v.0
     }
 }
-// 可能需要按架构区分，暂时统一为sv39的实现
+
 impl From<VirtAddr> for usize {
     fn from(v: VirtAddr) -> Self {
         if v.0 >= (1 << (VA_WIDTH - 1)) {
@@ -103,13 +121,21 @@ impl From<VirtAddr> for usize {
         }
     }
 }
+// 页号是无符号索引，不考虑高半低半地址空间
 impl From<VirtPageNum> for usize {
     fn from(v: VirtPageNum) -> Self {
         v.0
     }
 }
-/// virtual address impl
+
 impl VirtAddr {
+    /// 还原完整 64 位规范地址（把 [VA_WIDTH-1:0] 符号扩展）
+    /// 
+    /// 等价于 usize::from(*self)
+    pub fn full_addr(&self) -> usize {
+        usize::from(*self)
+    }
+
     /// Get the (floor) virtual page number
     pub fn std_floor(&self) -> VirtPageNum {
         VirtPageNum(self.0 / PAGE_SIZE)
@@ -148,6 +174,7 @@ impl From<VirtPageNum> for VirtAddr {
         Self(v.0 << PAGE_SIZE_BITS)
     }
 }
+
 impl PhysAddr {
     /// Get the immutable reference of physical address
     /// 用 cached 地址，不允许在访问硬件 mmio 等情况下使用
@@ -185,35 +212,24 @@ impl PhysAddr {
     pub fn actual_aligned(&self, page_size: super::PageSize) -> bool {
         self.actual_page_offset(page_size) == 0
     }
-    #[cfg(target_arch = "loongarch64")]
     /// 获取可缓存窗口映射后的内核态地址值
-    pub fn get_cached_addr(&self) -> usize {
-        self.0 | crate::CACHED_KERNEL_BASE
-    }
-    #[cfg(target_arch = "riscv64")]
-    /// 获取内核态地址值
     /// 
     /// 规定为内核自身内存访问使用
     /// 
-    /// 仅为了统一接口，riscv64不需要做任何处理
+    /// riscv64 不区分可缓存和不可缓存的窗口映射
     pub fn get_cached_addr(&self) -> usize {
-        self.0
+        self.0 | crate::CACHED_KERNEL_BASE
     }
-    #[cfg(target_arch = "loongarch64")]
     /// 获取不可缓存窗口映射后的内核态地址值
-    pub fn get_uncached_addr(&self) -> usize {
-        self.0 | crate::UNCACHED_KERNEL_BASE
-    }
-    #[cfg(target_arch = "riscv64")]
-    /// 获取内核态地址值
     ///
     /// 规定为设备访问时使用
     /// 
-    /// 仅为了统一接口，riscv64不需要做任何处理
+    /// riscv64 不区分可缓存和不可缓存的窗口映射
     pub fn get_uncached_addr(&self) -> usize {
-        self.0
+        self.0 | crate::UNCACHED_KERNEL_BASE
     }
 }
+
 impl From<PhysAddr> for PhysPageNum {
     fn from(v: PhysAddr) -> Self {
         assert_eq!(v.std_page_offset(), 0);
@@ -227,6 +243,12 @@ impl From<PhysPageNum> for PhysAddr {
 }
 
 impl VirtPageNum {
+    /// 获取起始虚拟地址值（返回 64 位有符号值）
+    /// 等价于 usize::from(VirtAddr::from(*self))
+    pub fn start_addr(&self) -> usize {
+        usize::from(VirtAddr::from(*self))
+    }
+
     /// Get the indexes of the page table entry
     /// la64的页表索引顺序与SV39相同
     pub fn indexes(&self) -> [usize; 3] {

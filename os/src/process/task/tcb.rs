@@ -12,17 +12,19 @@ use crate::process::task::{
     cred::Cred,
     fs::FsStruct,
 };
-use crate::process::signal::{Signal, SigHand, Sigpending};
-use alloc::{sync::{Arc, Weak}, vec::Vec};
+use crate::process::signal::{Signal, SignalAltStack, SigHand, Sigpending};
+use alloc::{string::String, sync::{Arc, Weak}, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 use crate::process::task::*;
 
 #[deny(non_camel_case_types)]
 pub struct TaskStruct {
     pub pid: Arc<PidHandle>,                // 全局唯一线程 ID
     pub tgid: Arc<PidHandle>,               // 线程组 ID，主线程 pid=tgid
-    pub group_leader: Weak<TaskStruct>, // 线程组领头进程
+    pub group_leader: Weak<TaskStruct>,     // 线程组领头进程
     pub inner: MPSafeCell<TaskStructInner>, // 内部可变结构体
 }
+
 impl TaskStruct {
     /// Get the mutable reference of the inner TCB
     pub fn inner_exclusive_access(&self) -> MPSafeGuard<'_, TaskStructInner> {
@@ -59,7 +61,47 @@ impl TaskStruct {
         (inner.sched_policy, inner.sched_priority)
      }
 
+    /// 尝试获取线程组 exec 互斥锁
+    pub(crate) fn try_lock_exec_update(self: &Arc<Self>) -> Option<ExecUpdateGuard> {
+        let inner = self.inner_exclusive_access();
+        let lock = inner.exec_update_lock.clone();
+        if lock
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            Some(ExecUpdateGuard { lock })
+        } else {
+            None
+        }
+    }
+
+    /// 等待线程组 exec 互斥锁，等待期间每次挂起前检查 SIGKILL
+    pub(crate) fn wait_exec_update_lock(
+        self: &Arc<Self>,
+    ) -> Result<ExecUpdateGuard, ()> {
+        loop {
+            if crate::process::signal::has_pending_sigkill(self) {
+                return Err(());
+            }
+            if let Some(guard) = self.try_lock_exec_update() {
+                return Ok(guard);
+            }
+            crate::process::suspend_current_and_run_next();
+        }
+    }
+
 }
+
+pub(crate) struct ExecUpdateGuard {
+    lock: Arc<AtomicBool>,
+}
+
+impl Drop for ExecUpdateGuard {
+    fn drop(&mut self) {
+        self.lock.store(false, Ordering::Release);
+    }
+}
+
 pub struct TaskStructInner {
     pub on_main_hart: bool, // 是否在主核上运行
     // 命名空间
@@ -111,17 +153,21 @@ pub struct TaskStructInner {
     /* 6. 文件系统与文件描述符 */
     pub fs: Arc<MPSafeCell<FsStruct>>,       // 进程当前目录、根目录信息
     pub files: Arc<MPSafeCell<FileDescriptorTable>>, // 进程打开的文件描述符表
+    /// 当前进程映像对应的规范绝对路径，用于 /proc/<pid>/exe。
+    pub exe_path: String,
 
-    /*7. 信号处理相关 */
-    pub signal: Arc<MPSafeCell<Signal>>,  // 信号处理相关信息
+    /* 7. 信号处理相关 */
+    pub signal: Arc<MPSafeCell<Signal>>, // 信号处理相关信息
+    pub exec_update_lock: Arc<AtomicBool>, // 线程组 exec 互斥锁
     pub signal_hand: Arc<MPSafeCell<SigHand>>, // 信号处理函数相关信息
-    pub blocked: SignalFlags, // 当前阻塞的信号集
-    pub pending: Sigpending, // 当前挂起的信号集 
+    pub blocked: SignalFlags, // 当前阻塞（不允许接收）的信号集
+    pub pending: Sigpending, // 当前挂起（收到但还未处理）的信号集 
     pub signal_interrupted: bool,
     pub sigsuspend_saved_mask: Option<SignalFlags>,
     pub signal_mask_backup: Vec<SignalFlags>,
     pub trap_ctx_backup: Vec<TrapContext>,
     pub signal_user_context_backup: Vec<usize>,
+    pub signal_alt_stack: SignalAltStack,
     pub term_signal: Option<i32>,
     pub frozen: bool,
 
@@ -129,11 +175,13 @@ pub struct TaskStructInner {
     pub cred: Arc<MPSafeCell<Cred>>, // 进程的凭证信息
     pub real_cred: Arc<MPSafeCell<Cred>>, // 进程的真实凭证信息
 
-    /* 9. 其他 */
+    /* 9. 时间相关 */
     pub start_time: u64, // 进程启动时间
     pub start_boottime: u64, // 进程启动时间的低位
+    /// 进程的 oom_score_adj（范围 -1000..=1000，LTP 兼容）
+    pub oom_score_adj: i32,
 
-    /* 10 .CPU调度  */
+    /* 10. CPU调度  */
     pub on_cpu: bool,
     pub on_rq: bool,
     pub cpu: usize,
@@ -142,8 +190,9 @@ pub struct TaskStructInner {
     /// 是否请求在安全调度点重新调度当前任务。
     pub need_resched: bool,
 
-    /*11 .线程退出清理地址 */
+    /* 11. 杂项 */
     pub clear_child_tid: usize, // 线程清理指针
+    pub vfork_completion: Option<Arc<VforkCompletion>>, // vfork 同步原语
     pub personality: usize, // 进程个性化标志
     pub locked_bytes: usize, // MAP_LOCKED 映射字节数
     pub comm: [u8; 10],

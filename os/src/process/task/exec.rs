@@ -7,14 +7,13 @@ use crate::arch::trap::{trap_handler, TrapContext};
 use crate::drivers::net::EthernetDevice;
 use crate::fs::{open_file, File, OpenFlags};
 use crate::process::FdFlags;
-use crate::mm::{translated_write, KERNEL_SPACE, MemorySet, VirtAddr};
-use crate::process::registry::{remove_from_tid2task, TID2TCB};
-use crate::process::scheduler::runqueue::{
-	lock_dispatch, remove_task_from_all_local_queues_unlocked,
-	remove_task_from_global_pool_unlocked,
+use crate::mm::{translated_write, KERNEL_SPACE, MemorySet};
+use crate::process::registry::{tid2task, TID2TCB};
+use crate::process::scheduler::runqueue::wake_up_task;
+use crate::process::signal::{
+	inner_has_pending_sigkill, SigHand, Signal, Sigpending, SignalFlags,
 };
-use crate::process::signal::{SigHand, Signal, Sigpending};
-use crate::process::task::{TaskControlBlock, TaskStatus, TaskStruct};
+use crate::process::task::{ExecUpdateGuard, TaskControlBlock, TaskStatus, TaskStruct};
 use crate::sync::MPSafeCell;
 use crate::syscall::errno::Errno;
 use alloc::{string::{String, ToString}, sync::Arc, vec, vec::Vec};
@@ -69,15 +68,18 @@ impl TaskStruct {
 		let cwd = fs.exclusive_access().get_pwd();
 		let (uid, gid) = {
 			let cred = cred.exclusive_access();
-			(cred.uid(), cred.gid())
+			(cred.fsuid(), cred.fsgid())
 		};
 
 		let mut path_exists = false;
+		let mut library_path_exists = false;
 		let mut hwaddr_exists = false;
 		for env in envs.iter() {
 			if env.starts_with("PATH=") {
 				path_exists = true;
-				break;
+			}
+			if env.starts_with("LD_LIBRARY_PATH=") {
+				library_path_exists = true;
 			}
 			if env.starts_with("LHOST_HWADDRS=") {
 				hwaddr_exists = true;
@@ -90,6 +92,10 @@ impl TaskStruct {
 			envs.push("PATH=/bin:/sbin:/usr/bin:/usr/sbin:/musl:/musl/ltp/testcases/bin".to_string());
 			envs.push("HOME=/".to_string());
 			envs.push("TERM=linux".to_string());
+		}
+		#[cfg(target_arch = "loongarch64")]
+		if !library_path_exists {
+			envs.push("LD_LIBRARY_PATH=/lib/loongarch64-linux-gnu:/usr/lib/loongarch64-linux-gnu:/usr/local/lib/loongarch64-linux-gnu:/usr/local/lib".to_string());
 		}
 		if !hwaddr_exists {
 			use crate::drivers::net::EthernetDevice;
@@ -120,6 +126,7 @@ impl TaskStruct {
 		let Some(app_inode) = open_file(cwd.clone(), path.as_str(), OpenFlags::RDONLY, 0) else {
 			return Self::exec_open_error(cwd, path.as_str());
 		};
+		let mut executable_path = app_inode.get_dentry().get_full_path();
 		{
 				let stat = app_inode.inode().get_stat();
 			let is_dir = (stat.mode & 0o170000) == 0o040000;
@@ -150,6 +157,7 @@ impl TaskStruct {
 				warn!("[kernel] sys_exec: failed to open script interpreter '{}'", interpreter);
 				return Self::exec_open_error(cwd, interpreter.as_str());
 			};
+			executable_path = inode.get_dentry().get_full_path();
 			let stat = inode.get_stat();
 			let is_dir = (stat.mode & 0o170000) == 0o040000;
 			if is_dir || !inode.get_perm().can_execute(uid, gid) {
@@ -179,7 +187,14 @@ impl TaskStruct {
 		for (index, arg) in args.iter().enumerate() {
 			info!("[kernel] sys_exec: arg[{}] = '{}'", index, arg);
 		}
-		self.install_exec_image(self.clone(), elf_data.as_slice(), args, envs, false);
+		self.install_exec_image(
+			self.clone(),
+			elf_data.as_slice(),
+			args,
+			envs,
+			executable_path,
+			false,
+		);
 		#[cfg(target_arch = "loongarch64")]
 		unsafe {
 			core::arch::asm!("ibar 0");
@@ -247,6 +262,7 @@ impl TaskStruct {
 		elf_data: &[u8],
 		args: Vec<String>,
 		envs: Vec<String>,
+		executable_path: String,
 		on_main_hart: bool,
 	) {
 
@@ -265,6 +281,13 @@ impl TaskStruct {
 				page += PAGE_SIZE;
 			}
 		}
+
+		// 尝试获取 exec/clone 互斥锁，期间会检查 SIGKILL
+		// guard 会在函数返回时自动释放
+		let exec_guard: ExecUpdateGuard = match caller_task.wait_exec_update_lock() {
+			Ok(guard) => guard,
+			Err(()) => return,
+		};
 
 		let cwd = self.inner_exclusive_access().fs.exclusive_access().get_pwd();
 		let mut has_interp = false;
@@ -290,13 +313,6 @@ impl TaskStruct {
 		#[cfg(target_arch = "riscv64")]
 		let (trap_cx_addr, kernel_stack_top) = {
 			let trap_cx_addr = caller_task.inner_exclusive_access().thread.trap_ctx;
-			let trap_cx_va = VirtAddr::from(trap_cx_addr);
-			let trap_cx_ppn = KERNEL_SPACE
-				.exclusive_access()
-				.translate(trap_cx_va.std_floor())
-				.expect("kernel TrapContext is not mapped")
-				.ppn();
-			memory_set.install_trap_context_page(trap_cx_va, trap_cx_ppn);
 			(trap_cx_addr, trap_cx_addr)
 		};
 
@@ -336,7 +352,7 @@ impl TaskStruct {
 		}
 
 		user_sp -= 16;
-	prepare_stack_pages(&mut memory_set, user_sp, user_sp + 16);
+		prepare_stack_pages(&mut memory_set, user_sp, user_sp + 16);
 		let random_at = user_sp;
 		for offset in 0..16 {
 			translated_write(token, (random_at + offset) as *mut u8, 0x23);
@@ -401,12 +417,60 @@ impl TaskStruct {
 		trap_cx.set_a0(args.len());
 		trap_cx.set_a1(argv_base);
 
-		let old_signal = {
+
+		let siblings: Vec<_> = {
+			let tasks = TID2TCB.exclusive_access();
+			tasks
+				.values()
+				.filter(|task| task.gettgid() == caller_task.gettgid())
+				.filter(|task| !Arc::ptr_eq(task, &caller_task))
+				.cloned()
+				.collect()
+		};
+
+		// 向快照中的线程发送 SIGKILL 并唤醒。
+		// 
+		// ** 需要保证内核中所有轮询都加入信号检查 **
+		for sibling in &siblings {
+			let mut sibling_inner = sibling.inner_exclusive_access();
+			sibling_inner.pending.insert(SignalFlags::SIGKILL);
+			sibling_inner.term_signal = Some(9);
+			if matches!(sibling_inner.state, TaskStatus::Blocked) {
+				sibling_inner.signal_interrupted = true;
+			}
+			sibling_inner.need_resched = true;
+			drop(sibling_inner);
+			wake_up_task(sibling.clone());
+		}
+
+		// 等待快照中的线程全部退出
+		for sibling in siblings {
+			while tid2task(sibling.gettid()).is_some() {
+				if crate::process::signal::has_pending_sigkill(&caller_task) {
+					return;
+				}
+				crate::process::suspend_current_and_run_next();
+			}
+		}
+
+		let (files, vfork_completion) = {
 			let mut inner = caller_task.inner_exclusive_access();
+			// 在一个临界区内清空 mm/signal 前再次检查 SIGKILL，
+			// 避免信号被吞掉。
+			if inner_has_pending_sigkill(&inner) {
+				return;
+			}
+			#[cfg(target_arch = "riscv64")]
+			if let Some(old_mm) = inner.mm.as_ref() {
+				old_mm.exclusive_access().flush_tlb_targets();
+			}
+			#[cfg(target_arch = "riscv64")]
+			crate::mm::switch_mm(memory_set.token());
 			let old_signal = inner.signal.clone();
 			inner.thread.trap_ctx = trap_cx_addr;
 			inner.mm = Some(Arc::new(MPSafeCell::new(memory_set)));
 			inner.on_main_hart = on_main_hart;
+			inner.exe_path = executable_path;
 			inner.signal = Arc::new(MPSafeCell::new(Signal::fork_from(
 				&old_signal.exclusive_access(),
 			)));
@@ -417,9 +481,11 @@ impl TaskStruct {
 			inner.signal_mask_backup.clear();
 			inner.trap_ctx_backup.clear();
 			inner.signal_user_context_backup.clear();
+			inner.signal_alt_stack = crate::process::signal::SignalAltStack::default();
 			inner.term_signal = None;
 			inner.frozen = false;
 			inner.clear_child_tid = 0;
+			let vfork_completion = inner.vfork_completion.take();
 			inner.start_time = get_time_us() as u64;
 			if let Some(argv0) = args.first() {
 				inner.comm = [0; 10];
@@ -428,10 +494,10 @@ impl TaskStruct {
 				inner.comm[..copy_len].copy_from_slice(&bytes[..copy_len]);
 			}
 			*inner.get_trap_cx() = trap_cx;
-			inner.files.clone()
+			(inner.files.clone(), vfork_completion)
 		};
 		{
-			let mut files = old_signal.exclusive_access();
+			let mut files = files.exclusive_access();
 			for fd in 0..files.fds.len() {
 				if files.fds[fd].flags.contains(FdFlags::CLOEXEC) {
 					files.clear_fd(fd);
@@ -439,30 +505,8 @@ impl TaskStruct {
 			}
 		}
 
-		let sibling_tasks = {
-			let tasks = TID2TCB.exclusive_access();
-			tasks
-				.values()
-				.filter(|task| task.gettgid() == caller_task.gettgid())
-				.filter(|task| !Arc::ptr_eq(task, &caller_task))
-				.cloned()
-				.collect::<Vec<_>>()
-		};
-		for sibling in sibling_tasks {
-			let mut sibling_inner = sibling.inner_exclusive_access();
-			#[cfg(target_arch = "riscv64")]
-			if let Some(mm) = sibling_inner.mm.as_ref() {
-				mm.exclusive_access().remove_trap_context_page(VirtAddr::from(
-					sibling_inner.thread.trap_ctx,
-				));
-			}
-			sibling_inner.state = TaskStatus::Zombie;
-			sibling_inner.mm.take();
-			drop(sibling_inner);
-			let _dispatch = lock_dispatch();
-			remove_from_tid2task(sibling.gettid());
-			remove_task_from_all_local_queues_unlocked(sibling.gettid());
-			remove_task_from_global_pool_unlocked(sibling.gettid());
+		if let Some(completion) = vfork_completion {
+			completion.complete();
 		}
 	}
 }

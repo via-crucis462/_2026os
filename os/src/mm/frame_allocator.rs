@@ -1,6 +1,6 @@
 use super::{PhysAddr, PhysPageNum, PageSize};
 #[allow(unused)]
-use crate::arch::config::{DMA_SIZE, MEMORY_END};
+use crate::arch::config::{CACHED_KERNEL_BASE, DMA_SIZE, MEMORY_END};
 use crate::{mm::mmap::free_up_mem_space, sync::MPSafeCell};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -228,7 +228,8 @@ pub fn init_frame_allocator() {
         fn ekernel();
     }
     // 为DMA预留空间
-    let frame_start = ekernel as *const() as usize + DMA_SIZE;
+    // ekernel 是链接出的高半窗口 VA，帧分配器需要物理地址
+    let frame_start = (ekernel as *const () as usize & !CACHED_KERNEL_BASE) + DMA_SIZE;
 
     #[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
     let frame_end = crate::arch::config::FRAME_ALLOC_END;

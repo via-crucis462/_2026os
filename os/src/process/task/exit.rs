@@ -1,4 +1,3 @@
-use crate::mm::VirtAddr;
 use crate::process::registry::remove_from_tid2task;
 use crate::process::registry;
 use crate::process::scheduler::{current_task, schedule};
@@ -48,6 +47,9 @@ pub fn exit_current_and_run_next(exit_code: i32){
 		.any(|other| other.getpid() == pid && other.gettid() != task.gettid());
 
 	if last_thread {
+		crate::timer::TIMER_MANAGER.lock().cancel_alarm(pid);
+		crate::process::remove_process_posix_timers(pid);
+
 		let (parent, orphan_children) = {
 			let mut inner = task.inner_exclusive_access();
 			(inner.parent.upgrade(), core::mem::take(&mut inner.children))
@@ -103,23 +105,27 @@ impl TaskStruct {
 		remove_from_tid2task(self.gettid());
 
 		let mut inner = self.inner_exclusive_access();
-		#[cfg(target_arch = "riscv64")]
-		if let Some(mm) = inner.mm.as_ref() {
-			//带走自己的内核上下文
-			mm.exclusive_access()
-				.remove_trap_context_page(VirtAddr::from(inner.thread.trap_ctx));
-		}
 		// 线程退出时，设置退出码、错误码、状态，并清理资源
 		inner.exit_code = exit_code;
 		inner.errno = 0;
 		inner.state = TaskStatus::Zombie;
 		inner.pending = Sigpending::new();
+		#[cfg(target_arch = "riscv64")]
+		if let Some(mm) = inner.mm.as_ref() {
+			mm.exclusive_access().flush_tlb_targets();
+		}
+		#[cfg(target_arch = "riscv64")]
+		crate::mm::switch_mm(crate::mm::kernel_token());
 		inner.mm.take();
+		let vfork_completion = inner.vfork_completion.take();
 		let files = core::mem::replace(
 			&mut inner.files,
 			Arc::new(MPSafeCell::new(FileDescriptorTable::empty())),
 		);
 		drop(inner);
 		drop(files);
+		if let Some(completion) = vfork_completion {
+			completion.complete();
+		}
 	}
 }

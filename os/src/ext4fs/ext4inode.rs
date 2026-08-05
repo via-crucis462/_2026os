@@ -3,9 +3,11 @@ use alloc::vec;
 use alloc::string::String;
 use xmas_elf::header;
 use core::sync::atomic::{AtomicU64, Ordering};
+use spin::Mutex;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 use crate::ext4fs::BLOCK_SZ;
 use super::{ext4::Ext4FS, ext4_dir_entry::Ext4DirEntry, block_modify_inode, get_block_cache};
+use crate::fs::VfsInode;
 
 use core::arch::asm;
 
@@ -130,6 +132,10 @@ pub struct Ext4Inode {
     pub mode: u16,
     /// 文件大小（Atomic 以支持通过 &self 在 write 后更新缓存）
     pub size: AtomicU64,
+    /// 写入锁：原子化文件内容的写入操作，避免多个线程同时修改文件数据
+    pub write_lock: Mutex<()>,
+    /// 块映射锁：原子化逻辑块到物理块映射的查找、分配和删除操作
+    pub block_map_lock: Mutex<()>,
     /// 标志位 (例如是否使用 Extents)
     pub flags: u32,
     /// 数据块指针（直接块、间接块等）
@@ -206,6 +212,8 @@ impl Ext4Inode {
             inode_id,
             mode: disk_inode.i_mode,
             size: AtomicU64::new(disk_inode.size()), // 使用 DiskInode 已有的方法计算大小
+            write_lock: Mutex::new(()),
+            block_map_lock: Mutex::new(()),
             flags: disk_inode.i_flags,
             i_block: disk_inode.i_block,
             generation: disk_inode.i_generation,
@@ -765,6 +773,9 @@ impl Ext4Inode {
                     disk_inode.i_size_high = 0;
                 }
             });
+            if !buf.is_empty() && end > old_size_bytes {
+                self.size.fetch_max(end as u64, Ordering::Release);
+            }
             return buf.len();
         }
         while curr_offset < end {
@@ -825,11 +836,13 @@ impl Ext4Inode {
         let new_size_bytes = offset + actual_write;
         info!("raw_write_at: done actual_write={} new_size={}", actual_write, new_size_bytes);
         
-        if new_size_bytes > old_size_bytes {
+        if actual_write > 0 && new_size_bytes > old_size_bytes {
             block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
                 disk_inode.i_size_lo = new_size_bytes as u32;
                 disk_inode.i_size_high = (new_size_bytes >> 32) as u32;
             });
+            self.size
+                .fetch_max(new_size_bytes as u64, Ordering::Release);
         }
 
         actual_write
@@ -844,7 +857,7 @@ impl Ext4Inode {
         let mut offset = 0;
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; BLOCK_SZ];
-            self.raw_read_at(offset, &mut buf);
+            self.read_at(offset, &mut buf);
             let mut block_offset = 0;
             while block_offset < BLOCK_SZ {
                 let dirent = unsafe { &*(buf[block_offset..].as_ptr() as *const Ext4DirEntry) };
@@ -863,7 +876,7 @@ impl Ext4Inode {
         offset = 0;
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; BLOCK_SZ];
-            self.raw_read_at(offset, &mut buf);
+            self.read_at(offset, &mut buf);
             
             let mut block_offset = 0;
             while block_offset < BLOCK_SZ {
@@ -889,7 +902,7 @@ impl Ext4Inode {
 
                     self.update_dir_block_checksum_if_needed(&mut buf);
                     
-                    self.raw_write_at(offset, &buf); 
+                    self.write_at(offset, &buf);
                     return true;
                 }
                 
@@ -909,7 +922,7 @@ impl Ext4Inode {
         new_buf[..new_dirent_bytes.len()].copy_from_slice(new_dirent_bytes);
         self.update_dir_block_checksum_if_needed(&mut new_buf);
         // raw_write_at 会自动分配新块、插入 extent、更新 inode size
-        let written = self.raw_write_at(file_size_bytes, &new_buf);
+        let written = self.write_at(file_size_bytes, &new_buf);
         written == BLOCK_SZ
     }
 
@@ -918,7 +931,7 @@ impl Ext4Inode {
         let mut offset = 0;
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; BLOCK_SZ];
-            let read_len = self.raw_read_at(offset, &mut buf);
+            let read_len = self.read_at(offset, &mut buf);
             let mut block_offset = 0;
             while block_offset + 8 <= read_len {
                 let dirent = Ext4DirEntry::from_bytes(&buf[block_offset..read_len])?;
@@ -942,7 +955,7 @@ impl Ext4Inode {
         let mut offset = 0;
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; BLOCK_SZ];
-            let read_len = self.raw_read_at(offset, &mut buf);
+            let read_len = self.read_at(offset, &mut buf);
             let mut block_offset = 0;
             let mut prev_offset = None;
             while block_offset + 8 <= read_len {
@@ -960,7 +973,7 @@ impl Ext4Inode {
                         dirent.inode = 0;
                     }
                     self.update_dir_block_checksum_if_needed(&mut buf);
-                    if self.raw_write_at(offset, &buf) == BLOCK_SZ {
+                    if self.write_at(offset, &buf) == BLOCK_SZ {
                         return Some(removed);
                     }
                     return None;
@@ -984,7 +997,7 @@ impl Ext4Inode {
         let mut offset = 0;
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; BLOCK_SZ];
-            let read_len = self.raw_read_at(offset, &mut buf);
+            let read_len = self.read_at(offset, &mut buf);
             let mut block_offset = 0;
             while block_offset + 8 <= read_len {
                 let dirent = unsafe { &mut *(buf[block_offset..].as_mut_ptr() as *mut Ext4DirEntry) };
@@ -997,7 +1010,7 @@ impl Ext4Inode {
                     dirent.inode = inode_id;
                     dirent.file_type = file_type;
                     self.update_dir_block_checksum_if_needed(&mut buf);
-                    if self.raw_write_at(offset, &buf) == BLOCK_SZ {
+                    if self.write_at(offset, &buf) == BLOCK_SZ {
                         return Some(replaced);
                     }
                     return None;
@@ -1014,7 +1027,7 @@ impl Ext4Inode {
         let mut offset = 0;
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; BLOCK_SZ];
-            let read_len = self.raw_read_at(offset, &mut buf);
+            let read_len = self.read_at(offset, &mut buf);
             let mut block_offset = 0;
             while block_offset + 8 <= read_len {
                 let Some(dirent) = Ext4DirEntry::from_bytes(&buf[block_offset..read_len]) else {
@@ -1065,10 +1078,12 @@ impl Ext4Inode {
             disk_inode.i_size_lo = len as u32;
             disk_inode.i_size_high = (len >> 32) as u32;
             self.fs.block_dev.write_block(block_id as usize, &buf);
+            self.size.store(len as u64, Ordering::Release);
             return true;
         }
 
         if len == old_size {
+            self.size.store(len as u64, Ordering::Release);
             return true;
         }
 
@@ -1087,6 +1102,7 @@ impl Ext4Inode {
                 disk_inode.i_size_lo = len as u32;
                 disk_inode.i_size_high = (len >> 32) as u32;
                 self.fs.block_dev.write_block(block_id as usize, &buf);
+                self.size.store(len as u64, Ordering::Release);
                 return true;
             }
             if header.eh_depth != 0 {
@@ -1193,6 +1209,7 @@ impl Ext4Inode {
         disk_inode.i_size_high = (len >> 32) as u32;
 
         self.fs.block_dev.write_block(block_id as usize, &buf);
+        self.size.store(len as u64, Ordering::Release);
 
         // 第二阶段：释放收集到的物理块
         for phys in blocks_to_free {

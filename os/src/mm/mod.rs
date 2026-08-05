@@ -11,6 +11,8 @@ pub use frame_allocator::get_free_frames;
 mod heap_allocator;
 mod id;
 mod memory_set;
+#[cfg(target_arch = "riscv64")]
+mod tlb;
 
 pub mod address;
 pub mod flags;
@@ -28,6 +30,10 @@ pub use flags::PTEFlags;
 pub use frame_allocator::{frame_alloc, frame_dealloc, FrameTracker};
 pub use memory_set::remap_test;
 pub use memory_set::{kernel_asid, kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
+#[cfg(target_arch = "riscv64")]
+pub use memory_set::flush_kernel_tlb_targets;
+#[cfg(target_arch = "riscv64")]
+pub use tlb::{active_tokens, running_harts, switch_mm};
 #[allow(unused)]
 pub use memory_set::{MapArea, MapType};
 pub use page_table::*;
@@ -38,7 +44,7 @@ pub fn init() {
     heap_allocator::init_heap();
     frame_allocator::init_frame_allocator();
     #[cfg(target_arch = "riscv64")]
-    KERNEL_SPACE.exclusive_access().activate();
+    switch_mm(kernel_token());
     #[cfg(target_arch = "loongarch64")]
     lazy_static::initialize(&KERNEL_SPACE);
 }

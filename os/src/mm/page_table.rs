@@ -40,11 +40,15 @@ impl PageSize {
     }
 }
 
-/// page table structure
+/// 页表结构体
+///
+/// rv 下所有页表的根页表的 256..512 项会复制内核初始化阶段创建的内容。
+/// 用户不能修改这些项，内核在第一个用户进程创建后也不应再修改会改动自身根页表的内容。
 pub struct PageTable {
     // LA64也要求PAGE_SIZE对齐
     root_ppn: PhysPageNum,
-    // 这里用同样的结构体记录分配的页帧
+    /// 页表节点的所有权，析构时会自动释放
+    /// 用户不应把内核页表的节点插入
     frames: Vec<FrameTracker>,
 }
 
@@ -58,15 +62,15 @@ impl PageTable {
             frames: vec![frame],
         }
     }
-    /// Create a page table that shares the same root as another.
-    /// The new table does NOT own the intermediate page table frames;
-    /// the original owner is responsible for freeing them.
+    /// 从现有页表创建一个新的页表，复制内核高半的根项
     pub fn alias_of(other: &PageTable) -> Self {
         Self {
             root_ppn: other.root_ppn,
             frames: Vec::new(),
         }
     }
+    /// 从token创建一个新的页表
+    ///
     /// LA64根页表地址存储在CSR.PGDL或H，
     /// 这里存储的是2级页表的物理地址，因为弃用了3，4级页表
     /// 参考rv64的rcore理解即可
@@ -78,6 +82,19 @@ impl PageTable {
             root_ppn: PhysAddr(token).std_floor(),
             frames: Vec::new(),
         }
+    }
+    /// 复制内核根页表的高半根项到当前页表。
+    ///
+    /// 根项指向的下级表仍由内核页表持有；用户页表只拥有自己的根表
+    /// 与低半下级表，因此析构时不会回收这些共享页表。内核栈在根项 511
+    /// 下更新，所有用户页表会立即看到同一份映射。
+    #[cfg(target_arch = "riscv64")]
+    pub fn share_kernel_half(&mut self, kernel: &PageTable) {
+        const KERNEL_ROOT_START: usize = 256;
+
+        let mut entries = [PageTableEntry::empty(); KERNEL_ROOT_START];
+        entries.copy_from_slice(&kernel.root_ppn.get_pte_array()[KERNEL_ROOT_START..]);
+        self.root_ppn.get_pte_array()[KERNEL_ROOT_START..].copy_from_slice(&entries);
     }
     /// Find PageTableEntry by VirtPageNum, create a frame for a 4KB page table if not exist
     #[cfg(target_arch = "riscv64")]
@@ -287,8 +304,9 @@ impl PageTable {
                 size.size()
             );
             let offset = va.actual_page_offset(size);
-            let aligned_pa_usize: usize = aligned_pa.get_cached_addr();
-            (aligned_pa_usize + offset).into()
+            // PhysAddr 约定存放真实物理地址；需要访存时由调用方自行
+            // get_cached_addr()/get_uncached_addr()
+            (aligned_pa.0 + offset).into()
         })
     }
     /// get the token from the page table
@@ -298,7 +316,11 @@ impl PageTable {
     }
     #[cfg(target_arch = "loongarch64")]
     pub fn token(&self) -> usize {
-        PhysAddr::from(self.root_ppn).0 // 
+        PhysAddr::from(self.root_ppn).0
+    }
+    /// 取出本页表拥有的全部页表帧，用于延迟释放
+    pub fn take_frames(&mut self) -> Vec<FrameTracker> {
+        core::mem::take(&mut self.frames)
     }
 }
 

@@ -180,13 +180,14 @@ fn main_init(hart_id: usize) {
         lazy_static::initialize(&crate::net::NET_IFACE);
     }
 
-    fs::init_test_env();
+    fs::set_up_env_final();
     fs::mount_procfs();
-    fs::setup_oscomp_env();
     fs::list_apps();
     MAIN_HART_ID.store(hart_id, Ordering::Release);
     crate::process::init::add_initproc();
-    //crate::process::init::add_worker_tasks();
+    crate::process::init::add_timer_worker();
+    crate::process::init::add_net_worker();
+    crate::process::init::add_writeback_worker();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger(process::scheduler::runqueue::SCHED_OTHER);
     #[cfg(board = "virt")]
@@ -257,10 +258,11 @@ fn init_other_hart(hart_id: usize) {
     }*/
     MAIN_HART_ID.store(hart_id, Ordering::Release);
     for i in 0..hart_id {
-        start_hart(i, _start as *const () as usize, 0);
+        // SBI hsm 启动地址需要物理地址，_start 是链接出的高半窗口 VA
+        start_hart(i, _start as *const () as usize & !CACHED_KERNEL_BASE, 0);
     }
     for i in hart_id + 1..CPU_CORE_NUM {
-        start_hart(i, _start as *const () as usize, 0);
+        start_hart(i, _start as *const () as usize & !CACHED_KERNEL_BASE, 0);
     }
 }
 
@@ -290,7 +292,6 @@ fn init_other_hart(hart_id: usize) {
     }
 }
 
-use mm::KERNEL_SPACE;
 fn other_init() {
     // 调试用，先把其他核关了
     /*
@@ -300,7 +301,7 @@ fn other_init() {
         );
     } */
     #[cfg(target_arch = "riscv64")]
-    KERNEL_SPACE.exclusive_access().activate();
+    mm::switch_mm(mm::kernel_token());
     #[cfg(target_arch = "loongarch64")]
     la::mm::la_kernel_init_mem(); // 设置映射窗口
     arch::trap::init();

@@ -16,7 +16,7 @@ impl VfsInode for Ext4Inode {
             return None;
         }
         let mut offset = 0;
-        let file_size_bytes = self.size.load(Ordering::Relaxed) as usize;
+        let file_size_bytes = self.size.load(Ordering::Acquire) as usize;
 
         while offset < file_size_bytes {
             let mut buf = alloc::vec![0u8; 4096];
@@ -53,21 +53,18 @@ impl VfsInode for Ext4Inode {
     }
 
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        self.raw_read_at(offset, buf) // 调用 Ext4Inode 的底层磁盘读取
+        Ext4Inode::raw_read_at(self, offset, buf)
     }
 
     fn raw_write_at(&self, offset: usize, buf: &[u8]) -> usize {
+        let _write_guard = self.write_lock.lock();
+        let _block_map_guard = self.block_map_lock.lock();
         let written = self.raw_write_at(offset, buf); // 调用 Ext4Inode 的底层磁盘写入
-        // 底层可能扩展了文件大小，同步更新缓存的 size
-        let new_end = (offset + written) as u64;
-        let old = self.size.load(Ordering::Relaxed);
-        if new_end > old {
-            self.size.store(new_end, Ordering::Relaxed);
-        }
         written
     }
 
     fn get_shared_page(&self, logical_block: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
+        let _block_map_guard = self.block_map_lock.lock();
         let disk_inode = self.fs.get_disk_inode(self.inode_id);
         if self.is_symlink() && disk_inode.size() <= 60 {
             // Fast symlinks keep their target directly in i_block. Treating a
@@ -84,8 +81,30 @@ impl VfsInode for Ext4Inode {
 
         let mut physical_block = self.find_physical_block(logical_block as u32);
         if physical_block == 0 {
-            let new_block = self.fs.alloc_block()?;
-            physical_block = self.add_extent_entry(logical_block as u32, new_block)?;
+            if disk_inode.i_flags & EXT4_EXTENTS_FL == 0 {
+                // Newly created inodes can use classic direct blocks.  Match
+                // raw_write_at here instead of unconditionally treating
+                // i_block as an extent tree.
+                if logical_block >= 12 {
+                    return None;
+                }
+                let new_block = self.fs.alloc_block()?;
+                block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
+                    let base = logical_block * 4;
+                    disk_inode.i_block[base..base + 4].copy_from_slice(&new_block.to_le_bytes());
+                    disk_inode.i_blocks_lo += (BLOCK_SZ / 512) as u32;
+                });
+                physical_block = new_block;
+            } else {
+                let new_block = self.fs.alloc_block()?;
+                physical_block = match self.add_extent_entry(logical_block as u32, new_block) {
+                    Some(block) => block,
+                    None => {
+                        self.fs.dealloc_block(new_block);
+                        return None;
+                    }
+                };
+            }
             return Some(crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
                 .get_new_page_cache(
                     self.inode_id as u64,
@@ -157,6 +176,7 @@ impl VfsInode for Ext4Inode {
 
     /// 带页缓存的写入
     fn write_at(&self, offset: usize, buf: &[u8]) -> usize {
+        let _write_guard = self.write_lock.lock();
         if buf.is_empty() {
             return 0;
         }
@@ -167,7 +187,7 @@ impl VfsInode for Ext4Inode {
             let written = self.raw_write_at(offset, buf);
             let new_end = offset + written;
             if new_end > old_size {
-                self.size.store(new_end as u64, Ordering::Relaxed);
+                self.size.fetch_max(new_end as u64, Ordering::Relaxed);
             }
             return written;
         }
@@ -183,7 +203,11 @@ impl VfsInode for Ext4Inode {
             let copy_len = core::cmp::min(page_size - page_off, write_end - (page_idx * page_size + page_off));
 
             let Some(cache) = self.get_shared_page(page_idx) else {
-                error!("VFS: write_at - failed to get page ino={} page={}", self.inode_id, page_idx);
+                error!(
+                    "VFS: failed to obtain page cache for inode {} page {} while writing",
+                    self.inode_id,
+                    page_idx,
+                );
                 break;
             };
             let mut page = cache.lock();
@@ -200,7 +224,7 @@ impl VfsInode for Ext4Inode {
         let new_end = offset + buf_offset;
         let old_size = self.get_size();
         if new_end > old_size {
-            self.size.store(new_end as u64, Ordering::Relaxed);
+            self.size.fetch_max(new_end as u64, Ordering::Relaxed);
             block_modify_inode(&self.fs, self.inode_id, |disk_inode: &mut Ext4InodeDisk| {
                 disk_inode.i_size_lo = new_end as u32;
                 disk_inode.i_size_high = (new_end >> 32) as u32;
@@ -211,10 +235,12 @@ impl VfsInode for Ext4Inode {
     }
 
     fn get_size(&self) -> usize {
-        self.size.load(Ordering::Relaxed) as usize
+        self.size.load(Ordering::Acquire) as usize
     }
 
     fn truncate(&self, len: usize) -> bool {
+        let _write_guard = self.write_lock.lock();
+        let _block_map_guard = self.block_map_lock.lock();
         let truncated = Ext4Inode::truncate(self, len);
         if truncated {
             self.size.store(len as u64, Ordering::Relaxed);
@@ -321,8 +347,24 @@ impl VfsInode for Ext4Inode {
             disk_inode.i_dtime = 0;
             disk_inode.i_links_count = 2;
             disk_inode.i_blocks_lo = 0;
-            disk_inode.i_flags = 0;
-            disk_inode.i_block.fill(0);
+            if (self.fs.superblock.incompat_features & 0x40) != 0 {
+                disk_inode.i_flags = EXT4_EXTENTS_FL;
+                disk_inode.i_block.fill(0);
+                let header = Ext4ExtentHeader {
+                    eh_magic: 0xF30A,
+                    eh_entries: 0,
+                    eh_max: 4,
+                    eh_depth: 0,
+                    eh_generation: 0,
+                };
+                unsafe {
+                    (disk_inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader)
+                        .write_unaligned(header);
+                }
+            } else {
+                disk_inode.i_flags = 0;
+                disk_inode.i_block.fill(0);
+            }
         });
 
         // 4. 在父目录的数据块中写入目录项 (文件类型 2)
@@ -356,7 +398,7 @@ impl VfsInode for Ext4Inode {
             return -1;
         }
         let mut buf_offset = 0;
-        let file_size_bytes = self.size.load(Ordering::Relaxed) as usize;
+        let file_size_bytes = self.size.load(Ordering::Acquire) as usize;
         let buf_len = buf.len();
         let mut last_name = String::new();
 
@@ -419,8 +461,7 @@ impl VfsInode for Ext4Inode {
                         buf[buf_offset+16..buf_offset+18].copy_from_slice(&reclen_u16.to_ne_bytes());
                         
 
-                        let d_type: u8 = ext4_dirent.file_type;
-                        buf[buf_offset+18] = d_type;
+                        buf[buf_offset+18] = ext4_dirent.linux_dirent_type();
                         
 
                         buf[buf_offset+19..buf_offset+19+name_len].copy_from_slice(name_bytes);
@@ -635,7 +676,7 @@ impl VfsInode for Ext4Inode {
         block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
             let old_atime = { disk_inode.i_atime };
             let old_mtime = { disk_inode.i_mtime };
-            println!("Ext4Inode::set_time: ino={}, old_atime={}, old_mtime={}, new_atime={}, new_mtime={}", 
+            debug!("Ext4Inode::set_time: ino={}, old_atime={}, old_mtime={}, new_atime={}, new_mtime={}", 
                 self.inode_id, old_atime, old_mtime, atime.tv_sec, mtime.tv_sec);
             unsafe {
                 core::ptr::addr_of_mut!(disk_inode.i_atime).write_unaligned(atime.tv_sec as u32);
@@ -656,9 +697,7 @@ impl VfsInode for Ext4Inode {
             f_bsize: sb.block_size as u64, // 动态获取块大小
             f_blocks: sb.total_blocks as u64, // 动态获取总块数
             
-            // 注意：因为你的 Ext4SuperBlock 里没有记录 free_blocks，
-            // 如果你的 fs 管理器里有维护，就改成 self.fs.free_blocks()。
-            // 否则为了应付打榜测试，我们可以先给一个大概的可用值（比如总数的一半）
+            // 临时设置为总块数的一半，实际应根据文件系统的使用情况计算
             f_bfree: (sb.total_blocks / 2) as u64, 
             f_bavail: (sb.total_blocks / 2) as u64,
             

@@ -4,9 +4,9 @@ use crate::arch::{
 };
 use crate::fs::ROOT_DENTRY;
 use crate::ipc::namespace::{IPCNamespace, NsProxy};
-use crate::mm::{KERNEL_SPACE, MemorySet, VirtAddr};
-use crate::process::scheduler::runqueue::SCHED_IDLE;
-use crate::process::signal::{SigHand, Signal, Sigpending, SignalFlags};
+use crate::mm::{KERNEL_SPACE, MemorySet};
+use crate::process::scheduler::runqueue::{SCHED_IDLE, SCHED_OTHER};
+use crate::process::signal::{SigHand, Signal, SignalAltStack, Sigpending, SignalFlags};
 use crate::process::task::{
 	context::ThreadStruct, Cred, FileDescriptorTable, FsStruct, TaskContext,
 	SchedDlEntity, SchedEntity, SchedRtEntity, TaskControlBlock, TaskStatus,
@@ -14,7 +14,8 @@ use crate::process::task::{
 };
 use crate::process::{add_task, kstack_alloc, pid_alloc};
 use crate::sync::MPSafeCell;
-use alloc::{sync::{Arc, Weak}, vec::Vec};
+use alloc::{string::String, sync::{Arc, Weak}, vec::Vec};
+use core::sync::atomic::AtomicBool;
 use lazy_static::*;
 
 impl TaskStruct {
@@ -22,7 +23,7 @@ impl TaskStruct {
 		//println!("[kernel] TaskControlBlock::new: start creating a new process");
 
 		//处理 ELF 文件，创建内存空间，返回的memory_set中已经包含了用户程序的代码段、数据段、bss段以及长度为1的堆段
-		let Some((mut memory_set, heap_bottom, user_sp, entry_point, _main_entry, _phdr, _phnum, _phent, _interp_base))
+		let Some((memory_set, heap_bottom, user_sp, entry_point, _main_entry, _phdr, _phnum, _phent, _interp_base))
 			= MemorySet::from_elf(elf_data) else {
 				panic!("TaskControlBlock::new: invalid ELF for init process");
 			};
@@ -41,16 +42,6 @@ impl TaskStruct {
 		let trap_cx_addr = kernel_stack.push_on_top(TrapContext::new_bare()) as usize;
 		let kernel_stack_top = trap_cx_addr;
 		let initial_user_sp = user_sp;
-		#[cfg(target_arch = "riscv64")]{
-			let trap_cx_va = VirtAddr::from(trap_cx_addr);
-			let trap_cx_ppn = KERNEL_SPACE
-				.exclusive_access()
-				.translate(trap_cx_va.std_floor())
-				.expect("kernel TrapContext is not mapped")
-				.ppn();
-			memory_set.install_trap_context_page(trap_cx_va, trap_cx_ppn);
-		}
-
 		debug!("TaskControlBlock::new: kernel_stack_top={:#x}", kernel_stack.get_top());
 		// 进程控制块
 
@@ -79,6 +70,7 @@ impl TaskStruct {
 				exit_signal: 0,
 				flags: 0,
 				errno: 0,
+				oom_score_adj: 0,
 				sched_policy: SCHED_IDLE, // initproc默认用SCHED_IDLE策略
 				sched_priority: 0,
 				prio: 120,
@@ -90,7 +82,9 @@ impl TaskStruct {
 				mm: Some(Arc::new(MPSafeCell::new(memory_set))),
 				fs: Arc::new(MPSafeCell::new(FsStruct::new(ROOT_DENTRY.clone(), ROOT_DENTRY.clone()))),
 				files: Arc::new(MPSafeCell::new(FileDescriptorTable::new())),
+				exe_path: String::from("/initproc"),
 				signal: Arc::new(MPSafeCell::new(Signal::new())),
+				exec_update_lock: Arc::new(AtomicBool::new(false)),
 				signal_hand: Arc::new(MPSafeCell::new(SigHand::new())),
 				blocked: SignalFlags::empty(),
 				pending: Sigpending::new(),
@@ -99,6 +93,7 @@ impl TaskStruct {
 				signal_mask_backup: Vec::new(),
 				trap_ctx_backup: Vec::new(),
 				signal_user_context_backup: Vec::new(),
+				signal_alt_stack: SignalAltStack::default(),
 				term_signal: None,
 				frozen: false,
 				cred: Arc::new(MPSafeCell::new(Cred::new(0, 0, 0, 0, 0, 0, 0, 0))),
@@ -115,6 +110,7 @@ impl TaskStruct {
 				},
 				need_resched: false,
 				clear_child_tid: 0,
+				vfork_completion: None,
 				personality: 0,
 				locked_bytes: 0,
 				comm: [0; 10],
@@ -175,12 +171,25 @@ lazy_static! {
 	};
 }
 
-pub fn add_worker_tasks(){
-	let worker_task = TaskStruct::new_kernel_worker(
-		crate::process::task::worker::test_kernel_worker
-	);
+pub fn add_timer_worker() {
+	let worker_task =
+		TaskStruct::new_kernel_worker(crate::process::task::worker::timer_kernel_worker, SCHED_OTHER);
 	add_task(worker_task.clone());
-	info!("add_worker_tasks: pid={}", worker_task.getpid());
+	info!("add_timer_worker: pid={}", worker_task.getpid());
+}
+
+pub fn add_net_worker() {
+	let worker_task =
+		TaskStruct::new_kernel_worker(crate::process::task::worker::net_kernel_worker, SCHED_OTHER);
+	add_task(worker_task.clone());
+	info!("add_net_worker: pid={}", worker_task.getpid());
+}
+
+pub fn add_writeback_worker() {
+	let worker_task =
+		TaskStruct::new_kernel_worker(crate::process::task::worker::writeback_kernel_worker, SCHED_IDLE);
+	add_task(worker_task.clone());
+	info!("add_writeback_worker: pid={}", worker_task.getpid());
 }
 
 pub fn add_initproc() {

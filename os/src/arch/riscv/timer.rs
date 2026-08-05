@@ -1,6 +1,6 @@
 //! RISC-V timer-related functionality
 
-use crate::arch::config::CLOCK_FREQ;
+use crate::arch::config::{CLOCK_FREQ, UNCACHED_KERNEL_BASE};
 use crate::arch::sbi::set_timer;
 use crate::process::scheduler::runqueue::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
 
@@ -16,7 +16,7 @@ const MSEC_PER_SEC: usize = 1000;
 const MICRO_PER_SEC: usize = 1_000_000;
 /// QEMU virt 平台上 Goldfish RTC 的 MMIO 基地址
 #[cfg(board = "virt")]
-const GOLDFISH_RTC_BASE: usize = 0x10_1000;
+const GOLDFISH_RTC_BASE: usize = 0x10_1000 | UNCACHED_KERNEL_BASE;
 
 /// 获取当前的真实时间 (返回自 1970-01-01 以来的纳秒数)
 #[cfg(board = "virt")]

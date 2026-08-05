@@ -15,7 +15,7 @@ pub mod memfd;
 use alloc::vec::{self, Vec};
 pub use memfd::*;
 pub mod tmpfs;
-pub use tmpfs::setup_oscomp_env;
+pub use tmpfs::{set_up_env_final, setup_oscomp_env};
 pub use tmpfs::{TmpfsFileInode, TmpfsDirInode};
 pub use procfs::mount_procfs;
 pub use dir_entry::DirEntry;
@@ -97,6 +97,15 @@ pub trait File: Send + Sync {
     fn ready_to_write(&self) -> bool {
         self.writable()
     }
+    /// 检查读错误
+    /// 
+    /// 如果有错误则返回 Some(errno)，否则返回 None
+    fn check_read_error(&self) -> Option<Errno> {
+        None
+    }
+    /// 检查写错误
+    /// 
+    /// 如果有错误则返回 Some(errno)，否则返回 None
     fn check_write_error(&self) -> Option<Errno> {
         None
     }
@@ -239,8 +248,9 @@ pub trait VfsInode: Send + Sync {
     /// len < 当前大小：丢弃超出部分
     /// len > 当前大小：扩展并用零填充（对 tmpfs 等可以只更新 size）
     fn truncate(&self, _len: usize) -> bool {
-        panic!("truncate not implemented for this inode type");
-        false // 默认不支持
+        // 默认返回 false，由调用方返回错误
+        // 旧实现的 panic 不妥
+        false
     }
     fn get_stat(&self) -> Stat;
     fn get_statx(&self) -> Statx;
