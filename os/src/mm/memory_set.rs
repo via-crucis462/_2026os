@@ -1916,7 +1916,11 @@ impl Drop for MemorySet {
         {
             let token = self.token();
             self.flush_tlb_targets();
-            crate::mm::tlb::remove_token(token);
+            // 页表帧所有权移交 tlb 层：若仍有核的 satp 指向该页表
+            // （空闲核有意保留 warm satp 不切换），帧会延迟到最后一个
+            // 核切换离开后才释放，不会因立即回收而破坏其它核的 satp。
+            let frames = self.page_table.take_frames();
+            crate::mm::tlb::remove_token(token, frames);
         }
     }
 }

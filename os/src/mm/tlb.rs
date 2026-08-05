@@ -3,21 +3,26 @@
 use crate::arch::config::CPU_CORE_NUM;
 use crate::get_hart_id;
 use crate::sync::MPSafeCell;
+use super::FrameTracker;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::arch::asm;
 use lazy_static::*;
+use riscv::register::satp as satp_csr;
 
 struct SatpActive {
     token_harts: BTreeMap<usize, usize>,
-    hart_tokens: [Option<usize>; CPU_CORE_NUM],
+    /// 已被销毁、但仍有核的 satp 指向的地址空间页表帧
+    /// 
+    /// 在最后一个核切换离开后才释放，避免破坏其它核的 satp
+    dying: BTreeMap<usize, Vec<FrameTracker>>,
 }
 
 impl SatpActive {
     fn new() -> Self {
         Self {
             token_harts: BTreeMap::new(),
-            hart_tokens: [None; CPU_CORE_NUM],
+            dying: BTreeMap::new(),
         }
     }
 }
@@ -30,6 +35,9 @@ lazy_static! {
     /// 
     /// 每次切换 satp 先标记目标 satp 本核活跃，
     /// 刷新 tlb 并切换 asid，再移除旧 satp 中的本核。
+    /// 
+    /// 旧 satp 通过 csrr 读取。
+    /// 
     /// 这样做能确保某核完成页表修改，希望刷新指定 satp 时，
     /// 在拿到锁获取刷新集合的瞬间，临界核或者已经自己刷过 tlb 切走，
     /// 或者刚拿到该 satp（tlb还是空的，也相当于刷了一次）。
@@ -72,8 +80,8 @@ pub fn switch_mm(token: usize) {
     let bit = hart_bit(hart_id);
     let old_token = {
         let mut active = SATP_ACTIVE.exclusive_access();
-        let old_token = active.hart_tokens[hart_id];
-        if old_token == Some(token) {
+        let old_token = satp_csr::read().bits();
+        if old_token == token {
             return;
         }
         *active.token_harts.entry(token).or_insert(0) |= bit;
@@ -88,24 +96,32 @@ pub fn switch_mm(token: usize) {
     }
 
     let mut active = SATP_ACTIVE.exclusive_access();
-    if let Some(old_token) = old_token {
-        let old_harts = active
-            .token_harts
-            .get_mut(&old_token)
-            .expect("active token missing during switch_mm");
+    // boot 阶段直接用 csrw 不会插入到表中，忽略即可，后续不会有核使用内核页表的 token
+    if let Some(old_harts) = active.token_harts.get_mut(&old_token) {
         *old_harts &= !bit;
         if *old_harts == 0 {
             active.token_harts.remove(&old_token);
+            // 如果最后一个切走的，把旧页表帧释放掉
+            if let Some(frames) = active.dying.remove(&old_token) {
+                drop(frames);
+            }
         }
     }
-    active.hart_tokens[hart_id] = Some(token);
 }
 
-/// 移除一个已经销毁的 token 的活跃 cpu 集合
+/// 移除一个已经销毁的 token，并接管其页表帧的所有权
+///
+/// 若仍有核的 satp 指向该页表，延迟释放帧
 /// 
-/// 会确认没有 cpu 仍然活跃在该 token 上，否则 panic
-pub fn remove_token(token: usize) {
+/// 调用者必须已对相关核完成 TLB 刷新
+pub fn remove_token(token: usize, frames: Vec<FrameTracker>) {
     let mut active = SATP_ACTIVE.exclusive_access();
-    let harts = active.token_harts.remove(&token).unwrap_or(0);
-    assert_eq!(harts, 0, "destroyed address space is still active");
+    let harts = active.token_harts.get(&token).copied().unwrap_or(0);
+    if harts != 0 {
+        active.dying.insert(token, frames);
+    } else {
+        // 无核引用该页表，移除条目并直接释放帧
+        active.token_harts.remove(&token);
+        drop(frames);
+    }
 }

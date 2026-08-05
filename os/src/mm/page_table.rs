@@ -318,6 +318,10 @@ impl PageTable {
     pub fn token(&self) -> usize {
         PhysAddr::from(self.root_ppn).0
     }
+    /// 取出本页表拥有的全部页表帧，用于延迟释放
+    pub fn take_frames(&mut self) -> Vec<FrameTracker> {
+        core::mem::take(&mut self.frames)
+    }
 }
 
 /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
