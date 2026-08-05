@@ -79,6 +79,13 @@ pub fn remove_posix_timer(id: i32) {
     POSIX_TIMERS.lock().remove(&id);
 }
 
+/// 删除属于退出进程的全部 POSIX 定时器，避免 PID 复用后误投递信号。
+pub fn remove_process_posix_timers(owner_pid: usize) {
+    POSIX_TIMERS
+        .lock()
+        .retain(|_, timer| timer.owner_pid != owner_pid);
+}
+
 fn timespec_to_ns(value: TimeSpec) -> Option<u128> {
     if value.tv_nsec >= 1_000_000_000 {
         return None;

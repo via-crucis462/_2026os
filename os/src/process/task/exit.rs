@@ -47,6 +47,9 @@ pub fn exit_current_and_run_next(exit_code: i32){
 		.any(|other| other.getpid() == pid && other.gettid() != task.gettid());
 
 	if last_thread {
+		crate::timer::TIMER_MANAGER.lock().cancel_alarm(pid);
+		crate::process::remove_process_posix_timers(pid);
+
 		let (parent, orphan_children) = {
 			let mut inner = task.inner_exclusive_access();
 			(inner.parent.upgrade(), core::mem::take(&mut inner.children))

@@ -40,13 +40,14 @@ use alloc::sync::Arc;
 use lazy_static::*;
 
 pub use signal::{
-    check_pending_signal, current_add_signal, handle_signals,
+    check_pending_signal, current_add_signal, handle_signals, pending_signal_should_restart,
     mark_signal_interrupted, take_current_signal_interrupted, SignalAction,
     SignalActions, SignalFlags, MAX_SIG,
 };
 pub use timer::{
     add_posix_timer, check_posix_timers, delete_posix_timer, get_posix_timer_spec,
-    remove_posix_timer, set_posix_timer, ITimerSpec, KernelSigEvent, PosixTimer,
+    remove_posix_timer, remove_process_posix_timers, set_posix_timer, ITimerSpec,
+    KernelSigEvent, PosixTimer,
 };
 pub(crate) use signal::restore_signal_context;
 pub use init::{add_initproc, INITTASK};
