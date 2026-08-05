@@ -15,6 +15,7 @@ use crate::process::task::{
 use crate::process::{add_task, kstack_alloc, pid_alloc};
 use crate::sync::MPSafeCell;
 use alloc::{string::String, sync::{Arc, Weak}, vec::Vec};
+use spin::rwlock::RwLock;
 use core::sync::atomic::AtomicBool;
 use lazy_static::*;
 
@@ -79,7 +80,7 @@ impl TaskStruct {
 				se: SchedEntity::new(),
 				rt: SchedRtEntity::new(),
 				dl: SchedDlEntity::new(),
-				mm: Some(Arc::new(MPSafeCell::new(memory_set))),
+				mm: Some(Arc::new(RwLock::new(memory_set))),
 				fs: Arc::new(MPSafeCell::new(FsStruct::new(ROOT_DENTRY.clone(), ROOT_DENTRY.clone()))),
 				files: Arc::new(MPSafeCell::new(FileDescriptorTable::new())),
 				exe_path: String::from("/initproc"),

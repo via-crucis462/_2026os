@@ -204,7 +204,7 @@ impl File for UserPageFaultInfo {
 
                 // 1. 为缺页地址建立物理页映射
                 let faulting_token = {
-                    let mut memory = mm.exclusive_access();
+                    let mut memory = mm.write();
                     let _ = memory.mmap(
                         dst as usize, core::cmp::max(len as usize, 4096),
                         crate::mm::mmap::MMapProt::PROT_READ

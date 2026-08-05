@@ -81,6 +81,10 @@ pub fn flush_kernel_tlb_targets() {
 }
 
 /// address space
+/// 
+/// 在锁粒度细化后约定锁序：拿外层锁访问 Self -> MapArea -> PageTable
+/// 
+/// 如果有解除映射，在 PageTable 修改后调用 flush_tlb_targets() 刷新 tlb，再释放旧帧
 pub struct MemorySet {
     page_table: PageTable,
     asid: ASIDHandle,
@@ -225,7 +229,8 @@ impl MemorySet {
             }
             self.grow_heap(old_top.into(), new_top.into())?;
         } else {
-            self.shrink_heap(new_top.into(), old_top.into())?;
+            // shrink_heap 的参数是 (旧堆顶, 新堆顶)：删除 [new_top, old_top) 区间。
+            self.shrink_heap(old_top.into(), new_top.into())?;
         }
         self.brk = VirtAddr::from(addr);
         Ok(addr)

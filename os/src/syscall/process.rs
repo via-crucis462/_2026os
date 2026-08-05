@@ -2804,7 +2804,7 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> isize {
     let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
         return EINVAL.as_isize();
     };
-    let result = mm.exclusive_access().mprotect(start, len, mmap_prot);
+    let result = mm.write().mprotect(start, len, mmap_prot);
     match result {
         Ok(()) => {
             #[cfg(target_arch = "loongarch64")]
@@ -2827,7 +2827,7 @@ pub fn sys_mlock(start: usize, len: usize) -> isize {
     let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
         return EINVAL.as_isize();
     };
-    let result = mm.exclusive_access().disable_share_in_range(start, len);
+    let result = mm.write().disable_share_in_range(start, len);
     match result {
         Ok(()) => 0,
         Err(errno) => errno,
@@ -2842,7 +2842,7 @@ pub fn sys_brk(addr: usize) -> isize {
         Some(mm) => mm,
         None => return EINVAL.as_isize(),
     };
-    let current_brk = mm.exclusive_access().current_brk();
+    let current_brk = mm.read().current_brk();
     
     trace!("kernel:pid[{}] sys_brk: request addr={:#x}, current_brk={:#x}", task.getpid(), addr, current_brk);
 

@@ -147,7 +147,7 @@ pub struct TaskStructInner {
     pub dl: SchedDlEntity,
 
     /* 5. 内存管理相关 */
-    pub mm: Option<Arc<MPSafeCell<MemorySet>>>,       // 用户进程内存描述符
+    pub mm: Option<Arc<spin::RwLock<MemorySet>>>,       // 用户进程内存描述符
     // pub active_mm: *mut mm_struct,// 上下文切换使用的活动 mm
 
     /* 6. 文件系统与文件描述符 */
@@ -207,7 +207,7 @@ impl TaskStructInner {
         self.mm
             .as_ref()
             .expect("user task has no mm")
-            .exclusive_access()
+            .read()
             .token()
     }
 
@@ -215,7 +215,7 @@ impl TaskStructInner {
         self.mm
             .as_ref()
             .expect("user task has no mm")
-            .exclusive_access()
+            .read()
             .asid()
     }
 }

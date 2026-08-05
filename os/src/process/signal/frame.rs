@@ -224,7 +224,7 @@ pub(super) fn push_signal_frame(
 	let token = task_inner.get_user_token();
 	let mm = task_inner.mm.as_ref()?.clone();
 	if !mm
-		.exclusive_access()
+		.write()
 		.ensure_writable_user_range(frame_sp, frame_size, user_sp)
 	{
 		return None;

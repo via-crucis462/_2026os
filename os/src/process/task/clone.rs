@@ -8,6 +8,7 @@ use crate::process::task::{context::ThreadStruct, *};
 use crate::sync::MPSafeCell;
 use crate::syscall::errno::Errno;
 use alloc::{sync::Arc, vec::Vec};
+use spin::rwlock::RwLock;
 use core::sync::atomic::AtomicBool;
 
 impl TaskStruct {
@@ -47,11 +48,11 @@ impl TaskStruct {
 		// ── 1. 获取父任务页表 token，用于后续 TID 指针可行性检查 ──
 		let parent_token = {
 			let inner = self.inner_exclusive_access();
-			let Some(mm) = inner.mm.as_ref() else {
+			if let Some(mm) = inner.mm.as_ref(){
+				mm.read().token()
+			}else {
 				return Errno::EINVAL.as_isize();
-			};
-			let mm_guard = mm.exclusive_access();
-			mm_guard.token()
+			}
 		};
 
 		// ── 2. 参数合法性校验：检查 TID 指针对应的用户地址是否可写 ──
@@ -99,13 +100,13 @@ impl TaskStruct {
 			parent_mm.clone()
 		} else {
 			// 无 CLONE_VM：写时复制（COW），创建独立的地址空间副本
-			let mut parent_memory = parent_mm.exclusive_access();
+			let mut parent_memory = parent_mm.write();
 			let child_memory = MemorySet::from_existed_user(&mut parent_memory);
 			#[cfg(target_arch = "riscv64")]
 			parent_memory.flush_tlb_targets();
 			#[cfg(target_arch = "loongarch64")]
 			crate::arch::mm::flush_tlb_for_asid(parent_memory.asid());
-			Arc::new(MPSafeCell::new(child_memory))
+			Arc::new(RwLock::new(child_memory))
 		};
 
 		// 3b. 文件系统信息（fs_struct：根目录、当前目录、umask）
@@ -353,7 +354,7 @@ impl TaskStruct {
 		if flags & CLONE_CHILD_SETTID != 0 {
 			let child_token = {
 				let child_inner = child.inner_exclusive_access();
-				let child_memory = child_inner.mm.as_ref().unwrap().exclusive_access();
+				let child_memory = child_inner.mm.as_ref().unwrap().read();
 				child_memory.token()
 			};
 			if !crate::mm::try_translated_write(child_token, ctid as *mut u32, child_tid) {

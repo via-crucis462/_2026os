@@ -168,7 +168,7 @@ pub fn trap_handler() -> ! {
                     break 'fault;
                 };
                 let files = task.inner_exclusive_access().files.clone();
-                let mut memory = mm.exclusive_access();
+                let mut memory = mm.write();
 
                 // 【修改 1】：获取当前的栈指针 SP
                 let sp = current_trap_cx().x[2];
