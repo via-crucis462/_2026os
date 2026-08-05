@@ -29,7 +29,14 @@ pub const USER_STACK_SIZE: usize = 0x80_0000; // 8MB
 /// kernel stack size
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 32; // 128KB
 /// kernel heap size
-pub const KERNEL_HEAP_SIZE: usize = 0x6000_0000; // 1.5GB
+///
+/// QEMU virt test runs with 16GiB RAM. The static heap must remain below the
+/// RISC-V PC-relative relocation range; it is split into per-hart and
+/// large-object arenas by `mm::heap_allocator`.
+#[cfg(board = "virt")]
+pub const KERNEL_HEAP_SIZE: usize = 0x7000_0000; // 1.75GiB
+#[cfg(board = "visionfive2")]
+pub const KERNEL_HEAP_SIZE: usize = 0x6000_0000; // 1.5GiB
 
 /// the virtual addr of trapoline
 pub const TRAMPOLINE: usize = usize::MAX - PAGE_SIZE + 1;
