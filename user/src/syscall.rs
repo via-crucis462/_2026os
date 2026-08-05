@@ -212,8 +212,8 @@ pub fn sys_set_priority(prio: isize) -> isize {
     syscall(SYSCALL_SET_PRIORITY, [prio as usize, 0, 0])
 }
 
-pub fn sys_sbrk(size: i32) -> isize {
-    syscall(SYSCALL_SBRK, [size as usize, 0, 0])
+pub fn sys_sbrk(addr: usize) -> isize {
+    syscall(SYSCALL_SBRK, [addr, 0, 0])
 }
 
 pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {

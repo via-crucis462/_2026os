@@ -119,11 +119,7 @@ pub fn trap_from_kernel() -> ! {
             loop {}
         };
         let memory_set = mm.exclusive_access();
-        let heap_bottom = memory_set.areas()[memory_set.brk_index()]
-            .get_vpn_range()
-            .get_start()
-            .0
-            * PAGE_SIZE;
+        let heap_bottom = memory_set.start_brk();
         error!(
             "[kernel][panic] current task snapshot: pid={}, tid={}, heap_bottom=0x{:x}, program_brk=0x{:x}",
             task.getpid(),
@@ -753,11 +749,7 @@ pub fn trap_handler() -> ! {
                         panic!("unreachable: exited task without mm");
                     };
                     let memory_set = mm.exclusive_access();
-                    let heap_bottom = memory_set.areas()[memory_set.brk_index()]
-                        .get_vpn_range()
-                        .get_start()
-                        .0
-                        * PAGE_SIZE;
+                    let heap_bottom = memory_set.start_brk();
                     trace!(
                         "[kernel] trap_handler: pid={}, tid={}, heap_bottom=0x{:x}, program_brk=0x{:x}",
                         task.getpid(),
