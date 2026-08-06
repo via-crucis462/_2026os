@@ -124,13 +124,12 @@ impl VfsInode for Ext4Inode {
 
     /// 带页缓存的读取
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        if self.is_symlink() && disk_inode.size() <= 60 {
+        if self.is_symlink() && self.size.load(Ordering::Relaxed) <= 60 {
             return self.raw_read_at(offset, buf);
         }
 
         let page_size = crate::PAGE_SIZE;
-        let file_size = self.get_size();
+        let file_size = self.size.load(Ordering::Relaxed) as usize;
         if buf.is_empty() || offset >= file_size { return 0; }
         let read_end = core::cmp::min(offset + buf.len(), file_size);
         let start_page = offset / page_size;

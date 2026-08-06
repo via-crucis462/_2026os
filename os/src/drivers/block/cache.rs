@@ -7,13 +7,16 @@ use super::BlockDevice;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::{Mutex, MutexGuard};
 
 use crate::ext4fs::BLOCK_SZ;
 use crate::mm::{frame_alloc, FrameTracker, PageSize};
+use crate::sync::RwLock;
 
+/// 全局访问时间戳，用于无锁的近似 LRU 淘汰
+static CACHE_STAMP: AtomicU64 = AtomicU64::new(0);
 
 /// 缓存状态
 /// 
@@ -72,10 +75,14 @@ pub struct PageCache {
     inner: Mutex<PageCacheInner>,
     block_id: usize,
     block_device: Option<Arc<dyn BlockDevice>>,
+    /// 数据块缓存还是元数据块缓存（淘汰时按类分别限制）
+    is_data: bool,
+    /// 最近一次访问的全局时间戳（仅用于淘汰决策，无需精确）
+    last_used: AtomicU64,
 }
 
 impl PageCache {
-    fn new_loading(block_id: usize, block_device: Arc<dyn BlockDevice>) -> Self {
+    fn new_loading(block_id: usize, block_device: Arc<dyn BlockDevice>, is_data: bool) -> Self {
         Self {
             inner: Mutex::new(PageCacheInner {
                 frame: frame_alloc(PageSize::Page4K).unwrap(),
@@ -85,6 +92,8 @@ impl PageCache {
             }),
             block_id,
             block_device: Some(block_device),
+            is_data,
+            last_used: AtomicU64::new(0),
         }
     }
     pub fn from_frame(frame: FrameTracker) -> Self {
@@ -97,7 +106,14 @@ impl PageCache {
             }),
             block_id: 0,
             block_device: None,
+            is_data: false,
+            last_used: AtomicU64::new(0),
         }
+    }
+    /// 无锁记录一次访问（近似 LRU 用）
+    pub fn touch(&self) {
+        self.last_used
+            .store(CACHE_STAMP.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
     }
     pub fn lock(&self) -> MutexGuard<'_, PageCacheInner> {
         self.inner.lock()
@@ -124,70 +140,6 @@ impl Drop for PageCache {
     }
 }
 
-struct PageCacheLruQueue {
-    chain: BTreeMap<u64, (Option<u64>, Option<u64>)>,
-    head: Option<u64>,
-    tail: Option<u64>,
-}
-
-impl PageCacheLruQueue {
-    fn new() -> Self {
-        Self {
-            chain: BTreeMap::new(),
-            head: None,
-            tail: None,
-        }
-    }
-    fn len(&self) -> usize {
-        self.chain.len()
-    }
-    fn pop(&mut self) -> Option<u64> {
-        let head = self.head?;
-        let (_, next) = self.chain.remove(&head).unwrap();
-        self.head = next;
-        if let Some(next) = next {
-            self.chain.get_mut(&next).unwrap().0 = None;
-        } else {
-            self.tail = None;
-        }
-        Some(head)
-    }
-
-    fn remove(&mut self, block_id: u64) -> bool {
-        let Some((prev, next)) = self.chain.remove(&block_id) else {
-            return false;
-        };
-        if let Some(prev) = prev {
-            self.chain.get_mut(&prev).unwrap().1 = next;
-        } else {
-            self.head = next;
-        }
-        if let Some(next) = next {
-            self.chain.get_mut(&next).unwrap().0 = prev;
-        } else {
-            self.tail = prev;
-        }
-        true
-    }
-
-    /// 将指定物理块移到队尾
-    fn update(&mut self, block_id: u64) {
-        if self.tail == Some(block_id) {
-            return;
-        }
-
-        self.remove(block_id);
-
-        if let Some(tail) = self.tail {
-            self.chain.get_mut(&tail).unwrap().1 = Some(block_id);
-        } else {
-            self.head = Some(block_id);
-        }
-        self.chain.insert(block_id, (self.tail, None));
-        self.tail = Some(block_id);
-    }
-}
-
 // 元数据缓存的最大数量，超过该数量时会尝试回收
 const META_CACHE_SIZE: usize = 1 << 12; // 16MB
 /// 数据页缓存的最大页数，超过时从 LRU 队头回收
@@ -203,25 +155,20 @@ pub struct PageCacheManager {
     /// (ino, logical_block_id) -> physical_block_id
     page_cache_id_map: Mutex<BTreeMap<(u64, usize), u64>>,
     /// physical_block_id -> cached
-    page_cache_map: Mutex<BTreeMap<u64, Arc<PageCache>>>,
-
-    // 旧实现中这里还有 vfsinode/file 注册表
-    // 而现在所有页缓存通过块号管理
-    // 不再需要回写的注册机制
-
-    /// 数据块（非元数据块） LRU 队列
-    data_lru_queue: Mutex<PageCacheLruQueue>,
-    /// 元数据块 LRU 队列
-    meta_lru_queue: Mutex<PageCacheLruQueue>,
+    page_cache_map: RwLock<BTreeMap<u64, Arc<PageCache>>>,
+    /// 元数据缓存条目数（避免每次 miss 都全表扫描判断是否超限）
+    meta_count: AtomicUsize,
+    /// 数据缓存条目数
+    data_count: AtomicUsize,
 }
 
 impl PageCacheManager {
     fn new() -> Self {
         Self {
             page_cache_id_map: Mutex::new(BTreeMap::new()),
-            page_cache_map: Mutex::new(BTreeMap::new()),
-            data_lru_queue: Mutex::new(PageCacheLruQueue::new()),
-            meta_lru_queue: Mutex::new(PageCacheLruQueue::new()),
+            page_cache_map: RwLock::new(BTreeMap::new()),
+            meta_count: AtomicUsize::new(0),
+            data_count: AtomicUsize::new(0),
         }
     }
     /// 获取指定物理块的缓存，如果不存在则创建新的缓存
@@ -236,10 +183,10 @@ impl PageCacheManager {
     ) -> (Arc<PageCache>, bool) {
         // 先尝试获取已存在的缓存
         {
-            let map = self.page_cache_map.lock();
+            let map = self.page_cache_map.read();
             if let Some(cache) = map.get(&block_id).cloned() {
                 drop(map);
-                self.touch_lru(block_id, is_data);
+                cache.touch();
                 return (cache, false);
             }
         }
@@ -249,6 +196,7 @@ impl PageCacheManager {
         let cache = Arc::new(PageCache::new_loading(
             block_id as usize,
             block_device.clone(),
+            is_data,
         ));
 
         // 条目公开到全局 map 前必须完成初始化，否则并发查找可能把
@@ -265,75 +213,87 @@ impl PageCacheManager {
             }
         }
 
-        let mut map = self.page_cache_map.lock();
+        let mut map = self.page_cache_map.write();
         if let Some(existing) = map.get(&block_id).cloned() {
             // 防止并发重复插入
             cache.inner.lock().discarded = true;
             drop(map);
             drop(cache);
-            self.touch_lru(block_id, is_data);
+            existing.touch();
             return (existing, false);
         }
         map.insert(block_id, cache.clone());
         drop(map);
-        self.touch_lru(block_id, is_data);
+        cache.touch();
 
         if !is_data {
-            self.trim_meta_cache();
+            self.meta_count.fetch_add(1, Ordering::Relaxed);
+            if self.meta_count.load(Ordering::Relaxed) > META_CACHE_SIZE {
+                self.trim_meta_cache();
+            }
         } else {
-            // 避免频繁回收数据缓存
-            // 在 tick_sync 中会定期回收
-            // self.trim_data_cache();
+            self.data_count.fetch_add(1, Ordering::Relaxed);
         }
         (cache, true)
     }
-    /// 在 LRU 队列中标记一次访问
-    fn touch_lru(&self, block_id: u64, is_data: bool) {
-        // 固定锁序 data -> meta，并保证一个物理块只属于一种 LRU。
-        let mut data_queue = self.data_lru_queue.lock();
-        let mut meta_queue = self.meta_lru_queue.lock();
-        if is_data {
-            meta_queue.remove(block_id);
-            data_queue.update(block_id);
-        } else {
-            data_queue.remove(block_id);
-            meta_queue.update(block_id);
-        }
-    }
     /// 尝试回收元数据缓存
     fn trim_meta_cache(&self) {
-        let attempts = self.meta_lru_queue.lock().len();
-        for _ in 0..attempts {
-            if self.meta_lru_queue.lock().len() <= META_CACHE_SIZE {
-                break;
-            }
-            let Some(block_id) = self.meta_lru_queue.lock().pop() else {
-                break;
-            };
-            if !self.try_evict(block_id) {
-                self.meta_lru_queue.lock().update(block_id);
-            }
-        }
+        self.trim_cache(META_CACHE_SIZE, false);
     }
     /// 尝试回收超过限制的数据缓存
     fn trim_data_cache(&self) {
-        let attempts = self.data_lru_queue.lock().len();
-        for _ in 0..attempts {
-            if self.data_lru_queue.lock().len() <= DATA_CACHE_SIZE {
-                break;
+        self.trim_cache(DATA_CACHE_SIZE, true);
+    }
+    /// 按 last_used 有界扫描淘汰最旧缓存（读锁扫描，逐块写锁淘汰）。
+    /// 只在对应类别超过 limit 时回收到 limit。每次最多淘汰
+    /// TRIM_BATCH 个、扫描 SCAN_LIMIT 项，避免退化成 O(n²)。
+    fn trim_cache(&self, limit: usize, is_data: bool) {
+        const TRIM_BATCH: usize = 64;
+        const SCAN_LIMIT: usize = 4096;
+        for _ in 0..TRIM_BATCH {
+            let count = if is_data {
+                self.data_count.load(Ordering::Relaxed)
+            } else {
+                self.meta_count.load(Ordering::Relaxed)
+            };
+            if count <= limit {
+                return;
             }
-            let Some(block_id) = self.data_lru_queue.lock().pop() else {
-                break;
+
+            let victim = {
+                let map = self.page_cache_map.read();
+                let mut scanned = 0usize;
+                let mut oldest: Option<(u64, u64)> = None;
+                for (&bid, c) in map.iter() {
+                    if c.is_data != is_data {
+                        continue;
+                    }
+                    scanned += 1;
+                    let lu = c.last_used.load(Ordering::Relaxed);
+                    if oldest.map_or(true, |(olu, _)| lu < olu) {
+                        oldest = Some((lu, bid));
+                    }
+                    if scanned >= SCAN_LIMIT {
+                        break;
+                    }
+                }
+                if scanned == 0 {
+                    return;
+                }
+                oldest.map(|(_, bid)| bid)
+            };
+            let Some(block_id) = victim else {
+                return;
             };
             if !self.try_evict(block_id) {
-                self.data_lru_queue.lock().update(block_id);
+                return;
             }
         }
     }
     /// 尝试回收指定物理块的缓存，返回是否成功回收
     fn try_evict(&self, block_id: u64) -> bool {
         let cache = {
-            let map = self.page_cache_map.lock();
+            let map = self.page_cache_map.read();
             let Some(cache) = map.get(&block_id) else {
                 return true;
             };
@@ -349,13 +309,18 @@ impl PageCacheManager {
             return false;
         }
 
-        let mut map = self.page_cache_map.lock();
+        let mut map = self.page_cache_map.write();
         if map
             .get(&block_id)
             .map(|entry| Arc::ptr_eq(entry, &cache) && Arc::strong_count(entry) == 2)
             .unwrap_or(false)
         {
             map.remove(&block_id);
+            if cache.is_data {
+                self.data_count.fetch_sub(1, Ordering::Relaxed);
+            } else {
+                self.meta_count.fetch_sub(1, Ordering::Relaxed);
+            }
             // 同步清理 (ino, logical_block) -> block_id 映射，避免表项残留
             self.page_cache_id_map
                 .lock()
@@ -372,16 +337,17 @@ impl PageCacheManager {
     /// 也不能继续作为该物理块的缓存被复用（会读到已释放文件的旧数据）。
     /// 与 get_physical_page 保持一致：先锁 map 再锁 inner。
     pub fn invalidate_block(&self, block_id: u64) {
-        let mut map = self.page_cache_map.lock();
-        if let Some(cache) = map.get(&block_id).cloned() {
+        let mut map = self.page_cache_map.write();
+        if let Some(cache) = map.get(&block_id) {
             cache.lock().discarded = true;
+            if cache.is_data {
+                self.data_count.fetch_sub(1, Ordering::Relaxed);
+            } else {
+                self.meta_count.fetch_sub(1, Ordering::Relaxed);
+            }
         }
         map.remove(&block_id);
         drop(map);
-
-        // 从 LRU 队列移除，避免之后被当作存活缓存弹出
-        self.data_lru_queue.lock().remove(block_id);
-        self.meta_lru_queue.lock().remove(block_id);
         // 清理指向该物理块的 (ino, logical_block) 映射
         self.page_cache_id_map
             .lock()
@@ -429,10 +395,12 @@ impl PageCacheManager {
         self.page_cache_id_map
             .lock()
             .insert((ino, logical_block), physical_block);
-        let cache = self
-            .get_physical_page(physical_block, block_device, true, false)
-            .0;
-        {
+        let (cache, created) =
+            self.get_physical_page(physical_block, block_device, true, false);
+        // alloc_block() 返回的块应当不在缓存中：dealloc_block() 会在块
+        // 回到位图前作废旧缓存。若不变量被破坏，保留已有缓存内容比无条件
+        // 清零安全，后者会直接破坏仍被其它路径使用的物理块。
+        if created {
             let mut inner = cache.lock();
             inner.frame.get_bytes_array().fill(0);
             inner.dirty = true;
@@ -448,7 +416,7 @@ impl PageCacheManager {
         logical_block: usize,
     ) -> Option<Arc<PageCache>> {
         let block_id = *self.page_cache_id_map.lock().get(&(ino, logical_block))?;
-        self.page_cache_map.lock().get(&block_id).cloned()
+        self.page_cache_map.read().get(&block_id).cloned()
     }
     pub fn write_back_page_cache(
         &self,
@@ -466,7 +434,7 @@ impl PageCacheManager {
         let mut cursor = 0u64;
         loop {
             let batch: Vec<Arc<PageCache>> = {
-                let map = self.page_cache_map.lock();
+                let map = self.page_cache_map.read();
                 map.range((Bound::Excluded(cursor), Bound::Unbounded))
                     .take(SYNC_BATCH)
                     .map(|(id, cache)| {
@@ -484,32 +452,42 @@ impl PageCacheManager {
         }
     }
     pub fn stats(&self) -> (Option<(usize, usize)>, Option<usize>, Option<usize>) {
+        let map = self.page_cache_map.read();
+        let pinned = map
+            .values()
+            .filter(|cache| Arc::strong_count(cache) > 1)
+            .count();
+        let page_stats = (map.len(), pinned);
+        drop(map);
         (
-            self.page_cache_map.try_lock().map(|m| {
-                let pinned = m
-                    .values()
-                    .filter(|cache| Arc::strong_count(cache) > 1)
-                    .count();
-                (m.len(), pinned)
-            }),
-            self.page_cache_id_map.try_lock().map(|m| m.len()),
-            self.data_lru_queue.try_lock().map(|q| q.len()),
+            Some(page_stats),
+            Some(self.page_cache_id_map.lock().len()),
+            None,
         )
     }
     fn free_data_pages(&self, count: usize) -> usize {
-        let attempts = self.data_lru_queue.lock().len();
         let mut freed = 0;
-        for _ in 0..attempts {
-            if freed == count {
-                break;
-            }
-            let Some(block_id) = self.data_lru_queue.lock().pop() else {
+        while freed < count {
+            let victim = {
+                let map = self.page_cache_map.read();
+                let mut oldest: Option<(u64, u64)> = None;
+                for (&bid, c) in map.iter() {
+                    if c.is_data {
+                        let lu = c.last_used.load(Ordering::Relaxed);
+                        if oldest.map_or(true, |(olu, _)| lu < olu) {
+                            oldest = Some((lu, bid));
+                        }
+                    }
+                }
+                oldest.map(|(_, bid)| bid)
+            };
+            let Some(block_id) = victim else {
                 break;
             };
             if self.try_evict(block_id) {
                 freed += 1;
             } else {
-                self.data_lru_queue.lock().update(block_id);
+                break;
             }
         }
         freed

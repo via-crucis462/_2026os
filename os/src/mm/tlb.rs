@@ -78,12 +78,12 @@ pub fn active_tokens() -> Vec<(usize, usize)> {
 pub fn switch_mm(token: usize) {
     let hart_id = get_hart_id();
     let bit = hart_bit(hart_id);
+    if satp_csr::read().bits() == token {
+        return;
+    }
     let old_token = {
         let mut active = SATP_ACTIVE.exclusive_access();
         let old_token = satp_csr::read().bits();
-        if old_token == token {
-            return;
-        }
         *active.token_harts.entry(token).or_insert(0) |= bit;
         old_token
     };

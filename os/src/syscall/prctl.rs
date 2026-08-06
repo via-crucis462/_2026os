@@ -77,36 +77,26 @@ pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5:
             0
         },
         PR_GET_SECCOMP => {
-            // 尚未实现secomp，允许所有系统调用
-            0
+            // seccomp state is not implemented.
+            Errno::ENOSYS.as_isize()
         }
         PR_SET_SECCOMP => {
-            // 不支持设置secomp
-            -EINVAL
+            Errno::ENOSYS.as_isize()
         }
         PR_CAPBSET_READ =>{
-            // 目前不支持cap，返回1表示所有能力都可用
-            1
+            Errno::ENOSYS.as_isize()
         }
         PR_GET_TSC =>{
-            // 允许读取TSC
-            1
+            Errno::ENOSYS.as_isize()
         }
         PR_SET_TSC =>{
-            // 默认允许所以支持启用
-            if _arg2 == PR_TSC_ENABLE {
-                0
-            } else {
-                -EINVAL
-            }
+            Errno::ENOSYS.as_isize()
         }
         PR_GET_TIMERSLACK => {
-            // 伪实现，返回默认值50ms
-            50000
+            Errno::ENOSYS.as_isize()
         }
         PR_SET_TIMERSLACK => {
-            // 伪实现，假装设置成功
-            0
+            Errno::ENOSYS.as_isize()
         }
         PR_SET_CHILD_SUBREAPER => {
             // 子进程收割者，待后续实现
@@ -116,37 +106,23 @@ pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5:
             -EINVAL
         }
         PR_SET_NO_NEW_PRIVS => {
-            // 伪实现，假装设置成功但不实际执行任何操作
-            if _arg2 == 1 {
-                0
-            } else {
-                -EINVAL
-            }
+            Errno::ENOSYS.as_isize()
         }
         PR_GET_NO_NEW_PRIVS => {
-            // 默认允许提权
-            0
+            Errno::ENOSYS.as_isize()
         }
         PR_SET_THP_DISABLE => {
-            // 目前的内核始终使用4K标准页大小，即默认禁用大页
-            if _arg2 == 1 {
-                0
-            } else {
-                -EINVAL
-            }
+            Errno::ENOSYS.as_isize()
         }
         PR_GET_THP_DISABLE => {
-            // 1:已启用
-            1
+            Errno::ENOSYS.as_isize()
         }
         PR_CAP_AMBIENT => {
             // 目前不支持cap
             -EINVAL
         }
         PR_GET_SPECULATION_CTRL => {
-            // 分支预测控制依赖具体cpu
-            // 伪实现，返回默认值0表示不受限制
-            0
+            Errno::ENOSYS.as_isize()
         }
         PR_SET_SPECULATION_CTRL => {
             -EINVAL
@@ -160,4 +136,4 @@ pub fn sys_arch_prctl(option: usize, addr: usize) -> isize {
     // 摘自linux手册：仅支持 Linux/x86-64 的 64 位程序
     // 不实现
     Errno::ENOSYS.as_isize()
-} 
+}

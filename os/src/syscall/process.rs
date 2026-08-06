@@ -35,6 +35,21 @@ use alloc::collections::BTreeMap;
 /// 初始值为 0，表示尚未设置
 static TTY_FOREGROUND_PGRP: AtomicI32 = AtomicI32::new(0);
 
+const EPOLLIN: u32 = 0x001;
+const EPOLLOUT: u32 = 0x004;
+const EPOLLONESHOT: u32 = 1 << 30;
+const EPOLLET: u32 = 1 << 31;
+
+/// 读取 TTY 前台进程组（0 表示尚未设置）
+pub fn tty_foreground_pgrp() -> i32 {
+    TTY_FOREGROUND_PGRP.load(Ordering::Relaxed)
+}
+
+/// 设置 TTY 前台进程组
+pub fn set_tty_foreground_pgrp(pgid: i32) {
+    TTY_FOREGROUND_PGRP.store(pgid, Ordering::Relaxed);
+}
+
 
 // 记录格式：ino (inode编号) -> (atime_sec, atime_nsec, mtime_sec, mtime_nsec)
 pub static TIME_CACHE: Mutex<BTreeMap<u64, (i64, i64, i64, i64)>> = Mutex::new(BTreeMap::new());
@@ -807,7 +822,6 @@ pub struct IfReq {
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     //warn!("kernel: sys_ioctl: fd={}, request=0x{:x}, argp=0x{:x}", fd, request, argp);
     let task = current_task().unwrap();
-    let proc = task.clone();
     let files = task.inner_exclusive_access().files.clone();
     let fd_table = files.exclusive_access().fds.clone();
     // fd合法性检查
@@ -853,37 +867,41 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 EFAULT.as_isize()
             }
         }
-        TIOCGPGRP => { 
+        TIOCGPGRP => {
             if !is_tty {
                 warn!("[kernel] sys_ioctl: TIOCGPGRP on non-tty fd {}", fd);
                 return ENOTTY.as_isize();
             }
-            if argp != 0 {
-                // 获取真实的进程组 ID 
-                let pgid = proc.inner_exclusive_access().pgid as i32;
-                if !try_translated_write(token, argp as *mut i32, pgid) {
-                    return EFAULT.as_isize();
-                }
-                0 
-            } else {
-                EFAULT.as_isize()
+            if argp == 0 {
+                return EFAULT.as_isize();
             }
+            let foreground_pgrp = tty_foreground_pgrp();
+            let pgrp = if foreground_pgrp == 0 {
+                task.inner_exclusive_access().pgid as i32
+            } else {
+                foreground_pgrp
+            };
+            if !try_translated_write(token, argp as *mut i32, pgrp) {
+                return EFAULT.as_isize();
+            }
+            0
         }
-        TIOCSPGRP => { 
+        TIOCSPGRP => {
             if !is_tty {
                 warn!("[kernel] sys_ioctl: TIOCSPGRP on non-tty fd {}", fd);
                 return ENOTTY.as_isize();
             }
-            if argp != 0 {
-                if let Some(new_pgid) = try_translated_read(token, argp as *const i32) {
-                    proc.inner_exclusive_access().pgid = new_pgid as usize;
-                    0 
-                } else {
-                    EFAULT.as_isize()
-                }
-            } else {
-                EFAULT.as_isize()
+            if argp == 0 {
+                return EFAULT.as_isize();
             }
+            let Some(new_pgrp) = try_translated_read(token, argp as *const i32) else {
+                return EFAULT.as_isize();
+            };
+            if new_pgrp <= 0 {
+                return EINVAL.as_isize();
+            }
+            set_tty_foreground_pgrp(new_pgrp);
+            0
         }
         
         TIOCSCTTY => { 
@@ -915,36 +933,6 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             } else {
                 fd_table.fds[fd].status &= !O_NONBLOCK;
             }
-            0
-        }
-        TIOCGPGRP => {
-            // 获取前台进程组 ID
-            // 如果还没设置过，默认返回当前进程的 pgid
-            let fg_pgrp = TTY_FOREGROUND_PGRP.load(Ordering::Relaxed);
-            let pgrp: i32 = if fg_pgrp == 0 {
-                task.inner_exclusive_access().pgid as i32
-            } else {
-                fg_pgrp
-            };
-            if argp != 0 {
-                if !try_translated_write(token, argp as *mut i32, pgrp) {
-                    return EFAULT.as_isize();
-                }
-                0
-            } else {
-                EFAULT.as_isize()
-            }
-        }
-        TIOCSPGRP => {
-            // 设置前台进程组 ID
-            if argp == 0 {
-                return EFAULT.as_isize();
-            }
-            let new_pgrp: i32 = match try_translated_read(token, argp as *const i32) {
-                Some(v) => v,
-                None => return EFAULT.as_isize(),
-            };
-            TTY_FOREGROUND_PGRP.store(new_pgrp, Ordering::Relaxed);
             0
         }
         RTC_RD_TIME => {
@@ -1220,7 +1208,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
         }
 
         0x8900..=0x89ff => {// 兜底：对其他未实现的 ifconfig / ip 命令配置请求返回 0 
-            0
+            Errno::ENOSYS.as_isize()
         }
         _ => {
             // 委托给文件自己的 ioctl（如 userfaultfd）
@@ -1381,7 +1369,7 @@ pub fn sys_getppid() -> isize {
     }
 }
 pub fn sys_syslog(_type_: usize, _buf: usize, _len: usize) -> isize {
-    0
+    ENOSYS.as_isize()
 }
 #[repr(C)]
 #[derive(Debug)]
@@ -3146,22 +3134,28 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
            
                 return EEXIST.as_isize(); 
             }
-            list.insert(fd, event); 
-            0 
+            list.insert(fd, event);
+            epoll_file.last_ready.lock().remove(&fd);
+            epoll_file.oneshot_disabled.lock().remove(&fd);
+            0
         }
         EPOLL_CTL_DEL => { 
             if list.remove(&fd).is_none() {
              
                 return ENOENT.as_isize(); 
             }
-            0 
+            epoll_file.last_ready.lock().remove(&fd);
+            epoll_file.oneshot_disabled.lock().remove(&fd);
+            0
         }
         EPOLL_CTL_MOD => { 
             if !list.contains_key(&fd) {
                 return ENOENT.as_isize(); 
             }
-            list.insert(fd, event); 
-            0 
+            list.insert(fd, event);
+            epoll_file.last_ready.lock().remove(&fd);
+            epoll_file.oneshot_disabled.lock().remove(&fd);
+            0
         }
         _ => EINVAL.as_isize(), 
     }
@@ -3216,19 +3210,42 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
 
             let mut ready_events = alloc::vec::Vec::new();
             let list = epoll_file.interest_list.lock();
+            let mut last_ready = epoll_file.last_ready.lock();
+            let mut oneshot_disabled = epoll_file.oneshot_disabled.lock();
             // 遍历所有被监控的 FD，检查就绪状态
             for (&fd, &event) in list.iter() {
-                if fd < inner.fds.len() {
-                    if let Some(file) = &inner.fds[fd].file {
-                        let mut revents = 0;
-                        if (event.events & 1) != 0 && file.ready_to_read() { revents |= 1; }
-                        if (event.events & 4) != 0 && file.ready_to_write() { revents |= 4; }
-
-                        if revents != 0 || event.events == 0 {
-                            let mut ready_ev = event;
-                            ready_ev.events = if revents != 0 { revents } else { event.events };
-                            ready_events.push((fd, ready_ev));
-                        }
+                let requested_events = event.events;
+                if requested_events == 0 {
+                    last_ready.remove(&fd);
+                    continue;
+                }
+                let Some(fd_entry) = inner.fds.get(fd) else { continue; };
+                let Some(file) = &fd_entry.file else { continue; };
+                if file.as_any().is::<EpollFile>() {
+                    last_ready.remove(&fd);
+                    continue;
+                }
+                let mut revents = 0;
+                if (requested_events & EPOLLIN) != 0 && file.ready_to_read() { revents |= EPOLLIN; }
+                if (requested_events & EPOLLOUT) != 0 && file.ready_to_write() { revents |= EPOLLOUT; }
+                let is_ready = revents != 0;
+                let was_ready = last_ready.contains(&fd);
+                let edge_triggered = (requested_events & EPOLLET) != 0;
+                let oneshot = (requested_events & EPOLLONESHOT) != 0;
+                let deliver = is_ready
+                    && !(oneshot && oneshot_disabled.contains(&fd))
+                    && (!edge_triggered || !was_ready);
+                if is_ready {
+                    last_ready.insert(fd);
+                } else {
+                    last_ready.remove(&fd);
+                }
+                if deliver {
+                    let mut ready_ev = event;
+                    ready_ev.events = revents;
+                    ready_events.push((fd, ready_ev));
+                    if oneshot {
+                        oneshot_disabled.insert(fd);
                     }
                 }
             }
@@ -4365,21 +4382,19 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> isize {
 pub fn sys_robust_list() -> isize {
     let task = current_task().unwrap();
     trace!("kernel:pid[{}] sys_robust_list NOT IMPLEMENTED", task.getpid());
-    // 目前还没有实现多线程（每个任务是独立的内存空间)，不需要管理锁，伪实现不会导致死锁
-    0
+    ENOSYS.as_isize()
 }
 
 pub fn sys_get_robust_list() -> isize {
     let task = current_task().unwrap();
     trace!("kernel:pid[{}] sys_get_robust_list NOT IMPLEMENTED", task.getpid());
-    0
+    ENOSYS.as_isize()
 }
 
 pub fn sys_resq() -> isize {
     let task = current_task().unwrap();
     trace!("kernel:pid[{}] sys_resq NOT IMPLEMENTED", task.getpid());
-    // 未实现多线程，这里伪实现
-    0
+    ENOSYS.as_isize()
 }
 
 #[repr(C)]
@@ -4556,13 +4571,7 @@ pub fn sys_prlimit64(
     let token = current_user_token();
     match resource {
         RLIMIT_NPROC => {
-            // 伪实现，返回一个固定值
-            if !old_limit.is_null() {
-                if !try_translated_write(token, old_limit, Rlimit64 { cur_lmt: 4096, max_lmt: 4096 }) {
-                    return EFAULT.as_isize();
-                }
-            }
-            0
+            ENOSYS.as_isize()
         }
         RLIMIT_NOFILE => {
             // 打开的文件数限制
@@ -4591,36 +4600,16 @@ pub fn sys_prlimit64(
             0
         }
         RLIMIT_MEMLOCK => {
-            // 锁定内存限制，伪实现
-            if !old_limit.is_null() {
-                translated_write(token, old_limit, Rlimit64 { cur_lmt: 0x40_0000, max_lmt: 0x40_0000 });
-            }
-            0
+            ENOSYS.as_isize()
         }
         RLIMIT_CORE => {
-            // core dump 文件大小限制，伪实现
-            if !old_limit.is_null() {
-                if !try_translated_write(token, old_limit, Rlimit64 { cur_lmt: 0, max_lmt: 0 }) {
-                    return Errno::EFAULT.as_isize();
-                }
-            }
-            0
+            ENOSYS.as_isize()
         }
         RLIMIT_STACK => {
-            // 栈大小限制，返回默认值，最大值 RLIM_INFINITY
-            if !old_limit.is_null() {
-                if !try_translated_write(token, old_limit, Rlimit64 { cur_lmt: USER_STACK_SIZE, max_lmt: usize::MAX }) {
-                    return Errno::EFAULT.as_isize();
-                }
-            }
-            0
+            ENOSYS.as_isize()
         }
         RLIMIT_DATA => {
-            // 数据段大小限制，不允许修改，设为USER_APP_MAX_SIZE
-            if !old_limit.is_null() {
-                translated_write(token, old_limit, Rlimit64 { cur_lmt: USER_APP_MAX_SIZE, max_lmt: USER_APP_MAX_SIZE });
-            }
-            0
+            ENOSYS.as_isize()
         }
         UL_SETFSIZE => {
             //若old有值则是将当前限制写入用户提供的缓冲区，若new有值则是设置新的限制，即读用户传进来的值。
@@ -4961,13 +4950,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
 
                 if wake_left > 0 {
                     wake_left -= 1;
-                    while task.inner_exclusive_access().state == crate::task::TaskStatus::BlockSaving {
-                        suspend_current_and_run_next();
-                    }
-                    let mut task_inner = task.inner_exclusive_access();
-                    task_inner.state = crate::task::TaskStatus::Ready;
-                    drop(task_inner);
-                    add_task(task);
+                    crate::process::wake_up_task(task);
                     affected += 1;
                     continue;
                 }

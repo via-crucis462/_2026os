@@ -20,6 +20,9 @@ const F_GETFD: usize = 1;
 const F_SETFD: usize = 2;
 const F_GETFL: usize = 3;
 const F_SETFL: usize = 4;
+const F_GETLK: usize = 5;
+const F_SETLK: usize = 6;
+const F_SETLKW: usize = 7;
 const F_DUPFD_CLOEXEC: usize = 1030;
 const F_GETPIPE_SIZE: usize = 1032;
 const FD_CLOEXEC: usize = 1;
@@ -27,6 +30,13 @@ const O_ACCMODE: usize = 0o3;
 const O_NONBLOCK: usize = 0o4000;
 const O_NDELAY: usize = O_NONBLOCK;
 const O_CLOEXEC: u32 = 0o2000000;
+
+const F_RDLCK: i16 = 0;
+const F_WRLCK: i16 = 1;
+const F_UNLCK: i16 = 2;
+const SEEK_SET: i16 = 0;
+const SEEK_CUR: i16 = 1;
+const SEEK_END: i16 = 2;
 
 const O_RDONLY: u32 = 0;
 const O_WRONLY: u32 = 0o1;
@@ -36,6 +46,18 @@ const O_RDWR: u32 = 0o2;
 use super::errno::Errno::*;
 
 const AT_REMOVEDIR: usize = 0x200;
+
+/// riscv64 `struct flock` 用户态 ABI：
+/// short l_type; short l_whence; off_t l_start; off_t l_len; pid_t l_pid
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Flock {
+    l_type: i16,
+    l_whence: i16,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+}
 
 fn current_files() -> Arc<crate::sync::MPSafeCell<crate::process::FileDescriptorTable>> {
     current_task().unwrap().inner_exclusive_access().files.clone()
@@ -213,7 +235,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
 }
 
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
-    warn!("kernel:pid[{}] sys_read, aim fd = {}, buf = {:#x}, len = {}", current_task().unwrap().getpid(), fd, buf as usize, len);
+    trace!("kernel:pid[{}] sys_read, aim fd = {}, buf = {:#x}, len = {}", current_task().unwrap().getpid(), fd, buf as usize, len);
     let token = current_user_token();
     let files = current_files();
     let inner = files.exclusive_access();
@@ -513,8 +535,10 @@ pub fn sys_close(fd: usize) -> isize {
     0
 }
 
-/// 文件锁，目前是伪实现
+/// flock()：整文件锁，按 (pid, fd) 视为同一打开文件描述持有
 pub fn sys_flock(fd: usize, operation: usize) -> isize {
+    use crate::fs::{file_locks_conflict, FileLock};
+
     const LOCK_SH: usize = 1;
     const LOCK_EX: usize = 2;
     const LOCK_NB: usize = 4;
@@ -526,11 +550,57 @@ pub fn sys_flock(fd: usize, operation: usize) -> isize {
         return EINVAL.as_isize();
     }
     let files = current_files();
-    let files = files.exclusive_access();
+    let mut files = files.exclusive_access();
     if fd >= files.fds.len() || files.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
-    0
+    let file = files.fds[fd].file.as_ref().unwrap().clone();
+    drop(files);
+
+    let Some(dentry) = file.get_dentry() else {
+        return 0;
+    };
+    let pid = current_task().unwrap().getpid();
+    let owner_key = (pid, fd);
+    let want_type: i16 = if operation & LOCK_SH != 0 { F_RDLCK } else { F_WRLCK };
+
+    if operation & LOCK_UN != 0 {
+        let mut locks = dentry.file_locks.lock();
+        locks.retain(|l| !(l.is_flock && (l.owner_pid, l.start as usize) == owner_key));
+        return 0;
+    }
+
+    loop {
+        let mut locks = dentry.file_locks.lock();
+        // 同一打开描述重复加锁：直接更新类型
+        if let Some(existing) = locks
+            .iter_mut()
+            .find(|l| l.is_flock && (l.owner_pid, l.start as usize) == owner_key)
+        {
+            existing.lock_type = want_type;
+            return 0;
+        }
+        let conflicted = locks.iter().any(|l| {
+            l.is_flock
+                && (l.owner_pid, l.start as usize) != owner_key
+                && file_locks_conflict(l, want_type, 0, 0)
+        });
+        if !conflicted {
+            locks.push(FileLock {
+                owner_pid: pid,
+                lock_type: want_type,
+                start: fd as i64,
+                len: 0,
+                is_flock: true,
+            });
+            return 0;
+        }
+        drop(locks);
+        if operation & LOCK_NB != 0 {
+            return EAGAIN.as_isize();
+        }
+        crate::process::suspend_current_and_run_next();
+    }
 }
 
 pub fn sys_accessat(dirfd: isize, path: *const u8, mode: u32, _flags: u32) -> isize {
@@ -589,7 +659,7 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, mode: u32, _flags: u32) -> is
 }
 
 pub fn sys_pipe(pipe: *mut usize, flags: usize) -> isize {
-    warn!("kernel:pid[{}] sys_pipe", current_task().unwrap().getpid());
+    trace!("kernel:pid[{}] sys_pipe", current_task().unwrap().getpid());
     let supported_flags = O_CLOEXEC as usize | O_NONBLOCK;
     if flags & !supported_flags != 0 {
         return EINVAL.as_isize();
@@ -610,7 +680,7 @@ pub fn sys_pipe(pipe: *mut usize, flags: usize) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(), //   
     };
-    warn!("kernel:pid[{}] sys_pipe: allocated read_fd={}", task.getpid(), read_fd);
+    trace!("kernel:pid[{}] sys_pipe: allocated read_fd={}", task.getpid(), read_fd);
     let fd_flags = if flags & O_CLOEXEC as usize != 0 {
         FdFlags::CLOEXEC
     } else {
@@ -627,7 +697,7 @@ pub fn sys_pipe(pipe: *mut usize, flags: usize) -> isize {
     };
     inner.set_fd(write_fd, pipe_write, fd_flags, O_WRONLY as usize | status_flags);
     // 诊断：打印管道 fd 分配
-    warn!("kernel:pid[{}] sys_pipe: allocated write_fd={}", task.getpid(), write_fd);
+    trace!("kernel:pid[{}] sys_pipe: allocated write_fd={}", task.getpid(), write_fd);
     // 释放锁，因为下面的write会访问用户锁
     drop(inner);
     // User ABI for pipe is int pipefd[2], i.e. two 32-bit entries.
@@ -1068,6 +1138,12 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
         return EBADF.as_isize();
     }
 
+    if matches!(cmd, F_GETLK | F_SETLK | F_SETLKW) {
+        let file = inner.fds[fd].file.as_ref().unwrap().clone();
+        drop(inner);
+        return posix_file_lock(&file, cmd, arg);
+    }
+
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
             if !fd_valid {
@@ -1125,6 +1201,117 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
                 return EBADF.as_isize();
             }
             16*4096 as isize
+        }
+        _ => EINVAL.as_isize(),
+    }
+}
+
+/// POSIX 记录锁：fcntl(F_GETLK/F_SETLK/F_SETLKW)。
+/// 锁表挂在 Dentry 上，同一文件的所有 fd/进程共享；
+/// 按 Linux 语义：同进程锁互不冲突，设置时替换同进程重叠区间。
+fn posix_file_lock(file: &Arc<dyn File + Send + Sync>, cmd: usize, arg: usize) -> isize {
+    use crate::fs::{file_locks_conflict, lock_ranges_overlap, FileLock};
+
+    let token = current_user_token();
+    let Some(mut req) = try_translated_read::<Flock>(token, arg as *const Flock) else {
+        return EFAULT.as_isize();
+    };
+    if !matches!(req.l_type, F_RDLCK | F_WRLCK | F_UNLCK) {
+        return EINVAL.as_isize();
+    }
+    // 无 inode 的文件（管道/设备等）：返回成功，但没有实际锁语义
+    let Some(dentry) = file.get_dentry() else {
+        return 0;
+    };
+
+    // 归一化为绝对区间 [start, start+len)，len==0 表示直到 EOF
+    let file_size = file.get_stat().size as i64;
+    let base = match req.l_whence {
+        SEEK_SET => 0i64,
+        // 当前文件偏移未暴露给 File trait，SQLite 只用 SEEK_SET；近似按 0 处理
+        SEEK_CUR => 0i64,
+        SEEK_END => file_size,
+        _ => return EINVAL.as_isize(),
+    };
+    let mut start = base.saturating_add(req.l_start).max(0);
+    let mut len = req.l_len;
+    if len < 0 {
+        // 负长度表示锁 [start+len, start)
+        let new_start = start.saturating_add(len);
+        if new_start < 0 {
+            return EINVAL.as_isize();
+        }
+        len = -len;
+        start = new_start;
+    }
+    let pid = current_task().unwrap().getpid();
+
+    match cmd {
+        F_GETLK => {
+            let mut locks = dentry.file_locks.lock();
+            let conflict = locks.iter().find(|l| {
+                !l.is_flock
+                    && l.owner_pid != pid
+                    && file_locks_conflict(l, req.l_type, start, len)
+            });
+            if let Some(l) = conflict {
+                req.l_type = l.lock_type;
+                req.l_start = l.start;
+                req.l_len = l.len;
+                req.l_pid = l.owner_pid as i32;
+            } else {
+                req.l_type = F_UNLCK;
+                req.l_start = 0;
+                req.l_len = 0;
+                req.l_pid = 0;
+            }
+            drop(locks);
+            if try_translated_write(token, arg as *mut Flock, req) {
+                0
+            } else {
+                EFAULT.as_isize()
+            }
+        }
+        F_SETLK | F_SETLKW => {
+            if req.l_type == F_UNLCK {
+                let mut locks = dentry.file_locks.lock();
+                locks.retain(|l| {
+                    !(!l.is_flock
+                        && l.owner_pid == pid
+                        && lock_ranges_overlap(l.start, l.len, start, len))
+                });
+                0
+            } else {
+                loop {
+                    let mut locks = dentry.file_locks.lock();
+                    let conflicted = locks.iter().any(|l| {
+                        !l.is_flock
+                            && l.owner_pid != pid
+                            && file_locks_conflict(l, req.l_type, start, len)
+                    });
+                    if !conflicted {
+                        locks.retain(|l| {
+                            !(!l.is_flock
+                                && l.owner_pid == pid
+                                && lock_ranges_overlap(l.start, l.len, start, len))
+                        });
+                        locks.push(FileLock {
+                            owner_pid: pid,
+                            lock_type: req.l_type,
+                            start,
+                            len,
+                            is_flock: false,
+                        });
+                        return 0;
+                    }
+                    drop(locks);
+                    if cmd == F_SETLK {
+                        return EAGAIN.as_isize();
+                    }
+                    // F_SETLKW：让出 CPU 等待；本内核暂无信号唤醒，循环即可
+                    crate::process::suspend_current_and_run_next();
+                }
+            }
         }
         _ => EINVAL.as_isize(),
     }
@@ -1516,8 +1703,9 @@ pub fn sys_fadvise64(fd: usize, _offset: usize, _len: usize, advice: i32) -> isi
         return ESPIPE.as_isize();
     }
 
-    // 最简兼容实现：接受合法提示，但暂不调整预读或页缓存策略。
-    0
+    // The advice is not acted upon yet; report that explicitly instead of
+    // claiming that the kernel applied it.
+    ENOSYS.as_isize()
 }
 
 /// 挂载，目前是伪实现
@@ -1536,7 +1724,7 @@ pub fn sys_mount(source: *const u8, target: *const u8, filesystemtype: *const u8
             return EFAULT.as_isize();
         }
     };
-    return 0;
+    return ENOSYS.as_isize();
 }
 
 /// 取消挂载，目前是伪实现
@@ -1545,7 +1733,7 @@ pub fn sys_umount(target: *const u8) -> isize {
     let target_str = normalize_leading_dot_path(
         if let Some(s) = try_translated_str(token, target) { s } else { return EFAULT.as_isize(); }
     );
-    return 0;
+    return ENOSYS.as_isize();
 }
 
 /// 移除，目前是伪实现
@@ -1560,7 +1748,7 @@ pub fn sys_fremovexattr(_fd: isize, _name: *const u8) -> isize {
             return EFAULT.as_isize();
         }
     };
-    return 0; // 目前不支持扩展属性，直接返回成功
+    return ENOSYS.as_isize(); // 目前不支持扩展属性，直接返回成功
 }
 
 pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usize) -> isize {
@@ -2415,8 +2603,8 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
 /// 
 /// TODO: 完全实现 fsync 语义
 pub fn sys_fsync(_fd: usize) -> isize {
-    // crate::mm::mmap::sync_shared_page_cache();
-    0
+    // Per-file durability and descriptor validation are not implemented.
+    ENOSYS.as_isize()
 }
 
 /// sync: 将所有文件系统缓存同步到磁盘

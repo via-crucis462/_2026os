@@ -45,19 +45,18 @@ impl File for Stdin {
     }
     fn read(&self, user_buf: UserBuffer) -> usize {
         let ch = loop {
-            let task = crate::task::current_task().unwrap();
-            let task_inner = task.inner_exclusive_access();
-            let pending_bits = task_inner.pending.bits();
-            let pending = pending_bits & !task_inner.blocked.bits();
-            let unmaskable = pending_bits & ((1 << 8) | (1 << 18));
-            drop(task_inner);
-
-            if pending != 0 || unmaskable != 0 {
-                return 0; 
+            crate::console::note_stdin_reader();
+            // Ctrl-C is process-directed and therefore lives in the shared
+            // pending set. Check both shared and thread-local pending signals.
+            if crate::process::check_pending_signal() {
+                return 0;
             }
 
             // 优先使用 ready_to_read() 时已缓冲的字符（此时需要补回显）
             if let Some(ch) = STDIN_BUFFERED_CHAR.exclusive_access().take() {
+                if crate::console::process_line_discipline(ch) {
+                    continue; // Ctrl-C 等控制字符已被消费并发信号，继续等待输入
+                }
                 echo_if_enabled(ch);
                 break ch;
             }

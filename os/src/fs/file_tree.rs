@@ -11,6 +11,8 @@ use crate::process::current_task;
 pub struct Dentry {
     pub inode: Arc<dyn VfsInode>,
     location: Mutex<DentryLocation>,
+    /// POSIX 记录锁表；同一 dentry（同一文件）的所有打开者共享
+    pub file_locks: Mutex<alloc::vec::Vec<super::FileLock>>,
     /// 对当前目录的操作（如插入、删除、查找）都应加此锁
     /// 保证不发生数据竞争
     pub namespace_lock: Mutex<()>,
@@ -32,6 +34,7 @@ impl Dentry {
         Arc::new(Self {
             inode,
             location: Mutex::new(DentryLocation { name, parent }),
+            file_locks: Mutex::new(alloc::vec::Vec::new()),
             namespace_lock: Mutex::new(()),
             children: Mutex::new(BTreeMap::new()),
             mounted_children: Mutex::new(BTreeMap::new()),
@@ -216,32 +219,33 @@ impl Dentry {
     /// 查找子节点（单级）：返回的是 Dentry 包装，以便继续向下查找
     pub fn find_child(self: &Arc<Self>, name: &str) -> Option<Arc<Dentry>> {
         trace!("[kernel] Dentry::find_child: parent={}, name={}", self.name(), name);
+        // 快速路径：缓存命中时只拿各自的 children/mounted_children 锁，
+        // 不拿 namespace_lock，避免同一目录下所有路径解析被串行化。
+        if let Some(child) = self.mounted_children.lock().get(name).cloned() {
+            return Some(child);
+        }
+        if let Some(child) = self.children.lock().get(name).cloned() {
+            return Some(child);
+        }
+
+        // 慢速路径：拿 namespace_lock 后双检，再落磁盘。
         let _namespace_guard = self.namespace_lock.lock();
-        //先看虚拟挂载点
-        let mounted_children = self.mounted_children.lock();
-        if let Some(child) = mounted_children.get(name) {
-            return Some(child.clone());
+        if let Some(child) = self.mounted_children.lock().get(name).cloned() {
+            return Some(child);
         }
-        drop(mounted_children);
-
-        let mut children = self.children.lock();
-        // 1. 尝试从当前节点的缓存中获取
-        if let Some(child) = children.get(name) {
-            return Some(child.clone());
+        if let Some(child) = self.children.lock().get(name).cloned() {
+            return Some(child);
         }
 
-        // 2. 缓存未击中，调用底层磁盘接口查找
         if let Some(vfs_inode) = self.inode.find(name) {
-            // 找到了，将其包装成 Dentry 并插入缓存树
             let new_child = Self::new(
                 String::from(name),
                 vfs_inode.clone(),
                 Arc::downgrade(self),
             );
-            children.insert(String::from(name), new_child.clone());
+            self.children.lock().insert(String::from(name), new_child.clone());
             return Some(new_child);
         }
-        // 3. 磁盘也没找到，按照要求 panic
         trace!("VFS: File '{}' not found in directory '{}'", name, self.name());
         None
     }

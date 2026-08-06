@@ -77,3 +77,93 @@
 - 源码：`benchmarks/sysbench.c`（单线程）、`benchmarks/sysbench_mp.c`（并发）
 - 静态二进制：`benchmarks/build/sysbench*`（riscv64 static，可直接放进镜像执行）
 - 原始日志：`benchmarks/*.log`（kernel-* 为内核侧，linux-* 为 Alpine 侧）
+
+## 2026-08-06 追加：纯 CPU O(n^3) 对照（同 QEMU/宿主，宿主时间戳）
+
+同一份 `volatile` 累加三重循环，gcc -O2，几乎无系统调用：
+
+| n | 内核耗时 | Alpine Linux 耗时 |
+|---:|---:|---:|
+| 200 | 0.052 s | 0.016 s |
+| 400 | 0.105 s | 0.107 s |
+| 600 | 0.358 s | 0.365 s |
+
+单线程纯计算基本一致（~0.5 s 总量），说明数量级差距不在 CPU/TCG，
+而在系统调用、内存管理、页缓存/块缓存等内核服务路径。
+8 线程版本受宿主同时跑多个 QEMU 干扰，暂不作为结论。
+
+### 2026-08-06 追加：停掉其他 QEMU 后的多线程纯计算（N=400，O(n^3)）
+
+两台系统各自独占 QEMU 运行，同一程序、gcc -O2、pthread：
+
+| 线程数 | 内核（两轮平均） | Alpine Linux（两轮平均） |
+|---:|---:|---:|
+| 1 | ~0.150 s | ~0.114 s |
+| 2 | ~0.199 s | ~0.101 s |
+| 4 | ~0.210 s | ~0.126 s |
+| 8 | ~0.246 s | ~0.133 s |
+
+两台系统在 QEMU TCG 下多线程都没有明显加速（8 线程相对 1 线程约
+1.6x vs 1.2x），说明该现象主要来自 TCG/宿主，而非内核调度器；
+内核仍比 Alpine 慢约 1.3~1.9x，但远不到数量级。
+
+### 2026-08-06 追加：8 线程共享 pthread mutex 自增（futex 路径）
+
+8 个线程反复 lock/unlock 同一把 pthread mutex，共享计数器 +1，
+直到达到目标值；两台系统各自独占 QEMU：
+
+| 目标值 | 内核 | Alpine Linux | 比值 |
+|---:|---:|---:|---:|
+| 200,000 | 0.150 s | 0.059 s | 2.5x |
+| 500,000 | 0.178 s | 0.116 s | 1.5x |
+| 1,000,000 | 0.290 s | 0.238 s | 1.2x |
+
+futex/mutex 路径与 Linux 基本同量级（1.2~2.5x），不是 buildstorm
+数量级差距的来源。
+
+### 2026-08-06 追加：单线程系统调用逐项对照（宿主时间戳，各自独占 QEMU）
+
+同一份 `sysbench_host.c`（见 `benchmarks/sysbench_host.c`），gcc -O2：
+
+| 阶段 | 内核 | Alpine | 比值 |
+|---|---:|---:|---:|
+| getpid ×1M | 1.434 s | 0.663 s | 2.2x |
+| clock_gettime ×500K | 1.020 s | 0.051 s | 20x* |
+| gettimeofday ×500K | 1.063 s | 0.065 s | 16x* |
+| open+close 命中 ×20K | 0.324 s | 0.140 s | 2.3x |
+| open+close 未命中 ×10K | 0.178 s | 0.073 s | 2.4x |
+| statx ×20K | 0.277 s | 0.082 s | 3.4x |
+| fstat ×20K | 0.053 s | 0.024 s | 2.2x |
+| readlinkat 未命中 ×10K | 0.169 s | 0.061 s | 2.8x |
+| pread 4K ×20K | 0.078 s | 0.043 s | 1.8x |
+| pread 64K ×2K | 0.024 s | 0.009 s | 2.7x |
+| mmap+munmap ×20K | 0.311 s | 0.244 s | 1.3x |
+| mprotect ×20K | 0.070 s | 0.030 s | 2.3x |
+| brk ×50K 对 | 2.686 s | 0.512 s | 5.2x |
+| getdents /usr/bin ×500 | 0.197 s | 0.348 s | 0.6x |
+| pipe 1B ping-pong ×20K | 0.110 s | 0.053 s | 2.1x |
+| fork+wait ×100 | 0.081 s | 0.087 s | 0.9x |
+
+`*` Alpine 的 clock_gettime/gettimeofday 走 vDSO，基本不陷入内核；
+我们的内核没有 vDSO，每次都是完整 syscall。真正的 syscall 开销差距
+可参考 getpid（2.2x）。
+
+### 2026-08-06 追加：8 进程 / 8 线程 syscall 对照（宿主时间戳，各自独占 QEMU）
+
+复用 `benchmarks/sysbench_mp.c`，nproc/threads=8：
+
+| 模式 | 内核 | Alpine | 比值 |
+|---|---:|---:|---:|
+| 8 进程 getpid | 3.56 s | 1.64 s | 2.2x |
+| 8 进程 clock_gettime | 4.71 s | 0.14 s | 33x* |
+| 8 进程 statx | 1.98 s | 0.16 s | 12.6x |
+| 8 进程 pread 4K | 0.95 s | 0.15 s | 6.5x |
+| 8 进程 fstat | 0.44 s | 0.10 s | 4.5x |
+| 8 进程 open+close | 1.34 s | 0.18 s | 7.5x |
+| 8 进程 mprotect | 0.23 s | 0.05 s | 4.8x |
+| 8 进程 mmap+munmap | 0.62 s | 0.26 s | 2.4x |
+| 8 线程共享 mm mprotect | 0.46 s | 0.25 s | 1.9x |
+| 8 线程共享 mm mmap+munmap | 8.82 s | 3.01 s | 2.9x |
+
+`*` 仍受 vDSO 影响。排除 clock 后，8 进程下 statx/openclose/pread
+的锁竞争是当前最明显的差距。

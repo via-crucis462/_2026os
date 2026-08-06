@@ -212,6 +212,44 @@ pub struct StatxTimestamp {
     pub tv_nsec: u32,
     pub __reserved: i32,
 }
+
+/// POSIX 文件记录锁（fcntl F_SETLK/F_SETLKW/F_GETLK 使用）
+#[derive(Debug, Clone, Copy)]
+pub struct FileLock {
+    /// 锁持有者（POSIX 锁按进程归并）
+    pub owner_pid: usize,
+    /// 0 = F_RDLCK, 1 = F_WRLCK, 2 = F_UNLCK
+    pub lock_type: i16,
+    /// 锁区间起点（绝对偏移）
+    pub start: i64,
+    /// 锁区间长度；0 表示锁到文件末尾
+    pub len: i64,
+    /// true 表示来自 flock()（与 fd 绑定，仅整个文件锁）
+    pub is_flock: bool,
+}
+
+impl FileLock {
+    pub fn end(&self) -> i64 {
+        if self.len == 0 {
+            i64::MAX
+        } else {
+            self.start.saturating_add(self.len)
+        }
+    }
+}
+
+/// 判断两个区间是否重叠（len==0 表示延伸到 EOF）
+pub fn lock_ranges_overlap(a_start: i64, a_len: i64, b_start: i64, b_len: i64) -> bool {
+    let a_end = if a_len == 0 { i64::MAX } else { a_start.saturating_add(a_len) };
+    let b_end = if b_len == 0 { i64::MAX } else { b_start.saturating_add(b_len) };
+    a_start < b_end && b_start < a_end
+}
+
+/// 读锁与读锁不冲突，其余情况（含写锁）冲突
+pub fn file_locks_conflict(a: &FileLock, b_type: i16, b_start: i64, b_len: i64) -> bool {
+    (a.lock_type == 1 || b_type == 1) && lock_ranges_overlap(a.start, a.len, b_start, b_len)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RenameError {
     NotFound,

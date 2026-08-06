@@ -333,7 +333,7 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> isize {
         }
         MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_FREE => {
             // 使用建议（优化用），伪实现
-            0
+            ENOSYS.as_isize()
         }
         _ => {
             EINVAL.as_isize()

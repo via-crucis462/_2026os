@@ -140,6 +140,10 @@ pub struct Ext4Inode {
     pub flags: u32,
     /// 数据块指针（直接块、间接块等）
     pub i_block: [u8; 60],
+    /// 磁盘 inode 所在块号（创建后不变，避免每次读取都抢块组锁）
+    pub inode_table_block: u32,
+    /// 磁盘 inode 在块内的字节偏移
+    pub inode_offset: usize,
     /// inode 代数：记录创建时的磁盘代数，防止 ino 被释放并复用后，
     /// 失效的旧对象误释放新文件
     generation: u32,
@@ -208,6 +212,7 @@ impl Ext4Inode {
     }
 
     pub fn new(inode_id: u32, disk_inode: &Ext4InodeDisk, fs: Arc<Ext4FS>, parent: Option<u32>) -> Self {
+        let (inode_table_block, inode_offset) = fs.get_inode_pos(inode_id);
         Self {
             inode_id,
             mode: disk_inode.i_mode,
@@ -216,11 +221,22 @@ impl Ext4Inode {
             block_map_lock: Mutex::new(()),
             flags: disk_inode.i_flags,
             i_block: disk_inode.i_block,
+            inode_table_block,
+            inode_offset,
             generation: disk_inode.i_generation,
             fs,
             parent,
         }
-    }    /// 定义一个高层接口，专门用于解析目录项
+    }
+
+    /// 使用缓存的位置直接读取磁盘 inode（不再每页抢块组锁）
+    fn read_disk_inode(&self) -> Ext4InodeDisk {
+        let cache = get_block_cache(self.inode_table_block as usize, self.fs.block_dev.clone());
+        let guard = cache.lock();
+        *guard.get_ref::<Ext4InodeDisk>(self.inode_offset)
+    }
+
+    /// 定义一个高层接口，专门用于解析目录项
     pub fn is_dir(&self) -> bool {
         self.mode & 0xF000 == 0x4000
     }
@@ -236,7 +252,7 @@ impl Ext4Inode {
     /// 根据逻辑块号寻找对应的物理块号 (支持 Extents 和直接块)
     pub fn find_physical_block(&self, logical_block_id: u32) -> u32 {
         // 实时获取磁盘 Inode，避免 self.i_block 与磁盘不同步
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        let disk_inode = self.read_disk_inode();
         let flags = disk_inode.i_flags;
         let i_block = disk_inode.i_block;
 

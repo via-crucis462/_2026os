@@ -1,12 +1,19 @@
 //! SBI console driver, for text output
 use crate::arch::sbi::{console_getchar, console_putchar};
 use crate::sync::MPSafeCell;
+use alloc::collections::VecDeque;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::fmt::{self, Write};
 
 use lazy_static::*;
 
 lazy_static! {
     pub static ref CONSOLE_LOCK: MPSafeCell<()> = MPSafeCell::new(());
+    /// 串口输入缓冲：内核控制台 worker 主动轮询填入，
+    /// read() 从这里取字符（避免输入只在有人 read 时才被消费）。
+    static ref INPUT_BUFFER: MPSafeCell<VecDeque<u8>> = MPSafeCell::new(VecDeque::new());
+    /// 最近一次读取 stdin 的用户进程组（Ctrl-C 无 TIOCSPGRP 时的回退目标）
+    static ref LAST_STDIN_READER_PGRP: AtomicUsize = AtomicUsize::new(0);
 }
 
 // ---------- 终端行规程（tty line discipline）----------
@@ -53,6 +60,50 @@ pub fn set_termios(t: ConsoleTermios) {
     *CONSOLE_TERMIOS.exclusive_access() = t;
 }
 
+/// 向 TTY 前台进程组发送中断信号（Ctrl-C / Ctrl-\）。
+/// 优先使用 ioctl(TIOCSPGRP) 设置的前台进程组；未设置时退化为当前读终端进程的进程组。
+pub fn tty_send_sigint() {
+    use crate::process::registry::TID2TCB;
+    use crate::process::{wake_up_task, SignalFlags, TaskControlBlock};
+    use alloc::collections::BTreeMap;
+    use alloc::sync::Arc;
+
+    let fg = crate::syscall::process::tty_foreground_pgrp();
+    let fallback_pgid = LAST_STDIN_READER_PGRP.load(Ordering::Relaxed);
+    let target_pgid = if fg == 0 { fallback_pgid } else { fg as usize };
+    if target_pgid == 0 {
+        return;
+    }
+
+    let tasks: alloc::vec::Vec<Arc<TaskControlBlock>> = TID2TCB
+        .exclusive_access()
+        .values()
+        .cloned()
+        .collect();
+    let mut targets = BTreeMap::<usize, Arc<TaskControlBlock>>::new();
+    for task in &tasks {
+        if task.inner_exclusive_access().pgid == target_pgid {
+            targets.entry(task.gettgid()).or_insert_with(|| task.clone());
+        }
+    }
+
+    for (tgid, proc) in targets {
+        let sig = proc.inner_exclusive_access().signal.clone();
+        sig.exclusive_access().insert_pending(SignalFlags::SIGINT);
+        for task in tasks.iter().filter(|task| task.gettgid() == tgid) {
+            wake_up_task(task.clone());
+        }
+    }
+}
+
+/// 记录当前正在读终端的用户进程组，供 Ctrl-C 回退使用
+pub fn note_stdin_reader() {
+    if let Some(task) = crate::process::current_task() {
+        let pgid = task.inner_exclusive_access().pgid;
+        LAST_STDIN_READER_PGRP.store(pgid, Ordering::Relaxed);
+    }
+}
+
 /// 把单个字符回显到控制台
 fn echo_char(ch: u8) {
     match ch {
@@ -61,6 +112,20 @@ fn echo_char(ch: u8) {
         c if (0x20..=0x7e).contains(&c) => print(format_args!("{}", c as char)),
         _ => {} // 其他控制字符不回显
     }
+}
+
+/// 行规程处理：识别 ISIG 控制字符（Ctrl-C 等）。
+/// 返回 true 表示字符已被行规程消费，不应再返回给用户。
+pub fn process_line_discipline(ch: u8) -> bool {
+    let (isig, vintr) = {
+        let t = CONSOLE_TERMIOS.exclusive_access();
+        ((t.c_lflag & ISIG) != 0, t.c_cc[0])
+    };
+    if isig && ch == vintr {
+        tty_send_sigint();
+        return true;
+    }
+    false
 }
 
 /// 若行规程开启了 ECHO，则把字符回显到控制台。
@@ -74,6 +139,11 @@ pub fn echo_if_enabled(ch: u8) {
 /// 从控制台非阻塞地读一个字符（无输入时返回 None）。
 /// 已做 ICRNL 回车转换，并按 ECHO 标志回显（只回显一次）。
 pub fn console_read_char() -> Option<u8> {
+    // 优先消费控制台 worker 轮询到的字符
+    if let Some(ch) = INPUT_BUFFER.exclusive_access().pop_front() {
+        echo_if_enabled(ch);
+        return Some(ch);
+    }
     let raw = console_getchar();
     if raw == 0 || raw == usize::MAX {
         return None;
@@ -86,6 +156,9 @@ pub fn console_read_char() -> Option<u8> {
     if icrnl && ch == b'\r' {
         ch = b'\n';
     }
+    if process_line_discipline(ch) {
+        return None;
+    }
     if echo {
         echo_char(ch);
     }
@@ -94,6 +167,10 @@ pub fn console_read_char() -> Option<u8> {
 
 /// 从控制台非阻塞地读一个字符，但不回显（用于 poll/select 探测）。
 pub fn console_peek_char() -> Option<u8> {
+    // 与 read 路径共用缓冲：取出后由 stdio 的 STDIN_BUFFERED_CHAR 暂存
+    if let Some(ch) = INPUT_BUFFER.exclusive_access().pop_front() {
+        return Some(ch);
+    }
     let raw = console_getchar();
     if raw == 0 || raw == usize::MAX {
         return None;
@@ -103,6 +180,26 @@ pub fn console_peek_char() -> Option<u8> {
         ch = b'\n';
     }
     Some(ch)
+}
+
+/// 控制台内核 worker：周期性轮询串口，处理行规程控制字符（Ctrl-C 等）
+/// 并把普通字符放入输入缓冲，供后续 read() 使用。
+pub fn console_poll_input() {
+    loop {
+        let raw = console_getchar();
+        if raw == 0 || raw == usize::MAX {
+            break;
+        }
+        let mut ch = raw as u8;
+        let icrnl = (CONSOLE_TERMIOS.exclusive_access().c_iflag & ICRNL) != 0;
+        if icrnl && ch == b'\r' {
+            ch = b'\n';
+        }
+        if process_line_discipline(ch) {
+            continue; // ^C 等已被消费并发信号
+        }
+        INPUT_BUFFER.exclusive_access().push_back(ch);
+    }
 }
 
 struct Stdout;

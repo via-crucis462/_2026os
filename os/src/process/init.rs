@@ -65,6 +65,7 @@ impl TaskStruct {
 				pgid: pid_handle.0,
 				sid: pid_handle.0,
 				state: TaskStatus::Ready,
+				wake_pending: false,
 				exit_state: 0,
 				exit_code: 0,
 				exit_signal: 0,
@@ -183,6 +184,13 @@ pub fn add_net_worker() {
 		TaskStruct::new_kernel_worker(crate::process::task::worker::net_kernel_worker, SCHED_OTHER);
 	add_task(worker_task.clone());
 	info!("add_net_worker: pid={}", worker_task.getpid());
+}
+
+pub fn add_console_worker() {
+	let worker_task =
+		TaskStruct::new_kernel_worker(crate::process::task::worker::console_kernel_worker, SCHED_OTHER);
+	add_task(worker_task.clone());
+	info!("add_console_worker: pid={}", worker_task.getpid());
 }
 
 pub fn add_writeback_worker() {

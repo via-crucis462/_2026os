@@ -228,28 +228,24 @@ pub(crate) fn advance_cfs_min_vruntime(cpu_id: usize) {
 		.advance_min_vruntime();
 }
 
-/// 唤醒阻塞任务，并重新加入它原先所属 CPU 的运行队列。 
+/// 唤醒阻塞任务，并重新加入它原先所属 CPU 的运行队列。
 /// 如果任务不是阻塞状态，则打印警告信息并忽略。
-pub fn wake_up_task(task: Arc<TaskControlBlock>) {
-	let mut warned = false;
+/// 返回是否真的已入队；对正在切换（BlockSaving）的任务只挂起
+/// 唤醒请求，由调度器在切换完成后入队，绝不自旋等待。
+pub fn wake_up_task(task: Arc<TaskControlBlock>) -> bool {
 	let should_enqueue = loop {
 		let mut inner = task.inner_exclusive_access();
 		if matches!(inner.state, TaskStatus::Blocked) {
 			inner.state = TaskStatus::Ready;
 			break true;
 		} else if inner.state == TaskStatus::BlockSaving {
-			// 原本实现没有 loop，直接返回 false ，似乎会把 BlockSaving 的任务给直接丢弃掉
 			let pid = task.getpid();
-			let state = inner.state;
-			drop(inner);
-			if !warned {
-				warned = true;
-				println!(
-					"[kernel] wake_up_task: task {} is saving context, current state: {:?}",
-					pid, state
-				);
-			}
-			core::hint::spin_loop();
+			inner.wake_pending = true;
+			warn!(
+				"[kernel] wake_up_task: task {} is saving context, wake pending",
+				pid
+			);
+			break false;
 		} else {
 			let pid = task.getpid();
 			let state = inner.state;
@@ -264,6 +260,7 @@ pub fn wake_up_task(task: Arc<TaskControlBlock>) {
 	if should_enqueue {
 		add_task_into_pool(task);
 	}
+	should_enqueue
 }
 
 /// 从当前 CPU 自己的运行队列获取任务，不执行跨核窃取。
@@ -286,13 +283,5 @@ pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
 			inner.need_resched = false;
 		}
 		return Some(task);
-	}
-}
-
-/// 调试用：打印每个 CPU 本地运行队列的可运行任务数。
-pub fn debug_print_rq_lengths() {
-	for (cpu_id, rq) in RQ_ARRAY.iter().enumerate() {
-		let nr = rq.inner_exclusive_access().nr_running;
-		println!("[RQ-DBG] cpu={} nr_running={}", cpu_id, nr);
 	}
 }

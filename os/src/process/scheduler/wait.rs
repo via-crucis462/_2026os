@@ -1,3 +1,5 @@
+use core::hint::spin_loop;
+
 use crate::process::{TaskContext, TaskControlBlockInner, TaskStatus};
 use crate::process::scheduler::processor::{current_task, schedule};
 use crate::process::scheduler::runqueue::wake_up_task;
@@ -99,31 +101,37 @@ where
 }
 
 pub fn wake_up_one(queue: &Mutex<WaitQueue>) -> bool {
-    loop {
+    'outer: loop {
         let Some(task) = queue.lock().pop_front() else {
             return false;
         };
-        // 跳过已经不在阻塞状态的任务
-        // 上面弹出了，不再重新入队，自动drop
+        // 在任务锁下处理状态：BlockSaving 挂起唤醒请求（不自旋），
+        // Blocked 直接唤醒，其余视为陈旧条目丢弃并继续找下一个。
         loop {
-            let state = task.inner_exclusive_access().state;
-            if state != TaskStatus::BlockSaving {
-                break;
+            let mut inner = task.inner_exclusive_access();
+            match inner.state {
+                TaskStatus::BlockSaving => {
+                    spin_loop();
+                    drop(inner);
+                    continue;
+                }
+                TaskStatus::Blocked => {
+                    drop(inner);
+                    wake_up_task(task);
+                    return true;
+                }
+                _ => {
+                    warn!(
+                        "[wake_up_one] dropping non-blocked queue entry pid={} tid={} state={:?}",
+                        task.getpid(),
+                        task.gettid(),
+                        inner.state,
+                    );
+                    drop(inner);
+                    continue 'outer;
+                }
             }
-            core::hint::spin_loop();
         }
-        let state = task.inner_exclusive_access().state;
-        if matches!(state, TaskStatus::Blocked) {
-            wake_up_task(task);
-            return true;
-        }
-        warn!(
-            "[wake_up_one] dropping non-blocked queue entry pid={} tid={} state={:?}",
-            task.getpid(),
-            task.gettid(),
-            state,
-        );
-        // 非阻塞/已就绪/僵尸等陈旧条目：丢弃并继续找下一个真正的等待者。
     }
 }
 
@@ -149,11 +157,7 @@ pub(crate) fn wake_up_all_mp(queue: &MPSafeCell<WaitQueue>) -> usize {
 
     let mut count = 0;
     for task in tasks {
-        while task.inner_exclusive_access().state == TaskStatus::BlockSaving {
-            core::hint::spin_loop();
-        }
-        if matches!(task.inner_exclusive_access().state, TaskStatus::Blocked) {
-            wake_up_task(task);
+        if wake_up_task(task) {
             count += 1;
         }
     }
