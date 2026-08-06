@@ -133,6 +133,7 @@ impl MemorySet {
         }
     }
 
+    /* 弃用
     /// Create a MemorySet that shares the same page table with the parent.
     /// Used by fork() with CLONE_VM flag for true address space sharing.
     ///
@@ -160,6 +161,7 @@ impl MemorySet {
             start_brk: AtomicU64::new(parent.start_brk.load(Ordering::Relaxed)),
         }
     }
+    */
     /// Get the page table token
     pub fn token(&self) -> usize {
         let pt = self.page_table.read();
@@ -1525,9 +1527,12 @@ impl MemorySet {
         } else {
             if Self::has_conflict_locked(&areas, addr, length) {
                 if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED) {
-                    if self.munmap_locked(&mut areas, addr, length).is_err() {
-                        return Err(Errno::EEXIST.as_isize());
-                    }
+                    let released_frames = self.munmap_locked(&mut areas, addr, length);
+                    #[cfg(target_arch = "loongarch64")]
+                    Self::flush_tlb_after_mapping_change();
+                    #[cfg(target_arch = "riscv64")]
+                    self.flush_tlb_targets();
+                    drop(released_frames);
                 } else {
                     return Err(Errno::EEXIST.as_isize());
                 }
@@ -1576,7 +1581,7 @@ impl MemorySet {
     /// 找的是逻辑区域，与实际物理页无关
     fn find_free_area_locked(
         length: usize,
-        areas: &crate::sync::RwLockWriteGuard<'_, BTreeMap<VirtPageNum, Arc<Mutex<MapArea>>>>,
+        areas: &BTreeMap<VirtPageNum, Arc<Mutex<MapArea>>>,
     ) -> Option<usize> {
         let mut current_addr: usize = USER_APP_BASE + (USER_APP_MAX_SIZE - USER_APP_BASE) / 2;
         // 为高地址用户栈预留顶部空间，避免 mmap 和初始栈冲突。
@@ -1609,7 +1614,7 @@ impl MemorySet {
 
     /// 检查目标地址段是否与已有的映射冲突（调用方需持有 areas 写锁）
     fn has_conflict_locked(
-        areas: &crate::sync::RwLockWriteGuard<'_, BTreeMap<VirtPageNum, Arc<Mutex<MapArea>>>>,
+        areas: &BTreeMap<VirtPageNum, Arc<Mutex<MapArea>>>,
         start: usize,
         len: usize,
     ) -> bool {
@@ -1630,24 +1635,25 @@ impl MemorySet {
     /// 现在的实现允许取消映射包括堆区等，堆区现由单独字段维护
     pub fn munmap(&self, start: usize, length: usize) -> Result<(), isize> {
         let mut areas = self.areas.write();
-        self.munmap_locked(&mut areas, start, length)?;
-        drop(areas);
+        let released_frames = self.munmap_locked(&mut areas, start, length);
         #[cfg(target_arch = "loongarch64")]
         Self::flush_tlb_after_mapping_change();
         #[cfg(target_arch = "riscv64")]
         self.flush_tlb_targets();
+        drop(areas);
+        drop(released_frames);
         Ok(())
     }
 
     /// 取消映射
     /// 
-    /// 调用方需要持有 areas 写锁
+    /// 调用方需要持有 areas 写锁，并在全核 TLB 刷新完成后释放返回的页帧
     fn munmap_locked(
         &self,
         areas: &mut crate::sync::RwLockWriteGuard<'_, BTreeMap<VirtPageNum, Arc<Mutex<MapArea>>>>,
         start: usize,
         length: usize,
-    ) -> Result<(), isize> {
+    ) -> Vec<FrameTracker> {
         let end = start + length;
         let start_vpn = VirtAddr::from(start).std_floor();
         let end_vpn = VirtAddr::from(end).std_ceil();
@@ -1744,8 +1750,7 @@ impl MemorySet {
             areas.insert(key, Arc::new(Mutex::new(area)));
         }
 
-        drop(released_frames);
-        Ok(())
+        released_frames
     }
 
     /// 丢弃驻留页但保留虚拟映射。匿名页重新分配为零页，私有文件页重新
@@ -1890,7 +1895,7 @@ impl MemorySet {
 
         let pte_flags = PTEFlags::from_bits(permission.bits).unwrap();
         let mut covered_until = start_vpn;
-        let mut affected: Vec<VirtPageNum> = Vec::new();
+        let mut affected: Vec<(VirtPageNum, Arc<Mutex<MapArea>>)> = Vec::new();
         let mut permissions_tightened = false;
         // 整个操作在 areas 写锁下完成：校验、分裂、改权限、改 PTE 之间不会被
         // 其他结构修改打断，同时避免“读锁校验 -> 再写锁修改”的多次全表扫描。
@@ -1903,12 +1908,12 @@ impl MemorySet {
             if area.vpn_range.get_end() <= start_vpn {
                 break;
             }
-            affected.push(*key);
+            affected.push((*key, area_arc.clone()));
         }
         // 按升序做覆盖性/权限校验
         affected.reverse();
-        for key in &affected {
-            let area = areas.get(key).unwrap().lock();
+        for (_, area_arc) in &affected {
+            let area = area_arc.lock();
             let area_start = area.vpn_range.get_start();
             let area_end = area.vpn_range.get_end();
             if area.map_type == MapType::Guard || area_start > covered_until {
@@ -1941,11 +1946,12 @@ impl MemorySet {
             return Err(Errno::ENOMEM.as_isize());
         }
 
-        // 先按边界分裂，使后续设置权限的区域边界与请求一致
-        for key in affected.iter() {
-            Self::split_area_at(&mut areas, *key, end_vpn)?;
-            Self::split_area_at(&mut areas, *key, start_vpn)?;
-        }
+        // 只有首尾区域可能跨越请求边界。先分裂右边界，保证首尾为同一
+        // 区域时，原 key 对应的左半部分仍可继续按左边界分裂。
+        let first_key = affected.first().unwrap().0;
+        let last_key = affected.last().unwrap().0;
+        Self::split_area_at(&mut areas, last_key, end_vpn)?;
+        Self::split_area_at(&mut areas, first_key, start_vpn)?;
 
         // 分裂后，完整落在 [start_vpn, end_vpn) 内的区域其键必然在该区间内，
         // 只锁这些区域，不再遍历/锁全部 area。
@@ -1996,18 +2002,18 @@ impl MemorySet {
         let end_vpn = VirtAddr::from(end).std_ceil();
 
         let mut covered_until = start_vpn;
-        let mut affected: Vec<VirtPageNum> = Vec::new();
+        let mut affected: Vec<(VirtPageNum, Arc<Mutex<MapArea>>)> = Vec::new();
         let mut areas = self.areas.write();
         for (key, area_arc) in areas.range(..end_vpn).rev() {
             let area = area_arc.lock();
             if area.vpn_range.get_end() <= start_vpn {
                 break;
             }
-            affected.push(*key);
+            affected.push((*key, area_arc.clone()));
         }
         affected.reverse();
-        for key in &affected {
-            let area = areas.get(key).unwrap().lock();
+        for (_, area_arc) in &affected {
+            let area = area_arc.lock();
             let area_start = area.vpn_range.get_start();
             let area_end = area.vpn_range.get_end();
             if area.map_type == MapType::Guard || area_start > covered_until {
@@ -2030,10 +2036,10 @@ impl MemorySet {
             return Err(Errno::ENOMEM.as_isize());
         }
 
-        for key in affected.iter() {
-            Self::split_area_at(&mut areas, *key, end_vpn)?;
-            Self::split_area_at(&mut areas, *key, start_vpn)?;
-        }
+        let first_key = affected.first().unwrap().0;
+        let last_key = affected.last().unwrap().0;
+        Self::split_area_at(&mut areas, last_key, end_vpn)?;
+        Self::split_area_at(&mut areas, first_key, start_vpn)?;
         let target_arcs: Vec<Arc<Mutex<MapArea>>> =
             areas.range(start_vpn..end_vpn).map(|(_, a)| a.clone()).collect();
         let mut guards: Vec<_> = target_arcs.iter().map(|a| a.lock()).collect();

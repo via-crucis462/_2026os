@@ -62,6 +62,7 @@ impl PageTable {
             frames: vec![frame],
         }
     }
+    /* 弃用，可能有生命周期问题
     /// 从现有页表创建一个新的页表，复制内核高半的根项
     pub fn alias_of(other: &PageTable) -> Self {
         Self {
@@ -69,6 +70,7 @@ impl PageTable {
             frames: Vec::new(),
         }
     }
+    */
     /// 从token创建一个新的页表
     ///
     /// LA64根页表地址存储在CSR.PGDL或H，

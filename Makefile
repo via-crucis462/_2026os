@@ -4,6 +4,8 @@ export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
 MODE ?= release
 LOG ?= OFF
 RV_SMP ?= 1
+RV_IMAGE ?= sdcard-rv.img
+RV_MEM ?= 16G
 LA_SMP ?= 1
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
@@ -109,7 +111,7 @@ test-rv: build-user-rv copy-user-rv build-rv copy-rv
 	-kernel kernel-rv \
 	-m 16G -nographic -smp $(RV_SMP) \
 	-snapshot \
-	-bios default -drive file=sdcard-rv.img,if=none,format=raw,id=x0 \
+	-bios default -drive file=$(RV_IMAGE),if=none,format=raw,id=x0 \
 	-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 	-no-reboot \
 	-device virtio-net-device,netdev=net0 \
@@ -140,7 +142,7 @@ test-la-2k1000: build-user-la copy-user-la build-la copy-la
 	-machine virt \
 	-cpu la464 \
 	-kernel kernel-la-2k1000 \
-	-m 1G -nographic \
+	-m 16G -nographic \
 	-smp $(LA_SMP) \
 	-drive file=sdcard-la.img,if=none,format=raw,id=x0 \
 	-device virtio-blk-pci,drive=x0 \
@@ -155,8 +157,8 @@ debug-rv: build-user-rv copy-user-rv build-rv copy-rv
 	@rm -f kernel_output.log
 	@qemu-system-riscv64 -machine virt \
 	-kernel kernel-rv \
-	-m 1G -nographic -smp $(RV_SMP) \
-	-bios default -drive file=sdcard-rv.img,if=none,format=raw,id=x0 \
+	-m $(RV_MEM) -nographic -smp $(RV_SMP) \
+	-bios default -drive file=$(RV_IMAGE),if=none,format=raw,id=x0 \
 	-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 	-no-reboot \
 	-device virtio-net-device,netdev=net \

@@ -211,6 +211,7 @@ pub struct PollFd {
 const POLLIN: i16 = 0x001;
 const POLLOUT: i16 = 0x004;
 const POLLERR: i16 = 0x008;
+const POLLNVAL: i16 = 0x020;
 const POLLHUP: u16 = 0x0010;
 
 pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> isize {
@@ -218,10 +219,14 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
     if ufds_ptr == 0 && nfds > 0 {
         return EFAULT.as_isize(); // EFAULT
     }
+    // Linux rejects a pollfd array larger than the caller's open-file limit.
+    if nfds > current_task().unwrap().nofile_limit() {
+        return EINVAL.as_isize();
+    }
 
     // 解析超时时间
     let has_timeout = tmo_p != 0;
-    let mut deadline_ms: usize = 0;
+    let mut deadline_us: usize = 0;
     if has_timeout {
         let token = current_user_token();
         let timespec = {
@@ -238,26 +243,32 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         if timespec.tv_sec > MAX_PPOLL_TIMEOUT_SEC {
             return EINVAL.as_isize();
         }
-        let timeout_ms = timespec.tv_sec.saturating_mul(1000).saturating_add(timespec.tv_nsec / 1_000_000);
-        deadline_ms = get_time_ms().saturating_add(timeout_ms);
+        let timeout_us = timespec.tv_sec.saturating_mul(1_000_000)
+            .saturating_add((timespec.tv_nsec + 999) / 1_000);
+        deadline_us = get_time_us().saturating_add(timeout_us);
     } else {
-        deadline_ms = usize::MAX;
+        deadline_us = usize::MAX;
     }
+
+    // Read the temporary mask before taking the task lock.  Calling
+    // current_user_token() while task_inner is held recursively acquired the
+    // same lock and deadlocked ppoll's signal-mask case.
+    let mask_val = if _sigmask != 0 {
+        let token = current_user_token();
+        match try_translated_read(token, _sigmask as *const usize) {
+            Some(val) => Some(val),
+            None => return EFAULT.as_isize(),
+        }
+    } else {
+        None
+    };
 
     // 备份原始掩码，并应用临时掩码
     let task = current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     let original_mask = task_inner.blocked;
-    
-    if _sigmask != 0 {
-        let token = current_user_token();
-        let mask_val = {
-            if let Some(val) = try_translated_read(token, _sigmask as *const usize) {
-                val
-            } else {
-                return EFAULT.as_isize();
-            }
-        };
+
+    if let Some(mask_val) = mask_val {
         task_inner.blocked = SignalFlags::from_bits_truncate(mask_val as u64);
     }
     drop(task_inner);
@@ -266,7 +277,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
         {
             let task = current_task().unwrap();
             // --- 检查信号 (使用当前的临时掩码) ---
-            let task_inner = task.inner_exclusive_access();
+            let mut task_inner = task.inner_exclusive_access();
             let pending_bits = task_inner.pending.bits()
                 | task_inner.signal.exclusive_access().pending_flags().bits();
             let pending = pending_bits & !task_inner.blocked.bits();
@@ -274,9 +285,9 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
             let unmaskable = pending_bits & ((1 << (9 - 1)) | (1 << (19 - 1)));
 
             if (pending | unmaskable) != 0 {
-                //task_inner.signal_mask = original_mask;
                 debug!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
                          pending_bits, task_inner.blocked.bits());
+                task_inner.blocked = original_mask;
                 drop(task_inner); // 放锁
                 return EINTR.as_isize(); // EINTR
             }
@@ -302,6 +313,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
                     if let Some(pf) = try_translated_read(token, pollfd_ptr) {
                         pf
                     } else {
+                        task.inner_exclusive_access().blocked = original_mask;
                         return EFAULT.as_isize();
                     }
                 };
@@ -313,7 +325,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
                 let fd_usize = fd as usize;
                 
                 if fd_usize >= fd_table.len() || fd_table[fd_usize].file.is_none() {
-                    pollfd.revents = 0x008; // POLLERR
+                    pollfd.revents = POLLNVAL;
                     ready_count += 1;
                 } else {
                     let file = fd_table[fd_usize].file.as_ref().unwrap();
@@ -332,6 +344,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
                     }
                 }
                 if !try_translated_write(token, pollfd_ptr, pollfd) {
+                    task.inner_exclusive_access().blocked = original_mask;
                     return EFAULT.as_isize();
                 }
                 //trace!("[kernel] ppoll fd={} target_events=0x{:x} ready_revents=0x{:x}", pollfd.fd, pollfd.events, pollfd.revents);
@@ -346,14 +359,19 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
             }
             
             // 如果没找到事件，处理超时逻辑
-            if has_timeout && get_time_ms() >= deadline_ms {
+            if has_timeout && get_time_us() >= deadline_us {
                 let mut task_inner = task.inner_exclusive_access();
                 task_inner.blocked = original_mask; 
                 drop(task_inner);
                 return 0; // 超时返回 0
             }
         }
-        suspend_current_and_run_next();
+        if has_timeout {
+            let deadline_ns = deadline_us.saturating_mul(1_000);
+            crate::process::scheduler::nanosleep::sleep_current_until(deadline_ns);
+        } else {
+            suspend_current_and_run_next();
+        }
     }
 }
 pub fn sys_exit(exit_code: i32) -> ! {
@@ -2148,7 +2166,7 @@ pub fn sys_waitid(idtype: i32, id: i32, infop: *mut SigInfo, options: i32) -> is
         let task = current_task().unwrap();
         let proc = task.clone();
         let mut proc_inner = proc.inner_exclusive_access();
-        let token = current_user_token();
+        let token = proc_inner.get_user_token();
         let mut child_pid: usize = 0;
         let mut exit_code = 0;
         let mut child_idx: Option<usize> = None;
@@ -2199,6 +2217,7 @@ pub fn sys_waitid(idtype: i32, id: i32, infop: *mut SigInfo, options: i32) -> is
                     _pad1: 0,
                     _pad: [0; 12],
                 };
+                drop(proc_inner);
                 if try_translated_write(token, infop, info) {
                     return 0;
                 } else {
@@ -2236,13 +2255,21 @@ pub fn sys_waitid(idtype: i32, id: i32, infop: *mut SigInfo, options: i32) -> is
                 _pad: [0; 12],
             }
         };
+        // User-memory writes may resolve COW and obtain the current task
+        // lock.  Do not hold proc_inner across that operation.
+        drop(proc_inner);
         if !try_translated_write(token, infop, info) {
             return EFAULT.as_isize();
         }
 
         if options & WNOWAIT == 0 {
-            if let Some(idx) = child_idx {
-                proc_inner.children.remove(idx);
+            let mut proc_inner = proc.inner_exclusive_access();
+            if child_idx.is_some() {
+                if let Some(idx) = proc_inner.children.iter().position(|child| child.getpid() == child_pid) {
+                    proc_inner.children.remove(idx);
+                } else {
+                    return ECHILD.as_isize();
+                }
             } else {
                 panic!("sys_waitid: logic error, child_pid is set but child_idx is None?");
             }

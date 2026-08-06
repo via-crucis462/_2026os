@@ -325,11 +325,14 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> isize {
 
     match advice {
         MADV_DONTNEED => {
-            // Discard physical pages without removing the virtual mapping.
+            // 内存够大，直接不释放
+            ENOSYS.as_isize()
+            /*
             match mmap::do_madvise_dontneed(addr, len) {
                 Ok(()) => 0,
                 Err(errno) => errno,
             }
+             */
         }
         MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_FREE => {
             // 使用建议（优化用），伪实现
