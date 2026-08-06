@@ -70,11 +70,43 @@ impl File for EventFile {
     fn info_type(&self) { println!("eventfd"); }
     fn readable(&self) -> bool { *self.count.lock() > 0 }
     fn writable(&self) -> bool { true }
-    fn read(&self, _buf: UserBuffer) -> usize { 0 }
-    fn pread(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
-    fn write(&self, _buf: UserBuffer) -> usize { 0 }
-    fn raw_read_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
-    fn raw_write_at(&self, _offset: usize, _buf: UserBuffer) -> usize { 0 }
+    fn read(&self, buf: UserBuffer) -> usize {
+        // 睡眠等待至 eventfd 计数非零，然后取走整个计数
+        let value = loop {
+            let mut count = self.count.lock();
+            if *count == 0 {
+                drop(count);
+                crate::process::suspend_current_and_run_next();
+                continue;
+            }
+            let value = *count;
+            *count = 0;
+            break value;
+        };
+        let mut iter = buf.into_iter();
+        for i in 0..8 {
+            match iter.next() {
+                Some(b) => unsafe { *b = ((value >> (8 * i)) & 0xff) as u8 },
+                None => return i,
+            }
+        }
+        8
+    }
+    fn write(&self, buf: UserBuffer) -> usize {
+        let mut iter = buf.into_iter();
+        let mut value: u64 = 0;
+        for i in 0..8 {
+            match iter.next() {
+                Some(b) => value |= (unsafe { *b } as u64) << (8 * i),
+                None => return 0,
+            }
+        }
+        let mut count = self.count.lock();
+        *count = count.saturating_add(value);
+        8
+    }
+    fn raw_read_at(&self, _offset: usize, buf: UserBuffer) -> usize { self.read(buf) }
+    fn raw_write_at(&self, _offset: usize, buf: UserBuffer) -> usize { self.write(buf) }
     fn get_stat(&self) -> Stat {
         Stat {
             dev: 0, ino: 0, mode: 0, nlink: 1, uid: 0, gid: 0, rdev: 0, __pad: 0,

@@ -201,6 +201,13 @@ impl MemorySet {
             crate::arch::sbi::remote_sfence_vma_asid(remote_targets, self.asid());
         }
     }
+
+    /// 只刷新本核 TLB
+    ///
+    /// 用于“无效 -> 有效”的新映射和置脏位：远程核从未缓存过有效翻译
+    pub fn flush_tlb_local(&self) {
+        crate::arch::mm::flush_tlb_for_asid(self.asid());
+    }
     /// 快照所有区域（调试/只读遍历用），调用方自行 lock 每个区域。
     pub fn area_snapshot(&self) -> Vec<Arc<Mutex<MapArea>>> {
         self.areas.read().values().cloned().collect()
@@ -217,13 +224,16 @@ impl MemorySet {
         self.brk.load(Ordering::Relaxed) as usize
     }
 
-    /// 调整当前任务的 program break，并把堆区补充填满或收缩。
+    /// 调整当前任务的 program break，并把堆区补充填满或收缩
     pub fn change_program_brk(&self, addr: usize) -> Result<usize, i32> {
-        let old_brk = self.current_brk();
+        let mut areas = self.areas.write();
+        let old_brk = self.brk.load(Ordering::Relaxed) as usize;
         if addr == 0 {
+            drop(areas);
             return Ok(old_brk);
         }
-        if addr < self.start_brk() {
+        let start_brk = self.start_brk.load(Ordering::Relaxed) as usize;
+        if addr < start_brk {
             return Err(Errno::ENOMEM.as_isize() as i32);
         }
 
@@ -232,6 +242,7 @@ impl MemorySet {
         if old_top == new_top {
             // 同一页内移动，无需改动映射
             self.brk.store(addr as u64, Ordering::Relaxed);
+            drop(areas);
             return Ok(addr);
         }
 
@@ -240,48 +251,59 @@ impl MemorySet {
             if get_free_frames() < pages {
                 return Err(Errno::ENOMEM.as_isize() as i32);
             }
-            self.grow_heap(old_top.into(), new_top.into(), &self.brk, addr)?;
+            self.grow_heap_locked(&mut areas, old_top.into(), new_top.into(), start_brk)?;
         } else {
             // shrink_heap 的参数是 (旧堆顶, 新堆顶)：删除 [new_top, old_top) 区间。
-            self.shrink_heap(old_top.into(), new_top.into(), &self.brk, addr)?;
+            self.shrink_heap_locked(&mut areas, old_top.into(), new_top.into(), start_brk)?;
         }
+        self.brk.store(addr as u64, Ordering::Relaxed);
+        drop(areas);
         Ok(addr)
     }
 
-    /// 扩展堆区到 [from, to)（均已页对齐）：优先扩展现有堆顶区域，否则新建。
-    /// 在持有 areas 写锁时更新 brk，保证 brk 与堆区映射的一致性。
-    fn grow_heap(
+    /// 扩展堆区到 [from, to)
+    /// 
+    /// 优先扩展现有堆顶区域，否则新建
+    fn grow_heap_locked(
         &self,
+        areas: &mut crate::sync::RwLockWriteGuard<'_, BTreeMap<VirtPageNum, Arc<Mutex<MapArea>>>>,
         from: VirtAddr,
         to: VirtAddr,
-        brk: &AtomicU64,
-        new_brk: usize,
+        start_brk: usize,
     ) -> Result<(), i32> {
         let from_vpn = from.std_ceil();
         let to_vpn = to.std_ceil();
         if to_vpn <= from_vpn {
             return Ok(());
         }
-        if self.has_conflict(from.0, to.0 - from.0) {
+        let heap_start_vpn = VirtAddr::from(start_brk).std_ceil();
+        let mut target: Option<Arc<Mutex<MapArea>>> = None;
+        let mut conflict = false;
+        for area_arc in areas.values() {
+            let area = area_arc.lock();
+            if area.vpn_range.get_start() < heap_start_vpn {
+                continue;
+            }
+            let a_start = area.vpn_range.get_start();
+            let a_end = area.vpn_range.get_end();
+            let is_target =
+                (a_start <= from_vpn && a_end > from_vpn) || (a_end == from_vpn && a_start >= heap_start_vpn);
+            if is_target {
+                target = Some(area_arc.clone());
+            } else if a_start < to_vpn && a_end > from_vpn {
+                // 有其他区域横跨待扩展区间（例如 mmap 占位），按 Linux 语义返回 ENOMEM
+                conflict = true;
+            }
+        }
+        if conflict {
             return Err(Errno::ENOMEM.as_isize() as i32);
         }
-        let heap_start_vpn = VirtAddr::from(self.start_brk()).std_ceil();
-        let mut areas = self.areas.write();
-        let target = {
-            let mut found = None;
-            for area_arc in areas.values() {
-                let area = area_arc.lock();
-                if area.vpn_range.get_end() == from_vpn
-                    && area.vpn_range.get_start() >= heap_start_vpn
-                {
-                    found = Some(area_arc.clone());
-                    break;
-                }
-            }
-            found
-        };
         if let Some(target) = target {
             let mut area = target.lock();
+            if area.vpn_range.get_end() >= to_vpn {
+                // 堆顶区域已经覆盖目标范围，无需改动映射
+                return Ok(());
+            }
             let mut pt = self.page_table.write();
             area.append_to(&mut pt, to_vpn);
         } else {
@@ -298,61 +320,54 @@ impl MemorySet {
             drop(pt);
             areas.insert(key, Arc::new(Mutex::new(area)));
         }
-        brk.store(new_brk as u64, Ordering::Relaxed);
-        drop(areas);
         #[cfg(target_arch = "loongarch64")]
         Self::flush_tlb_after_mapping_change();
         Ok(())
     }
 
-    /// 收缩堆区，跨越空洞/分裂区域时整段移除。
-    /// 在持有 areas 写锁时更新 brk，保证 brk 与堆区映射的一致性。
-    fn shrink_heap(
+    /// 收缩堆区
+    /// 
+    /// 调用方持有 areas 写锁
+    fn shrink_heap_locked(
         &self,
+        areas: &mut crate::sync::RwLockWriteGuard<'_, BTreeMap<VirtPageNum, Arc<Mutex<MapArea>>>>,
         from: VirtAddr,
         to: VirtAddr,
-        brk: &AtomicU64,
-        new_brk: usize,
+        start_brk: usize,
     ) -> Result<(), i32> {
         let from_vpn = from.std_ceil();
         let to_vpn = to.std_ceil();
         if to_vpn >= from_vpn {
             return Ok(());
         }
-        let heap_start_vpn = VirtAddr::from(self.start_brk()).std_ceil();
+        let heap_start_vpn = VirtAddr::from(start_brk).std_ceil();
         let mut frames = Vec::new();
         let mut found = false;
         let mut empty_keys: Vec<VirtPageNum> = Vec::new();
-        {
-            let mut areas = self.areas.write();
-            for (key, area_arc) in areas.iter() {
-                let mut area = area_arc.lock();
-                let a_start = area.vpn_range.get_start();
-                let a_end = area.vpn_range.get_end();
-                if a_start >= from_vpn || a_end <= to_vpn || a_start < heap_start_vpn {
-                    continue;
-                }
-                found = true;
-                if a_start < to_vpn {
-                    // 区域跨越新的 brk 所在页：只删除 [to_vpn, a_end) 部分
-                    let mut pt = self.page_table.write();
-                    frames.extend(area.shrink_to(&mut pt, to_vpn));
-                } else {
-                    // 整块位于待收缩范围内
-                    let mut pt = self.page_table.write();
-                    frames.extend(area.unmap(&mut pt));
-                    area.resize(a_start, a_start);
-                }
-                if area.vpn_range.get_start() >= area.vpn_range.get_end() {
-                    empty_keys.push(*key);
-                }
+        for (key, area_arc) in areas.iter() {
+            let mut area = area_arc.lock();
+            let a_start = area.vpn_range.get_start();
+            let a_end = area.vpn_range.get_end();
+            if a_start >= from_vpn || a_end <= to_vpn || a_start < heap_start_vpn {
+                continue;
             }
-            for key in empty_keys.iter() {
-                areas.remove(key);
+            found = true;
+            if a_start < to_vpn {
+                // 区域跨越新的 brk 所在页：只删除 [to_vpn, a_end) 部分
+                let mut pt = self.page_table.write();
+                frames.extend(area.shrink_to(&mut pt, to_vpn));
+            } else {
+                // 整块位于待收缩范围内
+                let mut pt = self.page_table.write();
+                frames.extend(area.unmap(&mut pt));
+                area.resize(a_start, a_start);
             }
-            if found {
-                brk.store(new_brk as u64, Ordering::Relaxed);
+            if area.vpn_range.get_start() >= area.vpn_range.get_end() {
+                empty_keys.push(*key);
             }
+        }
+        for key in empty_keys.iter() {
+            areas.remove(key);
         }
         if !found {
             return Err(Errno::ENOMEM.as_isize() as i32);
@@ -1380,7 +1395,7 @@ impl MemorySet {
             }
         };
         if need_flush {
-            self.flush_tlb_targets();
+            self.flush_tlb_local();
         }
         need_flush
     }
@@ -1445,19 +1460,6 @@ impl MemorySet {
         true
     }
 
-    /// 检查目标地址段是否与已有的映射冲突(存在交集)
-    fn has_conflict(&self, start: usize, len: usize) -> bool {
-        let target_start = VirtAddr::from(start).std_floor();
-        let target_end = VirtAddr::from(start + len).std_ceil();
-        let areas = self.areas.read();
-        for area_arc in areas.values() {
-            let area = area_arc.lock();
-            if target_end > area.vpn_range.get_start() && target_start < area.vpn_range.get_end() {
-                return true;
-            }
-        }
-        false
-    }
     /// mmap 实现
     /// 
     /// 当前实现下所有映射都为懒分配，
@@ -1507,99 +1509,75 @@ impl MemorySet {
             Some(file_inner.ok_or_else(|| Errno::EBADF.as_isize())?)
         };
 
-        // 并发安全：addr==0 时多个线程可能同时选中同一空隙，插入时发现
-        // 起始键已被占用则重试寻找下一个空隙（Linux 同样会在竞争后换地址）。
-        let mut start_va = addr;
-        for _attempt in 0..16 {
-            // 找合适起始地址
-            if start_va == 0 {
-                if let Some(new_addr) = self.find_free_area(length) {
-                    start_va = new_addr;
-                } else {
+        // 地址选择与插入在同一次 areas 写锁内完成
+        let mut areas = self.areas.write();
+        let start_va = if addr == 0 {
+            match Self::find_free_area_locked(length, &areas) {
+                Some(new_addr) => new_addr,
+                None => {
                     error!(
                         "mmap failed: no suitable free area found for length {:#x}",
                         length
                     );
                     return Err(Errno::EEXIST.as_isize());
                 }
-            } else if self.has_conflict(start_va, length) {
-                // 检查冲突
+            }
+        } else {
+            if Self::has_conflict_locked(&areas, addr, length) {
                 if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED) {
-                    if self.munmap(start_va, length).is_err() {
+                    if self.munmap_locked(&mut areas, addr, length).is_err() {
                         return Err(Errno::EEXIST.as_isize());
                     }
                 } else {
                     return Err(Errno::EEXIST.as_isize());
                 }
             }
+            addr
+        };
 
-            let inserted = if is_anonymous {
-                // 匿名 mmap 只创建区域元数据。首次访问由 handle_page_fault
-                // 分配并清零一个物理页，不再在这里遍历整个线程栈。
-                let mut area = MapArea::new(
-                    VirtAddr::from(start_va),
-                    VirtAddr::from(start_va + length),
-                    MapType::Framed,
-                    permission,
-                    PageSize::Page4K,
-                );
-                area.is_shared = is_shared;
-                if is_shared {
-                    area.anonymous_shared_frames =
-                        Some(Arc::new(MPSafeCell::new(BTreeMap::new())));
-                }
-                let key = area.vpn_range.get_start();
-                let mut areas = self.areas.write();
-                if areas.contains_key(&key) {
-                    false
-                } else {
-                    areas.insert(key, Arc::new(Mutex::new(area)));
-                    true
-                }
-            } else {
-                let file = file_opt.clone().unwrap();
-                let mut area = MapArea::new(
-                    VirtAddr::from(start_va),
-                    VirtAddr::from(start_va + length),
-                    MapType::File,
-                    permission,
-                    PageSize::Page4K,
-                );
-                area.backing_file = Some((file, page_offset));
-                area.is_shared = is_shared;
-                let key = area.vpn_range.get_start();
-                let mut areas = self.areas.write();
-                if areas.contains_key(&key) {
-                    false
-                } else {
-                    areas.insert(key, Arc::new(Mutex::new(area)));
-                    true
-                }
-            };
-
-            if inserted {
-                #[cfg(target_arch = "loongarch64")]
-                Self::flush_tlb_after_mapping_change();
-                return Ok(start_va);
+        if is_anonymous {
+            // 匿名 mmap 只创建区域元数据。首次访问由 handle_page_fault
+            // 分配并清零一个物理页，不再在这里遍历整个线程栈。
+            let mut area = MapArea::new(
+                VirtAddr::from(start_va),
+                VirtAddr::from(start_va + length),
+                MapType::Framed,
+                permission,
+                PageSize::Page4K,
+            );
+            area.is_shared = is_shared;
+            if is_shared {
+                area.anonymous_shared_frames =
+                    Some(Arc::new(MPSafeCell::new(BTreeMap::new())));
             }
-
-            // 并发撞地址：addr==0 时重新找空隙；MAP_FIXED 保留原地址重试。
-            start_va = if addr == 0 { 0 } else { addr };
+            let key = area.vpn_range.get_start();
+            areas.insert(key, Arc::new(Mutex::new(area)));
+        } else {
+            let file = file_opt.clone().unwrap();
+            let mut area = MapArea::new(
+                VirtAddr::from(start_va),
+                VirtAddr::from(start_va + length),
+                MapType::File,
+                permission,
+                PageSize::Page4K,
+            );
+            area.backing_file = Some((file, page_offset));
+            area.is_shared = is_shared;
+            let key = area.vpn_range.get_start();
+            areas.insert(key, Arc::new(Mutex::new(area)));
         }
-        error!(
-            "mmap failed: too many concurrent collisions for length {:#x}",
-            length
-        );
-        Err(Errno::EEXIST.as_isize())
+
+        #[cfg(target_arch = "loongarch64")]
+        Self::flush_tlb_after_mapping_change();
+        Ok(start_va)
     }
 
     /// 在当前地址空间中寻找一个长度为 length 的空闲连续区域
     /// 找的是逻辑区域，与实际物理页无关
-    pub fn find_free_area(&self, length: usize) -> Option<usize> {
-        //println!("[kernel] find_free_area: finding free area for length 0x{:x}", length);
-        // 将长度向上对齐到页，似乎没必要
-        // let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-
+    fn find_free_area_locked(
+        length: usize,
+        areas: &crate::sync::RwLockWriteGuard<'_, BTreeMap<VirtPageNum, Arc<Mutex<MapArea>>>>,
+    ) -> Option<usize> {
         let mut current_addr: usize = USER_APP_BASE + (USER_APP_MAX_SIZE - USER_APP_BASE) / 2;
         // 为高地址用户栈预留顶部空间，避免 mmap 和初始栈冲突。
         // loongarch的栈位置固定，所以上限可以直接计算
@@ -1608,7 +1586,6 @@ impl MemorySet {
         #[cfg(target_arch = "riscv64")]
         let limit_addr: usize = USER_APP_MAX_SIZE;
 
-        let areas = self.areas.read();
         for area_arc in areas.values() {
             let area = area_arc.lock();
             let area_start: usize = area.vpn_range.get_start().0 * PAGE_SIZE;
@@ -1629,9 +1606,48 @@ impl MemorySet {
             None
         }
     }
+
+    /// 检查目标地址段是否与已有的映射冲突（调用方需持有 areas 写锁）
+    fn has_conflict_locked(
+        areas: &crate::sync::RwLockWriteGuard<'_, BTreeMap<VirtPageNum, Arc<Mutex<MapArea>>>>,
+        start: usize,
+        len: usize,
+    ) -> bool {
+        let target_start = VirtAddr::from(start).std_floor();
+        let target_end = VirtAddr::from(start + len).std_ceil();
+        for area_arc in areas.values() {
+            let area = area_arc.lock();
+            if target_end > area.vpn_range.get_start()
+                && target_start < area.vpn_range.get_end()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// munmap 实现
     /// 现在的实现允许取消映射包括堆区等，堆区现由单独字段维护
     pub fn munmap(&self, start: usize, length: usize) -> Result<(), isize> {
+        let mut areas = self.areas.write();
+        self.munmap_locked(&mut areas, start, length)?;
+        drop(areas);
+        #[cfg(target_arch = "loongarch64")]
+        Self::flush_tlb_after_mapping_change();
+        #[cfg(target_arch = "riscv64")]
+        self.flush_tlb_targets();
+        Ok(())
+    }
+
+    /// 取消映射
+    /// 
+    /// 调用方需要持有 areas 写锁
+    fn munmap_locked(
+        &self,
+        areas: &mut crate::sync::RwLockWriteGuard<'_, BTreeMap<VirtPageNum, Arc<Mutex<MapArea>>>>,
+        start: usize,
+        length: usize,
+    ) -> Result<(), isize> {
         let end = start + length;
         let start_vpn = VirtAddr::from(start).std_floor();
         let end_vpn = VirtAddr::from(end).std_ceil();
@@ -1640,104 +1656,95 @@ impl MemorySet {
         let mut new_areas: Vec<MapArea> = Vec::new();
         let mut released_frames = Vec::new();
         let mut empty_keys: Vec<VirtPageNum> = Vec::new();
-        // (旧键, 新键)：区域的起始地址被前移时，需要把 BTreeMap 键一起更新，
-        // 否则键序与区域实际区间不一致，find_free_area 会算出“假空洞”。
+        // 起始地址变化后需要重新插入表
         let mut rekey: Vec<(VirtPageNum, VirtPageNum)> = Vec::new();
 
-        {
-            let mut areas = self.areas.write();
-            for (key, area_arc) in areas.iter() {
-                let mut area = area_arc.lock();
-                let a_start = area.vpn_range.get_start();
-                let a_end = area.vpn_range.get_end();
+        for (key, area_arc) in areas.iter() {
+            let mut area = area_arc.lock();
+            let a_start = area.vpn_range.get_start();
+            let a_end = area.vpn_range.get_end();
 
-                // 检查是否有交集
-                if a_start < end_vpn && a_end > start_vpn {
-                    let delete_left = a_start >= start_vpn; // 目标区域覆盖了当前块的左侧
-                    let delete_right = a_end <= end_vpn; // 目标区域覆盖了当前块的右侧
+            // 检查是否有交集
+            if a_start < end_vpn && a_end > start_vpn {
+                let delete_left = a_start >= start_vpn; // 目标区域覆盖了当前块的左侧
+                let delete_right = a_end <= end_vpn; // 目标区域覆盖了当前块的右侧
 
-                    let step = area.page_size.num_pages();
-                    if delete_left && delete_right {
-                        // 情况1：All（当前块被目标区域完全包裹，全部删掉）
-                        let mut pt = self.page_table.write();
-                        let mut vpn = a_start;
-                        while vpn < a_end {
-                            if let Some(frame) = area.unmap_one(&mut pt, vpn) {
-                                released_frames.push(frame);
-                            }
-                            vpn.step_by(step);
+                let step = area.page_size.num_pages();
+                if delete_left && delete_right {
+                    // 情况1：All（当前块被目标区域完全包裹，全部删掉）
+                    let mut pt = self.page_table.write();
+                    let mut vpn = a_start;
+                    while vpn < a_end {
+                        if let Some(frame) = area.unmap_one(&mut pt, vpn) {
+                            released_frames.push(frame);
                         }
-                        area.resize(a_start, a_start); // 长度设为0，稍后统一清理
-                        empty_keys.push(*key);
-                    } else if !delete_left && !delete_right {
-                        // 情况2：Split（目标区域在当前块中间，一分为二）
-                        // 2.1 清理中间被 unmap 的页表和物理页
-                        let mut pt = self.page_table.write();
-                        for vpn in VPNRange::new(start_vpn, end_vpn) {
-                            if let Some(frame) = area.unmap_one(&mut pt, vpn) {
-                                released_frames.push(frame);
-                            }
-                        }
-                        // 2.2 切出右半部分保留的物理帧
-                        let right_frames = area.data_frames.split_off(&end_vpn);
-                        // 2.3 缩短当前块，作为左半部分
-                        area.resize(a_start, start_vpn);
-                        // 2.4 新建右半部分
-                        let mut right_area = area.clone_meta_with_new_range(end_vpn, a_end);
-                        right_area.data_frames = right_frames;
-                        new_areas.push(right_area);
-                    } else if delete_left {
-                        // 情况3：Inc_Left（删掉左边部分）
-                        let mut pt = self.page_table.write();
-                        let mut vpn = a_start;
-                        while vpn < end_vpn {
-                            if let Some(frame) = area.unmap_one(&mut pt, vpn) {
-                                released_frames.push(frame);
-                            }
-                            vpn.step_by(step);
-                        }
-                        area.resize(end_vpn, a_end);
-                        rekey.push((*key, end_vpn));
-                    } else if delete_right {
-                        // 情况4：Inc_Right（删掉右边部分）
-                        let mut pt = self.page_table.write();
-                        let mut vpn = start_vpn;
-                        while vpn < a_end {
-                            if let Some(frame) = area.unmap_one(&mut pt, vpn) {
-                                released_frames.push(frame);
-                            }
-                            vpn.step_by(step);
-                        }
-                        area.resize(a_start, start_vpn);
+                        vpn.step_by(step);
                     }
+                    area.resize(a_start, a_start); // 长度设为0，稍后统一清理
+                    empty_keys.push(*key);
+                } else if !delete_left && !delete_right {
+                    // 情况2：Split（目标区域在当前块中间，一分为二）
+                    // 2.1 清理中间被 unmap 的页表和物理页
+                    let mut pt = self.page_table.write();
+                    for vpn in VPNRange::new(start_vpn, end_vpn) {
+                        if let Some(frame) = area.unmap_one(&mut pt, vpn) {
+                            released_frames.push(frame);
+                        }
+                    }
+                    // 2.2 切出右半部分保留的物理帧
+                    let right_frames = area.data_frames.split_off(&end_vpn);
+                    // 2.3 缩短当前块，作为左半部分
+                    area.resize(a_start, start_vpn);
+                    // 2.4 新建右半部分
+                    let mut right_area = area.clone_meta_with_new_range(end_vpn, a_end);
+                    right_area.data_frames = right_frames;
+                    new_areas.push(right_area);
+                } else if delete_left {
+                    // 情况3：Inc_Left（删掉左边部分）
+                    let mut pt = self.page_table.write();
+                    let mut vpn = a_start;
+                    while vpn < end_vpn {
+                        if let Some(frame) = area.unmap_one(&mut pt, vpn) {
+                            released_frames.push(frame);
+                        }
+                        vpn.step_by(step);
+                    }
+                    area.resize(end_vpn, a_end);
+                    rekey.push((*key, end_vpn));
+                } else if delete_right {
+                    // 情况4：Inc_Right（删掉右边部分）
+                    let mut pt = self.page_table.write();
+                    let mut vpn = start_vpn;
+                    while vpn < a_end {
+                        if let Some(frame) = area.unmap_one(&mut pt, vpn) {
+                            released_frames.push(frame);
+                        }
+                        vpn.step_by(step);
+                    }
+                    area.resize(a_start, start_vpn);
                 }
-            }
-
-            // 删除长度为0的区域
-            for key in empty_keys.iter() {
-                areas.remove(key);
-            }
-
-            // 起始地址前移的区域：按新起始地址重新入键
-            for (old_key, new_key) in rekey.iter() {
-                if let Some(area_arc) = areas.remove(old_key) {
-                    areas.insert(*new_key, area_arc);
-                }
-            }
-
-            // 插入劈开产生的新区域
-            for area in new_areas.drain(..) {
-                let key = area.vpn_range.get_start();
-                areas.insert(key, Arc::new(Mutex::new(area)));
             }
         }
 
-        #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
-        #[cfg(target_arch = "riscv64")]
-        self.flush_tlb_targets();
-        drop(released_frames);
+        // 删除长度为0的区域
+        for key in empty_keys.iter() {
+            areas.remove(key);
+        }
 
+        // 起始地址前移的区域：按新起始地址重新入键
+        for (old_key, new_key) in rekey.iter() {
+            if let Some(area_arc) = areas.remove(old_key) {
+                areas.insert(*new_key, area_arc);
+            }
+        }
+
+        // 插入劈开产生的新区域
+        for area in new_areas.drain(..) {
+            let key = area.vpn_range.get_start();
+            areas.insert(key, Arc::new(Mutex::new(area)));
+        }
+
+        drop(released_frames);
         Ok(())
     }
 
@@ -1799,8 +1806,8 @@ impl MemorySet {
         let old_end_vpn = VirtAddr::from(old_addr + old_size).std_ceil();
         let new_end_vpn = VirtAddr::from(old_addr + new_size).std_ceil();
 
+        let mut areas = self.areas.write();
         let area_arc = {
-            let areas = self.areas.read();
             areas
                 .values()
                 .find(|a| {
@@ -1814,7 +1821,7 @@ impl MemorySet {
         .ok_or(Errno::ENOMEM.as_isize())?;
 
         // 扩展区间必须空闲，否则无法原地扩大
-        if self.has_conflict(old_addr + old_size, new_size - old_size) {
+        if Self::has_conflict_locked(&areas, old_addr + old_size, new_size - old_size) {
             return Err(Errno::ENOMEM.as_isize());
         }
 
@@ -2087,6 +2094,8 @@ impl MemorySet {
                 }
             }
 
+            #[cfg(target_arch = "riscv64")]
+            self.flush_tlb_local();
             #[cfg(target_arch = "loongarch64")]
             {
                 Self::flush_tlb_after_mapping_change();
@@ -2155,6 +2164,8 @@ impl MemorySet {
             drop(pt);
             drop(area);
             drop(areas);
+            #[cfg(target_arch = "riscv64")]
+            self.flush_tlb_local();
             #[cfg(target_arch = "loongarch64")]
             Self::flush_tlb_after_mapping_change();
             // trace!("[kernel] User stack dynamically expanded down to {:#x}", bad_addr);

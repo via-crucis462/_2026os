@@ -231,6 +231,7 @@ pub(crate) fn advance_cfs_min_vruntime(cpu_id: usize) {
 /// 唤醒阻塞任务，并重新加入它原先所属 CPU 的运行队列。 
 /// 如果任务不是阻塞状态，则打印警告信息并忽略。
 pub fn wake_up_task(task: Arc<TaskControlBlock>) {
+	let mut warned = false;
 	let should_enqueue = loop {
 		let mut inner = task.inner_exclusive_access();
 		if matches!(inner.state, TaskStatus::Blocked) {
@@ -238,15 +239,24 @@ pub fn wake_up_task(task: Arc<TaskControlBlock>) {
 			break true;
 		} else if inner.state == TaskStatus::BlockSaving {
 			// 原本实现没有 loop，直接返回 false ，似乎会把 BlockSaving 的任务给直接丢弃掉
-			// 添加一个 loop 以及调试信息
-			println!(
-				"[kernel] wake_up_task: task {} is saving context, current state: {:?}",
-				task.getpid(), inner.state
-			);
+			let pid = task.getpid();
+			let state = inner.state;
+			drop(inner);
+			if !warned {
+				warned = true;
+				println!(
+					"[kernel] wake_up_task: task {} is saving context, current state: {:?}",
+					pid, state
+				);
+			}
+			core::hint::spin_loop();
 		} else {
+			let pid = task.getpid();
+			let state = inner.state;
+			drop(inner);
 			warn!(
 				"[kernel] wake_up_task: task {} is not blocked, current state: {:?}",
-				task.getpid(), inner.state
+				pid, state
 			);
 			break false;
 		}
@@ -276,5 +286,13 @@ pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
 			inner.need_resched = false;
 		}
 		return Some(task);
+	}
+}
+
+/// 调试用：打印每个 CPU 本地运行队列的可运行任务数。
+pub fn debug_print_rq_lengths() {
+	for (cpu_id, rq) in RQ_ARRAY.iter().enumerate() {
+		let nr = rq.inner_exclusive_access().nr_running;
+		println!("[RQ-DBG] cpu={} nr_running={}", cpu_id, nr);
 	}
 }

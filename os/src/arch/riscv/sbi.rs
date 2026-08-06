@@ -2,9 +2,7 @@
 
 #![allow(unused)]
 
-use crate::sync::MPSafeCell;
 use core::arch::asm;
-use lazy_static::*;
 
 // 如果用qemu8，下列需要修改
 // const SBI_SET_TIMER: usize = 0;//qemu7
@@ -27,78 +25,39 @@ const SBI_HSM: usize = 0x48534D;
 const SBI_EXT_IPI: usize = 0x735049;
 const SBI_IPI_SEND_IPI: usize = 0;
 
-struct SBICaller{}
-
-impl SBICaller {
-    #[allow(unused)]
-    pub fn call(&mut self, which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
-        let mut ret;
-        unsafe {
-            asm!(
-                "ecall",
-                inlateout("x10") arg0 => ret,
-                in("x11") arg1,
-                in("x12") arg2,
-                in("x16") 0,
-                in("x17") which,
-            );
-        }
-        ret
-    }
-    pub fn call_ext(&mut self, which: usize, ext: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
-        let mut ret;
-        unsafe {
-            asm!(
-                "ecall",
-                inlateout("x10") arg0 => ret,
-                in("x11") arg1,
-                in("x12") arg2,
-                in("x16") ext,
-                in("x17") which,
-            );
-        }
-        ret
-    }
-    pub fn call_ext5(
-        &mut self,
-        which: usize,
-        ext: usize,
-        arg0: usize,
-        arg1: usize,
-        arg2: usize,
-        arg3: usize,
-        arg4: usize,
-    ) -> usize {
-        let mut ret;
-        unsafe {
-            asm!(
-                "ecall",
-                inlateout("x10") arg0 => ret,
-                in("x11") arg1,
-                in("x12") arg2,
-                in("x13") arg3,
-                in("x14") arg4,
-                in("x16") ext,
-                in("x17") which,
-            );
-        }
-        ret
-    }
-}
-
-lazy_static! {
-    static ref SBI_CALLER: MPSafeCell<SBICaller> = MPSafeCell::new(SBICaller{});
-}
-
 /// general sbi call
 #[inline(always)]
 pub fn sbi_call(which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
-    SBI_CALLER.exclusive_access().call(which, arg0, arg1, arg2)
+    let mut ret;
+    unsafe {
+        asm!(
+            "ecall",
+            inlateout("x10") arg0 => ret,
+            in("x11") arg1,
+            in("x12") arg2,
+            in("x16") 0,
+            in("x17") which,
+            options(nostack),
+        );
+    }
+    ret
 }
 
 #[inline(always)]
 pub fn sbi_call_ext(which: usize, ext: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
-    SBI_CALLER.exclusive_access().call_ext(which, ext, arg0, arg1, arg2)
+    let mut ret;
+    unsafe {
+        asm!(
+            "ecall",
+            inlateout("x10") arg0 => ret,
+            in("x11") arg1,
+            in("x12") arg2,
+            in("x16") ext,
+            in("x17") which,
+            options(nostack),
+        );
+    }
+    ret
 }
 
 #[inline(always)]
@@ -111,9 +70,21 @@ pub fn sbi_call_ext5(
     arg3: usize,
     arg4: usize,
 ) -> usize {
-    SBI_CALLER
-        .exclusive_access()
-        .call_ext5(which, ext, arg0, arg1, arg2, arg3, arg4)
+    let mut ret;
+    unsafe {
+        asm!(
+            "ecall",
+            inlateout("x10") arg0 => ret,
+            in("x11") arg1,
+            in("x12") arg2,
+            in("x13") arg3,
+            in("x14") arg4,
+            in("x16") ext,
+            in("x17") which,
+            options(nostack),
+        );
+    }
+    ret
 }
 
 
@@ -143,7 +114,8 @@ pub fn send_ipi(mask: usize) {
 }
 
 pub fn start_hart(hart_id: usize, start_addr: usize, opaque: usize) {
-    sbi_call(SBI_HSM, hart_id, start_addr, opaque);
+    let ret = sbi_call(SBI_HSM, hart_id, start_addr, opaque);
+    println!("[sbi-debug] start_hart({}) addr={:#x} ret={:#x}", hart_id, start_addr, ret);
 }
 
 pub fn sbi_wakeup_hart(hart_id: usize) {

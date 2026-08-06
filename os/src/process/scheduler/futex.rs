@@ -19,3 +19,23 @@ pub(crate) fn get_futex_wait_queue(uaddr: usize) -> Arc<Mutex<WaitQueue>> {
 		.or_insert_with(|| Arc::new(Mutex::new(WaitQueue::new())))
 		.clone()
 }
+
+/// 调试用：打印所有 futex 等待队列的长度。
+pub fn debug_print_futex_queues() {
+	let queues = FUTEX_WAIT_QUEUES.lock();
+	if queues.is_empty() {
+		println!("[FUTEX-DBG] no futex queues");
+		return;
+	}
+	for (key, queue) in queues.iter() {
+		let guard = queue.lock();
+		let len = guard.len();
+		if len > 0 {
+			let tids = guard.get_tids();
+			println!(
+				"[FUTEX-DBG] key={:#x} waiters={} tids={:?}",
+				key, len, tids
+			);
+		}
+	}
+}
