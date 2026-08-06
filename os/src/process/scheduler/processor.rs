@@ -128,7 +128,7 @@ pub fn run_tasks() {
             let next_token = task_inner
                 .mm
                 .as_ref()
-                .map(|mm| mm.read().token())
+                .map(|mm| mm.token())
                 .unwrap_or_else(kernel_token);
             let next_task_cx_ptr = &task_inner.thread.task_ctx as *const TaskContext;
             drop(task_inner);

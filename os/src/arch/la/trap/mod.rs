@@ -118,7 +118,7 @@ pub fn trap_from_kernel() -> ! {
             error!("[kernel][panic] current task has no user mm");
             loop {}
         };
-        let memory_set = mm.exclusive_access();
+        let memory_set = mm;
         let heap_bottom = memory_set.start_brk();
         error!(
             "[kernel][panic] current task snapshot: pid={}, tid={}, heap_bottom=0x{:x}, program_brk=0x{:x}",
@@ -619,7 +619,7 @@ pub fn trap_handler() -> ! {
                     exit_current_and_run_next(-11);
                     panic!("unreachable: exited task without mm");
                 };
-                let mut memory_set = mm.exclusive_access();
+                let memory_set = mm;
                 let sp = current_trap_cx().r[3];
                 let vpn = VirtAddr::from(badv).std_floor();
                 if ecode == 4 {
@@ -748,7 +748,7 @@ pub fn trap_handler() -> ! {
                         exit_current_and_run_next(-11);
                         panic!("unreachable: exited task without mm");
                     };
-                    let memory_set = mm.exclusive_access();
+                    let memory_set = mm;
                     let heap_bottom = memory_set.start_brk();
                     trace!(
                         "[kernel] trap_handler: pid={}, tid={}, heap_bottom=0x{:x}, program_brk=0x{:x}",

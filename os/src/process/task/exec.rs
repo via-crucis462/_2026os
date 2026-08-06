@@ -410,7 +410,7 @@ impl TaskStruct {
 		let mut trap_cx = TrapContext::app_init_context(
 			final_entry_point,
 			user_sp,
-			KERNEL_SPACE.exclusive_access().token(),
+			KERNEL_SPACE.token(),
 			kernel_stack_top,
 			trap_handler as *const () as usize,
 		);
@@ -462,13 +462,13 @@ impl TaskStruct {
 			}
 			#[cfg(target_arch = "riscv64")]
 			if let Some(old_mm) = inner.mm.as_ref() {
-				old_mm.read().flush_tlb_targets();
+				old_mm.flush_tlb_targets();
 			}
 			#[cfg(target_arch = "riscv64")]
 			crate::mm::switch_mm(memory_set.token());
 			let old_signal = inner.signal.clone();
 			inner.thread.trap_ctx = trap_cx_addr;
-			inner.mm = Some(Arc::new(spin::RwLock::new(memory_set)));
+			inner.mm = Some(Arc::new(memory_set));
 			inner.on_main_hart = on_main_hart;
 			inner.exe_path = executable_path;
 			inner.signal = Arc::new(MPSafeCell::new(Signal::fork_from(

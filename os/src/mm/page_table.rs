@@ -345,8 +345,7 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
                     return Vec::new();
                 };
                 let sp = crate::task::current_trap_cx().get_sp();
-                let mut memory = mm.write();
-                if memory.handle_page_fault(start, sp) {
+                if mm.handle_page_fault(start, sp) {
                     let (pte, size) = page_table.find_pte(vpn).unwrap();
                     (pte.ppn(), size)
                 } else {
@@ -446,9 +445,7 @@ pub fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
         return false;
     };
     let sp = crate::task::current_trap_cx().get_sp();
-    let result = mm
-        .write()
-        .ensure_readable_user_range(ptr, len, sp);
+    let result = mm.ensure_readable_user_range(ptr, len, sp);
     result
 }
 
@@ -495,9 +492,7 @@ pub fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
         return false;
     };
     let sp = crate::task::current_trap_cx().get_sp();
-    let result = mm
-        .write()
-        .ensure_writable_user_range(ptr, len, sp);
+    let result = mm.ensure_writable_user_range(ptr, len, sp);
     result
 }
 

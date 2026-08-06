@@ -184,7 +184,7 @@ pub fn sys_mremap(
             .cloned()
             .ok_or(EINVAL.as_isize());
         if let Ok(mm) = mm {
-            let ret = mm.write().mremap_inplace(old_addr, old_sz, new_sz);
+            let ret = mm.mremap_inplace(old_addr, old_sz, new_sz);
             if let Ok(addr) = ret {
                 return addr as isize;
             }
@@ -269,15 +269,18 @@ pub fn sys_mincore(addr: usize, len: usize, vec: *mut u8) -> isize {
         mm.clone()
     };
     let residency = {
-        let memory = mm.read();
         let mut result = alloc::vec::Vec::with_capacity(page_count);
         for index in 0..page_count {
             let page_addr = addr + index * PAGE_SIZE;
             let vpn = crate::mm::VirtAddr::from(page_addr).std_floor();
-            if !memory.areas().iter().any(|area| area.contains(vpn)) {
+            let in_area = {
+                let areas = mm.areas.read();
+                areas.values().any(|a| a.lock().contains(vpn))
+            };
+            if !in_area {
                 return ENOMEM.as_isize();
             }
-            let resident = memory
+            let resident = mm
                 .translate(vpn)
                 .map(|pte| pte.is_valid())
                 .unwrap_or(false);
