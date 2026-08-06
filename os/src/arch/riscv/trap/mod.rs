@@ -145,9 +145,9 @@ pub fn trap_handler() -> ! {
                     );
                 }
             }*/
-            crate::timer::check_timers();
-            net_poll();
-            crate::mm::mmap::tick_sync();
+            // crate::timer::check_timers();
+            // net_poll();
+            // crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
         }
         Trap::Exception(Exception::StorePageFault)
@@ -168,23 +168,22 @@ pub fn trap_handler() -> ! {
                     break 'fault;
                 };
                 let files = task.inner_exclusive_access().files.clone();
-                let mut memory = mm.exclusive_access();
 
                 // 【修改 1】：获取当前的栈指针 SP
                 let sp = current_trap_cx().x[2];
                 let vpn = VirtAddr::from(stval).std_floor();
                 //
                 if scause.cause() == Trap::Exception(Exception::StorePageFault)
-                    && memory.set_pte_dirty(vpn)
+                    && mm.set_pte_dirty(vpn)
                 {
                     break 'fault;
-                } else if memory.handle_cow_fault(stval) {
+                } else if mm.handle_cow_fault(stval) {
                     info!("[WATCHDOG][COW] : {:#x}, PC: {:#x}", stval, sepc);
                     break 'fault;
-                } else if memory.handle_page_fault(stval, sp) {
+                } else if mm.handle_page_fault(stval, sp) {
                     info!("[WATCHDOG] : {:#x}, PC: {:#x}", stval, sepc);
                     break 'fault;
-                } else if memory.check_mmap_page_fault(stval){
+                } else if mm.check_mmap_page_fault(stval){
                     error!("[WATCHDOG][BUS] : {:#x}, PC: {:#x}", stval, sepc);
                     error!(
                         "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
@@ -217,13 +216,13 @@ pub fn trap_handler() -> ! {
                     let bad_vpn = VirtAddr::from(stval).std_floor();
                     let retry = match scause.cause() {
                         Trap::Exception(Exception::InstructionPageFault) => {
-                            memory.pte_satisfies(bad_vpn, false, false, true)
+                            mm.pte_satisfies(bad_vpn, false, false, true)
                         }
                         Trap::Exception(Exception::LoadPageFault) => {
-                            memory.pte_satisfies(bad_vpn, true, false, false)
+                            mm.pte_satisfies(bad_vpn, true, false, false)
                         }
                         Trap::Exception(Exception::StorePageFault) => {
-                            memory.pte_satisfies(bad_vpn, false, true, false)
+                            mm.pte_satisfies(bad_vpn, false, true, false)
                         }
                         _ => false,
                     };
@@ -232,7 +231,6 @@ pub fn trap_handler() -> ! {
                     }
 
                     // 【新增】检查 userfaultfd 注册范围
-                    drop(memory);
                 let files_guard = files.exclusive_access();
                 let fd_table = &files_guard.fds;
                 let mut uffd_handled = false;

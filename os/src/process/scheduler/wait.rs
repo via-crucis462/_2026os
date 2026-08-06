@@ -99,16 +99,31 @@ where
 }
 
 pub fn wake_up_one(queue: &Mutex<WaitQueue>) -> bool {
-    if let Some(task) = queue.lock().pop_front() {
-        while task.inner_exclusive_access().state == TaskStatus::BlockSaving {
-            //println!("wake_up_one: task is still saving context");
+    loop {
+        let Some(task) = queue.lock().pop_front() else {
+            return false;
+        };
+        // 跳过已经不在阻塞状态的任务
+        // 上面弹出了，不再重新入队，自动drop
+        loop {
+            let state = task.inner_exclusive_access().state;
+            if state != TaskStatus::BlockSaving {
+                break;
+            }
             core::hint::spin_loop();
-            //println!("wake_up_one: rechecking task status...");
         }
-		wake_up_task(task);
-        true
-    } else {
-        false
+        let state = task.inner_exclusive_access().state;
+        if matches!(state, TaskStatus::Blocked) {
+            wake_up_task(task);
+            return true;
+        }
+        warn!(
+            "[wake_up_one] dropping non-blocked queue entry pid={} tid={} state={:?}",
+            task.getpid(),
+            task.gettid(),
+            state,
+        );
+        // 非阻塞/已就绪/僵尸等陈旧条目：丢弃并继续找下一个真正的等待者。
     }
 }
 
@@ -132,12 +147,15 @@ pub(crate) fn wake_up_all_mp(queue: &MPSafeCell<WaitQueue>) -> usize {
         tasks
     };
 
-    let count = tasks.len();
+    let mut count = 0;
     for task in tasks {
         while task.inner_exclusive_access().state == TaskStatus::BlockSaving {
             core::hint::spin_loop();
         }
-        wake_up_task(task);
+        if matches!(task.inner_exclusive_access().state, TaskStatus::Blocked) {
+            wake_up_task(task);
+            count += 1;
+        }
     }
     count
 }

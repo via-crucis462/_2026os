@@ -281,8 +281,20 @@ pub fn munmap(start: usize, len: usize) -> isize {
     sys_munmap(start, len)
 }
 
+/// 修改断点，size 为变化量
 pub fn sbrk(size: i32) -> isize {
-    sys_sbrk(size)
+    let current = sys_sbrk(0);
+    if size == 0 {
+        return current;
+    }
+    // 相对地址转换为绝对地址
+    let Some(new_brk) = (current as isize).checked_add(size as isize) else {
+        return -1;
+    };
+    if new_brk < 0 {
+        return -1;
+    }
+    sys_sbrk(new_brk as usize)
 }
 
 pub fn spawn(path: &str) -> isize {

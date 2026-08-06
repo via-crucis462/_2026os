@@ -60,7 +60,7 @@ pub fn do_brk(addr: usize) -> Result<usize, i32> {
         .as_ref()
         .cloned()
         .ok_or(crate::syscall::errno::Errno::EINVAL.as_isize() as i32)?;
-    let result = mm.exclusive_access().change_program_brk(addr);
+    let result = mm.change_program_brk(addr);
     result
 }
 
@@ -81,7 +81,7 @@ pub fn do_mmap(
         .as_ref()
         .cloned()
         .ok_or(crate::syscall::errno::Errno::EINVAL.as_isize())?;
-    let result = mm.exclusive_access().mmap(addr, length, prot, flags, file_inner, offset);
+    let result = mm.mmap(addr, length, prot, flags, file_inner, offset);
     result
 }
 
@@ -94,7 +94,7 @@ pub fn do_munmap(addr: usize, length: usize) -> Result<(), isize> {
         .as_ref()
         .cloned()
         .ok_or(crate::syscall::errno::Errno::EINVAL.as_isize())?;
-    let result = mm.exclusive_access().munmap(addr, length);
+    let result = mm.munmap(addr, length);
     result
 }
 
@@ -106,6 +106,6 @@ pub fn do_madvise_dontneed(addr: usize, length: usize) -> Result<(), isize> {
         .as_ref()
         .cloned()
         .ok_or(crate::syscall::errno::Errno::EINVAL.as_isize())?;
-    let result = mm.exclusive_access().madvise_dontneed(addr, length);
+    let result = mm.madvise_dontneed(addr, length);
     result
 }

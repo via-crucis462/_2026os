@@ -28,7 +28,7 @@ pub fn exit_current_and_run_next(exit_code: i32){
 		let token = inner
 			.mm
 			.as_ref()
-			.map(|mm| mm.exclusive_access().token())
+			.map(|mm| mm.token())
 			.unwrap_or(0);
 		(token, inner.clear_child_tid)
 	};
@@ -112,7 +112,7 @@ impl TaskStruct {
 		inner.pending = Sigpending::new();
 		#[cfg(target_arch = "riscv64")]
 		if let Some(mm) = inner.mm.as_ref() {
-			mm.exclusive_access().flush_tlb_targets();
+			mm.flush_tlb_targets();
 		}
 		#[cfg(target_arch = "riscv64")]
 		crate::mm::switch_mm(crate::mm::kernel_token());

@@ -79,7 +79,7 @@ impl TaskStruct {
 				se: SchedEntity::new(),
 				rt: SchedRtEntity::new(),
 				dl: SchedDlEntity::new(),
-				mm: Some(Arc::new(MPSafeCell::new(memory_set))),
+				mm: Some(Arc::new(memory_set)),
 				fs: Arc::new(MPSafeCell::new(FsStruct::new(ROOT_DENTRY.clone(), ROOT_DENTRY.clone()))),
 				files: Arc::new(MPSafeCell::new(FileDescriptorTable::new())),
 				exe_path: String::from("/initproc"),
@@ -124,7 +124,7 @@ impl TaskStruct {
 		*trap_cx = TrapContext::app_init_context(
 			entry_point,
 			initial_user_sp,
-			KERNEL_SPACE.exclusive_access().token(),
+			KERNEL_SPACE.token(),
 			kernel_stack_top,
 			trap_handler as *const () as usize,
 		);

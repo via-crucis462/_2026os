@@ -434,22 +434,23 @@ impl VfsInode for ProcMapsInode {
         if let Some(task) = get_task(self.pid) {
             let mm = task.inner_exclusive_access().mm.clone();
             if let Some(mm) = mm {
-                let memory = mm.exclusive_access();
-                for area in memory.areas.iter() {
-                let start_va: usize = area.vpn_range.get_start().start_addr();
-                let end_va: usize = area.vpn_range.get_end().start_addr();
-                
-                let perm = area.get_map_permission();
+                let areas = mm.areas.read();
+                for area_arc in areas.values() {
+                    let area = area_arc.lock();
+                    let start_va: usize = area.vpn_range.get_start().start_addr();
+                    let end_va: usize = area.vpn_range.get_end().start_addr();
 
-                let r = if perm.contains(MapPermission::R) { 'r' } else { '-' };
-                let w = if perm.contains(MapPermission::W) { 'w' } else { '-' };
-                let x = if perm.contains(MapPermission::X) { 'x' } else { '-' };
-                let p = 'p';
-                let _ = write!(
-                    maps_str,
-                    "{:08x}-{:08x} {}{}{}{} 00000000 00:00 0\n",
-                    start_va, end_va, r, w, x, p
-                );
+                    let perm = area.get_map_permission();
+
+                    let r = if perm.contains(MapPermission::R) { 'r' } else { '-' };
+                    let w = if perm.contains(MapPermission::W) { 'w' } else { '-' };
+                    let x = if perm.contains(MapPermission::X) { 'x' } else { '-' };
+                    let p = 'p';
+                    let _ = write!(
+                        maps_str,
+                        "{:08x}-{:08x} {}{}{}{} 00000000 00:00 0\n",
+                        start_va, end_va, r, w, x, p
+                    );
                 }
             }
         }

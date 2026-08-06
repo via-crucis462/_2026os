@@ -58,7 +58,6 @@ pub(crate) fn clear_child_tid_and_wake(token: usize, clear_child_tid: usize) {
         return;
     }
 
-    // Translate again after the write and wake waiters on the final PTE's key.
     let page_table = PageTable::from_token(token);
     if let Some(pa) = page_table.translate_va(VirtAddr::from(clear_child_tid)) {
         let queue = {
@@ -2804,7 +2803,7 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> isize {
     let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
         return EINVAL.as_isize();
     };
-    let result = mm.exclusive_access().mprotect(start, len, mmap_prot);
+    let result = mm.mprotect(start, len, mmap_prot);
     match result {
         Ok(()) => {
             #[cfg(target_arch = "loongarch64")]
@@ -2827,7 +2826,7 @@ pub fn sys_mlock(start: usize, len: usize) -> isize {
     let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
         return EINVAL.as_isize();
     };
-    let result = mm.exclusive_access().disable_share_in_range(start, len);
+    let result = mm.disable_share_in_range(start, len);
     match result {
         Ok(()) => 0,
         Err(errno) => errno,
@@ -2842,7 +2841,7 @@ pub fn sys_brk(addr: usize) -> isize {
         Some(mm) => mm,
         None => return EINVAL.as_isize(),
     };
-    let current_brk = mm.exclusive_access().current_brk();
+    let current_brk = mm.current_brk();
     
     trace!("kernel:pid[{}] sys_brk: request addr={:#x}, current_brk={:#x}", task.getpid(), addr, current_brk);
 
@@ -4685,12 +4684,13 @@ pub fn sys_prlimit64(
 const FUTEX_WAIT: i32 = 0;
 const FUTEX_WAKE: i32 = 1;
 const FUTEX_REQUEUE: i32 = 3;
+const FUTEX_CMP_REQUEUE: i32 = 4;
+const FUTEX_WAKE_OP: i32 = 5;
 const FUTEX_WAIT_BITSET: i32 = 9;
 const FUTEX_WAKE_BITSET: i32 = 10;
 const FUTEX_PRIVATE_FLAG: i32 = 128;
 const FUTEX_CLOCK_REALTIME: i32 = 256;
 const FUTEX_CMD_MASK: i32 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
-
 
 ///作用：用户空间会传进去一个地址，内核解引用地址获取值后，如果和用户指定的val相等，则睡眠或唤醒对应等待队列的一个元素。
 /// 实际上，FUTEX就是管理所有信号量以及其等待队列的元素，信号量底层会用这个syscall。
@@ -4743,13 +4743,26 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                     .tv_sec
                     .saturating_mul(1_000_000)
                     .saturating_add((timeout_val.tv_nsec + 999) / 1000);
-                let deadline_us = get_time_us().saturating_add(timeout_us);
+                // FUTEX_WAIT_BITSET + FUTEX_CLOCK_REALTIME 的超时是
+                // CLOCK_REALTIME 绝对时间；其余情况是相对单调时间。
+                let is_realtime_abs = cmd == FUTEX_WAIT_BITSET
+                    && (op & FUTEX_CLOCK_REALTIME) != 0;
+                let deadline_us = if is_realtime_abs {
+                    timeout_us
+                } else {
+                    get_time_us().saturating_add(timeout_us)
+                };
 
                 loop {
                     if crate::process::check_pending_signal() {
                         return EINTR.as_isize();
                     }
-                    if get_time_us() >= deadline_us {
+                    let now_us = if is_realtime_abs {
+                        (current_wallclock_ns() / 1_000) as usize
+                    } else {
+                        get_time_us()
+                    };
+                    if now_us >= deadline_us {
                         return ETIMEDOUT.as_isize();
                     }
 
@@ -4870,12 +4883,10 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 return 0;
             }
 
-            let token = current_user_token();
             let page_table = PageTable::from_token(token);
             let Some(pa) = page_table.translate_va(VirtAddr::from(uaddr as usize)) else {
                 return EFAULT.as_isize();
             };
-
             let queue = {
                 let queues = FUTEX_WAIT_QUEUES.lock();
                 queues.get(&pa.0).cloned()
@@ -4895,12 +4906,19 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
 
             woken as isize
         }
-        FUTEX_REQUEUE => {
+        FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
+            if cmd == FUTEX_CMP_REQUEUE {
+                let Some(current_val) = try_translated_read(token, uaddr as *const i32) else {
+                    return EFAULT.as_isize();
+                };
+                if current_val != val3 {
+                    return EAGAIN.as_isize();
+                }
+            }
             if uaddr2.is_null() {
                 return EFAULT.as_isize();
             }
 
-            let token = current_user_token();
             let page_table = PageTable::from_token(token);
             let Some(src_pa) = page_table.translate_va(VirtAddr::from(uaddr as usize)) else {
                 return EFAULT.as_isize();
@@ -4908,7 +4926,6 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             let Some(dst_pa) = page_table.translate_va(VirtAddr::from(uaddr2 as usize)) else {
                 return EFAULT.as_isize();
             };
-
             let requeue_count = timeout as usize;
             let dst_queue = if requeue_count > 0 {
                 Some(get_futex_wait_queue(dst_pa.0))
@@ -4967,6 +4984,38 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             }
 
             affected as isize
+        }
+        FUTEX_WAKE_OP => {
+            // 可能需要进一步完善
+            let mut total_woken = 0usize;
+            let targets = [
+                (uaddr, val.max(0) as usize),
+                (uaddr2, (timeout as usize).min(isize::MAX as usize)),
+            ];
+            for (target, count) in targets {
+                if target.is_null() || count == 0 {
+                    continue;
+                }
+                let page_table = PageTable::from_token(token);
+                let Some(pa) = page_table.translate_va(VirtAddr::from(target as usize)) else {
+                    continue;
+                };
+                let queue = {
+                    let queues = FUTEX_WAIT_QUEUES.lock();
+                    queues.get(&pa.0).cloned()
+                };
+                let mut woken = 0usize;
+                if let Some(queue) = queue {
+                    while woken < count {
+                        if !crate::process::wake_up_one(&queue) {
+                            break;
+                        }
+                        woken += 1;
+                    }
+                }
+                total_woken += woken;
+            }
+            total_woken as isize
         }
         _ => ENOSYS.as_isize(),
     }
