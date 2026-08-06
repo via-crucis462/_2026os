@@ -34,7 +34,7 @@ pub const CLOCK_FREQ: usize = 12500000;
 pub const CLOCK_FREQ: usize = 100000000;
 
 #[cfg(board = "virt")]
-pub const CPU_CORE_NUM: usize = 8;
+pub const CPU_CORE_NUM: usize = 12;
 #[cfg(board = "2k1000")]
 pub const CPU_CORE_NUM: usize = 2;
 

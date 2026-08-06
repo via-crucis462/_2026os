@@ -14,6 +14,7 @@ const LARGE_ALLOCATION_BLOCK_SIZE: usize = 1 << 27;
 const LARGE_ALLOCATION_THRESHOLD: usize = 1 << 20;
 const LOCAL_HEAP_SIZE: usize = KERNEL_HEAP_SIZE - LARGE_HEAP_RESERVE_SIZE;
 const LOCAL_ARENA_SIZE: usize = LOCAL_HEAP_SIZE / CPU_CORE_NUM;
+const LOCAL_TOTAL_SIZE: usize = LOCAL_ARENA_SIZE * CPU_CORE_NUM;
 
 struct PerHartHeap {
     local_arenas: [LockedHeap; CPU_CORE_NUM],
@@ -36,7 +37,7 @@ impl PerHartHeap {
     fn owner(&self, ptr: *mut u8) -> Option<HeapOwner> {
         let heap_start = core::ptr::addr_of!(HEAP_SPACE) as *const u64 as usize;
         let offset = (ptr as usize).checked_sub(heap_start)?;
-        if offset < LOCAL_HEAP_SIZE {
+        if offset < LOCAL_TOTAL_SIZE {
             Some(HeapOwner::Local(offset / LOCAL_ARENA_SIZE))
         } else if offset < KERNEL_HEAP_SIZE {
             Some(HeapOwner::Large)
@@ -111,9 +112,9 @@ static mut HEAP_SPACE: [u64; KERNEL_HEAP_SIZE / 8] = [0; KERNEL_HEAP_SIZE / 8];
 #[allow(warnings)]
 pub fn init_heap() {
     assert!(KERNEL_HEAP_SIZE > LARGE_HEAP_RESERVE_SIZE);
-    assert_eq!(LOCAL_HEAP_SIZE % CPU_CORE_NUM, 0);
+    assert!(LOCAL_ARENA_SIZE > 0);
     let heap_start = core::ptr::addr_of!(HEAP_SPACE) as *const u64 as usize;
-    let large_start = heap_start + LOCAL_HEAP_SIZE;
+    let large_start = heap_start + LOCAL_TOTAL_SIZE;
     let large_end = heap_start + KERNEL_HEAP_SIZE;
     let aligned_large_start = (large_start + LARGE_ALLOCATION_BLOCK_SIZE - 1)
         & !(LARGE_ALLOCATION_BLOCK_SIZE - 1);
