@@ -29,7 +29,7 @@ use core::ptr::{read_volatile, write_volatile};
 pub use flags::PTEFlags;
 pub use frame_allocator::{frame_alloc, frame_dealloc, FrameTracker};
 pub use memory_set::remap_test;
-pub use memory_set::{kernel_asid, kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
+pub use memory_set::{FutexMappingKind, kernel_asid, kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
 #[cfg(target_arch = "riscv64")]
 pub use memory_set::flush_kernel_tlb_targets;
 #[cfg(target_arch = "riscv64")]

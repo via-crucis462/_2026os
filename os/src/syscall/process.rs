@@ -11,7 +11,7 @@ use crate::process::{
     wait4_block_current, waitid_block_current,
 };
 
-use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
+use crate::mm::{FutexMappingKind, prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
 use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, USER_STACK_SIZE, get_hart_id};
 use crate::process::{FdFlags, FileDescriptor};    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
@@ -51,8 +51,7 @@ pub(crate) fn clear_child_tid_and_wake(token: usize, clear_child_tid: usize) {
         return;
     }
 
-    // Clear first: try_translated_write may populate a lazy anonymous page or
-    // resolve COW, either of which can establish/change the physical futex key.
+    // Clear first: this may populate a lazy anonymous page or resolve COW.
     if !try_translated_write(token, clear_child_tid as *mut u32, 0u32) {
         error!(
             "[CLEAR_CHILD_TID] failed to clear va={:#x}",
@@ -61,16 +60,13 @@ pub(crate) fn clear_child_tid_and_wake(token: usize, clear_child_tid: usize) {
         return;
     }
 
-    let page_table = PageTable::from_token(token);
-    if let Some(pa) = page_table.translate_va(VirtAddr::from(clear_child_tid)) {
-        let queue = {
-            let queues = FUTEX_WAIT_QUEUES.lock();
-            queues.get(&FutexKey::shared(pa.0)).cloned()
-        };
+    let queue = {
+        let queues = FUTEX_WAIT_QUEUES.lock();
+        queues.get(&futex_key_for_address(token, clear_child_tid, false)).cloned()
+    };
 
-        if let Some(queue) = queue {
-            wake_futex_waiters(&queue, 1, u32::MAX);
-        }
+    if let Some(queue) = queue {
+        wake_futex_waiters(&queue, 1, u32::MAX);
     }
 }
 
@@ -4695,9 +4691,28 @@ const FUTEX_PRIVATE_FLAG: i32 = 128;
 const FUTEX_CLOCK_REALTIME: i32 = 256;
 const FUTEX_CMD_MASK: i32 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 
+fn futex_key_for_address(token: usize, virtual_address: usize, force_private: bool) -> FutexKey {
+    if !force_private {
+        if let Some(memory_set) = current_task()
+            .and_then(|task| task.inner_exclusive_access().mm.as_ref().cloned())
+        {
+            match memory_set.futex_mapping_kind(virtual_address) {
+                FutexMappingKind::SharedAnonymous { mapping_id, mapping_offset } => {
+                    return FutexKey::shared_anonymous(mapping_id, mapping_offset);
+                }
+                FutexMappingKind::SharedFile { inode, file_offset } => {
+                    return FutexKey::shared_file(inode, file_offset);
+                }
+                FutexMappingKind::Private => {}
+            }
+        }
+    }
+    FutexKey::private(token, virtual_address)
+}
+
 ///作用：用户空间会传进去一个地址，内核解引用地址获取值后，如果和用户指定的val相等，则睡眠或唤醒对应等待队列的一个元素。
 /// 实际上，FUTEX就是管理所有信号量以及其等待队列的元素，信号量底层会用这个syscall。
-/// FUTEX的键是物理地址，值是这个信号量对应的等待队列
+/// FUTEX 的键是页表根与用户虚拟地址，值是这个信号量对应的等待队列。
 pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, uaddr2: *mut i32, val3: i32) -> isize {
     if uaddr.is_null() {
         return EFAULT.as_isize();
@@ -4779,13 +4794,13 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 let mut inner = current.inner_exclusive_access();
                 inner.signal_interrupted = false;
             }
-            //获取地址对应的等待队列，放入当前任务并睡眠
-            let token = current_user_token();
-            let page_table = PageTable::from_token(token);
-            let Some(pa) = page_table.translate_va(VirtAddr::from(uaddr as usize)) else {
-                return EFAULT.as_isize();
-            };
-            let queue = get_futex_wait_queue(FutexKey::shared(pa.0));
+            // 页表根与用户虚拟地址决定等待队列；物理映射会随 COW 改变，
+            // 不能再以物理地址作为 futex 键。
+            let queue = get_futex_wait_queue(futex_key_for_address(
+                token,
+                uaddr as usize,
+                (op & FUTEX_PRIVATE_FLAG) != 0,
+            ));
 
             // Linux FUTEX_WAIT 的“比较用户值并挂入等待队列”必须相对
             // FUTEX_WAKE 原子。首次比较与这里之间，另一个 hart 可能已经
@@ -4880,13 +4895,9 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 return 0;
             }
 
-            let page_table = PageTable::from_token(token);
-            let Some(pa) = page_table.translate_va(VirtAddr::from(uaddr as usize)) else {
-                return EFAULT.as_isize();
-            };
             let queue = {
                 let queues = FUTEX_WAIT_QUEUES.lock();
-                queues.get(&FutexKey::shared(pa.0)).cloned()
+                queues.get(&futex_key_for_address(token, uaddr as usize, (op & FUTEX_PRIVATE_FLAG) != 0)).cloned()
             };
 
             let Some(queue) = queue else {
@@ -4916,22 +4927,19 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 return EFAULT.as_isize();
             }
 
-            let page_table = PageTable::from_token(token);
-            let Some(src_pa) = page_table.translate_va(VirtAddr::from(uaddr as usize)) else {
-                return EFAULT.as_isize();
-            };
-            let Some(dst_pa) = page_table.translate_va(VirtAddr::from(uaddr2 as usize)) else {
-                return EFAULT.as_isize();
-            };
             let requeue_count = requeue_count as usize;
             let dst_queue = if requeue_count > 0 {
-                Some(get_futex_wait_queue(FutexKey::shared(dst_pa.0)))
+                Some(get_futex_wait_queue(futex_key_for_address(
+                    token,
+                    uaddr2 as usize,
+                    (op & FUTEX_PRIVATE_FLAG) != 0,
+                )))
             } else {
                 None
             };
             let src_queue = {
                 let queues = FUTEX_WAIT_QUEUES.lock();
-                queues.get(&FutexKey::shared(src_pa.0)).cloned()
+                queues.get(&futex_key_for_address(token, uaddr as usize, (op & FUTEX_PRIVATE_FLAG) != 0)).cloned()
             };
 
             let Some(src_queue) = src_queue else {
@@ -4956,13 +4964,9 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 if target.is_null() || count == 0 {
                     continue;
                 }
-                let page_table = PageTable::from_token(token);
-                let Some(pa) = page_table.translate_va(VirtAddr::from(target as usize)) else {
-                    continue;
-                };
                 let queue = {
                     let queues = FUTEX_WAIT_QUEUES.lock();
-                    queues.get(&FutexKey::shared(pa.0)).cloned()
+                    queues.get(&futex_key_for_address(token, target as usize, (op & FUTEX_PRIVATE_FLAG) != 0)).cloned()
                 };
                 if let Some(queue) = queue {
                     total_woken += wake_futex_waiters(&queue, count, u32::MAX);
