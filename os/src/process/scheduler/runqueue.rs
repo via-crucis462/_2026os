@@ -7,7 +7,7 @@ use crate::process::scheduler::{CfsRq, DeadlineRq, IdleRq, RtRq, StopRq, CPU_NUM
 use crate::process::{TaskControlBlock, TaskStatus};
 use crate::sync::{MPSafeCell, MPSafeGuard};
 use crate::get_hart_id;
-use alloc::sync::Arc;
+use alloc::{collections::VecDeque, sync::Arc};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::lazy;
 use lazy_static::*;
@@ -47,7 +47,7 @@ impl Rq {
 	}
 }
 /// 每 CPU 运行队列，对应 Linux `struct rq` 的调度类核心部分。
-/// 调度类优先级固定为 stop > deadline > rt > cfs > idle。
+/// 调度类优先级固定为 stop > deadline > rt > wakeup > cfs > idle。
 pub struct Rqinner {
 	/// 最高优先级的每 CPU stop 调度类状态。
 	pub stop: MPSafeCell<StopRq>,
@@ -57,6 +57,8 @@ pub struct Rqinner {
 	pub cfs: MPSafeCell<CfsRq>,
 	/// SCHED_FIFO 和 SCHED_RR 使用的实时运行队列。
 	pub rt: MPSafeCell<RtRq>,
+	/// 事件唤醒的任务优先队列，不改变任务原有调度策略。
+	pub wakeup: VecDeque<Arc<TaskControlBlock>>,
 	/// 最低优先级的每 CPU idle 任务状态。
 	pub idle: MPSafeCell<IdleRq>,
 	/// 除 per-CPU idle 任务外的可运行任务总数。
@@ -71,6 +73,7 @@ impl Rqinner {
 			deadline: MPSafeCell::new(DeadlineRq::new()),
 			cfs: MPSafeCell::new(CfsRq::new()),
 			rt: MPSafeCell::new(RtRq::new()),
+			wakeup: VecDeque::new(),
 			idle: MPSafeCell::new(IdleRq::new()),
 			nr_running: 0,
 		}
@@ -78,13 +81,14 @@ impl Rqinner {
 
 	/// 按 Linux 调度类优先级依次选择任务，且不执行出队。
 	///
-	/// 固定顺序为 stop → deadline → rt → cfs → idle。
+	/// 固定顺序为 stop → deadline → rt → wakeup → cfs → idle。
 	pub fn pick_next_task(&self) -> Option<Arc<TaskControlBlock>> {
 		self.stop
 			.exclusive_access()
 			.pick_next()
 			.or_else(|| self.deadline.exclusive_access().pick_next())
 			.or_else(|| self.rt.exclusive_access().pick_next())
+			.or_else(|| self.wakeup.front().cloned())
 			.or_else(|| self.cfs.exclusive_access().pick_next())
 			.or_else(|| self.idle.exclusive_access().pick_next())
 	}
@@ -129,10 +133,25 @@ impl Rqinner {
 		}
 	}
 
+	/// 把刚刚被事件唤醒的任务放入 CFS 之前的临时优先队列。
+	pub fn enqueue_woken_task(&mut self, task: Arc<TaskControlBlock>) {
+		{
+			let mut inner = task.inner_exclusive_access();
+			if inner.on_rq || inner.state == TaskStatus::Zombie {
+				return;
+			}
+			inner.on_rq = true;
+			inner.on_cpu = false;
+		}
+		self.nr_running += 1;
+		self.wakeup.push_back(task);
+	}
+
 	/// 从最高可用普通调度类中移除一个任务。
 	pub(crate) fn pop_next_task(&mut self) -> Option<Arc<TaskControlBlock>> {
 		let task = self.deadline.exclusive_access().pop_next()
 			.or_else(|| self.rt.exclusive_access().pop_next())
+			.or_else(|| self.wakeup.pop_front())
 			.or_else(|| self.cfs.exclusive_access().pop_next());
 		if task.is_some() {
 			self.nr_running = self.nr_running.saturating_sub(1);
@@ -164,7 +183,11 @@ impl Rqinner {
 
 	/// 从本 CPU 的任一普通调度类队列中移除指定线程。
 	fn remove_task(&mut self, tid: usize) -> bool {
-		let task = self.deadline.exclusive_access().remove_task(tid)
+		let task = self.wakeup
+			.iter()
+			.position(|task| task.gettid() == tid)
+			.and_then(|index| self.wakeup.remove(index))
+			.or_else(|| self.deadline.exclusive_access().remove_task(tid))
 			.or_else(|| self.rt.exclusive_access().remove_task(tid))
 			.or_else(|| self.cfs.exclusive_access().remove_task(tid));
 		if let Some(task) = task {
@@ -226,6 +249,28 @@ pub fn add_task_into_pool(task: Arc<TaskControlBlock>) {
 	enqueue_task_on_cpu(task, cpu_id);
 }
 
+/// 将刚被唤醒的任务投递到其目标 CPU 的高优先级唤醒队列。
+pub fn add_woken_task_into_pool(task: Arc<TaskControlBlock>) {
+	let cpu_id = task.inner_exclusive_access().cpu.min(RQ_ARRAY.len().saturating_sub(1));
+	{
+		let mut inner = task.inner_exclusive_access();
+		if inner.state == TaskStatus::Zombie {
+			return;
+		}
+		inner.cpu = cpu_id;
+		inner.state = TaskStatus::Ready;
+		inner.on_cpu = false;
+	}
+	RQ_ARRAY[cpu_id].inner_exclusive_access().enqueue_woken_task(task);
+
+	if cpu_id != get_hart_id() {
+		#[cfg(target_arch = "riscv64")]
+		crate::arch::riscv::sbi::sbi_wakeup_hart(cpu_id);
+		#[cfg(target_arch = "loongarch64")]
+		crate::arch::la::ipi::send_ipi_single(cpu_id, 1);
+	}
+}
+
 /// 兼容旧调用者；新框架不再需要全局 dispatch lock。
 pub(crate) fn add_task_into_pool_unlocked(task: Arc<TaskControlBlock>) {
 	add_task_into_pool(task);
@@ -268,7 +313,7 @@ pub fn wake_up_task(task: Arc<TaskControlBlock>) {
 			drop(inner);
 			if !warned {
 				warned = true;
-				println!(
+				warn!(
 					"[kernel] wake_up_task: task {} is saving context, current state: {:?}",
 					pid, state
 				);
@@ -286,7 +331,7 @@ pub fn wake_up_task(task: Arc<TaskControlBlock>) {
 		}
 	};
 	if should_enqueue {
-		add_task_into_pool(task);
+		add_woken_task_into_pool(task);
 	}
 }
 

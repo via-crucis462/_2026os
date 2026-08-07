@@ -50,8 +50,12 @@ impl FutexWaitQueue {
 		self.queue.pop_front()
 	}
 
-	fn remove_task(&mut self, tid: usize) {
-		self.queue.retain(|waiter| waiter.task.gettid() != tid);
+	fn remove_task(&mut self, tid: usize) -> bool {
+		let Some(index) = self.queue.iter().position(|waiter| waiter.task.gettid() == tid) else {
+			return false;
+		};
+		self.queue.remove(index);
+		true
 	}
 
 	fn len(&self) -> usize {
@@ -197,11 +201,17 @@ pub(crate) fn requeue_futex_waiters(
 	woken + moved_waiters.len()
 }
 
-pub(crate) fn remove_futex_waiter(tid: usize) {
+/// 移除指定 waiter，并返回其是否仍在 futex 队列中。
+///
+/// 正常 FUTEX_WAKE/CMP_REQUEUE 唤醒会先将 waiter 从队列弹出；而 deadline
+/// 唤醒不会碰 futex 队列。因此该返回值可作为 wait 返回路径的获胜原因。
+pub(crate) fn remove_futex_waiter(tid: usize) -> bool {
 	let queues: Vec<_> = FUTEX_WAIT_QUEUES.lock().values().cloned().collect();
+	let mut removed = false;
 	for queue in queues {
-		queue.lock().remove_task(tid);
+		removed |= queue.lock().remove_task(tid);
 	}
+	removed
 }
 
 /// 调试用：打印所有 futex 等待队列的长度。

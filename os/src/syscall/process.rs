@@ -4810,16 +4810,14 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             }
             let current = current_task().unwrap();
             let current_tid = current.gettid();
-            remove_futex_waiter(current_tid);
+            let timed_out = remove_futex_waiter(current_tid);
 
-            if let Some((deadline_us, is_realtime_abs)) = deadline_us {
+            if deadline_us.is_some() {
                 crate::process::scheduler::nanosleep::cancel_sleep_task(current_tid);
-                let now_us = if is_realtime_abs {
-                    (current_wallclock_ns() / 1_000) as usize
-                } else {
-                    get_time_us()
-                };
-                if now_us >= deadline_us {
+                // 由 futex wake 唤醒时，等待项已经被 WAKE/CMP_REQUEUE
+                // 从队列移除；即使当前真正获得 CPU 时已越过 deadline，
+                // 也必须返回成功。只有 deadline 唤醒留下的等待项才超时。
+                if timed_out {
                     return ETIMEDOUT.as_isize();
                 }
             }
@@ -4893,6 +4891,13 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             wake_futex_waiters(&queue, val as usize, wake_bitset) as isize
         }
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
+            // 对 REQUEUE 而言，timeout 参数按 ABI 被复用为有符号的
+            // nr_requeue。负的唤醒数或重排数均是无效参数，不能转换为
+            // usize 后静默地作为零或极大计数处理。
+            let requeue_count = timeout as isize;
+            if val < 0 || requeue_count < 0 {
+                return EINVAL.as_isize();
+            }
             if cmd == FUTEX_CMP_REQUEUE {
                 let Some(current_val) = try_translated_read(token, uaddr as *const i32) else {
                     return EFAULT.as_isize();
@@ -4912,7 +4917,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             let Some(dst_pa) = page_table.translate_va(VirtAddr::from(uaddr2 as usize)) else {
                 return EFAULT.as_isize();
             };
-            let requeue_count = timeout as usize;
+            let requeue_count = requeue_count as usize;
             let dst_queue = if requeue_count > 0 {
                 Some(get_futex_wait_queue(FutexKey::shared(dst_pa.0)))
             } else {
