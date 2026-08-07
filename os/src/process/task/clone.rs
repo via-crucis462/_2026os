@@ -100,10 +100,7 @@ impl TaskStruct {
 		} else {
 			// 无 CLONE_VM：写时复制（COW），创建独立的地址空间副本
 			let child_memory = MemorySet::from_existed_user(&parent_mm);
-			#[cfg(target_arch = "riscv64")]
 			parent_mm.flush_tlb_targets();
-			#[cfg(target_arch = "loongarch64")]
-			crate::arch::mm::flush_tlb_for_asid(parent_mm.asid());
 			Arc::new(child_memory)
 		};
 

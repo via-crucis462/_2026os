@@ -3,7 +3,7 @@
 use crate::arch::config::CPU_CORE_NUM;
 use crate::get_hart_id;
 use crate::sync::MPSafeCell;
-use super::FrameTracker;
+use crate::mm::FrameTracker;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::arch::asm;
@@ -115,9 +115,9 @@ pub fn switch_mm(token: usize) {
 }
 
 /// 移除一个已经销毁的 token，并接管其页表帧的所有权
-///
-/// 若仍有核的 satp 指向该页表，延迟释放帧
 /// 
+/// 若仍有核的 satp 指向该页表，延迟释放帧
+///
 /// 调用者必须已对相关核完成 TLB 刷新
 pub fn remove_token(token: usize, frames: Vec<FrameTracker>) {
     let frames = {

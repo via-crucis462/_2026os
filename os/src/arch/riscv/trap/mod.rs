@@ -227,6 +227,16 @@ pub fn trap_handler() -> ! {
                         _ => false,
                     };
                     if retry {
+                        // The PTE may have been installed by another hart, or
+                        // mprotect may have relaxed its permissions without a
+                        // remote shootdown. Drop this hart's stale negative or
+                        // permission entry before retrying the faulting access.
+                        mm.flush_tlb_local();
+                        if scause.cause()
+                            == Trap::Exception(Exception::InstructionPageFault)
+                        {
+                            unsafe { asm!("fence.i") };
+                        }
                         break 'fault;
                     }
 

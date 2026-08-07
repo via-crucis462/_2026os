@@ -11,8 +11,6 @@ pub use frame_allocator::get_free_frames;
 mod heap_allocator;
 mod id;
 mod memory_set;
-#[cfg(target_arch = "riscv64")]
-mod tlb;
 
 pub mod address;
 pub mod flags;
@@ -33,7 +31,9 @@ pub use memory_set::{kernel_asid, kernel_token, MapPermission, MemorySet, KERNEL
 #[cfg(target_arch = "riscv64")]
 pub use memory_set::flush_kernel_tlb_targets;
 #[cfg(target_arch = "riscv64")]
-pub use tlb::{active_tokens, running_harts, switch_mm};
+pub use crate::arch::mm::tlb::{active_tokens, running_harts, switch_mm};
+#[cfg(target_arch = "loongarch64")]
+pub use crate::arch::mm::tlb::{handle_tlb_ipi, leave_user_mm, switch_mm};
 #[allow(unused)]
 pub use memory_set::{MapArea, MapType};
 pub use page_table::*;

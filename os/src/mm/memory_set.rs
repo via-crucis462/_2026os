@@ -113,13 +113,8 @@ impl MemorySet {
     }
 
     #[cfg(target_arch = "loongarch64")]
-    pub fn flush_tlb_after_mapping_change() {
-        unsafe {
-            // 先保证页表写入对重填路径可见，再失效陈旧 TLB 项。
-            asm!("dbar 0");
-            asm!("invtlb 0, $r0, $r0");
-            asm!("dbar 0");
-        }
+    pub fn flush_tlb_after_mapping_change(&self) {
+        self.flush_tlb_local();
     }
 
     /// Create a new empty `MemorySet`.
@@ -202,6 +197,11 @@ impl MemorySet {
         if remote_targets != 0 {
             crate::arch::sbi::remote_sfence_vma_asid(remote_targets, self.asid());
         }
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    pub fn flush_tlb_targets(&self) {
+        crate::arch::mm::tlb::flush_tlb_targets(self.token(), self.asid());
     }
 
     /// 只刷新本核 TLB
@@ -323,7 +323,7 @@ impl MemorySet {
             areas.insert(key, Arc::new(Mutex::new(area)));
         }
         #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
+        self.flush_tlb_after_mapping_change();
         Ok(())
     }
 
@@ -374,9 +374,7 @@ impl MemorySet {
         if !found {
             return Err(Errno::ENOMEM.as_isize() as i32);
         }
-        #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
-        #[cfg(target_arch = "riscv64")]
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
         self.flush_tlb_targets();
         drop(frames);
         Ok(())
@@ -1181,9 +1179,7 @@ impl MemorySet {
                 pt.set_entry(vpn, new_ppn, pte_flags);
                 drop(pt);
                 let old_frame = area.data_frames.insert(vpn, new_frame);
-                #[cfg(target_arch = "loongarch64")]
-                Self::flush_tlb_after_mapping_change();
-                #[cfg(target_arch = "riscv64")]
+                #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
                 self.flush_tlb_targets();
                 drop(old_frame);
                 return true;
@@ -1376,7 +1372,7 @@ impl MemorySet {
             }
         };
         if dirty {
-            Self::flush_tlb_after_mapping_change();
+            self.flush_tlb_after_mapping_change();
         }
         dirty
     }
@@ -1421,7 +1417,7 @@ impl MemorySet {
             drop(guards);
             areas.clear();
         }
-        #[cfg(target_arch = "riscv64")]
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
         self.flush_tlb_targets();
         drop(frames);
     }
@@ -1438,9 +1434,7 @@ impl MemorySet {
         let frames = area.shrink_to(&mut pt, new_end.std_ceil());
         drop(pt);
         drop(area);
-        #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
-        #[cfg(target_arch = "riscv64")]
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
         self.flush_tlb_targets();
         drop(frames);
         true
@@ -1458,7 +1452,7 @@ impl MemorySet {
         let mut pt = self.page_table.write();
         area.append_to(&mut pt, new_end.std_ceil());
         #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
+        self.flush_tlb_after_mapping_change();
         true
     }
 
@@ -1528,9 +1522,7 @@ impl MemorySet {
             if Self::has_conflict_locked(&areas, addr, length) {
                 if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED) {
                     let released_frames = self.munmap_locked(&mut areas, addr, length);
-                    #[cfg(target_arch = "loongarch64")]
-                    Self::flush_tlb_after_mapping_change();
-                    #[cfg(target_arch = "riscv64")]
+                    #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
                     self.flush_tlb_targets();
                     drop(released_frames);
                 } else {
@@ -1572,8 +1564,6 @@ impl MemorySet {
             areas.insert(key, Arc::new(Mutex::new(area)));
         }
 
-        #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
         Ok(start_va)
     }
 
@@ -1636,9 +1626,7 @@ impl MemorySet {
     pub fn munmap(&self, start: usize, length: usize) -> Result<(), isize> {
         let mut areas = self.areas.write();
         let released_frames = self.munmap_locked(&mut areas, start, length);
-        #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
-        #[cfg(target_arch = "riscv64")]
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
         self.flush_tlb_targets();
         drop(areas);
         drop(released_frames);
@@ -1787,9 +1775,7 @@ impl MemorySet {
             }
         }
 
-        #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
-        #[cfg(target_arch = "riscv64")]
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
         self.flush_tlb_targets();
         drop(released_frames);
 
@@ -1980,12 +1966,10 @@ impl MemorySet {
         drop(guards);
         drop(areas);
 
-        #[cfg(target_arch = "riscv64")]
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
         if permissions_tightened {
             self.flush_tlb_targets();
         }
-        #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
 
         Ok(())
     }
@@ -2104,7 +2088,7 @@ impl MemorySet {
             self.flush_tlb_local();
             #[cfg(target_arch = "loongarch64")]
             {
-                Self::flush_tlb_after_mapping_change();
+                self.flush_tlb_after_mapping_change();
                 unsafe { asm!("ibar 0") };
             }
             return true; // 惰性分配修复成功
@@ -2173,7 +2157,7 @@ impl MemorySet {
             #[cfg(target_arch = "riscv64")]
             self.flush_tlb_local();
             #[cfg(target_arch = "loongarch64")]
-            Self::flush_tlb_after_mapping_change();
+            self.flush_tlb_after_mapping_change();
             // trace!("[kernel] User stack dynamically expanded down to {:#x}", bad_addr);
             return true; // 栈扩张修复成功！
         }
@@ -2262,6 +2246,9 @@ impl MemorySet {
 
 impl Drop for MemorySet {
     fn drop(&mut self) {
+        #[cfg(target_arch = "loongarch64")]
+        crate::arch::mm::tlb::retire_mm(self.token(), self.asid());
+
         #[cfg(target_arch = "riscv64")]
         {
             let token = self.token();
@@ -2270,7 +2257,7 @@ impl Drop for MemorySet {
             // （空闲核有意保留 warm satp 不切换），帧会延迟到最后一个
             // 核切换离开后才释放，不会因立即回收而破坏其它核的 satp。
             let frames = self.page_table.write().take_frames();
-            crate::mm::tlb::remove_token(token, frames);
+            crate::arch::mm::tlb::remove_token(token, frames);
         }
     }
 }

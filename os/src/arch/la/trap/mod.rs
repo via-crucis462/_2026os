@@ -6,7 +6,6 @@ mod context;
 use crate::{KERNEL_STACK_SIZE, PAGE_SIZE, get_hart_id};
 use crate::mm::{translated_read, translated_write, PageTable, VirtAddr};
 use crate::syscall::syscall;
-use crate::arch::mm::flush_tlb_for_asid;
 use crate::task::{
     KernelStack, SignalFlags,
     current_add_signal, current_task, current_tid, current_trap_cx,
@@ -154,6 +153,7 @@ pub fn init() {
     let uboot_eentry = UBOOT_TRAP_HANDLER.load(Ordering::SeqCst);
     println!("[kernel] trap::init: uboot_eentry=0x{:x}, __k_alltraps=0x{:x}", uboot_eentry, target);
     set_kernel_trap_entry();
+    crate::arch::la::ipi::init_runtime_ipi();
     // 回读确认
     let verify: usize;
     unsafe { asm!("csrrd {}, 0xc", out(reg) verify); }
@@ -190,6 +190,7 @@ pub fn enable_timer_interrupt() {
 enum Cause {
     Syscall,
     TimeInterrupt,
+    Ipi,
     Other,
 }
 
@@ -509,6 +510,9 @@ pub fn trap_handler() -> ! {
     //println!("[kernel] trap_handler called CPU ID: {}", get_hart_id());
     // 设置内核态异常入口，防止嵌套中断时重入 __alltraps 破坏上下文
     set_kernel_trap_entry();
+    // Must precede every lock that a page-table modifier may hold. This closes
+    // the user/kernel transition race with synchronous TLB shootdowns.
+    crate::mm::leave_user_mm();
     trace!("[kernel] called trap_handler");
     let estat :usize;
     let era :usize;
@@ -526,7 +530,14 @@ pub fn trap_handler() -> ! {
     //11_0000_0000_0000_0000=>页表
     //3_0000_0000_0000_0000=>取指操作页无效例外
     
-    let cause = if ((estat >> 11) & 1)  != 0 {
+    let tlb_ipi = ((estat >> 12) & 1) != 0
+        && crate::arch::la::ipi::clear_tlb_shootdown_ipi();
+    if tlb_ipi {
+        crate::mm::handle_tlb_ipi();
+    }
+    let cause = if tlb_ipi {
+        Cause::Ipi
+    } else if ((estat >> 11) & 1)  != 0 {
         Cause::TimeInterrupt
     } else if ((estat >> 16) & 0x3fff) == 0xb {
         Cause::Syscall
@@ -576,7 +587,8 @@ pub fn trap_handler() -> ! {
             }
             suspend_current_and_run_next();
         }
-        _ => {
+        Cause::Ipi => {}
+        Cause::Other => {
             if ecode == 0x9 {
                 let cx = current_trap_cx();
                 match handle_ale(cx, badv, true) {
@@ -642,6 +654,22 @@ pub fn trap_handler() -> ! {
                     break 'fault;
                 }
                 if memory_set.handle_page_fault(badv, sp) {
+                    break 'fault;
+                }
+                // A concurrent fault or a permission relaxation may already
+                // have installed a sufficient PTE while this hart still holds
+                // a stale negative/permission TLB entry. Refresh only this ASID.
+                let retry = match ecode {
+                    1 | 5 => memory_set.pte_satisfies(vpn, true, false, false),
+                    2 | 4 => memory_set.pte_satisfies(vpn, false, true, false),
+                    3 | 6 => memory_set.pte_satisfies(vpn, false, false, true),
+                    _ => false,
+                };
+                if retry {
+                    memory_set.flush_tlb_local();
+                    if matches!(ecode, 3 | 6) {
+                        unsafe { asm!("ibar 0") };
+                    }
                     break 'fault;
                 }
                 match memory_set.translate(vpn) {
@@ -822,7 +850,7 @@ pub fn trap_return() -> ! {
         euen |= 0x3;
         asm!("csrwr {}, 0x2", inout(reg) euen => _);
     }
-    crate::mm::MemorySet::flush_tlb_after_mapping_change();
+    crate::mm::switch_mm(user_satp, id);
 
     // crate::arch::mm::prepare_user_tlb();
     // crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
@@ -840,9 +868,9 @@ pub fn trap_return() -> ! {
     //println!("[kernel] calling __restore, address: 0x{:x}", restore);
 
     unsafe {
-        asm!("csrwr {}, 0x18", inout(reg) id => _); // 设置asid为pid
+        asm!("csrwr {}, 0x18", inout(reg) id => _); // 设置asid
         asm!(
-            "dbar 0", // 相当于sfence.vma
+            "dbar 0",
             "jr {restore}",
             restore = in(reg) restore,
             in("$a0") trap_cx_ptr,

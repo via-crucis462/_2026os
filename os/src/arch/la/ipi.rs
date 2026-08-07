@@ -31,6 +31,9 @@ pub const IOCSR_IPI_SEND_IP_SHIFT: usize = 0;
 pub const IOCSR_IPI_SEND_CPU_SHIFT: usize = 16;
 pub const IOCSR_IPI_SEND_BLOCKING: u32 = 1 << 31;
 
+/// Runtime IPI vector reserved for synchronous TLB shootdowns.
+pub const TLB_SHOOTDOWN_IPI: u32 = 1 << 1;
+
 pub const LOONGARCH_IOCSR_MBUF_SEND: usize = 0x1048;
 pub const IOCSR_MBUF_SEND_BLOCKING: u64 = 1 << 31;
 pub const IOCSR_MBUF_SEND_BOX_SHIFT: usize = 2;
@@ -104,4 +107,36 @@ pub fn ipi_write_action(cpu: usize, action: u32) {
 
 pub fn send_ipi_single(cpu: usize, action: u32) {
     ipi_write_action(cpu, action);
+}
+
+/// Enable the runtime TLB IPI on the current hart and route IPI interrupts.
+pub fn init_runtime_ipi() {
+    iocsr_write_u32(LOONGARCH_IOCSR_IPI_CLEAR, TLB_SHOOTDOWN_IPI);
+    let enabled = iocsr_read_u32(LOONGARCH_IOCSR_IPI_EN);
+    iocsr_write_u32(LOONGARCH_IOCSR_IPI_EN, enabled | TLB_SHOOTDOWN_IPI);
+    unsafe {
+        let mut ecfg: usize;
+        asm!("csrrd {}, 0x4", out(reg) ecfg);
+        asm!("csrwr {}, 0x4", inout(reg) (ecfg | (1 << 12)) => _);
+    }
+}
+
+/// Clear the runtime TLB IPI if it is pending on the current hart.
+pub fn clear_tlb_shootdown_ipi() -> bool {
+    let pending = iocsr_read_u32(LOONGARCH_IOCSR_IPI_STATUS) & TLB_SHOOTDOWN_IPI;
+    if pending != 0 {
+        iocsr_write_u32(LOONGARCH_IOCSR_IPI_CLEAR, pending);
+        true
+    } else {
+        false
+    }
+}
+
+/// Raise the TLB IPI on every hart selected by `hart_mask`.
+pub fn send_tlb_shootdown(hart_mask: usize) {
+    for hart_id in 0..crate::arch::config::CPU_CORE_NUM {
+        if hart_mask & (1usize << hart_id) != 0 {
+            send_ipi_single(hart_id, TLB_SHOOTDOWN_IPI);
+        }
+    }
 }
