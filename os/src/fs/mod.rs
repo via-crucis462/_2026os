@@ -128,7 +128,7 @@ pub trait File: Send + Sync {
         None
     }
     /// ioctl 设备控制，默认返回 ENOTTY（不支持的 ioctl 请求）
-    fn ioctl(&self, _request: u32, _argp: usize, _token: usize) -> isize {
+    fn ioctl(&self, _request: u32, _argp: usize, _mm: &crate::mm::MemorySet) -> isize {
         Errno::ENOTTY.as_isize()
     }
     fn is_socket(&self) -> bool {

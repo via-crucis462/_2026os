@@ -29,7 +29,7 @@ pub struct SockAddrIn {
 }
 pub fn sys_getpeername(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let task = current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let files = task.inner_exclusive_access().files.clone();
     let inner = files.exclusive_access();
     
@@ -42,7 +42,7 @@ pub fn sys_getpeername(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
 
     // 读取用户态传入的地址长度限制
     let mut user_len = unsafe {
-        if let Some(ul) = try_translated_read(token, addrlen) {
+        if let Some(ul) = try_translated_read(&mm, addrlen) {
             ul
         } else {
             return EFAULT.as_isize();
@@ -78,13 +78,13 @@ pub fn sys_getpeername(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
             let copy_len = (user_len as usize).min(16);
             let mut current_addr = addr as usize;
             for i in 0..copy_len {
-                if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                if !try_translated_write(&mm, current_addr as *mut u8, sockaddr_bytes[i]) {
                     return EFAULT.as_isize();
                 }
                 current_addr += 1;
             } 
             // 按照 POSIX 标准，必须回写实际的套接字地址长度（16 字节）
-            if !try_translated_write(token, addrlen, 16u32) {
+            if !try_translated_write(&mm, addrlen, 16u32) {
                 return EFAULT.as_isize();
             }
         }
@@ -112,13 +112,13 @@ pub fn sys_getpeername(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
                 let copy_len = (user_len as usize).min(16);
                 let mut current_addr = addr as usize;
                 for i in 0..copy_len {
-                    if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                    if !try_translated_write(&mm, current_addr as *mut u8, sockaddr_bytes[i]) {
                         return crate::syscall::errno::Errno::EFAULT.as_isize();
                     }
                     current_addr += 1;
                 } 
                 // 回写实际的套接字地址长度
-                if !try_translated_write(token, addrlen, 16u32) {
+                if !try_translated_write(&mm, addrlen, 16u32) {
                     return crate::syscall::errno::Errno::EFAULT.as_isize();
                 }
             }
@@ -140,7 +140,7 @@ pub fn sys_getpeername(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
 /// 将内核中 Socket 的 local_endpoint 信息格式化为 sockaddr_in 结构并拷贝回用户空间。 asd
 pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let task = current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let files = task.inner_exclusive_access().files.clone();
     let inner = files.exclusive_access();
     if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
@@ -149,7 +149,7 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner); 
     let mut user_len = unsafe {
-        if let Some(ul) = try_translated_read(token, addrlen) {
+        if let Some(ul) = try_translated_read(&mm, addrlen) {
             ul
         } else {
             return EFAULT.as_isize();
@@ -198,16 +198,16 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         sockaddr_bytes[4..8].copy_from_slice(&ip);
 
         unsafe {
-            if let Some(user_len) = try_translated_read(token, addrlen) {
+            if let Some(user_len) = try_translated_read(&mm, addrlen) {
                 let copy_len = (user_len as usize).min(16);
                 let mut current_addr = addr as usize;
                 for i in 0..copy_len {
-                    if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                    if !try_translated_write(&mm, current_addr as *mut u8, sockaddr_bytes[i]) {
                         return EFAULT.as_isize();
                     }
                     current_addr += 1;
                 }   
-                if !try_translated_write(token, addrlen, 16u32) {
+                if !try_translated_write(&mm, addrlen, 16u32) {
                     return EFAULT.as_isize();
                 }
             } else {
@@ -226,14 +226,14 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         let mut current_addr = addr as usize;
         for i in 0..copy_len {
             unsafe {
-                if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                if !try_translated_write(&mm, current_addr as *mut u8, sockaddr_bytes[i]) {
                     return crate::syscall::errno::Errno::EFAULT.as_isize();
                 }
             }
             current_addr += 1;
         }
         unsafe {
-            if !try_translated_write(token, addrlen, 12u32) {
+            if !try_translated_write(&mm, addrlen, 12u32) {
                 return crate::syscall::errno::Errno::EFAULT.as_isize();
             }
         }
@@ -248,7 +248,7 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         let mut current_addr = addr as usize;
         for i in 0..copy_len {
             unsafe {
-                if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                if !try_translated_write(&mm, current_addr as *mut u8, sockaddr_bytes[i]) {
                     return crate::syscall::errno::Errno::EFAULT.as_isize();
                 }
             }
@@ -256,7 +256,7 @@ pub fn sys_getsockname(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
         }
 
         unsafe {
-            if !try_translated_write(token, addrlen, copy_len as u32) {
+            if !try_translated_write(&mm, addrlen, copy_len as u32) {
                 return crate::syscall::errno::Errno::EFAULT.as_isize();
             }
         }
@@ -293,7 +293,7 @@ pub fn sys_setsockopt(
     const SO_ATTACH_BPF: usize = 50;
     const SO_RCVTIMEO: usize = 20; // 接收超时常量
     let task = crate::task::current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let files = task.inner_exclusive_access().files.clone();
     let inner = files.exclusive_access();
 
@@ -310,7 +310,7 @@ pub fn sys_setsockopt(
             return Errno::EINVAL.as_isize();
         }
         // 从用户态读取 timeval 结构体
-        let timeval = if let Some(tv) = try_translated_read(token, optval as *const TimeVal) {
+        let timeval = if let Some(tv) = try_translated_read(&mm, optval as *const TimeVal) {
             tv
         } else {
             return Errno::EFAULT.as_isize();
@@ -336,7 +336,7 @@ pub fn sys_setsockopt(
         if optlen < core::mem::size_of::<i32>() as u32 || optval.is_null() {
             return Errno::EINVAL.as_isize();
         }
-        let prog_fd = if let Some(fd) = try_translated_read(token, optval as *const i32) {
+        let prog_fd = if let Some(fd) = try_translated_read(&mm, optval as *const i32) {
             fd
         } else {
             return Errno::EFAULT.as_isize();
@@ -368,7 +368,7 @@ pub fn sys_setsockopt(
 /// 从用户态读取目标 sockaddr_in（IP和端口），转换成大端序网络地址，并调用底层 TcpSocket 尝试建立连接。
 pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
     let task = current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let files = task.inner_exclusive_access().files.clone();
     let inner = files.exclusive_access();
     if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
@@ -384,7 +384,7 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
         return Errno::EFAULT.as_isize();
     }
     let family_bytes = {
-        if let Some(b) = try_translated_read(token, addr as *const [u8; 2]) {
+        if let Some(b) = try_translated_read(&mm, addr as *const [u8; 2]) {
             b
         } else {
             return EFAULT.as_isize();
@@ -406,7 +406,7 @@ pub fn sys_connect(fd: usize, addr: *const u8, addrlen: u32) -> isize {
         return Errno::EAFNOSUPPORT.as_isize(); 
     }
     let sockaddr = {
-        if let Some(s) = try_translated_read(token, addr as *const [u8; 16]) {
+        if let Some(s) = try_translated_read(&mm, addr as *const [u8; 16]) {
             s
         } else {
             return EFAULT.as_isize();
@@ -486,7 +486,7 @@ pub fn sys_sendto(
 ) -> isize {
     
     let task = current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let files = task.inner_exclusive_access().files.clone();
     let inner = files.exclusive_access();
     if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
@@ -505,7 +505,9 @@ pub fn sys_sendto(
         }
         // 1. 从用户空间拷贝出发送数据
         let mut data = vec![0u8; len];
-        let user_buf = UserBuffer::new(translated_byte_buffer(token, buf, len));
+        let Some(user_buf) = crate::mm::translated_user_buffer(&mm, buf, len) else {
+            return Errno::EFAULT.as_isize();
+        };
         let mut current = 0;
         for buffer in user_buf.buffers.iter() {
             let copy_len = buffer.len();
@@ -514,7 +516,7 @@ pub fn sys_sendto(
         }
         if dest_addr as usize != 0 {
             let sockaddr_bytes = {
-                if let Some(s) = try_translated_read(token, dest_addr as *const [u8; 16]) {
+                if let Some(s) = try_translated_read(&mm, dest_addr as *const [u8; 16]) {
                     s
                 } else {
                     return EFAULT.as_isize();
@@ -547,7 +549,9 @@ pub fn sys_sendto(
         }
     }
     loop {
-        let user_buf = UserBuffer::new(translated_byte_buffer(token, buf, len));
+        let Some(user_buf) = crate::mm::translated_user_buffer(&mm, buf, len) else {
+            return Errno::EFAULT.as_isize();
+        };
         let ret = file.write(user_buf) as isize;
         
         if ret == -11 {
@@ -575,7 +579,7 @@ pub fn sys_recvfrom(
 ) -> isize {
     const MSG_DONTWAIT: i32 = 0x40;
     let task = current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let files = task.inner_exclusive_access().files.clone();
     let inner = files.exclusive_access();
     if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
@@ -600,7 +604,12 @@ pub fn sys_recvfrom(
             if let Some((read_len, src_ep)) = udp_socket.recvfrom(&mut data) {
                 // 把数据拷贝回用户的 buf
                 if read_len > 0 {
-                    let mut user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, len));
+                    let Some(mut user_buf) = crate::mm::translated_user_buffer_mut(&mm,
+                        buf,
+                        len,
+                    ) else {
+                        return Errno::EFAULT.as_isize();
+                    };
                     let mut current = 0;
                     for buffer in user_buf.buffers.iter_mut() {
                         let copy_len = buffer.len().min(read_len - current);
@@ -620,19 +629,19 @@ pub fn sys_recvfrom(
 
                     unsafe {
                         let mut user_len = {
-                            if let Some(ul) = crate::mm::try_translated_read(token, addrlen) { ul } 
+                            if let Some(ul) = crate::mm::try_translated_read(&mm, addrlen) { ul }
                             else { return Errno::EFAULT.as_isize(); }
                         };
                         let copy_len = (user_len as usize).min(16);
                         let mut current_addr = src_addr as usize;
                         for i in 0..copy_len {
-                            if !crate::mm::try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                            if !crate::mm::try_translated_write(&mm, current_addr as *mut u8, sockaddr_bytes[i]) {
                                 return Errno::EFAULT.as_isize();
                             }
                             current_addr += 1;
                         }
                         user_len = 16;
-                        if !crate::mm::try_translated_write(token, addrlen, user_len) {
+                        if !crate::mm::try_translated_write(&mm, addrlen, user_len) {
                             return Errno::EFAULT.as_isize();
                         }
                     }
@@ -655,7 +664,9 @@ pub fn sys_recvfrom(
             }
         }
     }
-    let user_buf = UserBuffer::new(crate::mm::translated_byte_buffer_mut(token, buf, len));
+    let Some(user_buf) = crate::mm::translated_user_buffer_mut(&mm, buf, len) else {
+        return Errno::EFAULT.as_isize();
+    };
     let read_len = file.read(user_buf);
     if file.as_any().downcast_ref::<TcpSocket>().is_some() {
         warn!(
@@ -674,7 +685,7 @@ pub fn sys_recvfrom(
                     sockaddr_bytes[4..8].copy_from_slice(&v4.0); // IPv4
                 unsafe {
                     let mut user_len = {
-                        if let Some(ul) = try_translated_read(token, addrlen) {
+                        if let Some(ul) = try_translated_read(&mm, addrlen) {
                             ul
                         } else {
                             return EFAULT.as_isize();
@@ -684,13 +695,13 @@ pub fn sys_recvfrom(
                     let mut current_addr = src_addr as usize;
                     
                     for i in 0..copy_len {
-                        if !try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]) {
+                        if !try_translated_write(&mm, current_addr as *mut u8, sockaddr_bytes[i]) {
                             return EFAULT.as_isize();
                         }
                         current_addr += 1;
                     }
                     user_len = 16;
-                    if !try_translated_write(token, addrlen, user_len) {
+                    if !try_translated_write(&mm, addrlen, user_len) {
                         return EFAULT.as_isize();
                     }
                 }
@@ -767,7 +778,7 @@ pub fn sys_socketpair(domain: usize, socket_type: usize, protocol: usize, sv: *m
     const SOCK_CLOEXEC: usize = 0o2000000;
 
     let task = current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let files = task.inner_exclusive_access().files.clone();
     let mut inner = files.exclusive_access();
 
@@ -806,7 +817,7 @@ pub fn sys_socketpair(domain: usize, socket_type: usize, protocol: usize, sv: *m
     let mut data = [0u8; 8];
     data[..4].copy_from_slice(&(left_fd as i32).to_ne_bytes());
     data[4..].copy_from_slice(&(right_fd as i32).to_ne_bytes());
-    if !try_translated_write(token, sv as *mut [u8; 8], data) {
+    if !try_translated_write(&mm, sv as *mut [u8; 8], data) {
         return Errno::EFAULT.as_isize();
     }
     0
@@ -824,7 +835,7 @@ fn alloc_ephemeral_port() -> u16 {
 }
 pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
     let task = current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let files = task.inner_exclusive_access().files.clone();
     let inner = files.exclusive_access();
     if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
@@ -843,7 +854,7 @@ pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         // 从 addr 中安全读取端口信息
         let mut port = {
-            if let Some(p) = try_translated_read(token, (addr as usize + 2) as *const u16) {
+            if let Some(p) = try_translated_read(&mm, (addr as usize + 2) as *const u16) {
                 u16::from_be(p)
             } else {
                 return EFAULT.as_isize();
@@ -859,7 +870,7 @@ pub fn sys_bind(fd: usize, addr: *const u8, _addr_len: usize) -> isize {
     if let Some(socket) = file.as_any().downcast_ref::<TcpSocket>() {
         // 1. 从用户态读取 16 字节的 sockaddr_in
         let sockaddr = {
-            if let Some(s) = try_translated_read(token, addr as *const [u8; 16]) {
+            if let Some(s) = try_translated_read(&mm, addr as *const [u8; 16]) {
                 s
             } else {
                 return EFAULT.as_isize();
@@ -938,7 +949,7 @@ const O_RDWR: u32 = 0o2;
 const ACCEPT_HEARTBEAT_INTERVAL_MS: usize = 5_000;//证明不死锁的调试
 pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
     let task = current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let files = task.inner_exclusive_access().files.clone();
     let (file, status) = {
             let inner = files.exclusive_access();
@@ -1077,14 +1088,14 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
                 sockaddr_bytes[4..8].copy_from_slice(&ip);
 
                 unsafe {
-                    if let Some(user_len) = crate::mm::try_translated_read(token, addrlen) {
+                    if let Some(user_len) = crate::mm::try_translated_read(&mm, addrlen) {
                         let copy_len = (user_len as usize).min(16);
                         let mut current_addr = addr as usize;
                         for i in 0..copy_len {
-                            let _ = crate::mm::try_translated_write(token, current_addr as *mut u8, sockaddr_bytes[i]);
+                            let _ = crate::mm::try_translated_write(&mm, current_addr as *mut u8, sockaddr_bytes[i]);
                             current_addr += 1;
                         }
-                        let _ = crate::mm::try_translated_write(token, addrlen, 16u32);
+                        let _ = crate::mm::try_translated_write(&mm, addrlen, 16u32);
                     }
                 }
             }
@@ -1098,7 +1109,7 @@ pub fn sys_accept(fd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
 /// 系统调用号: 211
 pub fn sys_sendmsg(fd: usize, msg_ptr: *const MsgHdr, _flags: i32) -> isize {
     let task = crate::task::current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let files = task.inner_exclusive_access().files.clone();
     let inner = files.exclusive_access();
 
@@ -1110,15 +1121,15 @@ pub fn sys_sendmsg(fd: usize, msg_ptr: *const MsgHdr, _flags: i32) -> isize {
     if !file.writable() {
         return crate::syscall::errno::Errno::EACCES.as_isize();
     }
-    let msg = crate::mm::translated_read(token, msg_ptr);
+    let msg = crate::mm::translated_read(&mm, msg_ptr);
     let mut buffers = alloc::vec::Vec::new();
     for i in 0..msg.msg_iovlen {
         let iov_ptr = (msg.msg_iov + i * core::mem::size_of::<IoVec>()) as *const IoVec;
-        let iov = crate::mm::translated_read(token, iov_ptr);
+        let iov = crate::mm::translated_read(&mm, iov_ptr);
         
         if iov.iov_len > 0 {
 
-            let mut iov_bufs = crate::mm::translated_byte_buffer(token, iov.iov_base as *const u8, iov.iov_len);
+            let mut iov_bufs = crate::mm::translated_byte_buffer(&mm, iov.iov_base as *const u8, iov.iov_len);
             buffers.append(&mut iov_bufs);
         }
     }
@@ -1132,7 +1143,7 @@ pub fn sys_sendmsg(fd: usize, msg_ptr: *const MsgHdr, _flags: i32) -> isize {
 /// 系统调用号: 212
 pub fn sys_recvmsg(fd: usize, msg_ptr: *mut MsgHdr, _flags: i32) -> isize {
     let task = crate::task::current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let files = task.inner_exclusive_access().files.clone();
     let inner = files.exclusive_access();
 
@@ -1145,17 +1156,17 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: *mut MsgHdr, _flags: i32) -> isize {
 
 
     // 1. 读出 MsgHdr 控制结构
-    let mut msg = crate::mm::translated_read(token, msg_ptr);
+    let mut msg = crate::mm::translated_read(&mm, msg_ptr);
 
     // 2. 遍历提取用户的读缓冲 (IoVec)
     let mut buffers = alloc::vec::Vec::new();
     for i in 0..msg.msg_iovlen {
         let iov_ptr = (msg.msg_iov + i * core::mem::size_of::<IoVec>()) as *const IoVec;
-        let iov = crate::mm::translated_read(token, iov_ptr);
+        let iov = crate::mm::translated_read(&mm, iov_ptr);
         
         if iov.iov_len > 0 {
 
-            let mut iov_bufs = crate::mm::translated_byte_buffer_mut(token, iov.iov_base as *mut u8, iov.iov_len);
+            let mut iov_bufs = crate::mm::translated_byte_buffer_mut(&mm, iov.iov_base as *mut u8, iov.iov_len);
             buffers.append(&mut iov_bufs);
         }
     }
@@ -1172,7 +1183,7 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: *mut MsgHdr, _flags: i32) -> isize {
         sa_nl[4..8].copy_from_slice(&0u32.to_ne_bytes());  // nl_pid = 0
         
         // 安全地将 12 字节写入用户态提供的 msg_name 指针
-        let mut name_bufs = crate::mm::translated_byte_buffer_mut(token, msg.msg_name as *mut u8, 12);
+        let mut name_bufs = crate::mm::translated_byte_buffer_mut(&mm, msg.msg_name as *mut u8, 12);
         let mut current = 0;
         for buf in name_bufs.iter_mut() {
             let copy_len = buf.len().min(12 - current);
@@ -1183,7 +1194,7 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: *mut MsgHdr, _flags: i32) -> isize {
         
         // 更新实际写回的名字长度
         msg.msg_namelen = 12; 
-        crate::mm::translated_write(token, msg_ptr, msg);
+        crate::mm::translated_write(&mm, msg_ptr, msg);
         }
     }
 
@@ -1218,7 +1229,7 @@ pub fn sys_getsockopt(
     optlen: *mut u32
 ) -> isize {
     let task = crate::task::current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let files = task.inner_exclusive_access().files.clone();
     let inner = files.exclusive_access();
 
@@ -1233,7 +1244,7 @@ pub fn sys_getsockopt(
     const SOL_SOCKET: i32 = 1;  // 通用套接字
     const SO_SNDBUF: i32 = 7;  // 发送缓冲区大小
     const SO_RCVBUF: i32 = 8;  // 接收缓冲区大小
-    let mut len = crate::mm::translated_read(token, optlen);
+    let mut len = crate::mm::translated_read(&mm, optlen);
     if level == SOL_SOCKET {
         match optname {
             
@@ -1244,7 +1255,7 @@ pub fn sys_getsockopt(
                 // 统一回报 16384 字节 (4 字节 i32 结构)
                 let buffer_size: i32 = 16384; 
                 let bytes = buffer_size.to_ne_bytes();
-                let mut val_bufs = crate::mm::translated_byte_buffer_mut(token, optval, 4);
+                let mut val_bufs = crate::mm::translated_byte_buffer_mut(&mm, optval, 4);
                 let mut current = 0;
                 for buf in val_bufs.iter_mut() {
                     let copy_len = buf.len().min(4 - current);
@@ -1252,13 +1263,13 @@ pub fn sys_getsockopt(
                     current += copy_len;
                     if current == 4 { break; }
                 }
-                crate::mm::translated_write(token, optlen, 4u32);
+                crate::mm::translated_write(&mm, optlen, 4u32);
                 return 0; 
             }
             _ => {
                 if len >= 4 {
                     let bytes = 0i32.to_ne_bytes();
-                    let mut val_bufs = crate::mm::translated_byte_buffer_mut(token, optval, 4);
+                    let mut val_bufs = crate::mm::translated_byte_buffer_mut(&mm, optval, 4);
                     let mut current = 0;
                     for buf in val_bufs.iter_mut() {
                         let copy_len = buf.len().min(4 - current);
@@ -1266,7 +1277,7 @@ pub fn sys_getsockopt(
                         current += copy_len;
                         if current == 4 { break; }
                     }
-                    crate::mm::translated_write(token, optlen, 4u32);
+                    crate::mm::translated_write(&mm, optlen, 4u32);
                 }
                 return 0;
             }
@@ -1274,7 +1285,7 @@ pub fn sys_getsockopt(
     }
     if len >= 4 {
         let bytes = 0i32.to_ne_bytes();
-        let mut val_bufs = crate::mm::translated_byte_buffer_mut(token, optval, 4);
+        let mut val_bufs = crate::mm::translated_byte_buffer_mut(&mm, optval, 4);
         let mut current = 0;
         for buf in val_bufs.iter_mut() {
             let copy_len = buf.len().min(4 - current);
@@ -1282,7 +1293,7 @@ pub fn sys_getsockopt(
             current += copy_len;
             if current == 4 { break; }
         }
-        crate::mm::translated_write(token, optlen, 4u32);
+        crate::mm::translated_write(&mm, optlen, 4u32);
     }
     
     0 

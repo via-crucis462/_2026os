@@ -436,7 +436,7 @@ impl VfsInode for ProcMapsInode {
             if let Some(mm) = mm {
                 let areas = mm.areas.read();
                 for area_arc in areas.values() {
-                    let area = area_arc.lock();
+                    let area = area_arc.read();
                     let start_va: usize = area.vpn_range.get_start().start_addr();
                     let end_va: usize = area.vpn_range.get_end().start_addr();
 

@@ -104,7 +104,7 @@ impl MsgManager {
             ..Default::default()
         };
         // 初始化基本信息
-        queue.msqds.msg_ctime = (crate::get_real_time_ns() / 1_000_000_000) as usize;
+        queue.msqds.msg_ctime = crate::timer::current_wallclock_sec();
         let qid = id as u32;
         self.key_to_id.insert(key, qid);
         self.queues.insert(qid, Arc::new(Mutex::new(queue)));
@@ -177,15 +177,15 @@ impl MsgQueue {
 
     /// 更新信息（调用前 msg 必须已完成入队或出队操作）
     fn update_msqds(&mut self, is_send: bool, pid: usize) {
-        let time_now = crate::get_real_time_ns() / 1_000_000_000;
+        let time_now = crate::timer::current_wallclock_sec();
         // msg_qnum 和 msg_cbytes 直接由队列内容计算
         self.msqds.msg_qnum = self.msgs.len();
         self.msqds.msg_cbytes = self.msgs.iter().map(|msg| msg.mtext.len()).sum();
         if is_send {
-            self.msqds.msg_stime = time_now as usize;
+            self.msqds.msg_stime = time_now;
             self.msqds.msg_lspid = pid as i32;
         } else {
-            self.msqds.msg_rtime = time_now as usize;
+            self.msqds.msg_rtime = time_now;
             self.msqds.msg_lrpid = pid as i32;
         }
     }
@@ -226,7 +226,7 @@ impl MsgQueue {
         self.msqds.msg_perm.gid = new_ds.msg_perm.gid;
         self.msqds.msg_perm.mode = new_ds.msg_perm.mode;
         self.msqds.msg_qbytes = new_ds.msg_qbytes;
-        self.msqds.msg_ctime = (crate::get_real_time_ns() / 1_000_000_000) as usize;
+        self.msqds.msg_ctime = crate::timer::current_wallclock_sec();
     }
 
     /// 从队列中取出一个类型匹配的消息

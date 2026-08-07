@@ -44,11 +44,12 @@ const EINVAL: isize = 22;
 
 pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
     // todo：实现真正的多用户，权限机制和多线程
+    let mm = current_user_mm();
     trace!("kernel:pid[{}] sys_prctl option={}", current_task().unwrap().getpid(), option);
     match option {
         PR_SETNAME => {
             // 将名称写入当前线程的 comm 字段。
-            let name = if let Some(name) = try_translated_str(current_user_token(), _arg2 as *const u8) {
+            let name = if let Some(name) = try_translated_str(&mm, _arg2 as *const u8) {
                 name
             } else {
                 return -EINVAL;
@@ -64,14 +65,14 @@ pub fn sys_prctl(option: usize, _arg2: usize, _arg3: usize, _arg4: usize, _arg5:
         PR_GETNAME => {
             // 与set相反
             let task = current_task().unwrap();
-            let (name, token) = {
+            let name = {
                 let inner = task.inner_exclusive_access();
-                (inner.comm, inner.get_user_token())
+                inner.comm
             };
             let mut out = [0u8; 16];
             let copy_len = name.iter().position(|byte| *byte == 0).unwrap_or(name.len());
             out[..copy_len].copy_from_slice(&name[..copy_len]);
-            if !try_translated_write(token, _arg2 as *mut [u8; 16], out){
+            if !try_translated_write(&mm, _arg2 as *mut [u8; 16], out){
                 return EFAULT.as_isize();
             };
             0

@@ -25,7 +25,6 @@ pub use task::{
     Rlimit64, Rlimits, TaskContext, TaskControlBlock, TaskControlBlockInner,
     TaskStatus, TaskStruct, TaskStructInner, ThreadStruct,
 };
-use crate::mm::translated_byte_buffer;
 use crate::{arch::trap, console::print};
 use registry::*;
 use crate::sync::*;
@@ -57,7 +56,8 @@ pub use registry::{
 };
 
 pub use scheduler::processor::{
-    current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task, current_tid
+    current_task, current_trap_cx, current_user_mm, current_user_token, run_tasks, schedule,
+    take_current_task, current_tid
 };
 pub use scheduler::wait::{
     block_current_and_run_next, block_current_and_run_next_if,

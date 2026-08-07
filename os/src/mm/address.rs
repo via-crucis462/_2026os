@@ -263,6 +263,17 @@ impl VirtPageNum {
 }
 
 impl PhysPageNum {
+    /// Get an immutable view of a page-table page.
+    pub fn get_pte_array_ref(&self) -> &'static [PageTableEntry] {
+        let pa: PhysAddr = (*self).into();
+        unsafe {
+            core::slice::from_raw_parts(
+                pa.get_cached_addr() as *const PageTableEntry,
+                PAGE_SIZE >> 3,
+            )
+        }
+    }
+
     /// Get the reference of page table(array of ptes)
     /// pte 一定是按标准页组织的，因为一个9位页号对应页表占用一个标准页
     pub fn get_pte_array(&self) -> &'static mut [PageTableEntry] {

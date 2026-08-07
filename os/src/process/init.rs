@@ -151,7 +151,13 @@ static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
 	#[cfg(initproc = "sh")]
 	bytes: *include_bytes!("../arch/riscv/initproc_sh"),
 	#[cfg(initproc = "ltp")]
-	bytes: *include_bytes!("../arch/riscv/initproc_ltp")
+	bytes: *include_bytes!("../arch/riscv/initproc_ltp"),
+	#[cfg(initproc = "mmtest")]
+	bytes: *include_bytes!("../arch/riscv/initproc_mmtest"),
+	#[cfg(initproc = "cargotest")]
+	bytes: *include_bytes!("../arch/riscv/initproc_cargotest"),
+	#[cfg(initproc = "ctidtest")]
+	bytes: *include_bytes!("../arch/riscv/initproc_ctidtest"),
 };
 
 #[link_section = ".data"]
@@ -163,7 +169,13 @@ static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
 	#[cfg(initproc = "sh")]
 	bytes: *include_bytes!("../arch/la/initproc_sh"),
 	#[cfg(initproc = "ltp")]
-	bytes: *include_bytes!("../arch/la/initproc_ltp")
+	bytes: *include_bytes!("../arch/la/initproc_ltp"),
+	#[cfg(initproc = "mmtest")]
+	bytes: *include_bytes!("../arch/la/initproc_mmtest"),
+	#[cfg(initproc = "cargotest")]
+	bytes: *include_bytes!("../arch/la/initproc_cargotest"),
+	#[cfg(initproc = "ctidtest")]
+	bytes: *include_bytes!("../arch/la/initproc_ctidtest"),
 };
 
 lazy_static! {

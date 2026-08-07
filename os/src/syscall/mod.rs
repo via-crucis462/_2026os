@@ -38,6 +38,7 @@ const SYSCALL_CHROOT: usize = 51;
 const SYSCALL_FCHMOD: usize = 52;
 const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_FCHOWNAT: usize = 54;
+const SYSCALL_FCHOWN: usize = 55;
 /// openat syscall
 const SYSCALL_OPENAT: usize = 56;
 /// close syscall
@@ -249,7 +250,7 @@ use alloc::string::String;
 use crate::net::MsgHdr;
 
 use crate::get_hart_id;
-use crate::mm::try_translated_str;
+use crate::mm::{try_translated_str, MemorySet};
 use crate::syscall::net::*;
 
 use crate::{fs::Stat, task::{SignalAction, current_task}};
@@ -290,8 +291,8 @@ pub(crate) fn normalize_leading_dot_path(path: String) -> String {
 }
 
 
-pub fn translate_path(token: usize, path: *const u8) -> Result<String, Errno> {
-    let str = try_translated_str(token, path);
+pub fn translate_path(mm: &MemorySet, path: *const u8) -> Result<String, Errno> {
+    let str = try_translated_str(mm, path);
     if let Some(s) = str {
         if s.len() > PATH_MAX_LEN {
             return Err(Errno::ENAMETOOLONG);
@@ -352,7 +353,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_PIPE => sys_pipe(args[0] as *mut usize, args[1]),
         SYSCALL_LINKAT => sys_linkat(args[1] as *const u8, args[3] as *const u8),
         SYSCALL_FCHMOD => sys_fchmod(args[0], args[1] as u32),
-        // SYSCALL_FCHOWN => sys_fchown(args[0], args[1] as u32, args[2] as u32),
+        SYSCALL_FCHOWN => sys_fchown(args[0], args[1] as u32, args[2] as u32),
         SYSCALL_UNLINKAT => sys_unlinkat(args[0] as isize, args[1] as *const u8, args[2] as usize),
         SYSCALL_READ => sys_read(args[0], args[1] as *const u8, args[2]),
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),

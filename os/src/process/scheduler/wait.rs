@@ -1,5 +1,3 @@
-use core::hint::spin_loop;
-
 use crate::process::{TaskContext, TaskControlBlockInner, TaskStatus};
 use crate::process::scheduler::processor::{current_task, schedule};
 use crate::process::scheduler::runqueue::wake_up_task;
@@ -111,9 +109,11 @@ pub fn wake_up_one(queue: &Mutex<WaitQueue>) -> bool {
             let mut inner = task.inner_exclusive_access();
             match inner.state {
                 TaskStatus::BlockSaving => {
-                    spin_loop();
+                    // 任务准备阻塞但还没保存好上下文（切换到调度函数），
+                    // 标记为希望唤醒，调度器检查到会将其视作 Ready。
+                    inner.wake_pending = true;
                     drop(inner);
-                    continue;
+                    return true;
                 }
                 TaskStatus::Blocked => {
                     drop(inner);

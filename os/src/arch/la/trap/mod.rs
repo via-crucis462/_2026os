@@ -4,12 +4,12 @@ use crate::process::scheduler::processor::current_user_asid;
 mod context;
 
 use crate::{KERNEL_STACK_SIZE, PAGE_SIZE, get_hart_id};
-use crate::mm::{translated_read, translated_write, PageTable, VirtAddr};
+use crate::mm::{translated_read, translated_write, try_translated_read, MemorySet, VirtAddr};
 use crate::syscall::syscall;
 use crate::task::{
     KernelStack, SignalFlags,
     current_add_signal, current_task, current_tid, current_trap_cx,
-    current_user_token, exit_current_and_run_next,
+    current_user_mm, current_user_token, exit_current_and_run_next,
     suspend_current_and_run_next, handle_signals
 };
 use alloc::sync::Arc;
@@ -266,8 +266,7 @@ fn is_brk_process() -> bool {
         .unwrap_or(false)
 }
 
-fn debug_dump_user_stack_window(tag: &str, token: usize, sp: usize, words: usize) {
-    let page_table = PageTable::from_token(token);
+fn debug_dump_user_stack_window(tag: &str, mm: &MemorySet, sp: usize, words: usize) {
     error!(
         "[kernel] brk_stack {}: sp=0x{:x}, dumping {} words",
         tag,
@@ -276,9 +275,8 @@ fn debug_dump_user_stack_window(tag: &str, token: usize, sp: usize, words: usize
     );
     for index in 0..words {
         let va = sp + index * core::mem::size_of::<usize>();
-        match page_table.translate_va(VirtAddr::from(va)) {
-            Some(pa) => {
-                let value = *pa.get_ref::<usize>();
+        match try_translated_read(mm, va as *const usize) {
+            Some(value) => {
                 error!(
                     "[kernel] brk_stack {}: [0x{:x}] = 0x{:x}",
                     tag,
@@ -297,7 +295,7 @@ fn debug_dump_user_stack_window(tag: &str, token: usize, sp: usize, words: usize
     }
 }
 
-fn debug_dump_brk_snapshot(tag: &str, cx: &TrapContext, token: usize) {
+fn debug_dump_brk_snapshot(tag: &str, cx: &TrapContext, mm: &MemorySet) {
     error!(
         "[kernel] brk_trace {}: era=0x{:x}, user_sp=0x{:x}, a0=0x{:x}, a1=0x{:x}, a2=0x{:x}, a3=0x{:x}, a4=0x{:x}, a5=0x{:x}, a6=0x{:x}, a7=0x{:x}",
         tag,
@@ -312,27 +310,27 @@ fn debug_dump_brk_snapshot(tag: &str, cx: &TrapContext, token: usize) {
         cx.r[10],
         cx.r[11],
     );
-    debug_dump_user_stack_window(tag, token, cx.r[3], 24);
+    debug_dump_user_stack_window(tag, mm, cx.r[3], 24);
 }
 
 /// 从 era 获取异常的指令
-fn read_faulting_instruction(era: usize, user_token: Option<usize>) -> u32 {
-    match user_token {
-        Some(token) => translated_read(token, era as *const u32),
+fn read_faulting_instruction(era: usize, user_mm: &Option<Arc<MemorySet>>) -> u32 {
+    match user_mm {
+        Some(mm) => translated_read(mm, era as *const u32),
         None => unsafe { (era as *const u32).read_volatile() },
     }
 }
 
-fn read_ale<T: Copy>(vaddr: usize, user_token: Option<usize>) -> T {
-    match user_token {
-        Some(token) => translated_read(token, vaddr as *const T),
+fn read_ale<T: Copy>(vaddr: usize, user_mm: &Option<Arc<MemorySet>>) -> T {
+    match user_mm {
+        Some(mm) => translated_read(mm, vaddr as *const T),
         None => unsafe { (vaddr as *const T).read_unaligned() },
     }
 }
 
-fn write_ale<T>(vaddr: usize, value: T, user_token: Option<usize>) {
-    match user_token {
-        Some(token) => translated_write(token, vaddr as *mut T, value),
+fn write_ale<T>(vaddr: usize, value: T, user_mm: &Option<Arc<MemorySet>>) {
+    match user_mm {
+        Some(mm) => translated_write(mm, vaddr as *mut T, value),
         None => unsafe { (vaddr as *mut T).write_unaligned(value) },
     }
 }
@@ -343,8 +341,8 @@ fn write_ale<T>(vaddr: usize, value: T, user_token: Option<usize>) {
 /// 用户态行为还待进一步验证，但目前没有问题
 fn handle_ale(cx: &mut TrapContext, badv: usize, is_user: bool) -> Result<(), &'static str> {
     let era = cx.get_rt();
-    let user_token = is_user.then(current_user_token);
-    let bad_ins = read_faulting_instruction(era, user_token);
+    let user_mm = is_user.then(current_user_mm);
+    let bad_ins = read_faulting_instruction(era, &user_mm);
     let rd = (bad_ins & 0x1F) as usize;
     let opcode_8 = bad_ins >> 24;
     let opcode_10 = bad_ins >> 22;
@@ -362,21 +360,21 @@ fn handle_ale(cx: &mut TrapContext, badv: usize, is_user: bool) -> Result<(), &'
             match opcode_8 {
                 0x24 => {
                     if rd != 0 {
-                        cx.r[rd] = read_ale::<u32>(vaddr, user_token) as i32 as i64 as usize;
+                        cx.r[rd] = read_ale::<u32>(vaddr, &user_mm) as i32 as i64 as usize;
                     }
                 }
                 0x25 => {
                     let value = if rd != 0 { cx.r[rd] as u32 } else { 0 };
-                    write_ale(vaddr, value, user_token);
+                    write_ale(vaddr, value, &user_mm);
                 }
                 0x26 => {
                     if rd != 0 {
-                        cx.r[rd] = read_ale::<u64>(vaddr, user_token) as usize;
+                        cx.r[rd] = read_ale::<u64>(vaddr, &user_mm) as usize;
                     }
                 }
                 0x27 => {
                     let value = if rd != 0 { cx.r[rd] as u64 } else { 0 };
-                    write_ale(vaddr, value, user_token);
+                    write_ale(vaddr, value, &user_mm);
                 }
                 _ => unreachable!(),
             }
@@ -399,39 +397,39 @@ fn handle_ale(cx: &mut TrapContext, badv: usize, is_user: bool) -> Result<(), &'
             match opcode_10 {
                 0x0A1 => {
                     if rd != 0 {
-                        cx.r[rd] = read_ale::<u16>(vaddr, user_token) as i16 as i64 as usize;
+                        cx.r[rd] = read_ale::<u16>(vaddr, &user_mm) as i16 as i64 as usize;
                     }
                 }
                 0x0A2 => {
                     if rd != 0 {
-                        cx.r[rd] = read_ale::<u32>(vaddr, user_token) as i32 as i64 as usize;
+                        cx.r[rd] = read_ale::<u32>(vaddr, &user_mm) as i32 as i64 as usize;
                     }
                 }
                 0x0A3 => {
                     if rd != 0 {
-                        cx.r[rd] = read_ale::<u64>(vaddr, user_token) as usize;
+                        cx.r[rd] = read_ale::<u64>(vaddr, &user_mm) as usize;
                     }
                 }
                 0x0A5 => {
                     let value = if rd != 0 { cx.r[rd] as u16 } else { 0 };
-                    write_ale(vaddr, value, user_token);
+                    write_ale(vaddr, value, &user_mm);
                 }
                 0x0A6 => {
                     let value = if rd != 0 { cx.r[rd] as u32 } else { 0 };
-                    write_ale(vaddr, value, user_token);
+                    write_ale(vaddr, value, &user_mm);
                 }
                 0x0A7 => {
                     let value = if rd != 0 { cx.r[rd] as u64 } else { 0 };
-                    write_ale(vaddr, value, user_token);
+                    write_ale(vaddr, value, &user_mm);
                 }
                 0x0A9 => {
                     if rd != 0 {
-                        cx.r[rd] = read_ale::<u16>(vaddr, user_token) as usize;
+                        cx.r[rd] = read_ale::<u16>(vaddr, &user_mm) as usize;
                     }
                 }
                 0x0AA => {
                     if rd != 0 {
-                        cx.r[rd] = read_ale::<u32>(vaddr, user_token) as usize;
+                        cx.r[rd] = read_ale::<u32>(vaddr, &user_mm) as usize;
                     }
                 }
                 _ => unreachable!(),
@@ -451,41 +449,41 @@ fn handle_ale(cx: &mut TrapContext, badv: usize, is_user: bool) -> Result<(), &'
                     match opcode_16 {
                         0x3804 => {
                             if rd != 0 {
-                                cx.r[rd] = read_ale::<u16>(vaddr, user_token)
+                                cx.r[rd] = read_ale::<u16>(vaddr, &user_mm)
                                     as i16 as i64 as usize;
                             }
                         }
                         0x3808 => {
                             if rd != 0 {
-                                cx.r[rd] = read_ale::<u32>(vaddr, user_token)
+                                cx.r[rd] = read_ale::<u32>(vaddr, &user_mm)
                                     as i32 as i64 as usize;
                             }
                         }
                         0x380C => {
                             if rd != 0 {
-                                cx.r[rd] = read_ale::<u64>(vaddr, user_token) as usize;
+                                cx.r[rd] = read_ale::<u64>(vaddr, &user_mm) as usize;
                             }
                         }
                         0x3814 => {
                             let value = if rd != 0 { cx.r[rd] as u16 } else { 0 };
-                            write_ale(vaddr, value, user_token);
+                            write_ale(vaddr, value, &user_mm);
                         }
                         0x3818 => {
                             let value = if rd != 0 { cx.r[rd] as u32 } else { 0 };
-                            write_ale(vaddr, value, user_token);
+                            write_ale(vaddr, value, &user_mm);
                         }
                         0x381C => {
                             let value = if rd != 0 { cx.r[rd] as u64 } else { 0 };
-                            write_ale(vaddr, value, user_token);
+                            write_ale(vaddr, value, &user_mm);
                         }
                         0x3824 => {
                             if rd != 0 {
-                                cx.r[rd] = read_ale::<u16>(vaddr, user_token) as usize;
+                                cx.r[rd] = read_ale::<u16>(vaddr, &user_mm) as usize;
                             }
                         }
                         0x3828 => {
                             if rd != 0 {
-                                cx.r[rd] = read_ale::<u32>(vaddr, user_token) as usize;
+                                cx.r[rd] = read_ale::<u32>(vaddr, &user_mm) as usize;
                             }
                         }
                         _ => unreachable!(),

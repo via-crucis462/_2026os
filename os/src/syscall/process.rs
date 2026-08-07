@@ -21,7 +21,9 @@ use crate::syscall::EPOLL_CTL_DEL;
 use crate::syscall::EPOLL_CTL_ADD;
 use crate::syscall::EPOLL_CTL_MOD;
 use crate::process::scheduler::runqueue::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_OTHER, SCHED_RR};
-use crate::process::scheduler::futex::{get_futex_wait_queue, FUTEX_WAIT_QUEUES};
+use crate::process::scheduler::futex::{
+    get_futex_wait_queue, retire_futex_wait_queue_if_unused, FUTEX_WAIT_QUEUES,
+};
 use crate::lazy_static;
 use spin::Mutex;
 use crate::sync::WaitQueue;
@@ -58,14 +60,14 @@ lazy_static! {
     pub static ref SIGNAL_WAIT_QUEUE: Mutex<WaitQueue> = Mutex::new(WaitQueue::new());
 }
 
-pub(crate) fn clear_child_tid_and_wake(token: usize, clear_child_tid: usize) {
+pub(crate) fn clear_child_tid_and_wake(mm: &MemorySet, clear_child_tid: usize) {
     if clear_child_tid == 0 {
         return;
     }
 
-    // Clear first: try_translated_write may populate a lazy anonymous page or
-    // resolve COW, either of which can establish/change the physical futex key.
-    if !try_translated_write(token, clear_child_tid as *mut u32, 0u32) {
+    // Clear first. This may populate a lazy anonymous page or resolve COW, but
+    // the futex key itself is virtual for private mappings and remains stable.
+    if !try_translated_write(mm, clear_child_tid as *mut u32, 0u32) {
         error!(
             "[CLEAR_CHILD_TID] failed to clear va={:#x}",
             clear_child_tid,
@@ -73,11 +75,10 @@ pub(crate) fn clear_child_tid_and_wake(token: usize, clear_child_tid: usize) {
         return;
     }
 
-    let page_table = PageTable::from_token(token);
-    if let Some(pa) = page_table.translate_va(VirtAddr::from(clear_child_tid)) {
+    if let Some(key) = mm.futex_key(VirtAddr::from(clear_child_tid), false) {
         let queue = {
             let queues = FUTEX_WAIT_QUEUES.lock();
-            queues.get(&pa.0).cloned()
+            queues.get(&key).cloned()
         };
 
         if let Some(queue) = queue {
@@ -92,11 +93,11 @@ pub fn sys_sigaltstack(
 ) -> isize {
     const MINSIGSTKSZ: usize = 2048;
 
-    let token = current_user_token();
+    let mm = current_user_mm();
     let requested = if new_stack.is_null() {
         None
     } else {
-        let Some(stack) = try_translated_read(token, new_stack) else {
+        let Some(stack) = try_translated_read(&mm, new_stack) else {
             return EFAULT.as_isize();
         };
         Some(stack)
@@ -109,7 +110,7 @@ pub fn sys_sigaltstack(
     };
 
     if !old_stack.is_null()
-        && !try_translated_write(token, old_stack, current.status_for_sp(current_sp))
+        && !try_translated_write(&mm, old_stack, current.status_for_sp(current_sp))
     {
         return EFAULT.as_isize();
     }
@@ -141,11 +142,11 @@ pub fn sys_sigaltstack(
 
 pub use crate::{
     timer::*,
-    fs::*, 
-    mm::{PageTable, UserBuffer, VirtAddr, mmap, translated_byte_buffer, translated_str, translated_byte_buffer_mut, translated_write}, 
+    fs::*,
+    mm::{MemorySet, PageTable, UserBuffer, VirtAddr, mmap, translated_byte_buffer, translated_str, translated_byte_buffer_mut, translated_write},
     process::{
         task::{
-            MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_token, exit_current_and_run_next, suspend_current_and_run_next, 
+            MAX_SIG, SignalAction, SignalFlags, add_task, current_task, current_user_mm, exit_current_and_run_next, suspend_current_and_run_next,
                 TaskControlBlock
         },
         registry::*
@@ -223,14 +224,14 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
     if nfds > current_task().unwrap().nofile_limit() {
         return EINVAL.as_isize();
     }
+    let mm = current_user_mm();
 
     // 解析超时时间
     let has_timeout = tmo_p != 0;
     let mut deadline_us: usize = 0;
     if has_timeout {
-        let token = current_user_token();
         let timespec = {
-            if let Some(ts) = try_translated_read(token, tmo_p as *const TimeSpec) {
+            if let Some(ts) = try_translated_read(&mm, tmo_p as *const TimeSpec) {
                 ts
             } else {
                 return EFAULT.as_isize();
@@ -251,11 +252,10 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
     }
 
     // Read the temporary mask before taking the task lock.  Calling
-    // current_user_token() while task_inner is held recursively acquired the
-    // same lock and deadlocked ppoll's signal-mask case.
+    // Read user memory before taking task_inner; lazy fault-in may need to
+    // inspect the current trap context.
     let mask_val = if _sigmask != 0 {
-        let token = current_user_token();
-        match try_translated_read(token, _sigmask as *const usize) {
+        match try_translated_read(&mm, _sigmask as *const usize) {
             Some(val) => Some(val),
             None => return EFAULT.as_isize(),
         }
@@ -285,51 +285,51 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
             let unmaskable = pending_bits & ((1 << (9 - 1)) | (1 << (19 - 1)));
 
             if (pending | unmaskable) != 0 {
-                debug!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}", 
+                debug!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}",
                          pending_bits, task_inner.blocked.bits());
                 task_inner.blocked = original_mask;
                 drop(task_inner); // 放锁
                 return EINTR.as_isize(); // EINTR
             }
-            drop(task_inner); 
+            drop(task_inner);
             // ----------------------------------------
 
-            // 提取 token 和 fd_table 后立即释放锁，防止 translated_* 死锁
-            let (token, fd_table) = {
+            // Extract only the file table, then release task_inner before
+            // touching user memory.
+            let fd_table = {
                 let inner = task.inner_exclusive_access();
-                let token = inner.get_user_token();
                 let fd_table = inner.files.exclusive_access().fds.clone();
-                (token, fd_table)
+                fd_table
             }; // inner 在此释放
             // 防止随机/恶意 nfds 导致死循环
             const POLL_MAX: usize = 1024;
             let nfds = nfds.min(POLL_MAX);
             let mut ready_count = 0;
-            
+
             // --- 遍历轮询所有 fd ---
             for i in 0..nfds {
                 let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
                 let mut pollfd = {
-                    if let Some(pf) = try_translated_read(token, pollfd_ptr) {
+                    if let Some(pf) = try_translated_read(&mm, pollfd_ptr) {
                         pf
                     } else {
                         task.inner_exclusive_access().blocked = original_mask;
                         return EFAULT.as_isize();
                     }
                 };
-                
+
                 let fd = pollfd.fd;
                 pollfd.revents = 0;
-                
+
                 if fd < 0 { continue; }
                 let fd_usize = fd as usize;
-                
+
                 if fd_usize >= fd_table.len() || fd_table[fd_usize].file.is_none() {
                     pollfd.revents = POLLNVAL;
                     ready_count += 1;
                 } else {
                     let file = fd_table[fd_usize].file.as_ref().unwrap();
-                    
+
                     // 检查读
                     if (pollfd.events & POLLIN) != 0 && file.ready_to_read() {
                         pollfd.revents |= POLLIN;
@@ -338,30 +338,30 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
                     if (pollfd.events & POLLOUT) != 0 && file.ready_to_write() {
                         pollfd.revents |= POLLOUT;
                     }
-                    
+
                     if pollfd.revents != 0 {
                         ready_count += 1;
                     }
                 }
-                if !try_translated_write(token, pollfd_ptr, pollfd) {
+                if !try_translated_write(&mm, pollfd_ptr, pollfd) {
                     task.inner_exclusive_access().blocked = original_mask;
                     return EFAULT.as_isize();
                 }
                 //trace!("[kernel] ppoll fd={} target_events=0x{:x} ready_revents=0x{:x}", pollfd.fd, pollfd.events, pollfd.revents);
             }
-            
+
             // 如果找到了就绪事件，恢复掩码并返回
             if ready_count > 0 {
                 let mut task_inner = task.inner_exclusive_access();
-                task_inner.blocked = original_mask; 
+                task_inner.blocked = original_mask;
                 drop(task_inner);
                 return ready_count as isize;
             }
-            
+
             // 如果没找到事件，处理超时逻辑
             if has_timeout && get_time_us() >= deadline_us {
                 let mut task_inner = task.inner_exclusive_access();
-                task_inner.blocked = original_mask; 
+                task_inner.blocked = original_mask;
                 drop(task_inner);
                 return 0; // 超时返回 0
             }
@@ -441,9 +441,9 @@ pub fn sys_chroot(path: usize) -> isize {
     if cred.exclusive_access().euid() != 0 {
         return Errno::EPERM.as_isize();
     }
-    let token = current_user_token();
+    let mm = current_user_mm();
     let path_str = {
-        if let Some(s) = crate::mm::try_translated_str(token, path as *const u8) {
+        if let Some(s) = crate::mm::try_translated_str(&mm, path as *const u8) {
             s
         } else {
             return EFAULT.as_isize();
@@ -475,7 +475,7 @@ pub fn sys_getuid() -> isize {
 // 假装获取成功，返回 PGID 为 0
 pub fn sys_getpgid(pid: usize) -> isize {
     let task = current_task().unwrap();
-    
+
     // 如果 pid 为 0，表示获取当前进程的 pgid
     if pid == 0 {
         let inner = task.inner_exclusive_access();
@@ -568,20 +568,20 @@ pub fn sys_setuid(uid: u32) -> isize {
     let task = current_task().unwrap();
     let cred = task.inner_exclusive_access().cred.clone();
     cred.exclusive_access().set_uid(uid);
-    0 
+    0
 }
 
 pub fn sys_setgid(gid: u32) -> isize {
     let task = current_task().unwrap();
     let cred = task.inner_exclusive_access().cred.clone();
     cred.exclusive_access().set_gid(gid);
-    0 
+    0
 }
 pub fn sys_seteuid(euid: u32) -> isize {
     let task = current_task().unwrap();
     let cred = task.inner_exclusive_access().cred.clone();
     cred.exclusive_access().set_euid(euid);
-    0 
+    0
 }
 
 /// setfsuid(2): 修改文件权限检查使用的用户 ID，并始终返回旧 FSUID。
@@ -629,12 +629,12 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     inner.clear_child_tid = tidptr;
-    task.gettid() as isize 
+    task.gettid() as isize
 }
 
 pub fn sys_getsid(pid: usize) -> isize {
     let task = current_task().unwrap();
-    
+
     // 如果 pid 为 0，获取当前进程的 sid
     if pid == 0 {
         let inner = task.inner_exclusive_access();
@@ -654,18 +654,18 @@ pub fn sys_setsid() -> isize {
     let task = current_task().unwrap();
     let proc = task.clone();
     let mut inner = proc.inner_exclusive_access();
-    
+
     let pid = proc.pid.0;
-    
+
     // POSIX 规定：如果当前进程已经是进程组组长，则 setsid 失败（返回 EPERM）
     if inner.pgid == pid {
         return EPERM.as_isize(); // EPERM (Operation not permitted)
     }
-    
+
     // 将 sid 和 pgid 都设置为当前进程的 pid
     inner.sid = pid;
     inner.pgid = pid;
-    
+
     pid as isize // 成功时返回新的会话 ID
 }
 // 系统调用号 148: getresuid
@@ -673,18 +673,18 @@ pub fn sys_setsid() -> isize {
 // 内核需要把查到的 Root UID (0) 写进用户态传入的指针里。
 pub fn sys_getresuid(ruid_ptr: *mut u32, euid_ptr: *mut u32, suid_ptr: *mut u32) -> isize {
     // 获取当前进程的物理/虚拟内存翻译 Token
-    let token = current_user_token();
+    let mm = current_user_mm();
     let root_uid: u32 = 0;
     if ruid_ptr as usize != 0 {
-        translated_write(token, ruid_ptr, root_uid);
+        translated_write(&mm, ruid_ptr, root_uid);
     }
     if euid_ptr as usize != 0 {
-        translated_write(token, euid_ptr, root_uid);
+        translated_write(&mm, euid_ptr, root_uid);
     }
     if suid_ptr as usize != 0 {
-        translated_write(token, suid_ptr, root_uid);
+        translated_write(&mm, suid_ptr, root_uid);
     }
-    0 
+    0
 }
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
@@ -708,28 +708,8 @@ fn clock_adj_result_from_status(status: i32) -> isize {
     }
 }
 
-/// 缓存的 RTC 基准：在第一次读取时记录 RTC 值和当时的 monotonic 时间
-static RTC_BASE: spin::Once<(i64, u64)> = spin::Once::new();
-
 fn current_wallclock_ns() -> i64 {
-    let mono_us = get_time_us() as u64;
-    // 首次调用时，记录 RTC 快照和对应的 monotonic 时间
-    let (rtc_base_ns, mono_base_us) = RTC_BASE.call_once(|| {
-        (get_real_time_ns() as i64, mono_us)
-    });
-    // wallclock = RTC基准 + monotonic增量（转为纳秒） + offset
-    let mono_delta_ns = (mono_us - *mono_base_us) as i128 * 1_000;
-    let base_ns = *rtc_base_ns as i128 + mono_delta_ns;
-    let offset_ns = *CLOCK_REALTIME_OFFSET_NS.lock() as i128;
-    let adjusted = base_ns + offset_ns;
-
-    if adjusted <= 0 {
-        0
-    } else if adjusted > i64::MAX as i128 {
-        i64::MAX
-    } else {
-        adjusted as i64
-    }
+    crate::timer::current_realtime_ns()
 }
 
 pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
@@ -741,7 +721,7 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
             let total_ns = current_wallclock_ns() as usize;
             (total_ns / 1_000_000_000, total_ns % 1_000_000_000)
-            
+
         }
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_COARSE => {
             // 默认：返回系统运行时间 (Uptime)
@@ -750,18 +730,18 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> isize {
         }
         _ => return EINVAL.as_isize(),
     };
-    let token = current_user_token();
+    let mm = current_user_mm();
     let mut time_spec = {
-        if let Some(ts) = try_translated_read(token, tp) {
+        if let Some(ts) = try_translated_read(&mm, tp) {
             ts
         } else {
             return EFAULT.as_isize();
         }
     };
-    
+
     time_spec.tv_sec = sec;
     time_spec.tv_nsec = nsec;
-    if !try_translated_write(token, tp, time_spec) {
+    if !try_translated_write(&mm, tp, time_spec) {
         return EFAULT.as_isize();
     }
     0
@@ -775,8 +755,8 @@ pub fn sys_clock_getres(clock_id: usize, tp: *mut TimeSpec) -> isize {
     if tp.is_null() {
         return 0;
     }
-    let token = current_user_token();
-    if !try_translated_write(token, tp, TimeSpec { tv_sec: 0, tv_nsec: 1 }) {
+    let mm = current_user_mm();
+    if !try_translated_write(&mm, tp, TimeSpec { tv_sec: 0, tv_nsec: 1 }) {
         return EFAULT.as_isize();
     }
     0
@@ -832,7 +812,7 @@ pub struct IfReq {
     // 网卡名称
     pub ifr_name: [u8; 16],
     // 联合体数据 (包含了 sockaddr_in 或 flags 等)
-    pub ifru_data: [u8; 24], 
+    pub ifru_data: [u8; 24],
 }
 /// ioctl
 /// io设备控制系统调用
@@ -862,7 +842,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             }
         }
     }
-    let token = current_user_token();
+    let mm = current_user_mm();
     match request as u32 {
         TCGETS => {
             if !is_tty {
@@ -877,7 +857,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 c_line: t.c_line, c_cc: t.c_cc,
             };
             if argp != 0 {
-                if !try_translated_write(token, argp as *mut Termios, termios) {
+                if !try_translated_write(&mm, argp as *mut Termios, termios) {
                     return EFAULT.as_isize();
                 }
                 0 // 成功
@@ -899,7 +879,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             } else {
                 foreground_pgrp
             };
-            if !try_translated_write(token, argp as *mut i32, pgrp) {
+            if !try_translated_write(&mm, argp as *mut i32, pgrp) {
                 return EFAULT.as_isize();
             }
             0
@@ -912,7 +892,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             if argp == 0 {
                 return EFAULT.as_isize();
             }
-            let Some(new_pgrp) = try_translated_read(token, argp as *const i32) else {
+            let Some(new_pgrp) = try_translated_read(&mm, argp as *const i32) else {
                 return EFAULT.as_isize();
             };
             if new_pgrp <= 0 {
@@ -921,8 +901,8 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             set_tty_foreground_pgrp(new_pgrp);
             0
         }
-        
-        TIOCSCTTY => { 
+
+        TIOCSCTTY => {
             if !is_tty { return ENOTTY.as_isize(); }
             // 申请将当前终端设为控制终端返回成功
             0
@@ -934,14 +914,14 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             }
             let winsize = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
             if argp != 0 {
-                if !try_translated_write(token, argp as *mut Winsize, winsize) {
+                if !try_translated_write(&mm, argp as *mut Winsize, winsize) {
                     return EFAULT.as_isize();
                 }
                 0 // 成功
             } else { EFAULT.as_isize() }
         }
         FIONBIO => {
-            let Some(nonblocking) = try_translated_read(token, argp as *const i32) else {
+            let Some(nonblocking) = try_translated_read(&mm, argp as *const i32) else {
                 return EFAULT.as_isize();
             };
             const O_NONBLOCK: usize = 0o4000;
@@ -955,19 +935,19 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
         }
         RTC_RD_TIME => {
             // 获取硬件时间并写给用户
-            let time_ms = get_time_ms(); 
+            let time_ms = get_time_ms();
             let sec = (time_ms / 1000) as i32;
             let rtc_time = RtcTime {
                 tm_sec: sec % 60,
                 tm_min: (sec / 60) % 60,
                 tm_hour: (sec / 3600) % 24,
-                tm_mday: 1, 
-                tm_mon: 0, 
+                tm_mday: 1,
+                tm_mon: 0,
                 tm_year: 126,
                 tm_wday: 0, tm_yday: 0, tm_isdst: 0,
             };
             if argp != 0 {
-                if !try_translated_write(token, argp as *mut RtcTime, rtc_time) {
+                if !try_translated_write(&mm, argp as *mut RtcTime, rtc_time) {
                     return EFAULT.as_isize();
                 }
                 0
@@ -990,20 +970,20 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 Some(d) => d.inode.clone(),
                 None => return EINVAL.as_isize(),
             };
-            
+
             let loop_file = fd_table[fd].file.as_ref().unwrap();
             let dentry = match loop_file.get_dentry() {
                 Some(d) => d,
                 None => return EINVAL.as_isize(),
             };
-            
+
             let mut target_id = None;
             if let Some(id_str) = dentry.name().strip_prefix("loop") {
                 if let Ok(id) = id_str.parse::<usize>() {
                     target_id = Some(id);
                 }
             }
-            
+
             if let Some(id) = target_id {
                 if crate::drivers::loopdev::LOOP_DEVICE_MANAGER.set_backing_file(id, Some(backend_inode)) {
                     0
@@ -1020,7 +1000,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                 Some(d) => d,
                 None => return EINVAL.as_isize(),
             };
-            
+
             let mut target_id = None;
             if let Some(id_str) = dentry.name().strip_prefix("loop") {
                 if let Ok(id) = id_str.parse::<usize>() {
@@ -1058,7 +1038,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                             lo_encrypt_key_size: 0, lo_flags: 0, lo_file_name: [0; 64],
                             lo_crypt_name: [0; 64], lo_encrypt_key: [0; 32], lo_init: [0; 2],
                         };
-                        if !try_translated_write(token, argp as *mut LoopInfo64, info) {
+                        if !try_translated_write(&mm, argp as *mut LoopInfo64, info) {
                             return EFAULT.as_isize();
                         }
                         0
@@ -1085,7 +1065,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             if let Some(id) = target_id {
                 if let Some((_, size)) = crate::drivers::loopdev::LOOP_DEVICE_MANAGER.get_info(id) {
                     if argp != 0 {
-                        if !try_translated_write(token, argp as *mut u64, size as u64) {
+                        if !try_translated_write(&mm, argp as *mut u64, size as u64) {
                             return EFAULT.as_isize();
                         }
                         0
@@ -1109,14 +1089,14 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
         }
         LOOP_CONFIGURE => {
             let fd = {
-                if let Some(f) = try_translated_read(token, argp as *const i32) {
+                if let Some(f) = try_translated_read(&mm, argp as *const i32) {
                     f
                 } else {
                     return EFAULT.as_isize();
                 }
             };
             let bs = {
-                if let Some(b) = try_translated_read(token, (argp + 4) as *const u32) {
+                if let Some(b) = try_translated_read(&mm, (argp + 4) as *const u32) {
                     b as usize
                 } else {
                     return EFAULT.as_isize();
@@ -1138,7 +1118,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             if argp == 0 {
                 return EFAULT.as_isize();
             }
-            if let Some(t) = try_translated_read(token, argp as *const Termios) {
+            if let Some(t) = try_translated_read(&mm, argp as *const Termios) {
                 crate::console::set_termios(crate::console::ConsoleTermios {
                     c_iflag: t.c_iflag, c_oflag: t.c_oflag,
                     c_cflag: t.c_cflag, c_lflag: t.c_lflag,
@@ -1150,34 +1130,34 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             }
         }
         SIOCGIFFLAGS => { // 获取网卡运行状态
-        if let Some(mut ifr) = try_translated_read::<IfReq>(token, argp as *const IfReq) {
+        if let Some(mut ifr) = try_translated_read::<IfReq>(&mm, argp as *const IfReq) {
             // 网卡处于 UP (1) 且 RUNNING (0x40) 状态
-            let flags: u16 = 0x1 | 0x40; 
+            let flags: u16 = 0x1 | 0x40;
             ifr.ifru_data[0..2].copy_from_slice(&flags.to_ne_bytes());
-            try_translated_write(token, argp as *mut IfReq, ifr);
+            try_translated_write(&mm, argp as *mut IfReq, ifr);
             0
         } else { EFAULT.as_isize() }
         }
         SIOCGIFADDR => { // 获取网卡当前的 IP
-            if let Some(mut ifr) = try_translated_read::<IfReq>(token, argp as *const IfReq) {
+            if let Some(mut ifr) = try_translated_read::<IfReq>(&mm, argp as *const IfReq) {
                 let iface = crate::net::NET_IFACE.exclusive_access();
                 if let Some(ip) = iface.ip_addrs().first() {
                      let smoltcp::wire::IpAddress::Ipv4(ipv4) = ip.address() ;
                         ifr.ifru_data[0..2].copy_from_slice(&2u16.to_ne_bytes()); // AF_INET 协议族
                         ifr.ifru_data[2..4].copy_from_slice(&0u16.to_ne_bytes()); // 端口设为 0
                         ifr.ifru_data[4..8].copy_from_slice(&ipv4.0);             // 真实的 IPv4 地址
-                        try_translated_write(token, argp as *mut IfReq, ifr);
-                    
+                        try_translated_write(&mm, argp as *mut IfReq, ifr);
+
                 }
                 0
             } else { EFAULT.as_isize() }
         }
         SIOCGIFTXQLEN => {
-        if let Some(mut ifr) = try_translated_read::<IfReq>(token, argp as *const IfReq) {
+        if let Some(mut ifr) = try_translated_read::<IfReq>(&mm, argp as *const IfReq) {
                 let qlen: i32 = 1000;
                 // 将 1000 写入 union 的前 4 个字节
                 ifr.ifru_data[0..4].copy_from_slice(&qlen.to_ne_bytes());
-                if try_translated_write(token, argp as *mut IfReq, ifr) {
+                if try_translated_write(&mm, argp as *mut IfReq, ifr) {
                     0
                 } else {
                     EFAULT.as_isize()
@@ -1185,8 +1165,8 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             } else { EFAULT.as_isize() }
         }
         SIOCSIFADDR => { // 给 eth0 绑定新 IP！
-            if let Some(ifr) = try_translated_read::<IfReq>(token, argp as *const IfReq) {
-                // 从 ifreq.sockaddr_in 中提取 IPv4 字节流 
+            if let Some(ifr) = try_translated_read::<IfReq>(&mm, argp as *const IfReq) {
+                // 从 ifreq.sockaddr_in 中提取 IPv4 字节流
                 let ip_bytes = &ifr.ifru_data[4..8];
                 let ip = smoltcp::wire::Ipv4Address::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
                 let cidr = smoltcp::wire::IpCidr::new(smoltcp::wire::IpAddress::Ipv4(ip), 24); // 默认 24 位掩码
@@ -1200,24 +1180,24 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
                                 push_failed = true; // 记录失败了
                             }
                     }
-                    
+
                 });
                 if push_failed {
                     warn!("[kernel]  动态添加网卡 IP 失败：IP 池已满！");
-                    return ENOBUFS.as_isize(); 
+                    return ENOBUFS.as_isize();
                 }
                 info!("[kernel]  动态添加网卡 IP: {}", ip);
                 0
             } else { EFAULT.as_isize() }
         }
-        SIOCGIFINDEX => { 
-            if let Some(mut ifr) = try_translated_read::<IfReq>(token, argp as *const IfReq) {
+        SIOCGIFINDEX => {
+            if let Some(mut ifr) = try_translated_read::<IfReq>(&mm, argp as *const IfReq) {
                 // 在标准的 struct ifreq 中，ifr_ifindex 和 ifr_hwaddr 属于同一个 union
                 // 占用 ifru_data 的前 4 个字节（是一个 i32 类型的整数）
                 let ifindex: i32 = 1; // 网卡 eth0 的 index 是 1
                 ifr.ifru_data[0..4].copy_from_slice(&ifindex.to_ne_bytes());
-                
-                if try_translated_write(token, argp as *mut IfReq, ifr) {
+
+                if try_translated_write(&mm, argp as *mut IfReq, ifr) {
                     0 // 成功返回
                 } else {
                     EFAULT.as_isize()
@@ -1225,13 +1205,13 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             } else { EFAULT.as_isize() }
         }
 
-        0x8900..=0x89ff => {// 兜底：对其他未实现的 ifconfig / ip 命令配置请求返回 0 
+        0x8900..=0x89ff => {// 兜底：对其他未实现的 ifconfig / ip 命令配置请求返回 0
             Errno::ENOSYS.as_isize()
         }
         _ => {
             // 委托给文件自己的 ioctl（如 userfaultfd）
             let file = fd_table[fd].file.as_ref().unwrap();
-            file.ioctl(request as u32, argp, token)
+            file.ioctl(request as u32, argp, &mm)
         }
     }
 }
@@ -1246,16 +1226,16 @@ pub fn sys_renameat2(
     }
 
     let task = current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
 
 
     let old_path = normalize_leading_dot_path(
-        if let Some(s) = try_translated_str(token, oldpath_ptr as *const u8) { s } else { return EFAULT.as_isize(); }
+        if let Some(s) = try_translated_str(&mm, oldpath_ptr as *const u8) { s } else { return EFAULT.as_isize(); }
     );
     let new_path = normalize_leading_dot_path(
-        if let Some(s) = try_translated_str(token, newpath_ptr as *const u8) { s } else { return EFAULT.as_isize(); }
+        if let Some(s) = try_translated_str(&mm, newpath_ptr as *const u8) { s } else { return EFAULT.as_isize(); }
     );
-    
+
     // 解析父目录和文件名
     let old_parent_path = parent_path(&old_path);
     let old_name = file_name(&old_path);
@@ -1370,7 +1350,7 @@ pub fn sys_renameat2(
             return rename_locked();
         }
     }
-    
+
     ENOENT.as_isize()
 }
 pub fn sys_getpid() -> isize {
@@ -1383,7 +1363,7 @@ pub fn sys_getppid() -> isize {
     let inner = task.inner_exclusive_access();
     match inner.parent.upgrade() {
         Some(parent) => parent.getpid() as isize,
-        None => 0, 
+        None => 0,
     }
 }
 pub fn sys_syslog(_type_: usize, _buf: usize, _len: usize) -> isize {
@@ -1405,14 +1385,14 @@ pub struct Sysinfo {
     pub totalhigh: usize,   // 高端内存大小
     pub freehigh: usize,    // 高端内存剩余大小
     pub mem_unit: u32,      // 内存单位（比如 1 表示以 byte 为单位计算）
-    pub _pad: u32,          // 补齐到 112 字节 
+    pub _pad: u32,          // 补齐到 112 字节
 }
 
 pub fn sys_sysinfo(sysinfo_ptr: usize) -> isize {
     if sysinfo_ptr == 0 {
         return EFAULT.as_isize();
     }
-    let token = current_user_token();
+    let mm = current_user_mm();
     let sysinfo = Sysinfo {
         uptime: 1000,
         loads: [0, 0, 0],
@@ -1429,7 +1409,7 @@ pub fn sys_sysinfo(sysinfo_ptr: usize) -> isize {
         mem_unit: 1,
         _pad: 0,
     };
-    if !try_translated_write(token, sysinfo_ptr as *mut Sysinfo, sysinfo) {
+    if !try_translated_write(&mm, sysinfo_ptr as *mut Sysinfo, sysinfo) {
         return EFAULT.as_isize();
     }
 
@@ -1438,15 +1418,15 @@ pub fn sys_sysinfo(sysinfo_ptr: usize) -> isize {
 }
 
 pub fn sys_uname(uts: *mut UtsName) -> isize {
-    let token = current_user_token();
+    let mm = current_user_mm();
     let mut uts_name = {
-        if let Some(u) = try_translated_read(token, uts) {
+        if let Some(u) = try_translated_read(&mm, uts) {
             u
         } else {
             return EFAULT.as_isize();
         }
     };
-    
+
     // 读取当前进程的 personality，检查 UNAME26 标志
     let task = current_task().unwrap();
     let persona = task.inner_exclusive_access().personality;
@@ -1500,10 +1480,10 @@ pub fn sys_uname(uts: *mut UtsName) -> isize {
     fill_str(&mut uts_name.version, version);
     fill_str(&mut uts_name.machine, machine);
     fill_str(&mut uts_name.domainname, domainname);
-    if !try_translated_write(token, uts, uts_name) {
+    if !try_translated_write(&mm, uts, uts_name) {
         return EFAULT.as_isize();
     }
-    
+
     0
 }
 
@@ -1609,19 +1589,19 @@ pub fn sys_clone3(uargs: *const CloneArgs, size: usize) -> isize {
         return EINVAL.as_isize();
     }
 
-    let token = current_user_token();
+    let mm = current_user_mm();
     let args = if size < CLONE_ARGS_SIZE_VER1 {
-        match try_translated_read(token, uargs as *const CloneArgsV0) {
+        match try_translated_read(&mm, uargs as *const CloneArgsV0) {
             Some(args) => CloneArgs::from(args),
             None => return EFAULT.as_isize(),
         }
     } else if size < CLONE_ARGS_SIZE_VER2 {
-        match try_translated_read(token, uargs as *const CloneArgsV1) {
+        match try_translated_read(&mm, uargs as *const CloneArgsV1) {
             Some(args) => CloneArgs::from(args),
             None => return EFAULT.as_isize(),
         }
     } else {
-        match try_translated_read(token, uargs) {
+        match try_translated_read(&mm, uargs) {
             Some(args) => args,
             None => return EFAULT.as_isize(),
         }
@@ -1763,8 +1743,8 @@ pub fn sys_get_mempolicy(
         return EINVAL.as_isize();
     }
 
-    let token = current_user_token();
-    if !mode.is_null() && !try_translated_write(token, mode, 0i32) {
+    let mm = current_user_mm();
+    if !mode.is_null() && !try_translated_write(&mm, mode, 0i32) {
         return EFAULT.as_isize();
     }
 
@@ -1773,7 +1753,7 @@ pub fn sys_get_mempolicy(
         let words = maxnode.saturating_add(word_bits - 1) / word_bits;
         for index in 0..words {
             let value = if index == 0 { 1usize } else { 0usize };
-            if !try_translated_write(token, unsafe { nodemask.add(index) }, value) {
+            if !try_translated_write(&mm, unsafe { nodemask.add(index) }, value) {
                 return EFAULT.as_isize();
             }
         }
@@ -1785,21 +1765,21 @@ pub fn sys_get_mempolicy(
 // args 参数数组，必须以0结尾
 // envp 环境变量数组，必须以0结尾
 pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize) -> isize {
-    let token = current_user_token();
+    let mm = current_user_mm();
     let task = current_task().unwrap();
     let path_str = {
-        if let Some(path) = try_translated_str(token, path){
+        if let Some(path) = try_translated_str(&mm, path){
             normalize_leading_dot_path(path)
         } else {
             return EFAULT.as_isize();
         }
     };
      if path_str.len() >= 4096 { // PATH_MAX
-        return ENAMETOOLONG.as_isize(); 
+        return ENAMETOOLONG.as_isize();
     }
     for comp in path_str.split('/') {
         if comp.len() > 255 {
-            return ENAMETOOLONG.as_isize(); 
+            return ENAMETOOLONG.as_isize();
         }
     }
     let mut args_vec: Vec<String> = Vec::new();
@@ -1807,7 +1787,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     if args as usize != 0 {
         loop {
             let arg_str_ptr = {
-                if let Some(p) = try_translated_read(token, args) {
+                if let Some(p) = try_translated_read(&mm, args) {
                     p
                 } else {
                     return EFAULT.as_isize();
@@ -1815,7 +1795,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             };
             if arg_str_ptr == 0 { break; }
             let arg_str = {
-                if let Some(s) = try_translated_str(token, arg_str_ptr as *const u8) {
+                if let Some(s) = try_translated_str(&mm, arg_str_ptr as *const u8) {
                     s
                 } else {
                     return EFAULT.as_isize();
@@ -1832,7 +1812,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
     if envs as usize != 0 {
         loop {
             let env_str_ptr = {
-                if let Some(p) = try_translated_read(token, envs) {
+                if let Some(p) = try_translated_read(&mm, envs) {
                     p
                 } else {
                     return EFAULT.as_isize();
@@ -1840,7 +1820,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
             };
             if env_str_ptr == 0 { break; }
             let env_str = {
-                if let Some(s) = try_translated_str(token, env_str_ptr as *const u8) {
+                if let Some(s) = try_translated_str(&mm, env_str_ptr as *const u8) {
                     s
                 } else {
                     return EFAULT.as_isize();
@@ -1904,7 +1884,7 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
                             break;
                         }
                     }
-                     
+
                 }
             }
             value if value > 0 => {
@@ -1974,15 +1954,15 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
                     status
                 };
                 drop(proc_inner);
-                let token = current_user_token();
+                let mm = current_user_mm();
                 //println!("[wait4] Writing exit code {} (status: {:#x}) to user space for child P{}", exit_code, status, child_pid);
-                if !try_translated_write(token, exit_code_ptr, status) {
+                if !try_translated_write(&mm, exit_code_ptr, status) {
                     return EFAULT.as_isize();
                 }
                 //println!("[wait4] Wrote exit code {} (status: {:#x}) to user space for child P{}", exit_code, status, child_pid);
             }
-            
-            
+
+
             // 从全局进程表里删除这个子进程
             crate::process::remove_process(child_pid);
             return child_pid as isize;
@@ -1992,8 +1972,8 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
 /*  let task = current_task().unwrap();
     let proc = task.process();
     // 提前拿到当前进程的 pgid
-    let current_pgid = proc.inner_exclusive_access().pgid; 
-    
+    let current_pgid = proc.inner_exclusive_access().pgid;
+
     const WNOHANG: usize = 0x1;
     let nohang = (options & WNOHANG) != 0;//是否开启了非阻塞选项
     info!("[wait4] P{} waiting for PID/PGID: {}, options: {}", current_pgid, pid, options);
@@ -2046,13 +2026,13 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
             info!("[wait4] P{} has no matching children for filter {}", current_pgid, pid);
             return ECHILD.as_isize(); // 真的是一个匹配的都没有，才返回 ECHILD
         }
-    
+
         // 2. 判断该匹配的子进程是否已经是僵尸了，如果是僵尸了就收尸退出；如果不是僵尸了就睡眠等待
         if let Some((zombie_pid, exit_code)) = zombie_child {
             if let Some(idx) = proc_inner.children.iter().position(|child| child.getpid() == zombie_pid) {
                 let child = proc_inner.children.remove(idx);
                 let child_pid = child.getpid();
-           
+
                 info!("[wait4] P{} collected Zombie P{} (code: {})", current_pgid, child_pid, exit_code);
                 // 组装状态码
                 let status = (exit_code & 0xff) << 8;
@@ -2078,11 +2058,11 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
         drop(proc_inner);
         suspend_current_and_run_next();
     }
-     /*  
+     /*
         else{
             // B. 孩子还活着，睡眠等待
             info!("[wait4] P{}'s target(s) still alive, sleeping...", current_pgid);
-            // 新增：检查是否被信号打断 
+            // 新增：检查是否被信号打断
             let task_inner = task.inner_exclusive_access();
             let pending = task_inner.signals.bits() & !task_inner.signal_mask.bits();
                 info!("[wait4] Interrupted by signal! Returning EINTR.");
@@ -2093,7 +2073,7 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
             loop{
                 // 继续睡眠等待，直到被调度器唤醒
                 suspend_current_and_run_next();
-                
+
                 let children_snapshot = {
                     let proc_inner = proc.inner_exclusive_access();
                     proc_inner.children.clone()
@@ -2128,14 +2108,14 @@ pub fn sys_wait4(pid: i32, exit_code_ptr: *mut i32, options: usize) -> isize {
                         // 收尸成功，拿到孩子的 PID 和退出码
                         let child = proc_inner.children.remove(idx);
                         let child_pid = child.getpid();
-                        
+
                         info!("[wait4] P{} collected Zombie P{} (code: {}) after waking up", current_pgid, child_pid, exit_code);
                         // 组装状态码
                         let status = (exit_code & 0xff) << 8;
                         if exit_code_ptr as usize != 0 {
                             *translated_refmut(proc_inner.memory_set.token(), exit_code_ptr) = status;
                         }
-                        
+
                         return child_pid as isize;
                     }
                 }
@@ -2162,11 +2142,12 @@ pub fn sys_waitid(idtype: i32, id: i32, infop: *mut SigInfo, options: i32) -> is
         return EINVAL.as_isize();
     }
 
+    let mm = current_user_mm();
+
     loop {
         let task = current_task().unwrap();
         let proc = task.clone();
         let mut proc_inner = proc.inner_exclusive_access();
-        let token = proc_inner.get_user_token();
         let mut child_pid: usize = 0;
         let mut exit_code = 0;
         let mut child_idx: Option<usize> = None;
@@ -2218,7 +2199,7 @@ pub fn sys_waitid(idtype: i32, id: i32, infop: *mut SigInfo, options: i32) -> is
                     _pad: [0; 12],
                 };
                 drop(proc_inner);
-                if try_translated_write(token, infop, info) {
+                if try_translated_write(&mm, infop, info) {
                     return 0;
                 } else {
                     return EFAULT.as_isize();
@@ -2258,7 +2239,7 @@ pub fn sys_waitid(idtype: i32, id: i32, infop: *mut SigInfo, options: i32) -> is
         // User-memory writes may resolve COW and obtain the current task
         // lock.  Do not hold proc_inner across that operation.
         drop(proc_inner);
-        if !try_translated_write(token, infop, info) {
+        if !try_translated_write(&mm, infop, info) {
             return EFAULT.as_isize();
         }
 
@@ -2482,11 +2463,11 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     let total_ns = current_wallclock_ns();
     let sec = (total_ns / 1_000_000_000) as usize;
     let usec = ((total_ns % 1_000_000_000) / 1_000) as usize;
-    let token = current_user_token();
+    let mm = current_user_mm();
 
     // 校验 tz 指针
     if _tz != 0 {
-        if !prepare_user_write(token, _tz, 8) {
+        if !prepare_user_write(&mm, _tz, 8) {
             return EFAULT.as_isize();
         }
     }
@@ -2494,7 +2475,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     let time_val = TimeVal { sec, usec };
 
     // 校验&写入
-    if  !try_translated_write(token, ts, time_val) {
+    if  !try_translated_write(&mm, ts, time_val) {
         return EFAULT.as_isize();
     }
     0
@@ -2509,12 +2490,12 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
         let inner = task.inner_exclusive_access();
         (inner.files.clone(), inner.fs.clone())
     };
-    let token = current_user_token();
+    let mm = current_user_mm();
 
     // 1. 获取系统当前真实时间作为默认值 (应对 times_ptr == NULL 或 UTIME_NOW)
-    let real_time_ns = get_real_time_ns();
-    let current_sec = (real_time_ns / 1_000_000_000) as usize;
-    let current_nsec = (real_time_ns % 1_000_000_000) as usize;
+    let real_time_ns = current_wallclock_ns() as usize;
+    let current_sec = real_time_ns / 1_000_000_000;
+    let current_nsec = real_time_ns % 1_000_000_000;
     let mut new_atime = TimeSpec { tv_sec: current_sec, tv_nsec: current_nsec };
     let mut new_mtime = TimeSpec { tv_sec: current_sec, tv_nsec: current_nsec };
 
@@ -2549,7 +2530,7 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
             let cwd = fs.exclusive_access().get_pwd();
 
             let path_str = {
-                if let Some(s) = try_translated_str(token, path_ptr as *const u8) {
+                if let Some(s) = try_translated_str(&mm, path_ptr as *const u8) {
                     //warn!("sys_utimensat: translated path string: {}", s);
                     s
                 } else {
@@ -2583,13 +2564,13 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
     // 3. 解析用户传入的时间数组（无锁，安全调用 translated_*）
     if times_ptr != 0 {
         let times = {
-            if let Some(t) = try_translated_read(token, times_ptr as *const [TimeSpec; 2]) {
+            if let Some(t) = try_translated_read(&mm, times_ptr as *const [TimeSpec; 2]) {
                 t
             } else {
                 return EFAULT.as_isize();
             }
         };
-        
+
         // 解析 atime
         let utime_now: usize = 1073741823; // 0x3FFFFFFF
         let utime_omit: usize = 1073741822; // 0x3FFFFFFE
@@ -2617,10 +2598,10 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
 
     // 5. 存入 TIME_CACHE 解决底层 Ext4 32位时间戳截断问题
     if ino != 0 {
-        //warn!("sys_utimensat: updating TIME_CACHE for ino={}, atime=({}, {}), mtime=({}, {})", 
+        //warn!("sys_utimensat: updating TIME_CACHE for ino={}, atime=({}, {}), mtime=({}, {})",
             //ino, new_atime.tv_sec, new_atime.tv_nsec, new_mtime.tv_sec, new_mtime.tv_nsec);
         TIME_CACHE.lock().insert(
-            ino, 
+            ino,
             (new_atime.tv_sec as i64, new_atime.tv_nsec as i64, new_mtime.tv_sec as i64, new_mtime.tv_nsec as i64)
         );
     } else {
@@ -2630,9 +2611,9 @@ pub fn sys_utimensat(dirfd: i32, path_ptr: usize, times_ptr: usize, _flags: usiz
     0
 }
 pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> isize {
-    let token = current_user_token();
+    let mm = current_user_mm();
     let req_val = {
-        if let Some(ts) = try_translated_read(token, req) {
+        if let Some(ts) = try_translated_read(&mm, req) {
             ts
         } else {
             return EFAULT.as_isize();
@@ -2672,9 +2653,9 @@ pub fn sys_clock_nanosleep(
         return EINVAL.as_isize();
     }
 
-    let token = current_user_token();
+    let mm = current_user_mm();
     let req_val = {
-        if let Some(ts) = try_translated_read(token, request) {
+        if let Some(ts) = try_translated_read(&mm, request) {
             ts
         } else {
             return EFAULT.as_isize();
@@ -2742,7 +2723,7 @@ fn monotonic_now_ns() -> usize {
 /// nanosleep 核心实现：忙等 + 信号中断检测
 fn nanosleep_impl(req: &TimeSpec, rem: *mut TimeSpec) -> isize {
     let start_ns = clock_now_ns(CLOCK_MONOTONIC);
-    let token = current_user_token();
+    let mm = current_user_mm();
 
     let duration_ns = if let Some(ns) = timespec_to_ns(req) {
         ns
@@ -2768,11 +2749,11 @@ fn nanosleep_impl(req: &TimeSpec, rem: *mut TimeSpec) -> isize {
             // 计算还剩下多少时间没睡完
             let now_ns = clock_now_ns(CLOCK_MONOTONIC);
             let rem_ns = deadline_ns.saturating_sub(now_ns);
-            
+
             // 如果用户传入了 rem 指针，把剩下的时间写进去
             if rem as usize != 0 {
                 let mut rem_spec = {
-                    if let Some(ts) = try_translated_read(token, rem) {
+                    if let Some(ts) = try_translated_read(&mm, rem) {
                         ts
                     } else {
                         return EFAULT.as_isize();
@@ -2781,21 +2762,21 @@ fn nanosleep_impl(req: &TimeSpec, rem: *mut TimeSpec) -> isize {
                 let remaining = ns_to_timespec(rem_ns);
                 rem_spec.tv_sec = remaining.tv_sec;
                 rem_spec.tv_nsec = remaining.tv_nsec;
-                if try_translated_write(token, rem, rem_spec) {
+                if try_translated_write(&mm, rem, rem_spec) {
                     ()
                 } else {
                     return EFAULT.as_isize();
                 }
             }
-            
+
             //   3. 返回 -EINTR (-4)，触发外层的 trap_handler 调用 handle_signals
-            return EINTR.as_isize(); 
+            return EINTR.as_isize();
         }
 
         // 没有信号，阻塞到睡眠队列，等待调度器按时间戳唤醒
         crate::process::sleep_current_until(deadline_ns);
     }
-    
+
     // 正常睡醒，返回 0
     0
 }
@@ -2857,7 +2838,7 @@ pub fn sys_brk(addr: usize) -> isize {
         None => return EINVAL.as_isize(),
     };
     let current_brk = mm.current_brk();
-    
+
     trace!("kernel:pid[{}] sys_brk: request addr={:#x}, current_brk={:#x}", task.getpid(), addr, current_brk);
 
     if addr == 0 {
@@ -2899,42 +2880,37 @@ pub fn sys_sigprocmask(
     oldset_ptr: *mut usize,
     _sigsetsize: usize,
 ) -> isize {
-    let task = current_task().unwrap();
-    let token = current_user_token();
-    let mut inner = task.inner_exclusive_access();
-    // 1. 写回旧掩码：bits() 返回 u64，在 RV64 下对应 usize
-    if oldset_ptr as usize != 0 {
-        if !try_translated_write(token, oldset_ptr, inner.blocked.bits() as usize) {
-            return EFAULT.as_isize();
-        }
-    }
-    // 2. 更新新掩码
-    if set_ptr as usize != 0 {
-        // 使用 translated_ref 安全读取新掩码
-        let set_val = {
-            if let Some(v) = try_translated_read(token, set_ptr) {
-                v
-            } else {
-                return EFAULT.as_isize();
-            }
-        };
-        let mut set_flags = SignalFlags::from_bits_truncate(set_val as u64);
-        
-        //   核心：POSIX 规定 SIGKILL 和 SIGSTOP 不能被屏蔽
-        set_flags.remove(SignalFlags::SIGKILL);
-        set_flags.remove(SignalFlags::SIGSTOP);
+    let mm = current_user_mm();
 
-        const SIG_BLOCK: i32 = 0;   // 把 set 中的信号加到当前屏蔽位图中
-        const SIG_UNBLOCK: i32 = 1; // 从当前屏蔽位图中删除 set 中的信号
-        const SIG_SETMASK: i32 = 2; // 直接用 set 替换当前位图
+    let set_flags = if set_ptr.is_null() {
+        None
+    } else {
+        let Some(set_val) = try_translated_read(&mm, set_ptr) else {
+            return EFAULT.as_isize();
+        };
+        let mut flags = SignalFlags::from_bits_truncate(set_val as u64);
+        flags.remove(SignalFlags::SIGKILL | SignalFlags::SIGSTOP);
+        Some(flags)
+    };
+
+    let task = current_task().unwrap();
+    let old_mask = task.inner_exclusive_access().blocked.bits() as usize;
+    if !oldset_ptr.is_null() && !try_translated_write(&mm, oldset_ptr, old_mask) {
+        return EFAULT.as_isize();
+    }
+
+    if let Some(set_flags) = set_flags {
+        const SIG_BLOCK: i32 = 0;
+        const SIG_UNBLOCK: i32 = 1;
+        const SIG_SETMASK: i32 = 2;
+        let mut inner = task.inner_exclusive_access();
         match how {
             SIG_BLOCK => inner.blocked.insert(set_flags),
             SIG_UNBLOCK => inner.blocked.remove(set_flags),
             SIG_SETMASK => inner.blocked = set_flags,
-            _ => return EINVAL.as_isize() // EINVAL
+            _ => return EINVAL.as_isize(),
         }
     }
-    //warn!("sys_sigprocmask: updated signal mask to {:064b}", inner.signal_mask.bits());
     0
 }
 
@@ -2946,8 +2922,8 @@ pub fn sys_rt_sigsuspend(mask_ptr: *const usize, sigsetsize: usize) -> isize {
         return EFAULT.as_isize();
     }
 
-    let token = current_user_token();
-    let Some(mask_bits) = try_translated_read(token, mask_ptr) else {
+    let mm = current_user_mm();
+    let Some(mask_bits) = try_translated_read(&mm, mask_ptr) else {
         return EFAULT.as_isize();
     };
     let mut temporary_mask = SignalFlags::from_bits_truncate(mask_bits as u64);
@@ -3017,17 +2993,17 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     let task = current_task().unwrap();
     let files = task.inner_exclusive_access().files.clone();
     let fd_table = files.exclusive_access().fds.clone();
-    let token = current_user_token();
+    let mm = current_user_mm();
 
     if op != EPOLL_CTL_DEL && event_ptr == 0 {
         return EFAULT.as_isize();
     }
-    
 
-    if epfd >= fd_table.len() || fd >= fd_table.len() { 
-        return EBADF.as_isize(); 
+
+    if epfd >= fd_table.len() || fd >= fd_table.len() {
+        return EBADF.as_isize();
     }
-    
+
 
     let epoll_file_dyn = match &fd_table[epfd].file {
         Some(f) => f.clone(),
@@ -3035,7 +3011,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     };
     let target_file_dyn = match &fd_table[fd].file {
         Some(f) => f.clone(),
-        None => return EBADF.as_isize(), 
+        None => return EBADF.as_isize(),
     };
 
     let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
@@ -3044,20 +3020,20 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     };
 
     if epfd == fd {
-        return EINVAL.as_isize(); 
+        return EINVAL.as_isize();
     }
 
 
-    
+
 
     let stat = target_file_dyn.get_stat();
     let mode = stat.mode;
     let s_ifmt = 0o170000;
-    let s_ifreg = 0o100000; 
+    let s_ifreg = 0o100000;
     let s_ifdir = 0o040000;
     if (mode & s_ifmt) == s_ifreg || (mode & s_ifmt) == s_ifdir {
 
-        return EPERM.as_isize(); 
+        return EPERM.as_isize();
     }
     if op == EPOLL_CTL_ADD && target_file_dyn.as_any().is::<EpollFile>() {
         let mut adj: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -3094,12 +3070,12 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
         let mut queue = VecDeque::new();
         let mut depth: BTreeMap<usize, usize> = BTreeMap::new();
 
- 
+
         for (&node, &deg) in in_degree.iter() {
             if deg == 0 {
                 queue.push_back(node);
             }
-            depth.insert(node, 1); 
+            depth.insert(node, 1);
         }
 
         let mut visited_count = 0;
@@ -3122,7 +3098,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
                         }
                     }
                     let d_v = *depth.get(&v).unwrap();
-         
+
                     if d_u + 1 > d_v {
                         depth.insert(v, d_u + 1);
                     }
@@ -3132,11 +3108,11 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
 
 
         if visited_count != in_degree.len() {
-            return Errno::ELOOP.as_isize(); 
+            return Errno::ELOOP.as_isize();
         }
 
         if max_depth >= 6 {
-            return Errno::EINVAL.as_isize(); 
+            return Errno::EINVAL.as_isize();
         }
     }
 
@@ -3144,7 +3120,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
 
     let event = if op != 2 { // 如果不是 EPOLL_CTL_DEL，就需要读取用户态传来的数据
         //   使用你提供的 translated_ref
-        if let Some(ev) = try_translated_read(token, event_ptr as *const EpollEvent) {
+        if let Some(ev) = try_translated_read(&mm, event_ptr as *const EpollEvent) {
             ev
         } else {
             return EFAULT.as_isize();
@@ -3152,39 +3128,39 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     } else {
         EpollEvent { events: 0, data: 0 }
     };
-    
+
 
     let mut list = epoll_file.interest_list.lock();
     match op {
         EPOLL_CTL_ADD => {
             if list.contains_key(&fd) {
-           
-                return EEXIST.as_isize(); 
+
+                return EEXIST.as_isize();
             }
             list.insert(fd, event);
             epoll_file.last_ready.lock().remove(&fd);
             epoll_file.oneshot_disabled.lock().remove(&fd);
             0
         }
-        EPOLL_CTL_DEL => { 
+        EPOLL_CTL_DEL => {
             if list.remove(&fd).is_none() {
-             
-                return ENOENT.as_isize(); 
+
+                return ENOENT.as_isize();
             }
             epoll_file.last_ready.lock().remove(&fd);
             epoll_file.oneshot_disabled.lock().remove(&fd);
             0
         }
-        EPOLL_CTL_MOD => { 
+        EPOLL_CTL_MOD => {
             if !list.contains_key(&fd) {
-                return ENOENT.as_isize(); 
+                return ENOENT.as_isize();
             }
             list.insert(fd, event);
             epoll_file.last_ready.lock().remove(&fd);
             epoll_file.oneshot_disabled.lock().remove(&fd);
             0
         }
-        _ => EINVAL.as_isize(), 
+        _ => EINVAL.as_isize(),
     }
 }
 
@@ -3196,7 +3172,7 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
     if events_ptr == 0 {
         return EFAULT.as_isize();
     }
-    
+
     // 防御非法容量
     if maxevents <= 0 {
         return EINVAL.as_isize();
@@ -3207,8 +3183,8 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
 
     // 记录起始时间
     let start_time = get_time_ms();
-    let token = current_user_token();
-    
+    let mm = current_user_mm();
+
     loop {
         let ready_events = {
             let task = current_task().unwrap();
@@ -3279,24 +3255,24 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
             drop(list);
             ready_events
         };
-        
+
         // 如果找到了就绪事件，立即处理并返回
         if !ready_events.is_empty() {
             let mut count = 0;
             for (_fd, event) in ready_events.iter().take(maxevents as usize) {
                 let ev_ptr = events_ptr + count * core::mem::size_of::<EpollEvent>();
-                if !try_translated_write(token, ev_ptr as *mut EpollEvent, *event) {
+                if !try_translated_write(&mm, ev_ptr as *mut EpollEvent, *event) {
                     return EFAULT.as_isize();
                 }
                 count += 1;
             }
             return count as isize;
         }
-        
+
         // 如果没找到事件，处理超时逻辑
         if timeout == 0 {
             // 非阻塞模式，直接返回 0 个事件
-            return 0; 
+            return 0;
         } else if timeout > 0 {
             // 限时阻塞模式，看看有没有超时
             let current_time = get_time_ms();
@@ -3304,7 +3280,7 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i
                 return 0;
             }
         }
-        
+
         suspend_current_and_run_next();
     }
 }
@@ -3350,8 +3326,8 @@ pub fn sys_sched_getparam(pid: isize, param_ptr: *mut SchedParam) -> isize {
         Err(errno) => return errno,
     };
     let sched_priority = target_task.inner_exclusive_access().sched_priority;
-    let token = current_user_token();
-    if !try_translated_write(token, param_ptr, SchedParam { sched_priority }) {
+    let mm = current_user_mm();
+    if !try_translated_write(&mm, param_ptr, SchedParam { sched_priority }) {
         return EFAULT.as_isize();
     }
     0
@@ -3365,8 +3341,8 @@ pub fn sys_sched_setscheduler(pid: isize, policy: isize, param_ptr: *const Sched
         Ok(task) => task,
         Err(errno) => return errno,
     };
-    let token = current_user_token();
-    let Some(param) = try_translated_read(token, param_ptr) else {
+    let mm = current_user_mm();
+    let Some(param) = try_translated_read(&mm, param_ptr) else {
         return EFAULT.as_isize();
     };
     //println!("sys_sched_setscheduler: pid={}, current pid = {} , tid = {}, requested policy={}, priority={}", pid, task.process().getpid(), task.gettid(), policy, param.sched_priority);
@@ -3405,8 +3381,8 @@ pub fn sys_sched_setparam(pid: isize, param_ptr: *const SchedParam) -> isize {
         Ok(task) => task,
         Err(errno) => return errno,
     };
-    let token = current_user_token();
-    let Some(param) = try_translated_read(token, param_ptr) else {
+    let mm = current_user_mm();
+    let Some(param) = try_translated_read(&mm, param_ptr) else {
         return EFAULT.as_isize();
     };
     let policy = target_task.inner_exclusive_access().sched_policy;
@@ -3445,12 +3421,12 @@ pub fn sys_sched_setaffinity(pid: isize, cpusetsize: usize, mask_ptr: *const u8)
         return EFAULT.as_isize();
     }
 
-    let token = current_user_token();
+    let mm = current_user_mm();
     // 读取用户 mask（最多取内核 cpumask 大小的字节数）
     let mut mask_bytes = [0u8; KERNEL_CPUSET_BYTES];
     let read_len = core::cmp::min(cpusetsize, KERNEL_CPUSET_BYTES);
     for i in 0..read_len {
-        match try_translated_read::<u8>(token, unsafe { mask_ptr.add(i) }) {
+        match try_translated_read::<u8>(&mm, unsafe { mask_ptr.add(i) }) {
             Some(v) => mask_bytes[i] = v,
             None => return EFAULT.as_isize(),
         }
@@ -3507,10 +3483,10 @@ pub fn sys_sched_getaffinity(pid: isize, cpusetsize: usize, mask_ptr: *mut u8) -
     };
 
     let allowed = target.inner_exclusive_access().cpus_allowed;
-    let token = current_user_token();
+    let mm = current_user_mm();
     let bytes = allowed.to_le_bytes();
     for i in 0..KERNEL_CPUSET_BYTES {
-        if !try_translated_write(token, unsafe { mask_ptr.add(i) }, bytes[i]) {
+        if !try_translated_write(&mm, unsafe { mask_ptr.add(i) }, bytes[i]) {
             return EFAULT.as_isize();
         }
     }
@@ -3518,32 +3494,32 @@ pub fn sys_sched_getaffinity(pid: isize, cpusetsize: usize, mask_ptr: *mut u8) -
     KERNEL_CPUSET_BYTES as isize
 }
 pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize {
- 
+
     if which != 0 {
-        return EINVAL.as_isize(); 
+        return EINVAL.as_isize();
     }
 
     let task = crate::task::current_task().unwrap();
-    let token = current_user_token();
+    let mm = current_user_mm();
 
     if new_value == 0 {
-        return EFAULT.as_isize(); 
+        return EFAULT.as_isize();
     }
     let new_timer = {
-        if let Some(t) = try_translated_read(token, new_value as *const ITimerVal) {
+        if let Some(t) = try_translated_read(&mm, new_value as *const ITimerVal) {
             t
         } else {
             return EFAULT.as_isize();
         }
     };
 
-  
+
     let delay_ms = new_timer.it_value.sec * 1000 + new_timer.it_value.usec / 1000;
 
-   
+
     let pid = task.getpid();
     let current_ms = get_time_ms();
-    
+
 
     let remain_ms = crate::timer::TIMER_MANAGER.lock().set_alarm(pid, current_ms, delay_ms);
 
@@ -3551,23 +3527,23 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
     if old_value != 0 {
         // 读取修改后写回
         let mut old_timer = {
-            if let Some(t) = try_translated_read(token, old_value as *mut ITimerVal) {
+            if let Some(t) = try_translated_read(&mm, old_value as *mut ITimerVal) {
                 t
             } else {
                 return EFAULT.as_isize();
             }
         };
-        
+
         old_timer.it_value.sec = remain_ms / 1000;
         old_timer.it_value.usec = (remain_ms % 1000) * 1000;
         old_timer.it_interval = TimeVal { sec: 0, usec: 0 };
 
-        if !try_translated_write(token, old_value as *mut ITimerVal, old_timer) {
+        if !try_translated_write(&mm, old_value as *mut ITimerVal, old_timer) {
             return EFAULT.as_isize();
         }
     }
 
-    0 
+    0
 }
 
 /// 创建POSIX定时器（RISC-V/asm-generic系统调用107）。
@@ -3588,14 +3564,14 @@ pub fn sys_timer_create(clock_id: i32, event: *const KernelSigEvent, timer_id: *
         return EFAULT.as_isize();
     }
 
-    let token = current_user_token();
+    let mm = current_user_mm();
     let owner = current_task().unwrap();
     let owner_pid = owner.getpid();
     let (notify, signo, value, target_tid) = if event.is_null() {
         // Linux在event为NULL时默认向进程发送SIGALRM。
         (SIGEV_SIGNAL, 14, 0, 0)
     } else {
-        let Some(event) = try_translated_read(token, event) else {
+        let Some(event) = try_translated_read(&mm, event) else {
             return EFAULT.as_isize();
         };
         if !matches!(event.notify, SIGEV_SIGNAL | SIGEV_NONE | SIGEV_THREAD_ID) {
@@ -3632,7 +3608,7 @@ pub fn sys_timer_create(clock_id: i32, event: *const KernelSigEvent, timer_id: *
         interval_ns: 0,
     });
 
-    if !try_translated_write(token, timer_id, id) {
+    if !try_translated_write(&mm, timer_id, id) {
         remove_posix_timer(id);
         return EFAULT.as_isize();
     }
@@ -3655,9 +3631,9 @@ pub fn sys_timer_settime(
         return EFAULT.as_isize();
     }
 
-    let token = current_user_token();
+    let mm = current_user_mm();
     let owner_pid = current_task().unwrap().getpid();
-    let Some(new_spec) = try_translated_read(token, new_value) else {
+    let Some(new_spec) = try_translated_read(&mm, new_value) else {
         return EFAULT.as_isize();
     };
     let Some(previous) = get_posix_timer_spec(timer_id, owner_pid) else {
@@ -3667,7 +3643,7 @@ pub fn sys_timer_settime(
     if set_posix_timer(timer_id, owner_pid, new_spec, flags & TIMER_ABSTIME != 0).is_none() {
         return EINVAL.as_isize();
     }
-    if !old_value.is_null() && !try_translated_write(token, old_value, previous) {
+    if !old_value.is_null() && !try_translated_write(&mm, old_value, previous) {
         return EFAULT.as_isize();
     }
     0
@@ -3688,12 +3664,12 @@ pub fn sys_ftruncate(fd: usize, len: usize) -> isize {
     let task = current_task().unwrap();
     let files = task.inner_exclusive_access().files.clone();
     let inner = files.exclusive_access();
-    
+
     // 校验
     if fd >= inner.fds.len() {
         return EBADF.as_isize(); // -EBADF (Bad file descriptor)
     }
-    
+
     // 获取文件
     if let Some(file) = &inner.fds[fd].file {
         let typ = file.get_stat();
@@ -3728,7 +3704,7 @@ pub fn sys_ftruncate(fd: usize, len: usize) -> isize {
             return EINVAL.as_isize();
         }
     }
-    
+
     // fd 指定文件不存在
     EBADF.as_isize()
 }
@@ -3736,7 +3712,7 @@ pub fn sys_ftruncate(fd: usize, len: usize) -> isize {
 /// 信号处理完成后的恢复
 pub fn sys_sigreturn() -> isize {
     warn!("[SIG_RET] ENTERED sys_sigreturn!");
-    
+
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     #[cfg(target_arch = "riscv64")]
@@ -3794,12 +3770,12 @@ pub fn sys_getrusage(who: i32, usage_ptr: *mut Rusage) -> isize {
     const RUSAGE_THREAD: i32 = 1;     // 请求当前线程的资源使用情况
     // 参数校验
     if who != RUSAGE_SELF && who != RUSAGE_CHILDREN && who != RUSAGE_THREAD {
-        return EINVAL.as_isize(); 
+        return EINVAL.as_isize();
     }
     if usage_ptr as usize == 0 {
-        return EFAULT.as_isize(); 
+        return EFAULT.as_isize();
     }
-    let token = current_user_token();
+    let mm = current_user_mm();
     let elapsed_us = if who == RUSAGE_CHILDREN {
         0
     } else {
@@ -3814,7 +3790,7 @@ pub fn sys_getrusage(who: i32, usage_ptr: *mut Rusage) -> isize {
         },
         ..Default::default()
     };
-    if try_translated_write(token, usage_ptr, usage) {
+    if try_translated_write(&mm, usage_ptr, usage) {
         0
     } else {
         EFAULT.as_isize()
@@ -3863,12 +3839,12 @@ pub fn sys_rt_sigaction(
 
     let task = current_task().unwrap();
     let signal_hand = task.inner_exclusive_access().signal_hand.clone();
-    let token = current_user_token();
+    let mm = current_user_mm();
 
     // 把旧的信号处理行为写进用户空间
     if !old_action.is_null() {
         let prev_action = signal_hand.exclusive_access().action(table_idx);
-        if !try_translated_write(token, old_action, prev_action) {
+        if !try_translated_write(&mm, old_action, prev_action) {
             return EFAULT.as_isize();
         }
     }
@@ -3880,14 +3856,14 @@ pub fn sys_rt_sigaction(
 
     // 修改tcb的信号处理行为
     let new_action = {
-        if let Some(act) = try_translated_read(token, action) { 
+        if let Some(act) = try_translated_read(&mm, action) {
             act
         } else {
             return EFAULT.as_isize();
         }
     };
     signal_hand.exclusive_access().set_action(table_idx, new_action);
-    
+
     0
 }
 
@@ -3902,42 +3878,42 @@ pub fn sys_pselect6(
     let nfds = nfds.min(64);
     let task = current_task().unwrap();
     let files = task.inner_exclusive_access().files.clone();
-    let token = current_user_token();
+    let mm = current_user_mm();
 
     let original_mask = task.inner_exclusive_access().blocked;
     if sigmask_arg as usize != 0 {
-        let mask_ptr = match try_translated_read(token, sigmask_arg) {
+        let mask_ptr = match try_translated_read(&mm, sigmask_arg) {
             Some(mask_ptr) => mask_ptr,
             None => return EFAULT.as_isize(),
         };
         if mask_ptr != 0 {
-            let mask = match try_translated_read(token, mask_ptr as *const usize) {
+            let mask = match try_translated_read(&mm, mask_ptr as *const usize) {
                 Some(mask) => mask,
                 None => return EFAULT.as_isize(),
             };
             task.inner_exclusive_access().blocked = SignalFlags::from_bits_truncate(mask as u64);
         }
     }
-    
+
     // 从用户空间读取 readfds 位图
     let mut readfds = 0usize;
     if readfds_ptr as usize != 0 {
         readfds = {
-            if let Some(rf) = crate::mm::try_translated_read(token, readfds_ptr) { rf } 
+            if let Some(rf) = crate::mm::try_translated_read(&mm, readfds_ptr) { rf }
             else { return crate::syscall::errno::Errno::EFAULT.as_isize(); }
         };
     }
     let mut writefds = 0usize;
     if writefds_ptr as usize != 0 {
         writefds = {
-            if let Some(wf) = crate::mm::try_translated_read(token, writefds_ptr) { wf } 
+            if let Some(wf) = crate::mm::try_translated_read(&mm, writefds_ptr) { wf }
             else { return crate::syscall::errno::Errno::EFAULT.as_isize(); }
         };
     }
     let mut exceptfds = 0usize;
     if exceptfds_ptr as usize != 0 {
         exceptfds = {
-            if let Some(ef) = crate::mm::try_translated_read(token, exceptfds_ptr) { ef } 
+            if let Some(ef) = crate::mm::try_translated_read(&mm, exceptfds_ptr) { ef }
             else { return crate::syscall::errno::Errno::EFAULT.as_isize(); }
         };
     }
@@ -3946,7 +3922,7 @@ pub fn sys_pselect6(
     let mut timeout_ms: usize = 0;
     if has_timeout {
         let timespec = {
-            if let Some(ts) = try_translated_read(token, _timeout as *const TimeSpec) {
+            if let Some(ts) = try_translated_read(&mm, _timeout as *const TimeSpec) {
                 ts
             } else {
                 task.inner_exclusive_access().blocked = original_mask;
@@ -3968,13 +3944,13 @@ pub fn sys_pselect6(
         };
         // 1. 计算原始的毫秒数
         let mut calculated_ms = sec.saturating_mul(1000).saturating_add(timespec.tv_nsec / 1_000_000);
-        
+
         // 2. 限制最大超时时间为两分钟 (120,000 毫秒)
         const TWO_MINUTES_MS: usize = 30_000;
         if calculated_ms > TWO_MINUTES_MS {
             calculated_ms = TWO_MINUTES_MS;
         }
-        
+
         timeout_ms = calculated_ms;
         deadline_ms = crate::timer::get_time_ms().saturating_add(timeout_ms);
     }
@@ -3982,15 +3958,15 @@ pub fn sys_pselect6(
 
             if readfds_ptr as usize != 0 {
                 readfds = {
-                    if let Some(rf) = crate::mm::try_translated_read(token, readfds_ptr) { rf } 
+                    if let Some(rf) = crate::mm::try_translated_read(&mm, readfds_ptr) { rf }
                     else { return crate::syscall::errno::Errno::EFAULT.as_isize(); }
                 };
             }
             {
                 let task_inner = task.inner_exclusive_access();
-                let fatal_signals = crate::task::SignalFlags::SIGKILL 
-                    | crate::task::SignalFlags::SIGTERM 
-                    | crate::task::SignalFlags::SIGINT 
+                let fatal_signals = crate::task::SignalFlags::SIGKILL
+                    | crate::task::SignalFlags::SIGTERM
+                    | crate::task::SignalFlags::SIGINT
                     | crate::task::SignalFlags::SIGALRM;
 
                 if task_inner.pending.flags().intersects(fatal_signals) {
@@ -4024,7 +4000,7 @@ pub fn sys_pselect6(
                         }
                     }
                 }
-                
+
             }
             // 2检查所有的 FD 是否有数据就绪
             crate::net::net_poll();
@@ -4068,8 +4044,8 @@ pub fn sys_pselect6(
                                 let w_status = fd_file.writable();
                                 let mut sockets = crate::net::SOCKET_SET.exclusive_access();
                                 let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(tcp_wrapper.handle);
-                                
-                                drop(sockets); 
+
+                                drop(sockets);
 
                                 if in_read && r_status {
                                     ready_readfds |= 1usize << fd;
@@ -4094,7 +4070,7 @@ pub fn sys_pselect6(
                         }else {
                                 let r_status = fd_file.ready_to_read();
                                 let w_status = fd_file.ready_to_write();
-                                
+
                                 if in_read && r_status {
                                     ready_readfds |= 1usize << fd;
                                     ready_count += 1;
@@ -4143,25 +4119,25 @@ pub fn sys_pselect6(
                 drop(queues);
                 if ready_count > 0 {
                     // 写入用户态态指针
-                    if readfds_ptr as usize != 0 && !crate::mm::try_translated_write(token, readfds_ptr, ready_readfds) {
+                    if readfds_ptr as usize != 0 && !crate::mm::try_translated_write(&mm, readfds_ptr, ready_readfds) {
                         return crate::syscall::errno::Errno::EFAULT.as_isize();
                     }
-                    if writefds_ptr as usize != 0 && !crate::mm::try_translated_write(token, writefds_ptr, ready_writefds) {
+                    if writefds_ptr as usize != 0 && !crate::mm::try_translated_write(&mm, writefds_ptr, ready_writefds) {
                         return crate::syscall::errno::Errno::EFAULT.as_isize();
                     }
-                    if exceptfds_ptr as usize != 0 && !crate::mm::try_translated_write(token, exceptfds_ptr, ready_exceptfds) {
+                    if exceptfds_ptr as usize != 0 && !crate::mm::try_translated_write(&mm, exceptfds_ptr, ready_exceptfds) {
                         return crate::syscall::errno::Errno::EFAULT.as_isize();
                     }
                     return ready_count as isize;
                 } else {
                     // 超时返回
-                    if readfds_ptr as usize != 0 { crate::mm::try_translated_write(token, readfds_ptr, 0); }
-                    if writefds_ptr as usize != 0 { crate::mm::try_translated_write(token, writefds_ptr, 0); }
-                    if exceptfds_ptr as usize != 0 { crate::mm::try_translated_write(token, exceptfds_ptr, 0); }
+                    if readfds_ptr as usize != 0 { crate::mm::try_translated_write(&mm, readfds_ptr, 0); }
+                    if writefds_ptr as usize != 0 { crate::mm::try_translated_write(&mm, writefds_ptr, 0); }
+                    if exceptfds_ptr as usize != 0 { crate::mm::try_translated_write(&mm, exceptfds_ptr, 0); }
                     return 0;
                 }
             }
-            // 被 net_poll 唤醒，让出 CPU 
+            // 被 net_poll 唤醒，让出 CPU
             crate::task::suspend_current_and_run_next();
             // 下一轮循环的起点，清理掉上次入队的记录，防止重复通知和内存泄漏
             {
@@ -4215,7 +4191,7 @@ pub fn sys_keyctl(_operation: i32, _arg2: usize, _arg3: usize, _arg4: usize, _ar
 
 pub fn sys_times(tms_ptr: *mut usize) -> isize {
     //warn!("[kernel] sys_times called with tms_ptr=0x{:x}", tms_ptr as usize);
-    let token = current_user_token();
+    let mm = current_user_mm();
     // 暂时伪实现，写0
     let tms_val = Tms {
         tms_utime: 0,
@@ -4223,7 +4199,7 @@ pub fn sys_times(tms_ptr: *mut usize) -> isize {
         tms_cutime: 0,
         tms_cstime: 0,
     };
-    if !try_translated_write(token, tms_ptr as *mut Tms, tms_val) {
+    if !try_translated_write(&mm, tms_ptr as *mut Tms, tms_val) {
         return EFAULT.as_isize();
     }
     let current_ms = get_time_ms();
@@ -4237,8 +4213,8 @@ pub fn sys_clock_adjtime(which_clock: i32, tp: *mut Timex) -> isize {
         return EINVAL.as_isize();
     }
 
-    let token = current_user_token();
-    let Some(mut tx) = try_translated_read(token, tp as *const Timex) else {
+    let mm = current_user_mm();
+    let Some(mut tx) = try_translated_read(&mm, tp as *const Timex) else {
         return EFAULT.as_isize();
     };
 
@@ -4340,7 +4316,7 @@ pub fn sys_clock_adjtime(which_clock: i32, tp: *mut Timex) -> isize {
     tx.stbcnt = 0;
     tx.tai = state.tai;
 
-    if !try_translated_write(token, tp, tx) {
+    if !try_translated_write(&mm, tp, tx) {
         return EFAULT.as_isize();
     }
 
@@ -4354,8 +4330,8 @@ pub fn sys_clock_settime(which_clock: i32, tp: *const TimeSpec) -> isize {
         return EINVAL.as_isize();
     }
 
-    let token = current_user_token();
-    let timespec = match try_translated_read(token, tp) {
+    let mm = current_user_mm();
+    let timespec = match try_translated_read(&mm, tp) {
         Some(ts) => ts,
         None => return EFAULT.as_isize(),
     };
@@ -4390,8 +4366,8 @@ pub fn sys_clock_settime(which_clock: i32, tp: *const TimeSpec) -> isize {
     0
 }
 pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> isize {
-    let token = current_user_token();
-    let mut user_buf = translated_byte_buffer(token, buf, len);
+    let mm = current_user_mm();
+    let mut user_buf = crate::mm::translated_byte_buffer_mut(&mm, buf, len);
     const LCG_MULTIPLIER: usize = 25_214_903_917;
     const LCG_MASK: usize = (1usize << 48) - 1;
 
@@ -4441,9 +4417,9 @@ pub struct SigInfo {
 pub type SigSet = usize;
 
 /// ！！！目前的实现似乎始终超时，相关内容待人工重写！！！
-/// 
+///
 /// **系统调用：rt_sigtimedwait (0x81)**
-/// 
+///
 /// ### 功能描述
 /// 同步地等待并消费信号。进程会阻塞直到 `set` 中的信号集有信号发生，或达到 `timeout`。
 /// 与异步信号处理（Signal Handler）不同，此函数会**直接从进程的挂起位图中移除信号**，
@@ -4459,19 +4435,19 @@ pub type SigSet = usize;
 /// - 成功：返回被捕获的信号编号（正数）。
 /// - 失败：返回错误码（负数），如 `EAGAIN` (超时) 或 `EINVAL` (参数非法)。
 pub fn sys_rt_sigtimedwait(
-    set_ptr: *const usize, 
-    info_ptr: *mut SigInfo, 
-    timeout_ptr: *const TimeSpec, 
+    set_ptr: *const usize,
+    info_ptr: *mut SigInfo,
+    timeout_ptr: *const TimeSpec,
     sigsetsize: usize
 ) -> isize {
-    let token = current_user_token();
+    let mm = current_user_mm();
 
     if sigsetsize != 8 {
         return Errno::EINVAL.as_isize();
     }
 
     let target_set_bits = {
-        if let Some(b) = try_translated_read(token, set_ptr) {
+        if let Some(b) = try_translated_read(&mm, set_ptr) {
             b
         } else {
             return EFAULT.as_isize();
@@ -4482,7 +4458,7 @@ pub fn sys_rt_sigtimedwait(
     let mut deadline_us: Option<usize> = None;
     if !timeout_ptr.is_null() {
         let timeout = {
-            if let Some(t) = try_translated_read(token, timeout_ptr) {
+            if let Some(t) = try_translated_read(&mm, timeout_ptr) {
                 t
             } else {
                 return EFAULT.as_isize();
@@ -4491,7 +4467,7 @@ pub fn sys_rt_sigtimedwait(
         if timeout.tv_sec == 0 && timeout.tv_nsec == 0 {
             deadline_us = Some(0); // 纯轮询，立刻超时
         } else {
-            let current_us = get_time_us(); 
+            let current_us = get_time_us();
             let wait_us = (timeout.tv_sec as usize) * 1_000_000 + (timeout.tv_nsec as usize) / 1000;
             deadline_us = Some(current_us + wait_us);
         }
@@ -4525,7 +4501,7 @@ pub fn sys_rt_sigtimedwait(
 
                 // 写回 info
                 if !info_ptr.is_null() {
-                    if !try_translated_write(token, info_ptr, SigInfo {
+                    if !try_translated_write(&mm, info_ptr, SigInfo {
                         si_signo: sig_num,
                         si_errno: 0,
                         si_code: 0,
@@ -4541,7 +4517,7 @@ pub fn sys_rt_sigtimedwait(
                 }
                 return sig_num as isize;
             }
-            
+
             // 【新增】：如果在等待期间收到了非目标集合中且未屏蔽的信号
             // 则应当中断等待并返回 EINTR，给外层 trap_handler 执行收尸（call_user_signal_handler）的机会。
             let unmasked_pending = pending.bits() & !blocked.bits();
@@ -4549,17 +4525,17 @@ pub fn sys_rt_sigtimedwait(
             if (unmasked_pending | unmaskable) != 0 {
                 return Errno::EINTR.as_isize();
             }
-        } 
-        
+        }
+
         if let Some(deadline) = deadline_us {
             // 【带超时的等待】
             let current_us = get_time_us();
             if current_us >= deadline {
-                return Errno::EAGAIN.as_isize(); 
+                return Errno::EAGAIN.as_isize();
             }
-            
+
             suspend_current_and_run_next();
-            
+
         } else {
             suspend_current_and_run_next();
             /*
@@ -4574,9 +4550,9 @@ pub fn sys_rt_sigtimedwait(
 use crate::process::Rlimit64;
 /// 修改打开的文件数限制
 pub fn sys_prlimit64(
-    pid: usize, 
-    resource: i32, 
-    new_limit: *const Rlimit64, 
+    pid: usize,
+    resource: i32,
+    new_limit: *const Rlimit64,
     old_limit: *mut Rlimit64
 ) -> isize {
     const UL_SETFSIZE: i32 = 1;
@@ -4587,15 +4563,15 @@ pub fn sys_prlimit64(
     const RLIMIT_NOFILE: i32 = 7;    // 最大打开文件数
     const RLIMIT_MEMLOCK: i32 = 8;   // 锁定内存大小
     const RLIMIT_AS: i32 = 9;        // 虚拟地址空间大小
-    
+
     info!("sys_prlimit64 called with pid={}, resource={}, new_limit=0x{:x}, old_limit=0x{:x}", pid, resource, new_limit as u64, old_limit as u64);
     if pid != 0 {
          if pid != current_task().unwrap().getpid() {
-            return Errno::EPERM.as_isize(); 
-        } 
+            return Errno::EPERM.as_isize();
+        }
     }
 
-    let token = current_user_token();
+    let mm = current_user_mm();
     match resource {
         RLIMIT_NPROC => {
             ENOSYS.as_isize()
@@ -4610,12 +4586,12 @@ pub fn sys_prlimit64(
             let limit = signal.rlimits().nofile;
             let old = Rlimit64 { cur_lmt: limit.rlim_cur, max_lmt: limit.rlim_max };
             if !old_limit.is_null() {
-                if !try_translated_write(token, old_limit, old) {
+                if !try_translated_write(&mm, old_limit, old) {
                     return Errno::EFAULT.as_isize();
                 }
             }
             if !new_limit.is_null() {
-                let new = translated_read(token, new_limit);
+                let new = translated_read(&mm, new_limit);
                 if new.cur_lmt > new.max_lmt
                     || new.max_lmt > signal.rlimits().nofile.rlim_max
                 {
@@ -4645,12 +4621,12 @@ pub fn sys_prlimit64(
             let mut signal = signal.exclusive_access();
             let limit = signal.rlimits().fsize;
             if !old_limit.is_null() {
-                if !try_translated_write(token, old_limit, Rlimit64 { cur_lmt: limit.rlim_cur, max_lmt: limit.rlim_max }) {
+                if !try_translated_write(&mm, old_limit, Rlimit64 { cur_lmt: limit.rlim_cur, max_lmt: limit.rlim_max }) {
                     return EFAULT.as_isize();
                 }
             }
             if !new_limit.is_null() {
-                if let Some(new) = try_translated_read(token, new_limit) {
+                if let Some(new) = try_translated_read(&mm, new_limit) {
                     signal.rlimits_mut().fsize.rlim_cur = new.cur_lmt;
                     signal.rlimits_mut().fsize.rlim_max = new.max_lmt;
                 } else {
@@ -4663,33 +4639,33 @@ pub fn sys_prlimit64(
             let task = current_task().unwrap();
             let signal = task.inner_exclusive_access().signal.clone();
             let mut signal = signal.exclusive_access();
-            
+
             // 匹配对应的资源字段
             let target_limit = match resource {
                 RLIMIT_DATA => &mut signal.rlimits_mut().data,
                 RLIMIT_NPROC => &mut signal.rlimits_mut().nproc,
                 RLIMIT_AS => &mut signal.rlimits_mut().aspace,
-                _ => unreachable!(), 
+                _ => unreachable!(),
             };
 
             // 如果传了 old_limit，把当前内核的值写回给用户
             if !old_limit.is_null() {
                 let old = Rlimit64 { cur_lmt: target_limit.rlim_cur, max_lmt: target_limit.rlim_max };
-                if !try_translated_write(token, old_limit, old) {
+                if !try_translated_write(&mm, old_limit, old) {
                     return EFAULT.as_isize();
                 }
             }
 
             // 如果传了 new_limit，把用户的新值更新到内核
             if !new_limit.is_null() {
-                if let Some(new) = try_translated_read(token, new_limit) {
+                if let Some(new) = try_translated_read(&mm, new_limit) {
                     target_limit.rlim_cur = new.cur_lmt;
                     target_limit.rlim_max = new.max_lmt;
                 } else {
                     return EFAULT.as_isize();
                 }
             }
-            
+
             0 // 返回成功
         }
         // 其他请求暂不支持
@@ -4710,21 +4686,24 @@ const FUTEX_CMD_MASK: i32 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 
 ///作用：用户空间会传进去一个地址，内核解引用地址获取值后，如果和用户指定的val相等，则睡眠或唤醒对应等待队列的一个元素。
 /// 实际上，FUTEX就是管理所有信号量以及其等待队列的元素，信号量底层会用这个syscall。
-/// FUTEX的键是物理地址，值是这个信号量对应的等待队列
 pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, uaddr2: *mut i32, val3: i32) -> isize {
     if uaddr.is_null() {
         return EFAULT.as_isize();
     }
+    if (uaddr as usize) & (core::mem::align_of::<i32>() - 1) != 0 {
+        return EINVAL.as_isize();
+    }
 
     let cmd = op & FUTEX_CMD_MASK;
-    let token = current_user_token();
+    let private_requested = op & FUTEX_PRIVATE_FLAG != 0;
+    let mm = current_user_mm();
 
     match cmd {
         FUTEX_WAIT | FUTEX_WAIT_BITSET => {
             if cmd == FUTEX_WAIT_BITSET && val3 == 0 {
                 return EINVAL.as_isize();
             }
-            let Some(current_val) = try_translated_read(token, uaddr as *const i32) else {
+            let Some(current_val) = try_translated_read(&mm, uaddr as *const i32) else {
                 return EFAULT.as_isize();
             };
 
@@ -4748,7 +4727,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             }
             //当需要实时阻塞时，先检查是否有信号到来，如果有则返回EINTR，如果没有则进入睡眠等待被唤醒或者超时
             if !timeout.is_null() {
-                let Some(timeout_val) = try_translated_read(token, timeout) else {
+                let Some(timeout_val) = try_translated_read(&mm, timeout) else {
                     return EFAULT.as_isize();
                 };
                 if timeout_val.tv_nsec >= 1_000_000_000 {
@@ -4784,7 +4763,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
 
                     suspend_current_and_run_next();
 
-                    let Some(current_val) = try_translated_read(token, uaddr as *const i32) else {
+                    let Some(current_val) = try_translated_read(&mm, uaddr as *const i32) else {
                         return EFAULT.as_isize();
                     };
                     if current_val != val {
@@ -4807,13 +4786,11 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 let mut inner = current.inner_exclusive_access();
                 inner.signal_interrupted = false;
             }
-            //获取地址对应的等待队列，放入当前任务并睡眠
-            let token = current_user_token();
-            let page_table = PageTable::from_token(token);
-            let Some(pa) = page_table.translate_va(VirtAddr::from(uaddr as usize)) else {
+            // Resolve the stable queue key after validating the futex word.
+            let Some(key) = mm.futex_key(VirtAddr::from(uaddr as usize), private_requested) else {
                 return EFAULT.as_isize();
             };
-            let queue = get_futex_wait_queue(pa.0);
+            let queue = get_futex_wait_queue(key);
 
             // Linux FUTEX_WAIT 的“比较用户值并挂入等待队列”必须相对
             // FUTEX_WAKE 原子。首次比较与这里之间，另一个 hart 可能已经
@@ -4822,7 +4799,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             // 入队，而 WAKE 也持有该锁 pop_front，从而关闭竞态窗口。
             let mut rechecked_value = None;
             let blocked = block_current_and_run_next_if(&queue, || {
-                rechecked_value = try_translated_read(token, uaddr as *const i32);
+                rechecked_value = try_translated_read(&mm, uaddr as *const i32);
                 rechecked_value == Some(val)
             });
             if !blocked {
@@ -4846,6 +4823,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 let mut guard = queue.lock();
                 guard.remove_task(current_tid);
             }
+            retire_futex_wait_queue_if_unused(key, &queue);
 
             if crate::process::take_current_signal_interrupted() {
                 warn!(
@@ -4899,13 +4877,12 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 return 0;
             }
 
-            let page_table = PageTable::from_token(token);
-            let Some(pa) = page_table.translate_va(VirtAddr::from(uaddr as usize)) else {
+            let Some(key) = mm.futex_key(VirtAddr::from(uaddr as usize), private_requested) else {
                 return EFAULT.as_isize();
             };
             let queue = {
                 let queues = FUTEX_WAIT_QUEUES.lock();
-                queues.get(&pa.0).cloned()
+                queues.get(&key).cloned()
             };
 
             let Some(queue) = queue else {
@@ -4924,7 +4901,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
         }
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
             if cmd == FUTEX_CMP_REQUEUE {
-                let Some(current_val) = try_translated_read(token, uaddr as *const i32) else {
+                let Some(current_val) = try_translated_read(&mm, uaddr as *const i32) else {
                     return EFAULT.as_isize();
                 };
                 if current_val != val3 {
@@ -4934,23 +4911,25 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             if uaddr2.is_null() {
                 return EFAULT.as_isize();
             }
+            if (uaddr2 as usize) & (core::mem::align_of::<i32>() - 1) != 0 {
+                return EINVAL.as_isize();
+            }
 
-            let page_table = PageTable::from_token(token);
-            let Some(src_pa) = page_table.translate_va(VirtAddr::from(uaddr as usize)) else {
+            let Some(src_key) = mm.futex_key(VirtAddr::from(uaddr as usize), private_requested) else {
                 return EFAULT.as_isize();
             };
-            let Some(dst_pa) = page_table.translate_va(VirtAddr::from(uaddr2 as usize)) else {
+            let Some(dst_key) = mm.futex_key(VirtAddr::from(uaddr2 as usize), private_requested) else {
                 return EFAULT.as_isize();
             };
             let requeue_count = timeout as usize;
             let dst_queue = if requeue_count > 0 {
-                Some(get_futex_wait_queue(dst_pa.0))
+                Some(get_futex_wait_queue(dst_key))
             } else {
                 None
             };
             let src_queue = {
                 let queues = FUTEX_WAIT_QUEUES.lock();
-                queues.get(&src_pa.0).cloned()
+                queues.get(&src_key).cloned()
             };
 
             let Some(src_queue) = src_queue else {
@@ -4984,7 +4963,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
 
                 if requeue_left > 0 {
                     requeue_left -= 1;
-                    if src_pa.0 == dst_pa.0 {
+                    if src_key == dst_key {
                         src_queue.lock().push_back(task);
                     } else if let Some(dst_queue) = &dst_queue {
                         dst_queue.lock().push_back(task);
@@ -5006,13 +4985,15 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 if target.is_null() || count == 0 {
                     continue;
                 }
-                let page_table = PageTable::from_token(token);
-                let Some(pa) = page_table.translate_va(VirtAddr::from(target as usize)) else {
+                if (target as usize) & (core::mem::align_of::<i32>() - 1) != 0 {
+                    continue;
+                }
+                let Some(key) = mm.futex_key(VirtAddr::from(target as usize), private_requested) else {
                     continue;
                 };
                 let queue = {
                     let queues = FUTEX_WAIT_QUEUES.lock();
-                    queues.get(&pa.0).cloned()
+                    queues.get(&key).cloned()
                 };
                 let mut woken = 0usize;
                 if let Some(queue) = queue {
@@ -5034,21 +5015,21 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
 pub fn sys_getresgid(gid_ptr: *mut u32, egid_ptr: *mut u32, sgid_ptr: *mut u32) -> isize {
     let task = current_task().unwrap();
     let cred = task.inner_exclusive_access().cred.clone();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let cred = cred.exclusive_access();
 
     if !gid_ptr.is_null() {
-        if !try_translated_write(token, gid_ptr, cred.gid()) {
+        if !try_translated_write(&mm, gid_ptr, cred.gid()) {
             return EFAULT.as_isize();
         }
     }
     if !egid_ptr.is_null() {
-        if !try_translated_write(token, egid_ptr, cred.egid()) {
+        if !try_translated_write(&mm, egid_ptr, cred.egid()) {
             return EFAULT.as_isize();
         }
     }
     if !sgid_ptr.is_null() {
-        if !try_translated_write(token, sgid_ptr, cred.sgid()) {
+        if !try_translated_write(&mm, sgid_ptr, cred.sgid()) {
             return EFAULT.as_isize();
         }
     }
@@ -5063,10 +5044,10 @@ pub fn sys_rt_sigpending(sigset_ptr: *mut SigSet, sigsetsize: usize) -> isize {
         let inner = task.inner_exclusive_access();
         (inner.pending.flags(), inner.signal.clone())
     };
-    let token = current_user_token();
+    let mm = current_user_mm();
 
     let pending = (thread_pending | signal.exclusive_access().pending_flags()).bits() as usize;
-    if !try_translated_write(token, sigset_ptr, pending) {
+    if !try_translated_write(&mm, sigset_ptr, pending) {
         return EFAULT.as_isize();
     }
     0
@@ -5201,7 +5182,7 @@ pub fn sys_riscv_hwprobe(
         return EFAULT.as_isize();
     }
 
-    let token = current_user_token();
+    let mm = current_user_mm();
 
     // Linux允许(NULL, 0)表示查询所有在线CPU。若用户显式传入CPU位图，
     // 简化实现只检查该内存可读，所有CPU按同构处理。
@@ -5210,8 +5191,8 @@ pub fn sys_riscv_hwprobe(
             return EINVAL.as_isize();
         }
     } else if cpus.is_null()
-        || try_translated_read::<u8>(token, cpus).is_none()
-        || try_translated_read::<u8>(token, unsafe { cpus.add(cpusetsize - 1) }).is_none()
+        || try_translated_read::<u8>(&mm, cpus).is_none()
+        || try_translated_read::<u8>(&mm, unsafe { cpus.add(cpusetsize - 1) }).is_none()
     {
         return EFAULT.as_isize();
     }
@@ -5240,11 +5221,11 @@ pub fn sys_riscv_hwprobe(
     for index in 0..pair_count {
         let pair_ptr = (pairs as usize + index * core::mem::size_of::<RiscvHwprobe>())
             as *mut RiscvHwprobe;
-        let Some(mut pair) = try_translated_read(token, pair_ptr as *const RiscvHwprobe) else {
+        let Some(mut pair) = try_translated_read(&mm, pair_ptr as *const RiscvHwprobe) else {
             return EFAULT.as_isize();
         };
         fill_value(&mut pair);
-        if !try_translated_write(token, pair_ptr, pair) {
+        if !try_translated_write(&mm, pair_ptr, pair) {
             return EFAULT.as_isize();
         }
     }
