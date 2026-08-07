@@ -100,6 +100,17 @@ pub struct MemorySet {
     start_brk: AtomicU64,
 }
 
+/// 用户虚拟地址的 futex 共享域。
+///
+/// 私有映射由调用方的页表根区分；共享匿名映射以其跨 fork 继承的
+/// frame 表 Arc 为对象标识；共享文件映射以 inode 和文件内偏移标识。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FutexMappingKind {
+    Private,
+    SharedAnonymous { mapping_id: usize, mapping_offset: usize },
+    SharedFile { inode: u64, file_offset: usize },
+}
+
 impl MemorySet {
     /// 将内核根页表的高半地址空间引用进页表
     /// 
@@ -211,6 +222,34 @@ impl MemorySet {
     /// 快照所有区域（调试/只读遍历用），调用方自行 lock 每个区域。
     pub fn area_snapshot(&self) -> Vec<Arc<Mutex<MapArea>>> {
         self.areas.read().values().cloned().collect()
+    }
+
+    /// 返回用户地址应使用的 futex 共享域。
+    pub fn futex_mapping_kind(&self, virtual_address: usize) -> FutexMappingKind {
+        let virtual_page = VirtAddr::from(virtual_address).std_floor();
+        let Some(area) = self.find_area_arc(virtual_page) else {
+            return FutexMappingKind::Private;
+        };
+        let area = area.lock();
+        if !area.is_shared {
+            return FutexMappingKind::Private;
+        }
+
+        let area_start = area.vpn_range.get_start().0 * PAGE_SIZE;
+        let mapping_offset = virtual_address.saturating_sub(area_start);
+        if let Some(frames) = &area.anonymous_shared_frames {
+            return FutexMappingKind::SharedAnonymous {
+                mapping_id: Arc::as_ptr(frames) as usize,
+                mapping_offset,
+            };
+        }
+        if let Some((file, page_offset)) = &area.backing_file {
+            return FutexMappingKind::SharedFile {
+                inode: file.ino(),
+                file_offset: page_offset.saturating_mul(PAGE_SIZE).saturating_add(mapping_offset),
+            };
+        }
+        FutexMappingKind::Private
     }
     /// 堆区起点，program break 不允许低于该值。
     pub fn start_brk(&self) -> usize {

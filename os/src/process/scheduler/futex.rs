@@ -8,18 +8,40 @@ use lazy_static::*;
 use spin::Mutex;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct FutexKey {
-	address: usize,
-	private_token: Option<usize>,
+pub(crate) enum FutexKey {
+	Private {
+		page_table_root: usize,
+		virtual_address: usize,
+	},
+	SharedAnonymous {
+		mapping_id: usize,
+		mapping_offset: usize,
+	},
+	SharedFile {
+		inode: u64,
+		file_offset: usize,
+	},
 }
 
 impl FutexKey {
-	pub(crate) fn shared(physical_address: usize) -> Self {
-		Self { address: physical_address, private_token: None }
+	/// 页表根与用户虚拟地址共同标识一个 futex。
+	///
+	/// 同一地址空间的线程共享页表 token；COW fork 会创建新的页表 token，
+	/// 即使 fork 后两个地址空间暂时映射到同一物理页，也不会错误共享等待队列。
+	pub(crate) fn private(page_table_token: usize, virtual_address: usize) -> Self {
+		#[cfg(target_arch = "riscv64")]
+		let page_table_root = page_table_token & ((1usize << 44) - 1);//去除asid
+		#[cfg(target_arch = "loongarch64")]
+		let page_table_root = page_table_token;
+		Self::Private { page_table_root, virtual_address }
 	}
 
-	pub(crate) fn private(user_token: usize, virtual_address: usize) -> Self {
-		Self { address: virtual_address, private_token: Some(user_token) }
+	pub(crate) fn shared_anonymous(mapping_id: usize, mapping_offset: usize) -> Self {
+		Self::SharedAnonymous { mapping_id, mapping_offset }
+	}
+
+	pub(crate) fn shared_file(inode: u64, file_offset: usize) -> Self {
+		Self::SharedFile { inode, file_offset }
 	}
 }
 
@@ -68,12 +90,12 @@ impl FutexWaitQueue {
 }
 
 lazy_static! {
-	/// Futex 物理地址到对应等待队列的映射。
+	/// 页表根与用户虚拟地址到对应等待队列的映射。
 	pub(crate) static ref FUTEX_WAIT_QUEUES: Mutex<BTreeMap<FutexKey, Arc<Mutex<FutexWaitQueue>>>> =
 		Mutex::new(BTreeMap::new());
 }
 
-/// 获取 Futex 地址对应的等待队列；队列不存在时按原逻辑创建。
+/// 获取页表中 Futex 虚拟地址对应的等待队列；队列不存在时创建。
 pub(crate) fn get_futex_wait_queue(key: FutexKey) -> Arc<Mutex<FutexWaitQueue>> {
 	let mut queues = FUTEX_WAIT_QUEUES.lock();
 	queues
