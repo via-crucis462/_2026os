@@ -1,7 +1,7 @@
 //! Global task registry indexed by thread ID.
 
 use crate::process::scheduler::runqueue::{
-    add_task_into_pool, lock_dispatch, remove_task_from_all_local_queues_unlocked,
+    add_task_into_pool, enqueue_new_task, lock_dispatch, remove_task_from_all_local_queues_unlocked,
     remove_task_from_global_pool_unlocked,
 };
 use crate::process::TaskStruct;
@@ -97,7 +97,8 @@ pub fn add_task(task: Arc<TaskStruct>) {
     TID2TCB
         .exclusive_access()
         .insert(task.gettid(), Arc::clone(&task));
-    add_task_into_pool(task);
+    let fallback_cpu = task.inner_exclusive_access().cpu;
+    enqueue_new_task(task, fallback_cpu);
 }
 
 pub fn tid2task(tid: usize) -> Option<Arc<TaskStruct>> {

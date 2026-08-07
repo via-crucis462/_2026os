@@ -262,6 +262,9 @@ pub trait VfsInode: Send + Sync {
     fn dec_link_count(&self) -> bool {
         false
     }
+    fn inc_link_count(&self) -> bool {
+        false
+    }
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize;
     fn rename_dir_entry(
         &self,
@@ -315,7 +318,7 @@ pub trait VfsInode: Send + Sync {
         String::from_utf8_lossy(&buf).into_owned()
     }
     /// 3. 创建硬链接
-    fn link(&self, name: &str, inode: Arc<dyn VfsInode>) -> bool {
+    fn link(&self, _name: &str, _inode: Arc<dyn VfsInode>) -> bool {
         false
     }
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
@@ -324,6 +327,9 @@ pub trait VfsInode: Send + Sync {
     /// 调试用：返回具体实现类型的名字
     fn type_name(&self) -> &'static str {
         core::any::type_name::<Self>()
+    }
+    fn filesystem_kind(&self) -> &'static str {
+        self.type_name()
     }
     fn statfs(&self) -> Statfs {
         // 默认实现：返回全 0 或者一个安全的默认值

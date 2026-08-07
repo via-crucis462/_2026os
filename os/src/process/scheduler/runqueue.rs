@@ -8,6 +8,7 @@ use crate::process::{TaskControlBlock, TaskStatus};
 use crate::sync::{MPSafeCell, MPSafeGuard};
 use crate::get_hart_id;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::lazy;
 use lazy_static::*;
 
@@ -17,6 +18,8 @@ pub const SCHED_RR: isize = 2;
 pub const SCHED_BATCH: isize = 3;
 pub const SCHED_IDLE: isize = 5;
 pub const SCHED_DEADLINE: isize = 6;
+
+static NEXT_NEW_TASK_CPU: AtomicUsize = AtomicUsize::new(0);
 
 // 核的调度队列与核id
 pub struct Rq {
@@ -191,9 +194,30 @@ pub fn enqueue_task_on_cpu(task: Arc<TaskControlBlock>, cpu_id: usize) {
 	RQ_ARRAY[cpu_id].inner_exclusive_access().enqueue_task(task);
 }
 
-/// 将新创建的任务加入父任务所在 CPU 的本地运行队列。
-pub fn enqueue_new_task(task: Arc<TaskControlBlock>, parent_cpu: usize) {
-	enqueue_task_on_cpu(task, parent_cpu);
+/// 将新创建的任务加入负载最轻的允许 CPU。
+///
+/// 新任务只继承父任务的 affinity，不固定继承父核。平局使用轮转起点
+/// 打散，避免连续 clone 将所有 worker 堆到同一个 runqueue。
+pub fn enqueue_new_task(task: Arc<TaskControlBlock>, fallback_cpu: usize) {
+	let allowed = task.inner_exclusive_access().cpus_allowed;
+	let cpu_count = RQ_ARRAY.len();
+	let start_cpu = NEXT_NEW_TASK_CPU.fetch_add(1, Ordering::Relaxed) % cpu_count;
+	let mut target_cpu = None;
+	let mut lowest_load = usize::MAX;
+
+	for offset in 0..cpu_count {
+		let cpu_id = (start_cpu + offset) % cpu_count;
+		if cpu_id >= usize::BITS as usize || allowed & (1usize << cpu_id) == 0 {
+			continue;
+		}
+		let load = RQ_ARRAY[cpu_id].inner_exclusive_access().nr_running;
+		if load < lowest_load {
+			lowest_load = load;
+			target_cpu = Some(cpu_id);
+		}
+	}
+
+	enqueue_task_on_cpu(task, target_cpu.unwrap_or_else(|| fallback_cpu.min(cpu_count - 1)));
 }
 
 /// 将任务加入其 TCB 当前记录的本地运行队列。

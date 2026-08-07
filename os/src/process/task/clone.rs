@@ -367,7 +367,6 @@ impl TaskStruct {
 			self.inner_exclusive_access().children.push(child.clone());
 		}
 		// 注册到全局 TID→TaskStruct 映射，并加入调度就绪队列
-		warn!("do_clone: adding child task with PID {} and TID {}", child.getpid(), child.gettid());
 		#[cfg(target_arch = "loongarch64")]
 		{
 			let inner = child.inner_exclusive_access();
