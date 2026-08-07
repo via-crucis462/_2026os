@@ -4745,16 +4745,22 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                     .tv_sec
                     .saturating_mul(1_000_000)
                     .saturating_add((timeout_val.tv_nsec + 999) / 1000);
-                // FUTEX_WAIT_BITSET + FUTEX_CLOCK_REALTIME 的超时是
-                // CLOCK_REALTIME 绝对时间；其余情况是相对单调时间。
-                let is_realtime_abs = cmd == FUTEX_WAIT_BITSET
-                    && (op & FUTEX_CLOCK_REALTIME) != 0;
-                let deadline_us = if is_realtime_abs {
-                    timeout_us
+                // FUTEX_WAIT 使用相对 CLOCK_MONOTONIC timeout；
+                // FUTEX_WAIT_BITSET 则使用绝对 timeout，默认基于
+                // CLOCK_MONOTONIC，带 FUTEX_CLOCK_REALTIME 时基于
+                // CLOCK_REALTIME。睡眠队列只接受单调时钟 deadline，
+                // 因此 realtime 绝对时间须先换算为相对剩余时间。
+                let deadline_us = if cmd == FUTEX_WAIT_BITSET {
+                    if (op & FUTEX_CLOCK_REALTIME) != 0 {
+                        let now_us = (current_wallclock_ns() / 1_000) as usize;
+                        get_time_us().saturating_add(timeout_us.saturating_sub(now_us))
+                    } else {
+                        timeout_us
+                    }
                 } else {
                     get_time_us().saturating_add(timeout_us)
                 };
-                Some((deadline_us, is_realtime_abs))
+                Some(deadline_us)
             } else {
                 None
             };
@@ -4788,7 +4794,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             // 入队，而 WAKE 也持有该锁 pop_front，从而关闭竞态窗口。
             let mut rechecked_value = None;
             let wait_bitset = if cmd == FUTEX_WAIT_BITSET { val3 as u32 } else { u32::MAX };
-            let deadline_ns = deadline_us.map(|(deadline_us, _)| deadline_us.saturating_mul(1_000));
+            let deadline_ns = deadline_us.map(|deadline_us| deadline_us.saturating_mul(1_000));
             let blocked = block_current_on_futex_if(&queue, wait_bitset, deadline_ns, || {
                     rechecked_value = try_translated_read(token, uaddr as *const i32);
                     rechecked_value == Some(val)
