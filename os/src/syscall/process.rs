@@ -7,7 +7,7 @@ use crate::drivers::net::EthernetDevice;
 use crate::net::SOCKET_SET;
 use core::sync::atomic::{AtomicI32, Ordering};
 use crate::process::{
-    block_current_and_run_next_if, block_current_and_run_next_if_task,
+    block_current_and_run_next_if_task,
     wait4_block_current, waitid_block_current,
 };
 
@@ -21,7 +21,10 @@ use crate::syscall::EPOLL_CTL_DEL;
 use crate::syscall::EPOLL_CTL_ADD;
 use crate::syscall::EPOLL_CTL_MOD;
 use crate::process::scheduler::runqueue::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_OTHER, SCHED_RR};
-use crate::process::scheduler::futex::{get_futex_wait_queue, FUTEX_WAIT_QUEUES};
+use crate::process::scheduler::futex::{
+    block_current_on_futex_if, get_futex_wait_queue, remove_futex_waiter,
+    requeue_futex_waiters, wake_futex_waiters, FutexKey, FUTEX_WAIT_QUEUES,
+};
 use crate::lazy_static;
 use spin::Mutex;
 use crate::sync::WaitQueue;
@@ -62,11 +65,11 @@ pub(crate) fn clear_child_tid_and_wake(token: usize, clear_child_tid: usize) {
     if let Some(pa) = page_table.translate_va(VirtAddr::from(clear_child_tid)) {
         let queue = {
             let queues = FUTEX_WAIT_QUEUES.lock();
-            queues.get(&pa.0).cloned()
+            queues.get(&FutexKey::shared(pa.0)).cloned()
         };
 
         if let Some(queue) = queue {
-            crate::process::wake_up_one(&queue);
+            wake_futex_waiters(&queue, 1, u32::MAX);
         }
     }
 }
@@ -4730,8 +4733,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 );
                 return EAGAIN.as_isize();
             }
-            //当需要实时阻塞时，先检查是否有信号到来，如果有则返回EINTR，如果没有则进入睡眠等待被唤醒或者超时
-            if !timeout.is_null() {
+            let deadline_us = if !timeout.is_null() {
                 let Some(timeout_val) = try_translated_read(token, timeout) else {
                     return EFAULT.as_isize();
                 };
@@ -4743,40 +4745,26 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                     .tv_sec
                     .saturating_mul(1_000_000)
                     .saturating_add((timeout_val.tv_nsec + 999) / 1000);
-                // FUTEX_WAIT_BITSET + FUTEX_CLOCK_REALTIME 的超时是
-                // CLOCK_REALTIME 绝对时间；其余情况是相对单调时间。
-                let is_realtime_abs = cmd == FUTEX_WAIT_BITSET
-                    && (op & FUTEX_CLOCK_REALTIME) != 0;
-                let deadline_us = if is_realtime_abs {
-                    timeout_us
+                // FUTEX_WAIT 使用相对 CLOCK_MONOTONIC timeout；
+                // FUTEX_WAIT_BITSET 则使用绝对 timeout，默认基于
+                // CLOCK_MONOTONIC，带 FUTEX_CLOCK_REALTIME 时基于
+                // CLOCK_REALTIME。睡眠队列只接受单调时钟 deadline，
+                // 因此 realtime 绝对时间须先换算为相对剩余时间。
+                let deadline_us = if cmd == FUTEX_WAIT_BITSET {
+                    if (op & FUTEX_CLOCK_REALTIME) != 0 {
+                        let now_us = (current_wallclock_ns() / 1_000) as usize;
+                        get_time_us().saturating_add(timeout_us.saturating_sub(now_us))
+                    } else {
+                        timeout_us
+                    }
                 } else {
                     get_time_us().saturating_add(timeout_us)
                 };
+                Some(deadline_us)
+            } else {
+                None
+            };
 
-                loop {
-                    if crate::process::check_pending_signal() {
-                        return EINTR.as_isize();
-                    }
-                    let now_us = if is_realtime_abs {
-                        (current_wallclock_ns() / 1_000) as usize
-                    } else {
-                        get_time_us()
-                    };
-                    if now_us >= deadline_us {
-                        return ETIMEDOUT.as_isize();
-                    }
-
-                    suspend_current_and_run_next();
-
-                    let Some(current_val) = try_translated_read(token, uaddr as *const i32) else {
-                        return EFAULT.as_isize();
-                    };
-                    if current_val != val {
-                        return 0;
-                    }
-                }
-            }
-            //否则就是不带超时的等待，直接睡眠等待被唤醒
             let current = current_task().unwrap();
             let current_tid = current.gettid();
             if crate::process::check_pending_signal() {
@@ -4797,7 +4785,7 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             let Some(pa) = page_table.translate_va(VirtAddr::from(uaddr as usize)) else {
                 return EFAULT.as_isize();
             };
-            let queue = get_futex_wait_queue(pa.0);
+            let queue = get_futex_wait_queue(FutexKey::shared(pa.0));
 
             // Linux FUTEX_WAIT 的“比较用户值并挂入等待队列”必须相对
             // FUTEX_WAKE 原子。首次比较与这里之间，另一个 hart 可能已经
@@ -4805,10 +4793,12 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             // block_current_and_run_next_if 持有同一 queue 锁执行闭包并
             // 入队，而 WAKE 也持有该锁 pop_front，从而关闭竞态窗口。
             let mut rechecked_value = None;
-            let blocked = block_current_and_run_next_if(&queue, || {
-                rechecked_value = try_translated_read(token, uaddr as *const i32);
-                rechecked_value == Some(val)
-            });
+            let wait_bitset = if cmd == FUTEX_WAIT_BITSET { val3 as u32 } else { u32::MAX };
+            let deadline_ns = deadline_us.map(|deadline_us| deadline_us.saturating_mul(1_000));
+            let blocked = block_current_on_futex_if(&queue, wait_bitset, deadline_ns, || {
+                    rechecked_value = try_translated_read(token, uaddr as *const i32);
+                    rechecked_value == Some(val)
+                });
             if !blocked {
                 return match rechecked_value {
                     Some(current) => {
@@ -4826,9 +4816,16 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             }
             let current = current_task().unwrap();
             let current_tid = current.gettid();
-            {
-                let mut guard = queue.lock();
-                guard.remove_task(current_tid);
+            let timed_out = remove_futex_waiter(current_tid);
+
+            if deadline_us.is_some() {
+                crate::process::scheduler::nanosleep::cancel_sleep_task(current_tid);
+                // 由 futex wake 唤醒时，等待项已经被 WAKE/CMP_REQUEUE
+                // 从队列移除；即使当前真正获得 CPU 时已越过 deadline，
+                // 也必须返回成功。只有 deadline 唤醒留下的等待项才超时。
+                if timed_out {
+                    return ETIMEDOUT.as_isize();
+                }
             }
 
             if crate::process::take_current_signal_interrupted() {
@@ -4889,24 +4886,24 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             };
             let queue = {
                 let queues = FUTEX_WAIT_QUEUES.lock();
-                queues.get(&pa.0).cloned()
+                queues.get(&FutexKey::shared(pa.0)).cloned()
             };
 
             let Some(queue) = queue else {
                 return 0;
             };
 
-            let mut woken = 0;
-            while woken < val {
-                if !crate::process::wake_up_one(&queue) {
-                    break;
-                }
-                woken += 1;
-            }
-
-            woken as isize
+            let wake_bitset = if cmd == FUTEX_WAKE_BITSET { val3 as u32 } else { u32::MAX };
+            wake_futex_waiters(&queue, val as usize, wake_bitset) as isize
         }
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
+            // 对 REQUEUE 而言，timeout 参数按 ABI 被复用为有符号的
+            // nr_requeue。负的唤醒数或重排数均是无效参数，不能转换为
+            // usize 后静默地作为零或极大计数处理。
+            let requeue_count = timeout as isize;
+            if val < 0 || requeue_count < 0 {
+                return EINVAL.as_isize();
+            }
             if cmd == FUTEX_CMP_REQUEUE {
                 let Some(current_val) = try_translated_read(token, uaddr as *const i32) else {
                     return EFAULT.as_isize();
@@ -4926,64 +4923,27 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
             let Some(dst_pa) = page_table.translate_va(VirtAddr::from(uaddr2 as usize)) else {
                 return EFAULT.as_isize();
             };
-            let requeue_count = timeout as usize;
+            let requeue_count = requeue_count as usize;
             let dst_queue = if requeue_count > 0 {
-                Some(get_futex_wait_queue(dst_pa.0))
+                Some(get_futex_wait_queue(FutexKey::shared(dst_pa.0)))
             } else {
                 None
             };
             let src_queue = {
                 let queues = FUTEX_WAIT_QUEUES.lock();
-                queues.get(&src_pa.0).cloned()
+                queues.get(&FutexKey::shared(src_pa.0)).cloned()
             };
 
             let Some(src_queue) = src_queue else {
                 return 0;
             };
 
-            let mut affected = 0;
-            let mut wake_left = if val > 0 { val as usize } else { 0 };
-            let mut requeue_left = requeue_count;
-
-            loop {
-                let task = {
-                    let mut src_guard = src_queue.lock();
-                    if wake_left == 0 && requeue_left == 0 {
-                        None
-                    } else {
-                        src_guard.pop_front()
-                    }
-                };
-
-                let Some(task) = task else {
-                    break;
-                };
-
-                if wake_left > 0 {
-                    wake_left -= 1;
-                    while task.inner_exclusive_access().state == crate::task::TaskStatus::BlockSaving {
-                        suspend_current_and_run_next();
-                    }
-                    let mut task_inner = task.inner_exclusive_access();
-                    task_inner.state = crate::task::TaskStatus::Ready;
-                    drop(task_inner);
-                    add_task(task);
-                    affected += 1;
-                    continue;
-                }
-
-                if requeue_left > 0 {
-                    requeue_left -= 1;
-                    if src_pa.0 == dst_pa.0 {
-                        src_queue.lock().push_back(task);
-                    } else if let Some(dst_queue) = &dst_queue {
-                        dst_queue.lock().push_back(task);
-                    }
-                    affected += 1;
-                }
-            }
-
-            affected as isize
+            requeue_futex_waiters(
+                &src_queue,
+                dst_queue.as_ref(),
+                val.max(0) as usize,
+                requeue_count,
+            ) as isize
         }
         FUTEX_WAKE_OP => {
             // 可能需要进一步完善
@@ -5002,18 +4962,11 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
                 };
                 let queue = {
                     let queues = FUTEX_WAIT_QUEUES.lock();
-                    queues.get(&pa.0).cloned()
+                    queues.get(&FutexKey::shared(pa.0)).cloned()
                 };
-                let mut woken = 0usize;
                 if let Some(queue) = queue {
-                    while woken < count {
-                        if !crate::process::wake_up_one(&queue) {
-                            break;
-                        }
-                        woken += 1;
-                    }
+                    total_woken += wake_futex_waiters(&queue, count, u32::MAX);
                 }
-                total_woken += woken;
             }
             total_woken as isize
         }

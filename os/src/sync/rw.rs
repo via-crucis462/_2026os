@@ -9,6 +9,9 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicIsize, Ordering};
 
+const LOCK_WAIT_WARN_AFTER_US: usize = 1_000_000;
+const LOCK_WAIT_WARN_INTERVAL_US: usize = 5_000_000;
+
 pub struct RwLock<T: ?Sized> {
     /// 读者数量（>=0），或 -1 表示写者持有
     state: AtomicIsize,
@@ -37,6 +40,8 @@ impl<T: ?Sized> RwLock<T> {
     /// 获取共享读锁。若已有写者持有或有写者排队，则自旋等待。
     #[inline]
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
+        let wait_started_us = crate::arch::timer::get_time_us();
+        let mut next_report_us = wait_started_us.saturating_add(LOCK_WAIT_WARN_AFTER_US);
         loop {
             let state = self.state.load(Ordering::Acquire);
             if state >= 0 && self.asked_write.load(Ordering::Acquire) == 0 {
@@ -56,9 +61,21 @@ impl<T: ?Sized> RwLock<T> {
                     // 写者在 CAS 成功后已排队：退回读者计数并重试。
                     self.state.fetch_sub(1, Ordering::AcqRel);
                 }
-            } else {
-                core::hint::spin_loop();
             }
+
+            let now_us = crate::arch::timer::get_time_us();
+            if now_us >= next_report_us {
+                println!(
+                    "[RwLock] read wait lock={:p} hart={} waited={}us state={} waiting_writers={}",
+                    self as *const Self,
+                    crate::get_hart_id(),
+                    now_us.saturating_sub(wait_started_us),
+                    self.state.load(Ordering::Relaxed),
+                    self.asked_write.load(Ordering::Relaxed),
+                );
+                next_report_us = now_us.saturating_add(LOCK_WAIT_WARN_INTERVAL_US);
+            }
+            core::hint::spin_loop();
         }
     }
 
@@ -66,6 +83,8 @@ impl<T: ?Sized> RwLock<T> {
     #[inline]
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
         self.asked_write.fetch_add(1, Ordering::AcqRel);
+        let wait_started_us = crate::arch::timer::get_time_us();
+        let mut next_report_us = wait_started_us.saturating_add(LOCK_WAIT_WARN_AFTER_US);
         loop {
             let state = self.state.load(Ordering::Acquire);
             if state == 0 {
@@ -80,9 +99,21 @@ impl<T: ?Sized> RwLock<T> {
                         _marker: PhantomData,
                     };
                 }
-            } else {
-                core::hint::spin_loop();
             }
+
+            let now_us = crate::arch::timer::get_time_us();
+            if now_us >= next_report_us {
+                println!(
+                    "[RwLock] write wait lock={:p} hart={} waited={}us state={} waiting_writers={}",
+                    self as *const Self,
+                    crate::get_hart_id(),
+                    now_us.saturating_sub(wait_started_us),
+                    self.state.load(Ordering::Relaxed),
+                    self.asked_write.load(Ordering::Relaxed),
+                );
+                next_report_us = now_us.saturating_add(LOCK_WAIT_WARN_INTERVAL_US);
+            }
+            core::hint::spin_loop();
         }
     }
 }

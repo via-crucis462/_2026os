@@ -38,6 +38,7 @@ const SYSCALL_CHROOT: usize = 51;
 const SYSCALL_FCHMOD: usize = 52;
 const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_FCHOWNAT: usize = 54;
+const SYSCALL_FCHOWN: usize = 55;
 /// openat syscall
 const SYSCALL_OPENAT: usize = 56;
 /// close syscall
@@ -302,6 +303,26 @@ pub fn translate_path(token: usize, path: *const u8) -> Result<String, Errno> {
     }
 }
 
+fn should_log_syscall_error(syscall_id: usize, ret: isize) -> bool {
+    !matches!(
+        (syscall_id, ret),
+        // File lookups routinely use a failed lookup as a feature probe.
+        (SYSCALL_ACCESSAT | SYSCALL_FACCESSAT2 | SYSCALL_OPENAT | SYSCALL_FSTATAT | SYSCALL_STATX | SYSCALL_STATFS, -2)
+            // readlinkat emits a path-aware debug record for expected lookup failures.
+            | (SYSCALL_READLINKAT, -2 | -20 | -22)
+            // A non-terminal file descriptor must reject terminal ioctls.
+            | (SYSCALL_IOCTL, -25)
+            // Futex wait is expected to be interrupted or observe a changed value.
+            | (SYSCALL_FUTEX, -4 | -11)
+            // Shells often reap after a child has already been collected.
+            | (SYSCALL_WAIT4, -10)
+            // mkdir -p probes whether a directory already exists.
+            | (SYSCALL_MKDIR, -17)
+            // The current network stack intentionally supports IPv4 only.
+            | (SYSCALL_CONNECT, -97)
+    )
+}
+
 #[no_mangle]
 /// handle syscall exception with `syscall_id` and other arguments
 
@@ -350,9 +371,15 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_ACCESSAT => sys_accessat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_FACCESSAT2 => sys_accessat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut usize, args[1]),
-        SYSCALL_LINKAT => sys_linkat(args[1] as *const u8, args[3] as *const u8),
+        SYSCALL_LINKAT => sys_linkat(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2] as isize,
+            args[3] as *const u8,
+            args[4],
+        ),
         SYSCALL_FCHMOD => sys_fchmod(args[0], args[1] as u32),
-        // SYSCALL_FCHOWN => sys_fchown(args[0], args[1] as u32, args[2] as u32),
+        SYSCALL_FCHOWN => sys_fchown(args[0], args[1] as u32, args[2] as u32),
         SYSCALL_UNLINKAT => sys_unlinkat(args[0] as isize, args[1] as *const u8, args[2] as usize),
         SYSCALL_READ => sys_read(args[0], args[1] as *const u8, args[2]),
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
@@ -558,10 +585,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             get_hart_id(), current_task().unwrap().getpid(), current_task().unwrap().gettid(), syscall_id, args[0] as i32
         );*/
     }
-    /*if ret < 0 {
+    /*if ret < 0 && should_log_syscall_error(syscall_id, ret) {
         println!(
-            "[Syscall Error] PID: {} |  TID: {} | ID: {:3} | Args: [0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}] | Errno: {}", 
-            current_task().unwrap().process().pid.0, current_task().unwrap().tid.0, syscall_id, args[0], args[1], args[2], args[3], args[4], -ret
+            "[Syscall Error] PID: {} | ID: {:3} | Args: [0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}] | Errno: {}", 
+            current_task().unwrap().getpid(),  syscall_id, args[0], args[1], args[2], args[3], args[4], ret
         );
     }*/
     /*if syscall_id == SYSCALL_MMAP || syscall_id == SYSCALL_MUNMAP || syscall_id == SYSCALL_BRK {

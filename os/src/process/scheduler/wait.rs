@@ -72,6 +72,34 @@ where
     true
 }
 
+/// 在等待队列中原子检查、入队并注册单调时钟 deadline。
+pub fn block_current_and_run_next_if_timeout<F>(
+    queue: &Mutex<WaitQueue>,
+    deadline_ns: usize,
+    should_block: F,
+) -> bool
+where
+    F: FnOnce() -> bool,
+{
+    let mut guard = queue.lock();
+    if !should_block() {
+        return false;
+    }
+
+    let task = current_task().unwrap();
+    let task_cx_ptr = {
+        let mut task_inner = task.inner_exclusive_access();
+        let ptr = &mut task_inner.thread.task_ctx as *mut TaskContext;
+        task_inner.state = TaskStatus::BlockSaving;
+        ptr
+    };
+    crate::process::scheduler::nanosleep::register_sleep_task(deadline_ns, task.clone());
+    guard.push_back(task);
+    drop(guard);
+    schedule(task_cx_ptr);
+    true
+}
+
 /// 在多核安全等待队列锁内检查条件并原子入队。
 pub(crate) fn block_current_and_run_next_if_mp<F>(
     queue: &MPSafeCell<WaitQueue>,

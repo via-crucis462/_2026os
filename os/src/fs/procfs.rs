@@ -78,9 +78,10 @@ fn proc_state_char(pid: usize) -> char {
     };
     let status = task.inner_exclusive_access().state;
     match status {
-        TaskStatus::Running => 'R',
+        TaskStatus::Running | TaskStatus::Ready | TaskStatus::BlockSaving => 'R',
+        TaskStatus::Blocked => 'S',
         TaskStatus::Zombie => 'Z',
-        TaskStatus::Ready | TaskStatus::Blocked | TaskStatus::BlockSaving | TaskStatus::UnInit => 'S',
+        TaskStatus::UnInit => 'S',
     }
 }
 

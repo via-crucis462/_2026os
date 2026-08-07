@@ -68,3 +68,4 @@ recovered-buildstorm/
 alpine_linux.tar.gz
 RESULTS.md
 benchmarks/
+lmbench_tuning_playbook.md

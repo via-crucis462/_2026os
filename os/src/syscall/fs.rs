@@ -13,13 +13,22 @@ use super::{errno::Errno::*, normalize_leading_dot_path, translate_path};
 use crate::syscall::TmpfsFileInode;
 use crate::syscall::OSInode;
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::vec::Vec;
+use crate::process::scheduler::wait::{block_current_and_run_next_if_mp, wake_up_all_mp};
+use crate::sync::MPSafeCell;
+use crate::sync::WaitQueue;
+use lazy_static::lazy_static;
 
 const F_DUPFD: usize = 0;
 const F_GETFD: usize = 1;
 const F_SETFD: usize = 2;
 const F_GETFL: usize = 3;
 const F_SETFL: usize = 4;
+const F_GETLK: usize = 5;
+const F_SETLK: usize = 6;
+const F_SETLKW: usize = 7;
 const F_DUPFD_CLOEXEC: usize = 1030;
 const F_GETPIPE_SIZE: usize = 1032;
 const FD_CLOEXEC: usize = 1;
@@ -36,6 +45,88 @@ const O_RDWR: u32 = 0o2;
 use super::errno::Errno::*;
 
 const AT_REMOVEDIR: usize = 0x200;
+
+const F_RDLCK: i16 = 0;
+const F_WRLCK: i16 = 1;
+const F_UNLCK: i16 = 2;
+const SEEK_SET: i16 = 0;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Flock {
+    l_type: i16,
+    l_whence: i16,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+    _pad: i32,
+}
+
+#[derive(Clone, Copy)]
+struct RecordLock {
+    owner_pid: usize,
+    lock_type: i16,
+    start: u64,
+    len: Option<u64>,
+}
+
+lazy_static! {
+    static ref RECORD_LOCKS: MPSafeCell<BTreeMap<u64, Vec<RecordLock>>> =
+        MPSafeCell::new(BTreeMap::new());
+    static ref RECORD_LOCK_WAITERS: MPSafeCell<WaitQueue> = MPSafeCell::new(WaitQueue::new());
+}
+
+fn flock_range(flock: &Flock) -> Option<(u64, Option<u64>)> {
+    if flock.l_whence != SEEK_SET || flock.l_start < 0 || flock.l_len < 0 {
+        return None;
+    }
+    let start = flock.l_start as u64;
+    let len = (flock.l_len != 0).then_some(flock.l_len as u64);
+    Some((start, len))
+}
+
+fn ranges_overlap(left_start: u64, left_len: Option<u64>, right_start: u64, right_len: Option<u64>) -> bool {
+    let left_end = left_len.and_then(|len| left_start.checked_add(len));
+    let right_end = right_len.and_then(|len| right_start.checked_add(len));
+    match (left_end, right_end) {
+        (Some(left_end), Some(right_end)) => left_start < right_end && right_start < left_end,
+        (Some(left_end), None) => right_start < left_end,
+        (None, Some(right_end)) => left_start < right_end,
+        (None, None) => true,
+    }
+}
+
+fn release_record_locks(pid: usize, inode: u64) {
+    let mut locks = RECORD_LOCKS.exclusive_access();
+        let previous_len;
+        let released;
+        if let Some(entries) = locks.get_mut(&inode) {
+            previous_len = entries.len();
+            entries.retain(|entry| entry.owner_pid != pid);
+            released = entries.len() != previous_len;
+            if entries.is_empty() {
+                locks.remove(&inode);
+            }
+        } else {
+            previous_len = 0;
+            released = false;
+        }
+        drop(locks);
+        if released {
+            wake_up_all_mp(&RECORD_LOCK_WAITERS);
+        }
+}
+
+fn has_record_lock_conflict(inode: u64, pid: usize, lock_type: i16, start: u64, len: Option<u64>) -> bool {
+    RECORD_LOCKS
+        .exclusive_access()
+        .get(&inode)
+        .is_some_and(|entries| entries.iter().any(|entry| {
+            entry.owner_pid != pid
+                && (entry.lock_type == F_WRLCK || lock_type == F_WRLCK)
+                && ranges_overlap(entry.start, entry.len, start, len)
+        }))
+}
 
 fn current_files() -> Arc<crate::sync::MPSafeCell<crate::process::FileDescriptorTable>> {
     current_task().unwrap().inner_exclusive_access().files.clone()
@@ -322,7 +413,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
     let path_str = normalize_leading_dot_path(
         if let Some(s) = try_translated_str(token, path) { s } else { return EFAULT.as_isize(); }
     );
-    //println!("kernel:pid[{}] tid[{}] sys_openat, dirfd={}, path={}", task.process().pid.0, task.gettid(), dirfd, path_str);
+    //println!("kernel:pid[{}] tid[{}] sys_openat, dirfd={}, path={}", task.getpid(), task.gettid(), dirfd, path_str);
     //debug!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
     const O_TMPFILE: u32 = 0x400000;
     let (readable, writable) = match flags & 0x3 {
@@ -507,8 +598,11 @@ pub fn sys_close(fd: usize) -> isize {
     if inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
+    let inode = inner.fds[fd].file.as_ref().unwrap().get_stat().ino;
     let file_to_close = inner.fds[fd].file.take();
     inner.clear_fd(fd);
+    drop(inner);
+    release_record_locks(task.getpid(), inode);
     drop(file_to_close);
     0
 }
@@ -983,9 +1077,105 @@ pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
     }
 }
 
-pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_linkat NOT IMPLEMENTED", current_task().unwrap().getpid());
-    ENOSYS.as_isize()
+pub fn sys_linkat(
+    olddirfd: isize,
+    old_name: *const u8,
+    newdirfd: isize,
+    new_name: *const u8,
+    flags: usize,
+) -> isize {
+    const AT_SYMLINK_FOLLOW: usize = 0x400;
+    if flags & !AT_SYMLINK_FOLLOW != 0 {
+        return EINVAL.as_isize();
+    }
+
+    let token = current_user_token();
+    let old_path = match try_translated_str(token, old_name) {
+        Some(path) if !path.is_empty() => normalize_leading_dot_path(path),
+        Some(_) => return ENOENT.as_isize(),
+        None => return EFAULT.as_isize(),
+    };
+    let new_path = match try_translated_str(token, new_name) {
+        Some(path) if !path.is_empty() => normalize_leading_dot_path(path),
+        Some(_) => return ENOENT.as_isize(),
+        None => return EFAULT.as_isize(),
+    };
+
+    let old_base = if old_path.starts_with('/') {
+        ROOT_DENTRY.clone()
+    } else if olddirfd == AT_FDCWD {
+        current_pwd()
+    } else {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        let Some(file) = (olddirfd >= 0)
+            .then(|| inner.fds.get(olddirfd as usize))
+            .flatten()
+            .and_then(|entry| entry.file.as_ref())
+        else {
+            return EBADF.as_isize();
+        };
+        let Some(dentry) = file.get_dentry() else {
+            return ENOTDIR.as_isize();
+        };
+        if (dentry.inode.get_stat().mode & S_IFMT) != 0o040000 {
+            return ENOTDIR.as_isize();
+        }
+        dentry
+    };
+    let source = match old_base.find_tree(&old_path, (flags & AT_SYMLINK_FOLLOW) != 0) {
+        Ok(dentry) => dentry,
+        Err(1) => return ENOTDIR.as_isize(),
+        Err(_) => return ENOENT.as_isize(),
+    };
+    if (source.inode.get_stat().mode & S_IFMT) == 0o040000 {
+        return EPERM.as_isize();
+    }
+
+    let new_base = if new_path.starts_with('/') {
+        ROOT_DENTRY.clone()
+    } else if newdirfd == AT_FDCWD {
+        current_pwd()
+    } else {
+        let files = current_files();
+        let inner = files.exclusive_access();
+        let Some(file) = (newdirfd >= 0)
+            .then(|| inner.fds.get(newdirfd as usize))
+            .flatten()
+            .and_then(|entry| entry.file.as_ref())
+        else {
+            return EBADF.as_isize();
+        };
+        let Some(dentry) = file.get_dentry() else {
+            return ENOTDIR.as_isize();
+        };
+        if (dentry.inode.get_stat().mode & S_IFMT) != 0o040000 {
+            return ENOTDIR.as_isize();
+        }
+        dentry
+    };
+    let parent = match new_base.find_tree(&parent_path(&new_path), true) {
+        Ok(dentry) => dentry,
+        Err(1) => return ENOTDIR.as_isize(),
+        Err(_) => return ENOENT.as_isize(),
+    };
+    let name = file_name(&new_path);
+    if name.is_empty() {
+        return ENOENT.as_isize();
+    }
+    if parent.find_child(&name).is_some() {
+        return EEXIST.as_isize();
+    }
+    if source.inode.filesystem_kind() != parent.inode.filesystem_kind() {
+        return EXDEV.as_isize();
+    }
+    if !parent.inode.link(&name, source.inode.clone()) {
+        warn!("[linkat] pid={} failed {} -> {}", current_task().unwrap().getpid(), old_path, new_path);
+        return EIO.as_isize();
+    }
+    parent.insert(name, source.inode.clone());
+    info!("[linkat] pid={} created {} -> {}", current_task().unwrap().getpid(), new_path, old_path);
+    0
 }
 
 /// 读出符号链接内容（文件本体而非目标）到用户缓冲区，返回实际读出的字节数
@@ -1008,6 +1198,7 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
     if path_str.is_empty() {
         return ENOENT.as_isize();
     }
+    debug!("[readlinkat] pid={} dirfd={} path={}", current_task().unwrap().getpid(), _dirfd, path_str);
     // 获取工作路径并查找
     let base_dentry = if path_str.starts_with('/') {
         ROOT_DENTRY.clone()
@@ -1032,13 +1223,20 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
     // 查找路径对应的 dentry
     let link_dentry = match base_dentry.find_tree(&path_str, false) {
         Ok(d) => d,
-        Err(_) => return ENOENT.as_isize(),
-        Err(1) => return ENOTDIR.as_isize(),
+        Err(1) => {
+            debug!("[readlinkat] path={} failed: ENOTDIR", path_str);
+            return ENOTDIR.as_isize();
+        }
+        Err(_) => {
+            debug!("[readlinkat] path={} failed: ENOENT", path_str);
+            return ENOENT.as_isize();
+        }
     };
     // 文件类型检查
     let st = link_dentry.inode.get_stat();
     let is_symlink = (st.mode & 0o170000) == 0o120000; // 符号链接
     if !is_symlink {
+        debug!("[readlinkat] path={} failed: EINVAL (not a symlink)", path_str);
         return EINVAL.as_isize();
     }
     // 读取符号链接内容
@@ -1055,6 +1253,7 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
         seg[..take].copy_from_slice(&target[copied..copied + take]);
         copied += take;
     }
+    debug!("[readlinkat] path={} read {} bytes", path_str, copied);
     copied as isize
 }
 
@@ -1118,6 +1317,70 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
         F_SETFL => {
             let old = inner.fds[fd].status;
             inner.fds[fd].status = (old & O_ACCMODE) | (arg & !O_ACCMODE);
+            0
+        }
+        F_GETLK | F_SETLK | F_SETLKW => {
+            let inode = inner.fds[fd].file.as_ref().unwrap().get_stat().ino;
+            let pid = current_task().unwrap().getpid();
+            drop(inner);
+            let Some(mut flock) = try_translated_read(current_user_token(), arg as *const Flock) else {
+                return EFAULT.as_isize();
+            };
+            let Some((start, len)) = flock_range(&flock) else {
+                return EINVAL.as_isize();
+            };
+            if !matches!(flock.l_type, F_RDLCK | F_WRLCK | F_UNLCK) {
+                return EINVAL.as_isize();
+            }
+
+            let mut locks = RECORD_LOCKS.exclusive_access();
+            let entries = locks.entry(inode).or_insert_with(Vec::new);
+            let conflict = entries.iter().find(|entry| {
+                entry.owner_pid != pid
+                    && (entry.lock_type == F_WRLCK || flock.l_type == F_WRLCK)
+                    && ranges_overlap(entry.start, entry.len, start, len)
+            }).copied();
+
+            if cmd == F_GETLK {
+                if let Some(entry) = conflict {
+                    flock.l_type = entry.lock_type;
+                    flock.l_whence = SEEK_SET;
+                    flock.l_start = entry.start as i64;
+                    flock.l_len = entry.len.unwrap_or(0) as i64;
+                    flock.l_pid = entry.owner_pid as i32;
+                } else {
+                    flock.l_type = F_UNLCK;
+                    flock.l_pid = 0;
+                }
+                drop(locks);
+                return if try_translated_write(current_user_token(), arg as *mut Flock, flock) {
+                    0
+                } else {
+                    EFAULT.as_isize()
+                };
+            }
+
+            if flock.l_type == F_UNLCK {
+                entries.retain(|entry| {
+                    entry.owner_pid != pid || !ranges_overlap(entry.start, entry.len, start, len)
+                });
+                if entries.is_empty() {
+                    locks.remove(&inode);
+                }
+                return 0;
+            }
+            if conflict.is_some() {
+                return EAGAIN.as_isize();
+            }
+            entries.retain(|entry| {
+                entry.owner_pid != pid || !ranges_overlap(entry.start, entry.len, start, len)
+            });
+            entries.push(RecordLock {
+                owner_pid: pid,
+                lock_type: flock.l_type,
+                start,
+                len,
+            });
             0
         }
         F_GETPIPE_SIZE => {
@@ -1300,19 +1563,126 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usiz
     total_transferred as isize
 }
 
-/// copy_file_range syscall stub — not yet implemented.
-/// Returns ENOSYS so LTP tests get a clear "not supported" rather than an
-/// "unimplemented syscall" warning.
 pub fn sys_copy_file_range(
-    _fd_in: usize,
-    _off_in: *mut i64,
-    _fd_out: usize,
-    _off_out: *mut i64,
-    _len: usize,
-    _flags: u32,
+    fd_in: usize,
+    off_in: *mut i64,
+    fd_out: usize,
+    off_out: *mut i64,
+    len: usize,
+    flags: u32,
 ) -> isize {
-    warn!("[kernel] sys_copy_file_range: not implemented");
-    ENOSYS.as_isize()
+    const COPY_CHUNK: usize = 64 * 1024;
+
+    if flags != 0 {
+        return EINVAL.as_isize();
+    }
+    if len == 0 {
+        return 0;
+    }
+
+    let files = current_files();
+    let inner = files.exclusive_access();
+    if fd_in >= inner.fds.len() || fd_out >= inner.fds.len() {
+        return EBADF.as_isize();
+    }
+    let Some(file_in) = inner.fds[fd_in].file.as_ref().cloned() else {
+        return EBADF.as_isize();
+    };
+    let Some(file_out) = inner.fds[fd_out].file.as_ref().cloned() else {
+        return EBADF.as_isize();
+    };
+    drop(inner);
+
+    if !file_in.readable() || !file_out.writable() {
+        return EBADF.as_isize();
+    }
+
+    let token = current_user_token();
+    let mut input_offset = if off_in.is_null() {
+        None
+    } else {
+        match try_translated_read(token, off_in as *const i64) {
+            Some(offset) if offset >= 0 => Some(offset as usize),
+            Some(_) => return EINVAL.as_isize(),
+            None => return EFAULT.as_isize(),
+        }
+    };
+    let mut output_offset = if off_out.is_null() {
+        None
+    } else {
+        match try_translated_read(token, off_out as *const i64) {
+            Some(offset) if offset >= 0 => Some(offset as usize),
+            Some(_) => return EINVAL.as_isize(),
+            None => return EFAULT.as_isize(),
+        }
+    };
+
+    let mut copied = 0usize;
+    while copied < len {
+        let chunk_len = (len - copied).min(COPY_CHUNK);
+        let mut buffer = alloc::vec![0; chunk_len];
+        let read_slice = unsafe {
+            core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), chunk_len)
+        };
+        let read_buffer = UserBuffer {
+            buffers: vec![read_slice],
+        };
+        let read_len = match input_offset {
+            Some(offset) => file_in.read_at(offset, read_buffer),
+            None => file_in.read(read_buffer),
+        };
+        if read_len == 0 {
+            break;
+        }
+
+        let mut written = 0usize;
+        while written < read_len {
+            let write_slice = unsafe {
+                core::slice::from_raw_parts_mut(
+                    buffer.as_mut_ptr().add(written),
+                    read_len - written,
+                )
+            };
+            let write_buffer = UserBuffer {
+                buffers: vec![write_slice],
+            };
+            let write_len = match output_offset {
+                Some(offset) => file_out.write_at(offset + written, write_buffer),
+                None => file_out.write(write_buffer),
+            };
+            if write_len == 0 {
+                break;
+            }
+            written += write_len;
+        }
+
+        if written == 0 {
+            break;
+        }
+        copied += written;
+        if let Some(offset) = input_offset.as_mut() {
+            *offset += written;
+        }
+        if let Some(offset) = output_offset.as_mut() {
+            *offset += written;
+        }
+        if written < read_len {
+            break;
+        }
+    }
+
+    if let Some(offset) = input_offset {
+        if !try_translated_write(token, off_in, offset as i64) {
+            return if copied == 0 { EFAULT.as_isize() } else { copied as isize };
+        }
+    }
+    if let Some(offset) = output_offset {
+        if !try_translated_write(token, off_out, offset as i64) {
+            return if copied == 0 { EFAULT.as_isize() } else { copied as isize };
+        }
+    }
+
+    copied as isize
 }
 
 pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
@@ -1789,6 +2159,48 @@ pub fn sys_fchmod(fd: usize, mode: u32) -> isize {
     // 仅修改权限位（低12位）
     let new_mode = (perm.mode.bits() & !0o7777) | (mode as u16 & 0o7777);
     perm.set_mode(crate::auth::FileMode::from_bits_truncate(new_mode));
+
+    if dentry.inode.set_perm(perm) {
+        0
+    } else {
+        EACCES.as_isize()
+    }
+}
+
+/// 通过 fd 修改文件所有者和组。
+/// Linux: int fchown(int fd, uid_t owner, gid_t group)
+pub fn sys_fchown(fd: usize, owner: u32, group: u32) -> isize {
+    let euid = current_euid();
+    let files = current_files();
+    let inner = files.exclusive_access();
+
+    let Some(file) = inner.fds.get(fd).and_then(|entry| entry.file.as_ref()).cloned() else {
+        return EBADF.as_isize();
+    };
+    drop(inner);
+
+    let Some(dentry) = file.get_dentry() else {
+        return EBADF.as_isize();
+    };
+
+    let mut perm = dentry.inode.get_perm();
+    let requested_owner = (owner != u32::MAX).then_some(owner);
+    let requested_group = (group != u32::MAX).then_some(group);
+
+    if euid != 0 {
+        if requested_owner.is_some_and(|requested| requested != perm.uid)
+            || (requested_group.is_some() && perm.uid != euid)
+        {
+            return EPERM.as_isize();
+        }
+    }
+
+    if let Some(owner) = requested_owner {
+        perm.set_uid(owner);
+    }
+    if let Some(group) = requested_group {
+        perm.set_gid(group);
+    }
 
     if dentry.inode.set_perm(perm) {
         0

@@ -1511,28 +1511,35 @@ impl MemorySet {
 
         // 地址选择与插入在同一次 areas 写锁内完成
         let mut areas = self.areas.write();
-        let start_va = if addr == 0 {
+        let find_free_area = || -> Result<usize, isize> {
             match Self::find_free_area_locked(length, &areas) {
-                Some(new_addr) => new_addr,
+                Some(new_addr) => Ok(new_addr),
                 None => {
                     error!(
                         "mmap failed: no suitable free area found for length {:#x}",
                         length
                     );
-                    return Err(Errno::EEXIST.as_isize());
+                    Err(Errno::EEXIST.as_isize())
                 }
             }
+        };
+        let start_va = if addr == 0 {
+            find_free_area()?
         } else {
             if Self::has_conflict_locked(&areas, addr, length) {
                 if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED) {
                     if self.munmap_locked(&mut areas, addr, length).is_err() {
                         return Err(Errno::EEXIST.as_isize());
                     }
-                } else {
+                    addr
+                } else if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED_NOREPLACE) {
                     return Err(Errno::EEXIST.as_isize());
+                } else {
+                    find_free_area()?
                 }
+            } else {
+                addr
             }
-            addr
         };
 
         if is_anonymous {

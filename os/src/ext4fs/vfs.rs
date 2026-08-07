@@ -393,6 +393,27 @@ impl VfsInode for Ext4Inode {
         true
     }
 
+    fn inc_link_count(&self) -> bool {
+        self.fs.adjust_link_count(self.inode_id, 1);
+        true
+    }
+
+    fn link(&self, name: &str, inode: Arc<dyn VfsInode>) -> bool {
+        if !self.is_dir() || inode.type_name() != self.type_name() || self.find(name).is_some() {
+            return false;
+        }
+
+        let file_type = match inode.get_stat().mode & 0o170000 {
+            0o100000 => 1,
+            0o120000 => 7,
+            _ => return false,
+        };
+        if !self.add_dir_entry(name, inode.ino() as u32, file_type) {
+            return false;
+        }
+        inode.inc_link_count()
+    }
+
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
         if !self.is_dir() {
             return -1;
