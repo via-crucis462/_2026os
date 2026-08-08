@@ -917,6 +917,68 @@ impl VfsInode for MemInfoInode {
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
 
+/// `/proc/uptime` exports time elapsed since boot from the monotonic clock.
+pub struct UptimeInode {
+    ino: u64,
+}
+
+impl UptimeInode {
+    pub fn new() -> Self {
+        Self { ino: get_next_ino() }
+    }
+}
+
+impl VfsInode for UptimeInode {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        // Use the same clock as CLOCK_MONOTONIC, not the adjustable realtime clock.
+        let centiseconds = crate::timer::get_time_us() / 10_000;
+        let seconds = centiseconds / 100;
+        let fraction = centiseconds % 100;
+        let mut local_buf = [0u8; 32];
+        let mut writer = StackBuffer { buf: &mut local_buf, len: 0 };
+        let _ = write!(writer, "{}.{:02} 0.00\n", seconds, fraction);
+        let output = &writer.buf[..writer.len];
+
+        if offset >= output.len() {
+            return 0;
+        }
+
+        let read_len = core::cmp::min(buf.len(), output.len() - offset);
+        buf[..read_len].copy_from_slice(&output[offset..offset + read_len]);
+        read_len
+    }
+
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
+    fn get_stat(&self) -> Stat {
+        Stat {
+            dev: 0,
+            ino: self.ino,
+            mode: 0o100444,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            __pad: 0,
+            size: 0,
+            blksize: 512,
+            __pad2: 0,
+            blocks: 0,
+            atime_sec: 0,
+            atime_nsec: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            __unused: [0; 2],
+        }
+    }
+    impl_default_statx!();
+    impl_unsupported_ops!(-1);
+    fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
+}
+
 pub struct MountsInode {
     ino: u64,
 }
@@ -1043,6 +1105,7 @@ pub fn mount_procfs() {
     sys_dir.insert(String::from("kernel"), kernel_dir);
     proc_root.insert_static(String::from("sys"), sys_dir);
     proc_root.insert_static(String::from("meminfo"), Arc::new(MemInfoInode::new()));
+    proc_root.insert_static(String::from("uptime"), Arc::new(UptimeInode::new()));
     proc_root.insert_static(String::from("mounts"), Arc::new(MountsInode::new()));
     proc_root.insert_static(String::from("cgroups"), Arc::new(CgroupsInode::new()));
     let self_dentry = Arc::new(TmpfsDirInode::new(0o777));
@@ -1057,5 +1120,5 @@ pub fn mount_procfs() {
     ROOT_DENTRY.mount_child(String::from("proc"), proc_root);
    
     
-    info!("[VFS] /proc/meminfo, mounts, and /proc/self/maps mounted successfully!");
+    info!("[VFS] /proc/meminfo, uptime, mounts, and /proc/self/maps mounted successfully!");
 }

@@ -158,6 +158,8 @@ static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
 	bytes: *include_bytes!("../arch/riscv/initproc_cargotest"),
 	#[cfg(initproc = "ctidtest")]
 	bytes: *include_bytes!("../arch/riscv/initproc_ctidtest"),
+	#[cfg(initproc = "uptime")]
+	bytes: *include_bytes!("../arch/riscv/initproc_uptime"),
 };
 
 #[link_section = ".data"]
@@ -176,6 +178,8 @@ static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
 	bytes: *include_bytes!("../arch/la/initproc_cargotest"),
 	#[cfg(initproc = "ctidtest")]
 	bytes: *include_bytes!("../arch/la/initproc_ctidtest"),
+	#[cfg(initproc = "uptime")]
+	bytes: *include_bytes!("../arch/la/initproc_uptime"),
 };
 
 lazy_static! {

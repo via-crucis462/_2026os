@@ -16,7 +16,7 @@ fn main() {
     };
 
     println!(
-        "cargo::rustc-check-cfg=cfg(initproc, values(\"default\", \"sh\", \"ltp\", \"mmtest\", \"cargotest\", \"ctidtest\"))"
+        "cargo::rustc-check-cfg=cfg(initproc, values(\"default\", \"sh\", \"ltp\", \"mmtest\", \"cargotest\", \"ctidtest\", \"uptime\"))"
     );
     println!("cargo::rustc-check-cfg=cfg(log_level, values(\"OFF\", \"ERROR\", \"WARN\", \"INFO\", \"DEBUG\", \"TRACE\"))");
     println!("cargo::rustc-check-cfg=cfg(board, values(\"virt\", \"2k1000\", \"visionfive2\"))");

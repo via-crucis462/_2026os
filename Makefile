@@ -9,7 +9,7 @@ RV_MEM ?= 16G
 LA_SMP ?= 1
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
-# default, sh, ltp
+# default, sh, ltp, uptime
 INIT ?= default
 # virt, visionfive2, 2k1000
 BOARD ?= virt
