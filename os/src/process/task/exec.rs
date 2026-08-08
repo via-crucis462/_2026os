@@ -322,7 +322,6 @@ impl TaskStruct {
 			(inner.thread.trap_ctx, inner.thread.trap_ctx)
 		};
 
-		let token = memory_set.token();
 		let mut argv_ptrs = Vec::with_capacity(args.len());
 		let arg_size = args.iter().map(|arg| arg.len() + 1).sum::<usize>();
 		if arg_size != 0 {
@@ -331,9 +330,9 @@ impl TaskStruct {
 		for arg in &args {
 			user_sp -= arg.len() + 1;
 			for (offset, byte) in arg.as_bytes().iter().enumerate() {
-				translated_write(token, (user_sp + offset) as *mut u8, *byte);
+				translated_write(&memory_set, (user_sp + offset) as *mut u8, *byte);
 			}
-			translated_write(token, (user_sp + arg.len()) as *mut u8, 0);
+			translated_write(&memory_set, (user_sp + arg.len()) as *mut u8, 0);
 			argv_ptrs.push(user_sp);
 		}
 
@@ -345,9 +344,9 @@ impl TaskStruct {
 		for env in &envs {
 			user_sp -= env.len() + 1;
 			for (offset, byte) in env.as_bytes().iter().enumerate() {
-				translated_write(token, (user_sp + offset) as *mut u8, *byte);
+				translated_write(&memory_set, (user_sp + offset) as *mut u8, *byte);
 			}
-			translated_write(token, (user_sp + env.len()) as *mut u8, 0);
+			translated_write(&memory_set, (user_sp + env.len()) as *mut u8, 0);
 			envp_ptrs.push(user_sp);
 		}
 
@@ -355,7 +354,7 @@ impl TaskStruct {
 		prepare_stack_pages(&mut memory_set, user_sp, user_sp + 16);
 		let random_at = user_sp;
 		for offset in 0..16 {
-			translated_write(token, (random_at + offset) as *mut u8, 0x23);
+			translated_write(&memory_set, (random_at + offset) as *mut u8, 0x23);
 		}
 		user_sp -= user_sp % core::mem::size_of::<usize>();
 
@@ -385,27 +384,27 @@ impl TaskStruct {
 
 		for (id, value) in auxv.iter().rev() {
 			user_sp -= word_size;
-			translated_write(token, user_sp as *mut usize, *value);
+			translated_write(&memory_set, user_sp as *mut usize, *value);
 			user_sp -= word_size;
-			translated_write(token, user_sp as *mut usize, *id);
+			translated_write(&memory_set, user_sp as *mut usize, *id);
 		}
 
 		user_sp -= word_size;
-		translated_write(token, user_sp as *mut usize, 0usize);
+		translated_write(&memory_set, user_sp as *mut usize, 0usize);
 		for env_ptr in envp_ptrs.iter().rev() {
 			user_sp -= word_size;
-			translated_write(token, user_sp as *mut usize, *env_ptr);
+			translated_write(&memory_set, user_sp as *mut usize, *env_ptr);
 		}
 
 		user_sp -= word_size;
-		translated_write(token, user_sp as *mut usize, 0usize);
+		translated_write(&memory_set, user_sp as *mut usize, 0usize);
 		for arg_ptr in argv_ptrs.iter().rev() {
 			user_sp -= word_size;
-			translated_write(token, user_sp as *mut usize, *arg_ptr);
+			translated_write(&memory_set, user_sp as *mut usize, *arg_ptr);
 		}
 		let argv_base = user_sp;
 		user_sp -= word_size;
-		translated_write(token, user_sp as *mut usize, args.len());
+		translated_write(&memory_set, user_sp as *mut usize, args.len());
 
 		let mut trap_cx = TrapContext::app_init_context(
 			final_entry_point,

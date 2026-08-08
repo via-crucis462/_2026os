@@ -1,7 +1,7 @@
 use crate::fs::{File, Stat, Dentry};
 use crate::mm::UserBuffer;
 use crate::auth::{PermSet, PermStat, FileMode};
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use spin::Mutex;
 use core::any::Any;
@@ -18,11 +18,18 @@ pub struct EpollEvent {
 pub struct EpollFile {
     // 监控列表：fd -> EpollEvent
     pub interest_list: Mutex<BTreeMap<usize, EpollEvent>>,
+    // Readiness state used to implement edge-triggered and one-shot delivery.
+    pub last_ready: Mutex<BTreeSet<usize>>,
+    pub oneshot_disabled: Mutex<BTreeSet<usize>>,
 }
 
 impl EpollFile {
     pub fn new() -> Self {
-        Self { interest_list: Mutex::new(BTreeMap::new()) }
+        Self {
+            interest_list: Mutex::new(BTreeMap::new()),
+            last_ready: Mutex::new(BTreeSet::new()),
+            oneshot_disabled: Mutex::new(BTreeSet::new()),
+        }
     }
 }
 

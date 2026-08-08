@@ -141,7 +141,7 @@ impl File for OSInode {
         let mut total_read = 0;
         let mut current_offset = offset;
         for slice in buf.buffers.iter_mut() {
-            let read_len = self.inode().raw_read_at(current_offset, *slice);
+            let read_len = self.inode().raw_read_at(current_offset, &mut *slice);
             if read_len == 0 { break; }
             current_offset += read_len;
             total_read += read_len;
@@ -153,7 +153,7 @@ impl File for OSInode {
         let mut total_write = 0;
         let mut current_offset = offset;
         for slice in buf.buffers.iter() {
-            let write_len = self.inode().raw_write_at(current_offset, *slice);
+            let write_len = self.inode().raw_write_at(current_offset, &*slice);
             if write_len == 0 { break; }
             current_offset += write_len;
             total_write += write_len;
@@ -168,7 +168,7 @@ impl File for OSInode {
         let mut total_read = 0;
         let mut current_offset = offset;
         for slice in buf.buffers.iter_mut() {
-            let read_len = inode.read_at(current_offset, *slice);
+            let read_len = inode.read_at(current_offset, &mut *slice);
             if read_len == 0 { break; }
             current_offset += read_len;
             total_read += read_len;
@@ -183,7 +183,7 @@ impl File for OSInode {
         let mut total_write = 0;
         let mut current_offset = offset;
         for slice in buf.buffers.iter() {
-            let write_len = inode.write_at(current_offset, *slice);
+            let write_len = inode.write_at(current_offset, &*slice);
             if write_len == 0 { break; }
             current_offset += write_len;
             total_write += write_len;

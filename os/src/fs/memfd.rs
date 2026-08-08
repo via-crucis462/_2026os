@@ -1,15 +1,10 @@
 use alloc::sync::Arc;
 use spin::Mutex;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::mm::address::{PhysPageNum, VPNRange, VirtPageNum};
-use crate::mm::{frame_alloc, FrameTracker, UserBuffer, PageSize, translated_byte_buffer_mut, translated_write};
+use crate::mm::{frame_alloc, FrameTracker, PageSize};
 use crate::auth::{PermStat, FileMode};
-use crate::arch::config::PAGE_SIZE;
-use crate::task::current_user_token;
-use crate::syscall::errno::*;
-use super::{Dentry, File, VfsInode};
+use super::VfsInode;
 use super::ino::get_next_ino;
 use super::tmpfs::HUGEPAGES_DENTRY;
 

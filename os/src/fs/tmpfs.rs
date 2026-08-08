@@ -202,9 +202,6 @@ impl super::VfsInode for TmpfsFileInode {
     fn type_name(&self) -> &'static str {
         "TmpfsFileInode"
     }
-    fn filesystem_kind(&self) -> &'static str {
-        "tmpfs"
-    }
     fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> {
         None
     }
@@ -216,10 +213,6 @@ impl super::VfsInode for TmpfsFileInode {
     }
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> {
         None
-    }
-    fn inc_link_count(&self) -> bool {
-        self.stat.lock().nlink += 1;
-        true
     }
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize {
         -1
@@ -355,15 +348,6 @@ impl super::VfsInode for TmpfsDirInode {
         }
     }
 
-    fn link(&self, name: &str, inode: Arc<dyn super::VfsInode>) -> bool {
-        let mut entries = self.entries.lock();
-        if entries.contains_key(name) || !inode.inc_link_count() {
-            return false;
-        }
-        entries.insert(name.to_string(), inode);
-        true
-    }
-
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
         let entries = self.entries_snapshot();
         let mut buf_offset = 0;
@@ -411,9 +395,6 @@ impl super::VfsInode for TmpfsDirInode {
             f_flags: 0,
             f_spare: [0; 4],
         }
-    }
-    fn filesystem_kind(&self) -> &'static str {
-        "tmpfs"
     }
     fn create_symlink(&self, name: &str, target: &str) -> Option<Arc<dyn VfsInode>> {
         let symlink_inode = Arc::new(TmpfsFsSymbolicLinkInode {
@@ -929,9 +910,6 @@ impl VfsInode for TmpfsFsSymbolicLinkInode {
     fn type_name(&self) -> &'static str {
         "TmpfsFsSymbolicLinkInode"
     }
-    fn filesystem_kind(&self) -> &'static str {
-        "tmpfs"
-    }
     fn find(&self, _name: &str) -> Option<Arc<dyn super::VfsInode>> {
         None
     }
@@ -943,10 +921,6 @@ impl VfsInode for TmpfsFsSymbolicLinkInode {
     }
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> {
         None
-    }
-    fn inc_link_count(&self) -> bool {
-        self.stat.lock().nlink += 1;
-        true
     }
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize {
         -1

@@ -26,7 +26,7 @@ pub use vfork::VforkCompletion;
 pub use crate::process::{
 	add_initproc, add_task, block_current_and_run_next,
 	current_add_signal, current_task, current_tid, current_trap_cx,
-	current_user_token, exit_current_and_run_next, get_process, handle_signals,
+	current_user_mm, current_user_token, exit_current_and_run_next, get_process, handle_signals,
 	kstack_alloc, lock_dispatch, run_tasks, suspend_current_and_run_next,
 	wake_up_one, KernelStack, SignalAction, SignalActions, SignalFlags, MAX_SIG,
 };

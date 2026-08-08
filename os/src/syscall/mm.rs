@@ -209,21 +209,27 @@ pub fn sys_mremap(
     };
 
     let copy_len = old_sz;
-    let token = current_user_token();
-    let src = crate::mm::page_table::translated_byte_buffer(token, old_addr as *const u8, copy_len);
-    let dst = crate::mm::page_table::translated_byte_buffer_mut(
-        token,
+    let mm = current_user_mm();
+    let Some(src) = crate::mm::page_table::translated_user_buffer(
+        &mm,
+        old_addr as *const u8,
+        copy_len,
+    ) else {
+        let _ = mmap::do_munmap(new_addr, new_sz);
+        return EFAULT.as_isize();
+    };
+    let Some(dst) = crate::mm::page_table::translated_user_buffer_mut(
+        &mm,
         new_addr as *mut u8,
         copy_len,
-    );
-    let mut copied = 0usize;
-    for (s, d) in src.into_iter().zip(dst.into_iter()) {
-        let c = core::cmp::min(s.len(), d.len());
-        d[..c].copy_from_slice(&s[..c]);
-        copied += c;
-        if copied >= copy_len {
-            break;
-        }
+    ) else {
+        let _ = mmap::do_munmap(new_addr, new_sz);
+        return EFAULT.as_isize();
+    };
+    let copied = src.read_into_buffer(dst) as usize;
+    if copied != copy_len {
+        let _ = mmap::do_munmap(new_addr, new_sz);
+        return EFAULT.as_isize();
     }
 
     mmap::do_munmap(old_addr, old_sz).ok();
@@ -275,7 +281,7 @@ pub fn sys_mincore(addr: usize, len: usize, vec: *mut u8) -> isize {
             let vpn = crate::mm::VirtAddr::from(page_addr).std_floor();
             let in_area = {
                 let areas = mm.areas.read();
-                areas.values().any(|a| a.lock().contains(vpn))
+                areas.values().any(|a| a.read().contains(vpn))
             };
             if !in_area {
                 return ENOMEM.as_isize();
@@ -289,9 +295,8 @@ pub fn sys_mincore(addr: usize, len: usize, vec: *mut u8) -> isize {
         result
     };
 
-    let token = current_user_token();
     for (index, resident) in residency.into_iter().enumerate() {
-        if !crate::mm::try_translated_write(token, unsafe { vec.add(index) }, resident) {
+        if !crate::mm::try_translated_write(&mm, unsafe { vec.add(index) }, resident) {
             return EFAULT.as_isize();
         }
     }
@@ -325,15 +330,18 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> isize {
 
     match advice {
         MADV_DONTNEED => {
-            // Discard physical pages without removing the virtual mapping.
+            // 内存够大，直接不释放
+            ENOSYS.as_isize()
+            /*
             match mmap::do_madvise_dontneed(addr, len) {
                 Ok(()) => 0,
                 Err(errno) => errno,
             }
+             */
         }
         MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_FREE => {
             // 使用建议（优化用），伪实现
-            0
+            ENOSYS.as_isize()
         }
         _ => {
             EINVAL.as_isize()

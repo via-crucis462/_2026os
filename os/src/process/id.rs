@@ -160,6 +160,9 @@ pub fn kstack_alloc() -> KernelStack {
         MapPermission::R | MapPermission::W,
         PageSize::Page4K, // 内核栈用标准页
     );
+    #[cfg(target_arch = "riscv64")]
+    // rv 下内核栈在页表建立映射到新分配的物理页帧，应该刷新 TLB
+    flush_kernel_tlb_targets();
     KernelStack(kstack_id)
 }
 

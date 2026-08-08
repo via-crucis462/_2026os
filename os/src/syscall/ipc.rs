@@ -4,8 +4,8 @@
 use crate::{
     auth::{FileMode, PermSet, PermStat},
     ipc::{msg::*, shm::*, namespace::*, IpcPerm},
-    mm::{UserBuffer, mmap, try_translated_byte_buffer, try_translated_byte_buffer_mut, try_translated_read, try_translated_write},
-    process::current_user_token,
+    mm::{mmap, translated_user_buffer, translated_user_buffer_mut, try_translated_read, try_translated_write},
+    process::current_user_mm,
 };
 use super::*;
 use Errno::*;
@@ -80,7 +80,7 @@ pub fn sys_msgget(key: u32, msgflg: usize) -> isize {
 pub fn sys_msgsnd(msqid: usize, msgp: usize, msgsz: usize, msgflg: usize) -> isize {
     let task = current_task().unwrap();
     let pid = task.getpid();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let (uid, gid) = {
         let inner = task.inner_exclusive_access();
         let cred = inner.cred.exclusive_access();
@@ -94,7 +94,7 @@ pub fn sys_msgsnd(msqid: usize, msgp: usize, msgsz: usize, msgflg: usize) -> isi
     }
 
     // 读取消息类型
-    let mtype = if let Some(m) = try_translated_read(token, msgp as *const isize) {
+    let mtype = if let Some(m) = try_translated_read(&mm, msgp as *const isize) {
         m
     } else {
         return EFAULT.as_isize();
@@ -106,14 +106,8 @@ pub fn sys_msgsnd(msqid: usize, msgp: usize, msgsz: usize, msgflg: usize) -> isi
 
     // 读取消息内容
     let msgtptr = msgp + core::mem::size_of::<usize>();
-    let msg_buf = if msgsz > 0 {
-        if let Some(text) = try_translated_byte_buffer(token, msgtptr as *const u8, msgsz) {
-            UserBuffer::new(text)
-        } else {
-            return EFAULT.as_isize();
-        }
-    } else {
-        UserBuffer::new(Vec::new())
+    let Some(msg_buf) = translated_user_buffer(&mm, msgtptr as *const u8, msgsz) else {
+        return EFAULT.as_isize();
     };
     let mut text = vec![0u8; msg_buf.len()];
     msg_buf.read(&mut text);
@@ -142,7 +136,7 @@ pub fn sys_msgsnd(msqid: usize, msgp: usize, msgsz: usize, msgflg: usize) -> isi
 pub fn sys_msgrcv(msqid: usize, msgp: usize, msgsz: usize, msgtyp: isize, msgflg: usize) -> isize {
     let task = current_task().unwrap();
     let pid = task.getpid();
-    let token = current_user_token();
+    let mm = current_user_mm();
     let (uid, gid) = {
         let inner = task.inner_exclusive_access();
         let cred = inner.cred.exclusive_access();
@@ -164,22 +158,19 @@ pub fn sys_msgrcv(msqid: usize, msgp: usize, msgsz: usize, msgtyp: isize, msgflg
                 let copy_len = core::cmp::min(msgsz, actual_len);
 
                 // 写入消息类型
-                if !try_translated_write(token, msgp as *mut usize, msg.mtype) {
+                if !try_translated_write(&mm, msgp as *mut usize, msg.mtype) {
                     return EFAULT.as_isize();
                 }
 
                 // 写入消息内容
                 if copy_len > 0 {
-                    let mtext_buf = if let Some(buf) = try_translated_byte_buffer_mut(
-                        token,
+                    let Some(mut mtext_buf) = translated_user_buffer_mut(
+                        &mm,
                         (msgp + core::mem::size_of::<usize>()) as *mut u8,
                         copy_len,
-                    ) {
-                        UserBuffer::new(buf)
-                    } else {
+                    ) else {
                         return EFAULT.as_isize();
                     };
-                    let mut mtext_buf = mtext_buf;
                     mtext_buf.write(&msg.mtext[..copy_len]);
                 }
 
@@ -195,7 +186,7 @@ pub fn sys_msgrcv(msqid: usize, msgp: usize, msgsz: usize, msgtyp: isize, msgflg
 /// 对消息队列执行控制操作
 /// cmd: IPC_STAT / IPC_SET / IPC_RMID
 pub fn sys_msgctl(msqid: u32, cmd: usize, buf: usize) -> isize {
-    let token = current_user_token();
+    let mm = current_user_mm();
     let (uid, gid) = {
         let task = current_task().unwrap();
         let inner = task.inner_exclusive_access();
@@ -216,7 +207,7 @@ pub fn sys_msgctl(msqid: u32, cmd: usize, buf: usize) -> isize {
                     return EACCES.as_isize();
                 }
                 let ds = q.get_msqid_ds();
-                if !try_translated_write(token, buf as *mut MsqidDs, ds) {
+                if !try_translated_write(&mm, buf as *mut MsqidDs, ds) {
                     return EFAULT.as_isize();
                 }
                 0
@@ -226,7 +217,7 @@ pub fn sys_msgctl(msqid: u32, cmd: usize, buf: usize) -> isize {
         }
         // 设置状态信息
         IPC_SET => {
-            let ds = if let Some(d) = try_translated_read(token, buf as *const MsqidDs) {
+            let ds = if let Some(d) = try_translated_read(&mm, buf as *const MsqidDs) {
                 d
             } else {
                 return EFAULT.as_isize();
@@ -355,7 +346,7 @@ pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
 
 pub fn sys_shmctl(shmid: u32, cmd: usize, buf: usize) -> isize {
     use crate::ipc::shm::ShmidDs;
-    let token = current_user_token();
+    let mm = current_user_mm();
     let (uid, gid) = {
         let task = current_task().unwrap();
         let inner = task.inner_exclusive_access();
@@ -376,13 +367,13 @@ pub fn sys_shmctl(shmid: u32, cmd: usize, buf: usize) -> isize {
                 return EACCES.as_isize();
             }
             let ds = shm.get_stat();
-            if !try_translated_write(token, buf as *mut ShmidDs, ds) {
+            if !try_translated_write(&mm, buf as *mut ShmidDs, ds) {
                 return EFAULT.as_isize();
             }
             0
         }
         IPC_SET => {
-            let ds: ShmidDs = match try_translated_read(token, buf as *const ShmidDs) {
+            let ds: ShmidDs = match try_translated_read(&mm, buf as *const ShmidDs) {
                 Some(d) => d,
                 None => return EFAULT.as_isize(),
             };

@@ -44,11 +44,11 @@ impl TaskStruct {
 		// ── 0. 判断是创建线程还是独立进程 ──
 		let clone_thread = flags & CLONE_THREAD != 0;
 
-		// ── 1. 获取父任务页表 token，用于后续 TID 指针可行性检查 ──
-		let parent_token = {
+		// ── 1. 获取父地址空间，用于后续 TID 指针可行性检查 ──
+		let parent_mm = {
 			let inner = self.inner_exclusive_access();
 			if let Some(mm) = inner.mm.as_ref(){
-				mm.token()
+				mm.clone()
 			}else {
 				return Errno::EINVAL.as_isize();
 			}
@@ -59,7 +59,7 @@ impl TaskStruct {
 		if flags & CLONE_PARENT_SETTID != 0
 			&& (ptid == 0
 				|| !crate::mm::prepare_user_write(
-					parent_token,
+					&parent_mm,
 					ptid,
 					core::mem::size_of::<u32>(),
 				))
@@ -70,7 +70,7 @@ impl TaskStruct {
 		if flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID) != 0
 			&& (ctid == 0
 				|| !crate::mm::prepare_user_write(
-					parent_token,
+					&parent_mm,
 					ctid,
 					core::mem::size_of::<u32>(),
 				))
@@ -100,10 +100,7 @@ impl TaskStruct {
 		} else {
 			// 无 CLONE_VM：写时复制（COW），创建独立的地址空间副本
 			let child_memory = MemorySet::from_existed_user(&parent_mm);
-			#[cfg(target_arch = "riscv64")]
 			parent_mm.flush_tlb_targets();
-			#[cfg(target_arch = "loongarch64")]
-			crate::arch::mm::flush_tlb_for_asid(parent_mm.asid());
 			Arc::new(child_memory)
 		};
 
@@ -264,6 +261,7 @@ impl TaskStruct {
 					pgid,
 					sid,
 					state: TaskStatus::Ready,
+					wake_pending: false,
 					exit_state: 0,
 					exit_code: 0,
 					exit_signal: (flags & CSIGNAL) as i32, // 退出时向父进程发送的信号
@@ -336,7 +334,7 @@ impl TaskStruct {
 			if flags & CLONE_SETTLS != 0 {
 				trap_cx.set_tls(tls);
 			}
-			// ★ 关键：子任务从 clone() 返回 0
+			// 子任务从 clone() 返回 0
 			trap_cx.set_a0(0);
 		}
 
@@ -344,23 +342,28 @@ impl TaskStruct {
 		let child_tid = child.gettid() as u32;
 		// CLONE_PARENT_SETTID：向父地址空间的 *ptid 写入子 TID
 		if flags & CLONE_PARENT_SETTID != 0
-			&& !crate::mm::try_translated_write(parent_token, ptid as *mut u32, child_tid)
+			&& !crate::mm::try_translated_write(&parent_mm, ptid as *mut u32, child_tid)
 		{
 			return Errno::EFAULT.as_isize();
 		}
 		// CLONE_CHILD_SETTID：向子地址空间的 *ctid 写入自身 TID
 		if flags & CLONE_CHILD_SETTID != 0 {
-			let child_token = {
+			let (child_mm, child_sp) = {
 				let child_inner = child.inner_exclusive_access();
-				child_inner.mm.as_ref().unwrap().token()
+				let child_mm = child_inner.mm.as_ref().unwrap().clone();
+				(child_mm, child_inner.get_trap_cx().get_sp())
 			};
-			if !crate::mm::try_translated_write(child_token, ctid as *mut u32, child_tid) {
+			if !child_mm.ensure_writable_user_range(
+				ctid,
+				core::mem::size_of::<u32>(),
+				child_sp,
+			) || !crate::mm::try_translated_write(&child_mm, ctid as *mut u32, child_tid)
+			{
 				return Errno::EFAULT.as_isize();
 			}
 		}
 		// 注意：CLONE_CHILD_CLEARTID 在步骤 6 中将 ctid 保存到 clear_child_tid 字段，
 		// 实际的清零 + futex 唤醒操作在子任务退出时由 exit 路径完成。
-
 		// ── 9. 建立父子关系并加入调度 ──
 		// 只有独立进程才加入父进程的 children 链表（线程属于同一线程组，不需要）
 		if !clone_thread {

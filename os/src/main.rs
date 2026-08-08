@@ -187,6 +187,7 @@ fn main_init(hart_id: usize) {
     crate::process::init::add_initproc();
     crate::process::init::add_timer_worker();
     crate::process::init::add_net_worker();
+    crate::process::init::add_console_worker();
     crate::process::init::add_writeback_worker();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger(process::scheduler::runqueue::SCHED_OTHER);

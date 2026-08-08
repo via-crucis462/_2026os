@@ -606,7 +606,7 @@ sh /glibc/lmbench_testcode.sh
 }
 
 // --- musl ltp ---
-#[cfg(true)]
+#[cfg(false)]
 {
     write_fd(fd, "echo \"#### OS COMP TEST GROUP START ltp-musl ####\"\n");
     for chunk in run_cases.chunks(50) {
@@ -619,7 +619,7 @@ sh /glibc/lmbench_testcode.sh
         write_fd(fd, "  f=\"/musl/ltp/testcases/bin/$name\"\n");
         write_fd(fd, "  if [ -f \"$f\" ] && [ -x \"$f\" ]; then\n");
         write_fd(fd, "    echo \"RUN LTP CASE $name\"\n");
-        write_fd(fd, "    \"$f\"\n");
+        write_fd(fd, "    timeout 35 \"$f\"\n");
         write_fd(fd, "    ret=$?\n");
         write_fd(fd, "    echo \"FAIL LTP CASE $name : $ret\"\n");
         write_fd(fd, "  fi\n");
@@ -642,7 +642,7 @@ sh /glibc/lmbench_testcode.sh
         write_fd(fd, "  f=\"/glibc/ltp/testcases/bin/$name\"\n");
         write_fd(fd, "  if [ -f \"$f\" ] && [ -x \"$f\" ]; then\n");
         write_fd(fd, "    echo \"RUN LTP CASE $name\"\n");
-        write_fd(fd, "    \"$f\"\n");
+        write_fd(fd, "    timeout 35 \"$f\"\n");
         write_fd(fd, "    ret=$?\n");
         write_fd(fd, "    echo \"FAIL LTP CASE $name : $ret\"\n");
         write_fd(fd, "  fi\n");

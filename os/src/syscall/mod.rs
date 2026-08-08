@@ -250,7 +250,7 @@ use alloc::string::String;
 use crate::net::MsgHdr;
 
 use crate::get_hart_id;
-use crate::mm::try_translated_str;
+use crate::mm::{try_translated_str, MemorySet};
 use crate::syscall::net::*;
 
 use crate::{fs::Stat, task::{SignalAction, current_task}};
@@ -291,8 +291,8 @@ pub(crate) fn normalize_leading_dot_path(path: String) -> String {
 }
 
 
-pub fn translate_path(token: usize, path: *const u8) -> Result<String, Errno> {
-    let str = try_translated_str(token, path);
+pub fn translate_path(mm: &MemorySet, path: *const u8) -> Result<String, Errno> {
+    let str = try_translated_str(mm, path);
     if let Some(s) = str {
         if s.len() > PATH_MAX_LEN {
             return Err(Errno::ENAMETOOLONG);
@@ -301,26 +301,6 @@ pub fn translate_path(token: usize, path: *const u8) -> Result<String, Errno> {
     } else {
         Err(Errno::EFAULT)
     }
-}
-
-fn should_log_syscall_error(syscall_id: usize, ret: isize) -> bool {
-    !matches!(
-        (syscall_id, ret),
-        // File lookups routinely use a failed lookup as a feature probe.
-        (SYSCALL_ACCESSAT | SYSCALL_FACCESSAT2 | SYSCALL_OPENAT | SYSCALL_FSTATAT | SYSCALL_STATX | SYSCALL_STATFS, -2)
-            // readlinkat emits a path-aware debug record for expected lookup failures.
-            | (SYSCALL_READLINKAT, -2 | -20 | -22)
-            // A non-terminal file descriptor must reject terminal ioctls.
-            | (SYSCALL_IOCTL, -25)
-            // Futex wait is expected to be interrupted or observe a changed value.
-            | (SYSCALL_FUTEX, -4 | -11)
-            // Shells often reap after a child has already been collected.
-            | (SYSCALL_WAIT4, -10)
-            // mkdir -p probes whether a directory already exists.
-            | (SYSCALL_MKDIR, -17)
-            // The current network stack intentionally supports IPv4 only.
-            | (SYSCALL_CONNECT, -97)
-    )
 }
 
 #[no_mangle]
@@ -358,7 +338,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         let inner = process.inner_exclusive_access();
         inner.info_map_areas();
     }*/
-    warn!("[K] hart[{}] PID{} , called syscall {}", get_hart_id(), current_task().unwrap().pid.0, syscall_id);
+    trace!("[K] hart[{}] PID{} , called syscall {}", get_hart_id(), current_task().unwrap().pid.0, syscall_id);
     //warn!("[K] syscall args: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}", args[0], args[1], args[2], args[3], args[4], args[5]);
     info!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().getpid(), current_task().unwrap().gettid(), syscall_id);
     let ret =match syscall_id {
@@ -371,13 +351,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_ACCESSAT => sys_accessat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_FACCESSAT2 => sys_accessat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut usize, args[1]),
-        SYSCALL_LINKAT => sys_linkat(
-            args[0] as isize,
-            args[1] as *const u8,
-            args[2] as isize,
-            args[3] as *const u8,
-            args[4],
-        ),
+        SYSCALL_LINKAT => sys_linkat(args[1] as *const u8, args[3] as *const u8),
         SYSCALL_FCHMOD => sys_fchmod(args[0], args[1] as u32),
         SYSCALL_FCHOWN => sys_fchown(args[0], args[1] as u32, args[2] as u32),
         SYSCALL_UNLINKAT => sys_unlinkat(args[0] as isize, args[1] as *const u8, args[2] as usize),
@@ -571,10 +545,21 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SCHED_SETAFFINITY => sys_sched_setaffinity(args[0] as isize, args[1], args[2] as *const u8),
         SYSCALL_MLOCK => sys_mlock(args[0], args[1]),
         _ => {
-            println!(
-                "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
-                syscall_id
-            );
+            if let Some(task) = current_task() {
+                let comm = task.inner_exclusive_access().comm;
+                let end = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
+                let comm = core::str::from_utf8(&comm[..end]).unwrap_or("?");
+                println!(
+                    "[UNIMPLEMENTED SYSCALL] ID: {:3} pid={} tid={} comm={} args=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
+                    syscall_id,
+                    task.getpid(),
+                    task.gettid(),
+                    comm,
+                    args[0], args[1], args[2], args[3], args[4], args[5]
+                );
+            } else {
+                println!("[UNIMPLEMENTED SYSCALL] ID: {:3} no-current-task", syscall_id);
+            }
             Errno::ENOSYS.as_isize()
         }
     };
@@ -585,10 +570,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             get_hart_id(), current_task().unwrap().getpid(), current_task().unwrap().gettid(), syscall_id, args[0] as i32
         );*/
     }
-    /*if ret < 0 && should_log_syscall_error(syscall_id, ret) {
+    /*if ret < 0 {
         println!(
-            "[Syscall Error] PID: {} | ID: {:3} | Args: [0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}] | Errno: {}", 
-            current_task().unwrap().getpid(),  syscall_id, args[0], args[1], args[2], args[3], args[4], ret
+            "[Syscall Error] PID: {} |  TID: {} | ID: {:3} | Args: [0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}] | Errno: {}", 
+            current_task().unwrap().process().pid.0, current_task().unwrap().tid.0, syscall_id, args[0], args[1], args[2], args[3], args[4], -ret
         );
     }*/
     /*if syscall_id == SYSCALL_MMAP || syscall_id == SYSCALL_MUNMAP || syscall_id == SYSCALL_BRK {
@@ -609,7 +594,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             "[Syscall Trace] ID: {:3} | Args: [0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], args[3], args[4], ret
         );*/
-    warn!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
+    trace!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
     info!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
     ret
 }

@@ -11,8 +11,6 @@ pub use frame_allocator::get_free_frames;
 mod heap_allocator;
 mod id;
 mod memory_set;
-#[cfg(target_arch = "riscv64")]
-mod tlb;
 
 pub mod address;
 pub mod flags;
@@ -29,15 +27,20 @@ use core::ptr::{read_volatile, write_volatile};
 pub use flags::PTEFlags;
 pub use frame_allocator::{frame_alloc, frame_dealloc, FrameTracker};
 pub use memory_set::remap_test;
-pub use memory_set::{FutexMappingKind, kernel_asid, kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
+pub use memory_set::{
+    FutexKey, FutexSharedObject, MapPermission, MemorySet, KERNEL_SPACE,
+    kernel_asid, kernel_token,
+};
 #[cfg(target_arch = "riscv64")]
 pub use memory_set::flush_kernel_tlb_targets;
 #[cfg(target_arch = "riscv64")]
-pub use tlb::{active_tokens, running_harts, switch_mm};
+pub use crate::arch::mm::tlb::{active_tokens, running_harts, switch_mm};
+#[cfg(target_arch = "loongarch64")]
+pub use crate::arch::mm::tlb::{handle_tlb_ipi, leave_user_mm, switch_mm};
 #[allow(unused)]
-pub use memory_set::{MapArea, MapType};
+pub use memory_set::{MapArea, MapType, VersionedArea};
 pub use page_table::*;
-pub use user_buffer::UserBuffer;
+pub use user_buffer::{UserBuffer, UserBufferSegment};
 
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {

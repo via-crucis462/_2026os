@@ -8,7 +8,7 @@ use spin::Mutex;
 use crate::arch::timer::get_time_us;
 use crate::process::registry::{get_process, tid2task, TID2TCB};
 use crate::process::signal::SignalFlags;
-use crate::timer::{queue_timer_signal, TimeSpec, CLOCK_REALTIME_OFFSET_NS};
+use crate::timer::{current_realtime_ns, queue_timer_signal, TimeSpec};
 
 /// Linux内核使用的sigevent布局；只保留timer_create需要读取的字段。
 #[repr(C)]
@@ -101,9 +101,7 @@ fn ns_to_timespec(value: u128) -> TimeSpec {
 }
 
 fn realtime_ns() -> u128 {
-    let base = crate::get_real_time_ns() as i128;
-    let adjusted = base.saturating_add(*CLOCK_REALTIME_OFFSET_NS.lock() as i128);
-    adjusted.max(0) as u128
+    current_realtime_ns() as u128
 }
 
 fn clock_now_ns(clock_id: i32) -> u128 {

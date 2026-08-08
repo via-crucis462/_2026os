@@ -23,16 +23,17 @@ pub fn exit_current_and_run_next(exit_code: i32){
 		}
 	};
 	let pid = task.getpid();
-	let (token, clear_child_tid) = {
+	let (mm, clear_child_tid) = {
 		let inner = task.inner_exclusive_access();
-		let token = inner
+		let mm = inner
 			.mm
 			.as_ref()
-			.map(|mm| mm.token())
-			.unwrap_or(0);
-		(token, inner.clear_child_tid)
+			.cloned();
+		(mm, inner.clear_child_tid)
 	};
-	crate::syscall::process::clear_child_tid_and_wake(token, clear_child_tid);
+	if let Some(mm) = mm {
+		crate::syscall::process::clear_child_tid_and_wake(&mm, clear_child_tid);
+	}
 
 	task.recycle_on_exit(exit_code);
 

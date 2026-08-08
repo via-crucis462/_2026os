@@ -17,10 +17,6 @@ use super::*;
 /// `exclusive_access`.
 
 use spin::{Mutex, MutexGuard};
-
-const LOCK_WAIT_WARN_AFTER_US: usize = 1_000_000;
-const LOCK_WAIT_WARN_INTERVAL_US: usize = 5_000_000;
-
 pub struct MPSafeCell<T> {
     /// inner data
     inner: Mutex<T>,
@@ -33,29 +29,9 @@ impl<T> MPSafeCell<T> {
             inner: Mutex::new(value),
         }
     }
-    /// 当数据已经被其他线程访问时，调用此函数会忙等待，直到数据可用。
-    /// 持续等待时定期输出诊断，帮助定位可能的死锁或长时间持锁。
+    /// 当数据已经被其他线程访问时，调用此函数会忙等待，直到数据可用
     pub fn exclusive_access(&self) -> MutexGuard<'_, T> {
-        let wait_started_us = crate::arch::timer::get_time_us();
-        let mut next_report_us = wait_started_us.saturating_add(LOCK_WAIT_WARN_AFTER_US);
-
-        loop {
-            if let Some(guard) = self.inner.try_lock() {
-                return guard;
-            }
-
-            let now_us = crate::arch::timer::get_time_us();
-            if now_us >= next_report_us {
-                println!(
-                    "[MPSafeCell] lock wait cell={:p} hart={} waited={}us",
-                    self as *const Self,
-                    crate::get_hart_id(),
-                    now_us.saturating_sub(wait_started_us),
-                );
-                next_report_us = now_us.saturating_add(LOCK_WAIT_WARN_INTERVAL_US);
-            }
-            core::hint::spin_loop();
-        }
+        self.inner.lock()
     }
     pub fn get_mutex(&self) -> &Mutex<T> {
         &self.inner

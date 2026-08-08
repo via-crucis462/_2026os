@@ -3,7 +3,7 @@ use crate::process::task::TaskControlBlock;
 use crate::process::{block_current_and_run_next, wake_up_task};
 use crate::sync::WaitQueue;
 use spin::Mutex;
-use crate::mm::{PageTable, UserBuffer, VirtAddr, translated_byte_buffer, try_translated_write, try_translated_read};
+use crate::mm::{UserBuffer, translated_user_buffer, translated_user_buffer_mut, try_translated_read, try_translated_write};
 use alloc::vec::Vec;
 
 // struct uffdio_api { api: u64, features: u64, ioctls: u64 }  → 24 bytes
@@ -157,82 +157,84 @@ impl File for UserPageFaultInfo {
     fn get_shared_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         None // 默认不支持
     }
-    fn ioctl(&self, request: u32, argp: usize, token: usize) -> isize {
-        let a = request;
+    fn ioctl(&self, request: u32, argp: usize, mm: &crate::mm::MemorySet) -> isize {
         match request {
             UFFDIO_API => {
-                let api: u64 = try_translated_read(token, argp as *const u64).unwrap_or(0);
+                let api: u64 = try_translated_read(mm, argp as *const u64).unwrap_or(0);
                 if api != 0xAA {
                     return Errno::EINVAL.as_isize();
                 }
                 // features = 0, ioctls = _UFFDIO_REGISTER | _UFFDIO_COPY
                 let ioctls: u64 = (1 << _UFFDIO_REGISTER_BIT) | (1 << _UFFDIO_COPY_BIT);
-                try_translated_write(token, (argp + 8) as *mut u64, 0u64);
-                try_translated_write(token, (argp + 16) as *mut u64, ioctls);
+                try_translated_write(mm, (argp + 8) as *mut u64, 0u64);
+                try_translated_write(mm, (argp + 16) as *mut u64, ioctls);
                 0
             }
             UFFDIO_REGISTER => {
-                let start: u64 = try_translated_read(token, argp as *const u64).unwrap_or(0);
-                let len: u64 = try_translated_read(token, (argp + 8) as *const u64).unwrap_or(0);
-                let mode: u64 = try_translated_read(token, (argp + 16) as *const u64).unwrap_or(0);
+                let start: u64 = try_translated_read(mm, argp as *const u64).unwrap_or(0);
+                let len: u64 = try_translated_read(mm, (argp + 8) as *const u64).unwrap_or(0);
+                let mode: u64 = try_translated_read(mm, (argp + 16) as *const u64).unwrap_or(0);
                 if mode & 1 == 0 {
                     return Errno::EINVAL.as_isize();
                 }
                 self.registered_ranges.lock()
                     .push((start as usize, len as usize));
                 let ioctls: u64 = (1 << _UFFDIO_COPY_BIT);
-                try_translated_write(token, (argp + 24) as *mut u64, ioctls);
+                try_translated_write(mm, (argp + 24) as *mut u64, ioctls);
                 0
             }
             UFFDIO_COPY => {
-                let dst: u64 = try_translated_read(token, argp as *const u64).unwrap_or(0);
-                let src: u64 = try_translated_read(token, (argp + 8) as *const u64).unwrap_or(0);
-                let len: u64 = try_translated_read(token, (argp + 16) as *const u64).unwrap_or(0);
-                let mode: u64 = try_translated_read(token, (argp + 24) as *const u64).unwrap_or(0);
+                let dst: u64 = try_translated_read(mm, argp as *const u64).unwrap_or(0);
+                let src: u64 = try_translated_read(mm, (argp + 8) as *const u64).unwrap_or(0);
+                let len: u64 = try_translated_read(mm, (argp + 16) as *const u64).unwrap_or(0);
+                let mode: u64 = try_translated_read(mm, (argp + 24) as *const u64).unwrap_or(0);
 
-                // 先提取故障任务的 mm，释放 faulting_task 锁后再操作，避免死锁。
-                let mm = {
+                // Do not nest the fault queue lock with a task-inner lock.
+                // Clone the task first, then clone its MM under only the short
+                // task-inner critical section.
+                let faulting_task = {
                     let guard = self.faulting_task.lock();
-                    guard.as_ref().and_then(|task| {
-                        task.inner_exclusive_access().mm.clone()
-                    })
+                    guard.clone()
                 };
-                let mm = match mm {
+                let faulting_mm = match faulting_task.and_then(|task| {
+                    task.inner_exclusive_access().mm.clone()
+                }) {
                     Some(mm) => mm,
                     None => return Errno::EINVAL.as_isize(),
                 };
 
                 // 1. 为缺页地址建立物理页映射
-                let faulting_token = {
-                    let _ = mm.mmap(
-                        dst as usize, core::cmp::max(len as usize, 4096),
-                        crate::mm::mmap::MMapProt::PROT_READ
-                            | crate::mm::mmap::MMapProt::PROT_WRITE,
-                        crate::mm::mmap::MMapFlags::MAP_ANONYMOUS
-                            | crate::mm::mmap::MMapFlags::MAP_PRIVATE
-                            | crate::mm::mmap::MMapFlags::MAP_FIXED,
-                        None, 0,
-                    );
-                    mm.token()
-                };
+                let _ = faulting_mm.mmap(
+                    dst as usize, core::cmp::max(len as usize, 4096),
+                    crate::mm::mmap::MMapProt::PROT_READ
+                        | crate::mm::mmap::MMapProt::PROT_WRITE,
+                    crate::mm::mmap::MMapFlags::MAP_ANONYMOUS
+                        | crate::mm::mmap::MMapFlags::MAP_PRIVATE
+                        | crate::mm::mmap::MMapFlags::MAP_FIXED,
+                    None, 0,
+                );
 
                 // 2. 从 src 拷贝数据到 dst
-                let src_bufs = translated_byte_buffer(token, src as *const u8, len as usize);
-                let mut total = 0;
-                for src_buf in src_bufs.iter() {
-                    let mut dst_bufs = crate::mm::translated_byte_buffer_mut(
-                        faulting_token,
-                        (dst as usize + total) as *const u8,
-                        src_buf.len(),
-                    );
-                    for (d, s) in dst_bufs.iter_mut().zip(core::iter::repeat(src_buf)) {
-                        d.copy_from_slice(s);
-                    }
-                    total += src_buf.len();
+                let Some(src_buf) = translated_user_buffer(
+                    mm,
+                    src as *const u8,
+                    len as usize,
+                ) else {
+                    return Errno::EFAULT.as_isize();
+                };
+                let Some(dst_buf) = translated_user_buffer_mut(
+                    &faulting_mm,
+                    dst as *mut u8,
+                    len as usize,
+                ) else {
+                    return Errno::EFAULT.as_isize();
+                };
+                if src_buf.read_into_buffer(dst_buf) != len as isize {
+                    return Errno::EFAULT.as_isize();
                 }
 
                 // 3. 写回已拷贝字节数
-                try_translated_write(token, (argp + 32) as *mut i64, len as i64);
+                try_translated_write(mm, (argp + 32) as *mut i64, len as i64);
 
                 // 4. 唤醒缺页线程
                 if mode & 1 == 0 {

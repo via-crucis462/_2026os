@@ -3,6 +3,7 @@
 //! 尚不完善
 pub mod pte;
 pub mod info;
+pub mod tlb;
 
 use crate::arch::config::*;
 use core::arch::asm;
@@ -115,10 +116,11 @@ pub fn prepare_user_tlb() {
     }
 }
 
-pub fn flush_tlb_for_asid(_asid: usize) {
+pub fn flush_tlb_for_asid(asid: usize) {
     unsafe {
         asm!("dbar 0");
-        asm!("invtlb 0, $r0, $r0");
+        // op 0x4 invalidates non-global entries matching the supplied ASID.
+        asm!("invtlb 0x4, {asid}, $r0", asid = in(reg) asid);
         asm!("dbar 0");
     }
 }

@@ -9,6 +9,7 @@ use crate::process::scheduler::runqueue::{
 use crate::process::{TaskContext, TaskControlBlock, TaskStatus};
 #[cfg(target_arch = "riscv64")]
 use crate::mm::{kernel_token, switch_mm};
+use crate::mm::MemorySet;
 use crate::arch::timer::get_time_us;
 use crate::get_hart_id;
 use crate::sync::*;
@@ -94,6 +95,20 @@ pub fn current_user_token() -> usize {
     token
 }
 
+/// Clone the current task's address-space handle under a short task-inner
+/// lock.  User-pointer helpers take this handle directly; they must not use a
+/// hardware token to recover the address space through a global registry.
+pub fn current_user_mm() -> Arc<MemorySet> {
+    let task = current_task().expect("user pointer access without a current task");
+    let mm = task
+        .inner_exclusive_access()
+        .mm
+        .as_ref()
+        .cloned()
+        .expect("user task has no mm");
+    mm
+}
+
 pub fn current_user_asid() -> usize {
     let task = current_task().unwrap();
     let asid = task.inner_exclusive_access().get_asid();
@@ -163,6 +178,19 @@ pub fn run_tasks() {
                         .saturating_add(delta_vruntime.max(1));
 					prev_inner.se.exec_start = 0;
 					prev_inner.on_cpu = false;
+					// Commit BlockSaving while still holding the task lock.  A waker
+					// can either set wake_pending before this point, in which case we
+					// publish Ready, or observe the stable Blocked state afterwards
+					// and enqueue it itself.  Do not leave a gap between observing
+					// wake_pending and publishing Blocked.
+					if prev_inner.state == TaskStatus::BlockSaving {
+						if prev_inner.wake_pending {
+							prev_inner.state = TaskStatus::Ready;
+							prev_inner.wake_pending = false;
+						} else {
+							prev_inner.state = TaskStatus::Blocked;
+						}
+					}
 					(
 						prev_inner.state,
 						prev_inner.cpu,
@@ -174,9 +202,6 @@ pub fn run_tasks() {
                 } else {
                     if matches!(sched_policy, SCHED_OTHER | SCHED_BATCH | SCHED_IDLE) {
                         advance_cfs_min_vruntime(cpu_id);
-                    }
-                    if status == TaskStatus::BlockSaving {
-                        prev_task.inner_exclusive_access().state = TaskStatus::Blocked;
                     }
                 }
             }

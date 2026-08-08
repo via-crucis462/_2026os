@@ -65,6 +65,7 @@ impl TaskStruct {
 				pgid: pid_handle.0,
 				sid: pid_handle.0,
 				state: TaskStatus::Ready,
+				wake_pending: false,
 				exit_state: 0,
 				exit_code: 0,
 				exit_signal: 0,
@@ -150,7 +151,13 @@ static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
 	#[cfg(initproc = "sh")]
 	bytes: *include_bytes!("../arch/riscv/initproc_sh"),
 	#[cfg(initproc = "ltp")]
-	bytes: *include_bytes!("../arch/riscv/initproc_ltp")
+	bytes: *include_bytes!("../arch/riscv/initproc_ltp"),
+	#[cfg(initproc = "mmtest")]
+	bytes: *include_bytes!("../arch/riscv/initproc_mmtest"),
+	#[cfg(initproc = "cargotest")]
+	bytes: *include_bytes!("../arch/riscv/initproc_cargotest"),
+	#[cfg(initproc = "ctidtest")]
+	bytes: *include_bytes!("../arch/riscv/initproc_ctidtest"),
 };
 
 #[link_section = ".data"]
@@ -162,7 +169,13 @@ static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
 	#[cfg(initproc = "sh")]
 	bytes: *include_bytes!("../arch/la/initproc_sh"),
 	#[cfg(initproc = "ltp")]
-	bytes: *include_bytes!("../arch/la/initproc_ltp")
+	bytes: *include_bytes!("../arch/la/initproc_ltp"),
+	#[cfg(initproc = "mmtest")]
+	bytes: *include_bytes!("../arch/la/initproc_mmtest"),
+	#[cfg(initproc = "cargotest")]
+	bytes: *include_bytes!("../arch/la/initproc_cargotest"),
+	#[cfg(initproc = "ctidtest")]
+	bytes: *include_bytes!("../arch/la/initproc_ctidtest"),
 };
 
 lazy_static! {
@@ -183,6 +196,13 @@ pub fn add_net_worker() {
 		TaskStruct::new_kernel_worker(crate::process::task::worker::net_kernel_worker, SCHED_OTHER);
 	add_task(worker_task.clone());
 	info!("add_net_worker: pid={}", worker_task.getpid());
+}
+
+pub fn add_console_worker() {
+	let worker_task =
+		TaskStruct::new_kernel_worker(crate::process::task::worker::console_kernel_worker, SCHED_OTHER);
+	add_task(worker_task.clone());
+	info!("add_console_worker: pid={}", worker_task.getpid());
 }
 
 pub fn add_writeback_worker() {

@@ -128,7 +128,7 @@ pub trait File: Send + Sync {
         None
     }
     /// ioctl 设备控制，默认返回 ENOTTY（不支持的 ioctl 请求）
-    fn ioctl(&self, _request: u32, _argp: usize, _token: usize) -> isize {
+    fn ioctl(&self, _request: u32, _argp: usize, _mm: &crate::mm::MemorySet) -> isize {
         Errno::ENOTTY.as_isize()
     }
     fn is_socket(&self) -> bool {
@@ -212,6 +212,44 @@ pub struct StatxTimestamp {
     pub tv_nsec: u32,
     pub __reserved: i32,
 }
+
+/// POSIX 文件记录锁（fcntl F_SETLK/F_SETLKW/F_GETLK 使用）
+#[derive(Debug, Clone, Copy)]
+pub struct FileLock {
+    /// 锁持有者（POSIX 锁按进程归并）
+    pub owner_pid: usize,
+    /// 0 = F_RDLCK, 1 = F_WRLCK, 2 = F_UNLCK
+    pub lock_type: i16,
+    /// 锁区间起点（绝对偏移）
+    pub start: i64,
+    /// 锁区间长度；0 表示锁到文件末尾
+    pub len: i64,
+    /// true 表示来自 flock()（与 fd 绑定，仅整个文件锁）
+    pub is_flock: bool,
+}
+
+impl FileLock {
+    pub fn end(&self) -> i64 {
+        if self.len == 0 {
+            i64::MAX
+        } else {
+            self.start.saturating_add(self.len)
+        }
+    }
+}
+
+/// 判断两个区间是否重叠（len==0 表示延伸到 EOF）
+pub fn lock_ranges_overlap(a_start: i64, a_len: i64, b_start: i64, b_len: i64) -> bool {
+    let a_end = if a_len == 0 { i64::MAX } else { a_start.saturating_add(a_len) };
+    let b_end = if b_len == 0 { i64::MAX } else { b_start.saturating_add(b_len) };
+    a_start < b_end && b_start < a_end
+}
+
+/// 读锁与读锁不冲突，其余情况（含写锁）冲突
+pub fn file_locks_conflict(a: &FileLock, b_type: i16, b_start: i64, b_len: i64) -> bool {
+    (a.lock_type == 1 || b_type == 1) && lock_ranges_overlap(a.start, a.len, b_start, b_len)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RenameError {
     NotFound,
@@ -260,9 +298,6 @@ pub trait VfsInode: Send + Sync {
     fn delete_dir_entry(&self, name: &str) -> Option<u32>;
     // 用于unlink时调整链接数
     fn dec_link_count(&self) -> bool {
-        false
-    }
-    fn inc_link_count(&self) -> bool {
         false
     }
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize;
@@ -318,7 +353,7 @@ pub trait VfsInode: Send + Sync {
         String::from_utf8_lossy(&buf).into_owned()
     }
     /// 3. 创建硬链接
-    fn link(&self, _name: &str, _inode: Arc<dyn VfsInode>) -> bool {
+    fn link(&self, name: &str, inode: Arc<dyn VfsInode>) -> bool {
         false
     }
     fn set_time(&self, _atime: &TimeSpec, _mtime: &TimeSpec) -> isize {
@@ -327,9 +362,6 @@ pub trait VfsInode: Send + Sync {
     /// 调试用：返回具体实现类型的名字
     fn type_name(&self) -> &'static str {
         core::any::type_name::<Self>()
-    }
-    fn filesystem_kind(&self) -> &'static str {
-        self.type_name()
     }
     fn statfs(&self) -> Statfs {
         // 默认实现：返回全 0 或者一个安全的默认值

@@ -124,13 +124,12 @@ impl VfsInode for Ext4Inode {
 
     /// 带页缓存的读取
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        if self.is_symlink() && disk_inode.size() <= 60 {
+        if self.is_symlink() && self.size.load(Ordering::Relaxed) <= 60 {
             return self.raw_read_at(offset, buf);
         }
 
         let page_size = crate::PAGE_SIZE;
-        let file_size = self.get_size();
+        let file_size = self.size.load(Ordering::Relaxed) as usize;
         if buf.is_empty() || offset >= file_size { return 0; }
         let read_end = core::cmp::min(offset + buf.len(), file_size);
         let start_page = offset / page_size;
@@ -391,27 +390,6 @@ impl VfsInode for Ext4Inode {
     fn dec_link_count(&self) -> bool {
         self.fs.decrease_link_count(self.inode_id);
         true
-    }
-
-    fn inc_link_count(&self) -> bool {
-        self.fs.adjust_link_count(self.inode_id, 1);
-        true
-    }
-
-    fn link(&self, name: &str, inode: Arc<dyn VfsInode>) -> bool {
-        if !self.is_dir() || inode.type_name() != self.type_name() || self.find(name).is_some() {
-            return false;
-        }
-
-        let file_type = match inode.get_stat().mode & 0o170000 {
-            0o100000 => 1,
-            0o120000 => 7,
-            _ => return false,
-        };
-        if !self.add_dir_entry(name, inode.ino() as u32, file_type) {
-            return false;
-        }
-        inode.inc_link_count()
     }
 
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
