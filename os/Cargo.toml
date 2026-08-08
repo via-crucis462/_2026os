@@ -18,7 +18,7 @@ smoltcp = { version = "0.11", default-features = false, features = ["alloc", "lo
 buddy_system_allocator = "0.6"
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 spin = "0.9.8"
-log = "0.4"
+log = { version = "0.4", features = ["max_level_off"] }
 xmas-elf = "0.7.0"
 zerocopy = { version = "0.8", features = ["derive"] }
 # pci = "0.0.1" # 已经导入项目中并按规范复制许可证等

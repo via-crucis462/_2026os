@@ -160,6 +160,18 @@ impl super::VfsInode for TmpfsFileInode {
         let page_cache = crate::mm::mmap::PageCache::from_frame(frame.clone());
         Some(Arc::new(page_cache))
     }
+    fn get_file_page(
+        &self,
+        page_offset: usize,
+    ) -> Option<Arc<crate::mm::mmap::PageCache>> {
+        if let Some(frame) = self.pages.lock().get(&page_offset).cloned() {
+            return Some(Arc::new(crate::mm::mmap::PageCache::from_frame(frame)));
+        }
+        // A sparse tmpfs hole is logically zero-filled.  Do not insert a
+        // synthetic page into the file just to service an executable read.
+        let frame = frame_alloc(Page4K)?;
+        Some(Arc::new(crate::mm::mmap::PageCache::from_frame(frame)))
+    }
     fn ino(&self) -> u64 {
         self.stat.lock().ino
     }

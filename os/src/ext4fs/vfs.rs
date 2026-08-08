@@ -122,6 +122,34 @@ impl VfsInode for Ext4Inode {
             ).0)
     }
 
+    fn get_file_page(&self, logical_block: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
+        let _block_map_guard = self.block_map_lock.lock();
+        if self.is_symlink() && self.fs.get_disk_inode(self.inode_id).size() <= 60 {
+            return None;
+        }
+        if let Some(cache) = crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
+            .get_cached_file_page(self.inode_id as u64, logical_block)
+        {
+            return Some(cache);
+        }
+        let physical_block = self.find_physical_block(logical_block as u32);
+        if physical_block == 0 {
+            // A read-only executable mapping must not allocate an ext4 block
+            // merely because a sparse-file page is faulted in.
+            return None;
+        }
+        Some(
+            crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
+                .get_page_cache(
+                    self.inode_id as u64,
+                    logical_block,
+                    physical_block as u64,
+                    self.fs.block_dev.clone(),
+                )
+                .0,
+        )
+    }
+
     /// 带页缓存的读取
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         if self.is_symlink() && self.size.load(Ordering::Relaxed) <= 60 {

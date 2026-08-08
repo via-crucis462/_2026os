@@ -62,6 +62,19 @@ pub trait File: Send + Sync {
     fn read_at(&self, offset: usize, buf: UserBuffer) -> usize {
         self.raw_read_at(offset, buf)
     }
+    /// Read into a kernel-owned byte slice.  Executable loading only needs a
+    /// small ELF header/program-header buffer and must not allocate user pages
+    /// merely to inspect it.
+    fn read_kernel_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        // The default path deliberately bypasses the user-page translation
+        // layer.  Concrete regular files can still override this to use their
+        // page cache (OSInode does); devices and pipes retain their existing
+        // raw-read semantics.
+        if buf.is_empty() {
+            return 0;
+        }
+        self.raw_read_at(offset, unsafe { UserBuffer::from_kernel_slice(buf) })
+    }
     /// 带页缓存的写入。默认直接调用 raw_write_at。
     fn write_at(&self, offset: usize, buf: UserBuffer) -> usize {
         self.raw_write_at(offset, buf)
@@ -125,6 +138,12 @@ pub trait File: Send + Sync {
     // 这里是默认实现，需要为不同文件重写
     fn get_shared_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         error!("File type does not support shared pages: page_offset={}", page_offset);
+        None
+    }
+    /// Look up a file page without allocating a block for a sparse hole.
+    /// This is used by executable MAP_PRIVATE mappings; ordinary MAP_SHARED
+    /// writes continue to use `get_shared_page`, which may allocate on write.
+    fn get_file_page(&self, _page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         None
     }
     /// ioctl 设备控制，默认返回 ENOTTY（不支持的 ioctl 请求）
@@ -374,6 +393,11 @@ pub trait VfsInode: Send + Sync {
     }
     fn get_shared_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         error!("VFS inode does not provide a physical block for page {}", page_offset);
+        None
+    }
+    /// Read-only page-cache lookup.  Unlike `get_shared_page`, this must not
+    /// allocate a physical file block when the requested page is a hole.
+    fn get_file_page(&self, _page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         None
     }
     /// 返回该 inode 的唯一标识号（跨所有文件系统唯一）

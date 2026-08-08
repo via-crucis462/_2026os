@@ -53,6 +53,23 @@ fn parse_shebang(data: &[u8]) -> Result<Option<(String, Option<String>)>, isize>
 	)))
 }
 
+/// Only the first line is relevant for script dispatch.  Keep this separate
+/// from ELF loading so exec never needs a whole-file staging buffer.
+fn read_exec_prefix(file: &dyn File, limit: usize) -> Vec<u8> {
+    let size = usize::try_from(file.get_stat().size).unwrap_or(0);
+    let mut data = vec![0; size.min(limit)];
+    let mut offset = 0;
+    while offset < data.len() {
+        let read = file.read_kernel_at(offset, &mut data[offset..]);
+        if read == 0 || read > data.len() - offset {
+            break;
+        }
+        offset += read;
+    }
+    data.truncate(offset);
+    data
+}
+
 
 impl TaskStruct {
 	pub fn do_exec(
@@ -127,6 +144,7 @@ impl TaskStruct {
 			return Self::exec_open_error(cwd, path.as_str());
 		};
 		let mut executable_path = app_inode.get_dentry().get_full_path();
+		let mut executable_file: Arc<dyn File + Send + Sync> = app_inode.clone();
 		{
 				let stat = app_inode.inode().get_stat();
 			let is_dir = (stat.mode & 0o170000) == 0o040000;
@@ -139,8 +157,8 @@ impl TaskStruct {
 
 			debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode().get_size());
         let app_name = app_inode.get_dentry().name();
-		let mut elf_data = app_inode.read_all();
-		let shebang = match parse_shebang(&elf_data) {
+		let mut executable_prefix = read_exec_prefix(app_inode.as_ref(), 256);
+		let shebang = match parse_shebang(&executable_prefix) {
 			Ok(shebang) => shebang,
 			Err(error) => return error,
 		};
@@ -172,29 +190,33 @@ impl TaskStruct {
 			new_args.push(path.clone());
 			new_args.extend(args.into_iter().skip(1));
 			args = new_args;
-			elf_data = inode.read_all();
-			if elf_data.len() < 4 || &elf_data[0..4] != b"\x7fELF" {
+			let interpreter_prefix = read_exec_prefix(inode.as_ref(), 4);
+			if interpreter_prefix.len() < 4 || &interpreter_prefix[0..4] != b"\x7fELF" {
 				warn!("[kernel] sys_exec: script interpreter '{}' is not an ELF executable", interpreter);
 				return Errno::ENOEXEC.as_isize();
 			}
+			executable_file = inode;
+			executable_prefix = interpreter_prefix;
 			let inner = self.inner_exclusive_access();
 			info!("[kernel] sys_exec: interpreter detour success. Current process PID: {}, basic children count: {}", self.getpid(), inner.children.len());
 		}
 
-		if elf_data.len() < 4 || &elf_data[0..4] != b"\x7fELF" {
+		if executable_prefix.len() < 4 || &executable_prefix[0..4] != b"\x7fELF" {
 			return Errno::ENOEXEC.as_isize();
 		}
 		for (index, arg) in args.iter().enumerate() {
 			info!("[kernel] sys_exec: arg[{}] = '{}'", index, arg);
 		}
-		self.install_exec_image(
+		if let Err(error) = self.install_exec_image(
 			self.clone(),
-			elf_data.as_slice(),
+			executable_file,
 			args,
 			envs,
 			executable_path,
 			false,
-		);
+		) {
+			return error;
+		}
 		#[cfg(target_arch = "loongarch64")]
 		unsafe {
 			core::arch::asm!("ibar 0");
@@ -259,12 +281,12 @@ impl TaskStruct {
 	fn install_exec_image(
 		self: &Arc<Self>,
 		caller_task: Arc<TaskControlBlock>,
-		elf_data: &[u8],
+		elf_file: Arc<dyn File + Send + Sync>,
 		args: Vec<String>,
 		envs: Vec<String>,
 		executable_path: String,
 		on_main_hart: bool,
-	) {
+	) -> Result<(), isize> {
 
 		const AT_BASE: usize = 7;
 		const AT_PHDR: usize = 3;
@@ -286,7 +308,7 @@ impl TaskStruct {
 		// guard 会在函数返回时自动释放
 		let exec_guard: ExecUpdateGuard = match caller_task.wait_exec_update_lock() {
 			Ok(guard) => guard,
-			Err(()) => return,
+			Err(()) => return Err(Errno::EINTR.as_isize()),
 		};
 
 		let cwd = self.inner_exclusive_access().fs.exclusive_access().get_pwd();
@@ -301,13 +323,14 @@ impl TaskStruct {
 			phnum,
 			phent,
 			interp_base,
-		)) = MemorySet::from_elf_with_interp_loader(elf_data, |interp_path| {
+		)) = MemorySet::from_elf_file_with_interp_loader(elf_file, |interp_path| {
 			open_file(cwd.clone(), interp_path, OpenFlags::RDONLY, 0).map(|inode| {
 				has_interp = true;
-				inode.read_all()
+				let file: Arc<dyn File + Send + Sync> = inode;
+				file
 			})
 		}) else {
-			return;
+			return Err(Errno::ENOEXEC.as_isize());
 		};
 
 		#[cfg(target_arch = "riscv64")]
@@ -446,7 +469,7 @@ impl TaskStruct {
 		for sibling in siblings {
 			while tid2task(sibling.gettid()).is_some() {
 				if crate::process::signal::has_pending_sigkill(&caller_task) {
-					return;
+					return Err(Errno::EINTR.as_isize());
 				}
 				crate::process::suspend_current_and_run_next();
 			}
@@ -457,7 +480,7 @@ impl TaskStruct {
 			// 在一个临界区内清空 mm/signal 前再次检查 SIGKILL，
 			// 避免信号被吞掉。
 			if inner_has_pending_sigkill(&inner) {
-				return;
+				return Err(Errno::EINTR.as_isize());
 			}
 			#[cfg(target_arch = "riscv64")]
 			if let Some(old_mm) = inner.mm.as_ref() {
@@ -507,5 +530,6 @@ impl TaskStruct {
 		if let Some(completion) = vfork_completion {
 			completion.complete();
 		}
+		Ok(())
 	}
 }

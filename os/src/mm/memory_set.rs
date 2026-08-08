@@ -16,6 +16,7 @@ use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
@@ -73,6 +74,312 @@ fn futex_mapping_id_alloc() -> u64 {
     let id = NEXT_FUTEX_MAPPING_ID.fetch_add(1, Ordering::Relaxed);
     assert_ne!(id, 0, "futex mapping identity space exhausted");
     id
+}
+
+const ELF64_EHDR_SIZE: usize = 64;
+const ELF64_PHDR_SIZE: usize = 56;
+const ELF_MAX_PROGRAM_HEADERS: usize = 1024;
+const ELF_MAX_INTERP_PATH: usize = 4096;
+
+const ELF_ET_EXEC: u16 = 2;
+const ELF_ET_DYN: u16 = 3;
+const ELF_PT_LOAD: u32 = 1;
+const ELF_PT_INTERP: u32 = 3;
+const ELF_PT_PHDR: u32 = 6;
+const ELF_PF_X: u32 = 1;
+const ELF_PF_W: u32 = 2;
+const ELF_PF_R: u32 = 4;
+
+#[derive(Clone)]
+struct ElfLoadSegment {
+    offset: usize,
+    vaddr: usize,
+    filesz: usize,
+    memsz: usize,
+    align: usize,
+    permission: MapPermission,
+}
+
+struct ParsedElf {
+    is_shared_object: bool,
+    entry: usize,
+    phnum: usize,
+    phent: usize,
+    loads: Vec<ElfLoadSegment>,
+    interp: Option<String>,
+    phdr_vaddr: Option<usize>,
+}
+
+fn elf_u16(input: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes([*input.get(offset)?, *input.get(offset + 1)?]))
+}
+
+fn elf_u32(input: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes([
+        *input.get(offset)?,
+        *input.get(offset + 1)?,
+        *input.get(offset + 2)?,
+        *input.get(offset + 3)?,
+    ]))
+}
+
+fn elf_u64(input: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_le_bytes([
+        *input.get(offset)?,
+        *input.get(offset + 1)?,
+        *input.get(offset + 2)?,
+        *input.get(offset + 3)?,
+        *input.get(offset + 4)?,
+        *input.get(offset + 5)?,
+        *input.get(offset + 6)?,
+        *input.get(offset + 7)?,
+    ]))
+}
+
+fn read_file_exact(file: &(dyn File + Send + Sync), mut offset: usize, mut buf: &mut [u8]) -> bool {
+    while !buf.is_empty() {
+        let read = file.read_kernel_at(offset, buf);
+        if read == 0 || read > buf.len() {
+            return false;
+        }
+        let Some(next_offset) = offset.checked_add(read) else {
+            return false;
+        };
+        offset = next_offset;
+        buf = &mut buf[read..];
+    }
+    true
+}
+
+fn elf_file_size(file: &(dyn File + Send + Sync)) -> Option<usize> {
+    usize::try_from(file.get_stat().size).ok()
+}
+
+fn elf_load_align(raw_align: usize) -> Option<usize> {
+    match raw_align {
+        0 | 1 => Some(PAGE_SIZE),
+        align if align.is_power_of_two() => Some(align.max(PAGE_SIZE)),
+        _ => None,
+    }
+}
+
+fn elf_align_up(value: usize, align: usize) -> Option<usize> {
+    value.checked_add(align - 1).map(|value| value & !(align - 1))
+}
+
+/// Parse only ELF64 metadata from a regular file.  Segment bytes remain in
+/// the inode/page cache and are never copied into a temporary ELF buffer.
+fn parse_elf64_file(file: &(dyn File + Send + Sync)) -> Option<ParsedElf> {
+    let file_size = elf_file_size(file)?;
+    if file_size < ELF64_EHDR_SIZE {
+        return None;
+    }
+
+    let mut ehdr = [0u8; ELF64_EHDR_SIZE];
+    if !read_file_exact(file, 0, &mut ehdr) {
+        return None;
+    }
+    if ehdr[..4] != [0x7f, b'E', b'L', b'F']
+        || ehdr[4] != 2
+        || ehdr[5] != 1
+        || ehdr[6] != 1
+        || elf_u32(&ehdr, 20)? != 1
+    {
+        return None;
+    }
+    let machine = elf_u16(&ehdr, 18)?;
+    #[cfg(target_arch = "riscv64")]
+    if machine != 0x00f3 {
+        return None;
+    }
+    #[cfg(target_arch = "loongarch64")]
+    if machine != 0x0102 {
+        return None;
+    }
+
+    let elf_type = elf_u16(&ehdr, 16)?;
+    if elf_type != ELF_ET_EXEC && elf_type != ELF_ET_DYN {
+        return None;
+    }
+    if elf_u16(&ehdr, 52)? as usize != ELF64_EHDR_SIZE {
+        return None;
+    }
+    let phent = elf_u16(&ehdr, 54)? as usize;
+    let phnum = elf_u16(&ehdr, 56)? as usize;
+    if phent != ELF64_PHDR_SIZE || phnum == 0 || phnum > ELF_MAX_PROGRAM_HEADERS {
+        return None;
+    }
+    let phoff = usize::try_from(elf_u64(&ehdr, 32)?).ok()?;
+    let phdr_bytes = phnum.checked_mul(ELF64_PHDR_SIZE)?;
+    let phend = phoff.checked_add(phdr_bytes)?;
+    if phoff < ELF64_EHDR_SIZE || phoff % 8 != 0 || phend > file_size {
+        return None;
+    }
+
+    let mut phdrs = vec![0u8; phdr_bytes];
+    if !read_file_exact(file, phoff, &mut phdrs) {
+        return None;
+    }
+
+    let mut loads = Vec::new();
+    let mut interp = None;
+    // Keep an explicitly declared PT_PHDR address until all PT_LOAD entries
+    // have been parsed. The table's runtime address is only trustworthy when
+    // its file bytes are covered by the same LOAD mapping.
+    let mut declared_phdr_vaddr = None;
+    for phdr in phdrs.chunks_exact(ELF64_PHDR_SIZE) {
+        let typ = elf_u32(phdr, 0)?;
+        let flags = elf_u32(phdr, 4)?;
+        let offset = usize::try_from(elf_u64(phdr, 8)?).ok()?;
+        let vaddr = usize::try_from(elf_u64(phdr, 16)?).ok()?;
+        let filesz = usize::try_from(elf_u64(phdr, 32)?).ok()?;
+        let memsz = usize::try_from(elf_u64(phdr, 40)?).ok()?;
+        let align = usize::try_from(elf_u64(phdr, 48)?).ok()?;
+
+        match typ {
+            ELF_PT_LOAD => {
+                // ELF requires p_vaddr and p_offset to have the same
+                // congruence modulo p_align (when p_align is meaningful).
+                // The loader additionally needs page congruence because its
+                // file backing is indexed by 4 KiB page offsets.
+                if align > 1 && vaddr % align != offset % align {
+                    return None;
+                }
+                if filesz > memsz
+                    || offset.checked_add(filesz).map_or(true, |end| end > file_size)
+                    || vaddr % PAGE_SIZE != offset % PAGE_SIZE
+                    || elf_load_align(align).is_none()
+                    || vaddr.checked_add(memsz).is_none()
+                {
+                    return None;
+                }
+                let mut permission = MapPermission::U;
+                if flags & ELF_PF_R != 0 {
+                    permission |= MapPermission::R;
+                }
+                if flags & ELF_PF_W != 0 {
+                    permission |= MapPermission::W;
+                }
+                if flags & ELF_PF_X != 0 {
+                    permission |= MapPermission::X;
+                }
+                loads.push(ElfLoadSegment {
+                    offset,
+                    vaddr,
+                    filesz,
+                    memsz,
+                    align: elf_load_align(align)?,
+                    permission,
+                });
+            }
+            ELF_PT_INTERP => {
+                if interp.is_some()
+                    || filesz == 0
+                    || filesz > memsz
+                    || filesz > ELF_MAX_INTERP_PATH
+                    || offset.checked_add(filesz).map_or(true, |end| end > file_size)
+                {
+                    return None;
+                }
+                let mut path = vec![0u8; filesz];
+                if !read_file_exact(file, offset, &mut path) {
+                    return None;
+                }
+                let nul = path.iter().position(|byte| *byte == 0)?;
+                if nul == 0 {
+                    return None;
+                }
+                interp = Some(String::from(core::str::from_utf8(&path[..nul]).ok()?));
+            }
+            ELF_PT_PHDR => {
+                let Some(file_end) = offset.checked_add(filesz) else {
+                    return None;
+                };
+                if declared_phdr_vaddr.is_some()
+                    || memsz < phdr_bytes
+                    || offset > phoff
+                    || phend > file_end
+                    || file_end > file_size
+                    || vaddr.checked_add(memsz).is_none()
+                {
+                    return None;
+                }
+                // p_vaddr names the beginning of the PT_PHDR segment. The
+                // table itself may begin later if the segment covers a wider
+                // file range.
+                declared_phdr_vaddr = Some(vaddr.checked_add(phoff - offset)?);
+            }
+            _ => {}
+        }
+    }
+
+    let entry = usize::try_from(elf_u64(&ehdr, 24)?).ok()?;
+    if loads.is_empty()
+        || !loads.iter().any(|segment| {
+            segment.permission.contains(MapPermission::X)
+                && segment.vaddr <= entry
+                && segment
+                    .vaddr
+                    .checked_add(segment.memsz)
+                    .is_some_and(|end| entry < end)
+        })
+    {
+        return None;
+    }
+
+    let mut mapped_ranges: Vec<(usize, usize)> = loads
+        .iter()
+        .filter(|segment| segment.memsz != 0)
+        .map(|segment| {
+            let start = segment.vaddr & !(PAGE_SIZE - 1);
+            let end = elf_align_up(segment.vaddr.checked_add(segment.memsz)?, PAGE_SIZE)?;
+            Some((start, end))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    mapped_ranges.sort_unstable();
+    if mapped_ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+        return None;
+    }
+
+    let file_mapped_phdr_vaddr = loads.iter().find_map(|segment| {
+        let segment_file_end = segment.offset.checked_add(segment.filesz)?;
+        if segment.offset <= phoff && phend <= segment_file_end {
+            segment.vaddr.checked_add(phoff - segment.offset)
+        } else {
+            None
+        }
+    });
+    // A PT_PHDR declaration must agree with the actual file-to-VA relation of
+    // a PT_LOAD. Otherwise AT_PHDR could point into BSS (or an unrelated
+    // page) even though the ELF metadata itself looks superficially valid.
+    if let Some(declared) = declared_phdr_vaddr {
+        if file_mapped_phdr_vaddr != Some(declared) {
+            return None;
+        }
+    }
+    let phdr_vaddr = declared_phdr_vaddr.or(file_mapped_phdr_vaddr);
+
+    if let Some(phdr_addr) = phdr_vaddr {
+        let phdr_end = phdr_addr.checked_add(phdr_bytes)?;
+        if !loads.iter().any(|segment| {
+            segment.vaddr <= phdr_addr
+                && phdr_end <= segment.vaddr.checked_add(segment.memsz).unwrap_or(0)
+                && segment.offset <= phoff
+                && phend <= segment.offset.checked_add(segment.filesz).unwrap_or(0)
+        }) {
+            return None;
+        }
+    }
+
+    Some(ParsedElf {
+        is_shared_object: elf_type == ELF_ET_DYN,
+        entry,
+        phnum,
+        phent,
+        loads,
+        interp,
+        phdr_vaddr,
+    })
 }
 
 /// Invalidate shared kernel mappings under every active user ASID.
@@ -806,6 +1113,326 @@ impl MemorySet {
         Option<usize>,
     )> {
         Self::from_elf_with_interp_loader(elf_data, |_| None)
+    }
+
+    /// Build an ELF address space directly from regular files.  Only ELF
+    /// metadata is read into kernel memory; PT_LOAD pages are faulted from the
+    /// file page cache and private writable pages use COW.
+    pub fn from_elf_file_with_interp_loader<F>(
+        main_file: Arc<dyn File + Send + Sync>,
+        mut load_interp: F,
+    ) -> Option<(
+        Self,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        Option<usize>,
+    )>
+    where
+        F: FnMut(&str) -> Option<Arc<dyn File + Send + Sync>>,
+    {
+        let main_elf = parse_elf64_file(main_file.as_ref())?;
+        let main_load_align = main_elf
+            .loads
+            .iter()
+            .map(|segment| segment.align)
+            .max()
+            .unwrap_or(PAGE_SIZE);
+        let main_load_bias = if main_elf.is_shared_object {
+            elf_align_up(USER_APP_BASE, main_load_align)?
+        } else {
+            OFFSET_FOR_USER_APP
+        };
+
+        let memory_set = Self::new_bare();
+        memory_set.map_user_trampoline();
+
+        let mut max_end_vpn = VirtPageNum(0);
+        let mut main_max_end_vpn = VirtPageNum(0);
+        let phdr_addr = match main_elf.phdr_vaddr {
+            Some(address) => address.checked_add(main_load_bias)?,
+            None => 0,
+        };
+        let phnum = main_elf.phnum;
+        let phent = main_elf.phent;
+        let main_entry = main_elf.entry.checked_add(main_load_bias)?;
+        if main_entry >= USER_TRAMPOLINE {
+            return None;
+        }
+        let mut final_entry = main_entry;
+        let mut interp_base = None;
+
+        for segment in &main_elf.loads {
+            let start = segment.vaddr.checked_add(main_load_bias)?;
+            let area_end_vpn = memory_set.map_elf_file_segment(
+                main_file.clone(),
+                start,
+                segment.offset,
+                segment.filesz,
+                segment.memsz,
+                segment.permission,
+            )?;
+            max_end_vpn = max_end_vpn.max(area_end_vpn);
+            main_max_end_vpn = main_max_end_vpn.max(area_end_vpn);
+
+        }
+
+        if let Some(interp_path) = main_elf.interp.as_deref() {
+            let Some(interp_file) = load_interp(interp_path) else {
+                // A PT_INTERP image cannot be started without its dynamic
+                // linker. Falling back to the main entry would skip all
+                // relocations and produce an apparently successful but
+                // unusable execve.
+                warn!(
+                    "MemorySet::from_elf_file: PT_INTERP loader '{}' not found",
+                    interp_path
+                );
+                return None;
+            };
+            let interp_elf = parse_elf64_file(interp_file.as_ref())?;
+            // The interpreter is itself relocated at a runtime base. An
+            // ET_EXEC interpreter requires a fixed layout and cannot be
+            // treated as position-independent here.
+            if !interp_elf.is_shared_object || interp_elf.interp.is_some() {
+                warn!(
+                    "MemorySet::from_elf_file: invalid PT_INTERP image '{}'",
+                    interp_path
+                );
+                return None;
+            }
+            let interp_load_align = interp_elf
+                .loads
+                .iter()
+                .map(|segment| segment.align)
+                .max()
+                .unwrap_or(PAGE_SIZE);
+            const GUARD_PAGES: usize = 10;
+            let interp_runtime_base = main_max_end_vpn
+                .0
+                .checked_mul(PAGE_SIZE)?
+                .checked_add(GUARD_PAGES * PAGE_SIZE)?;
+            memory_set.push_guard_area(main_max_end_vpn.0 * PAGE_SIZE, GUARD_PAGES);
+            let interp_load_bias = elf_align_up(interp_runtime_base, interp_load_align)?;
+            let candidate_entry = interp_elf.entry.checked_add(interp_load_bias)?;
+            if candidate_entry >= USER_TRAMPOLINE {
+                return None;
+            }
+            interp_base = Some(interp_load_bias);
+            final_entry = candidate_entry;
+            for segment in &interp_elf.loads {
+                let start = segment.vaddr.checked_add(interp_load_bias)?;
+                let area_end_vpn = memory_set.map_elf_file_segment(
+                    interp_file.clone(),
+                    start,
+                    segment.offset,
+                    segment.filesz,
+                    segment.memsz,
+                    segment.permission,
+                )?;
+                max_end_vpn = max_end_vpn.max(area_end_vpn);
+            }
+            info!(
+                "MemorySet::from_elf_file: PT_INTERP loaded '{}', entry switched {:#x} -> {:#x}",
+                interp_path, main_entry, final_entry
+            );
+        }
+
+        // Main/interpreter segments -> guard -> stack -> guard -> heap.
+        const GUARD_PAGES: usize = 10;
+        let user_stack_bottom = max_end_vpn
+            .0
+            .checked_mul(PAGE_SIZE)?
+            .checked_add(GUARD_PAGES * PAGE_SIZE)?;
+        memory_set.push_guard_area(max_end_vpn.0 * PAGE_SIZE, GUARD_PAGES);
+        let user_stack_top = user_stack_bottom.checked_add(USER_STACK_SIZE)?;
+        if user_stack_top > USER_TRAMPOLINE {
+            return None;
+        }
+        let stack_area = MapArea::new(
+            user_stack_bottom.into(),
+            user_stack_top.into(),
+            MapType::Framed,
+            MapPermission::R | MapPermission::W | MapPermission::U,
+            PageSize::Page4K,
+        );
+        memory_set.areas.write().insert(
+            stack_area.vpn_range.get_start(),
+            Arc::new(VersionedArea::new(stack_area)),
+        );
+
+        let heap_bottom = user_stack_top.checked_add(GUARD_PAGES * PAGE_SIZE)?;
+        if heap_bottom >= USER_TRAMPOLINE {
+            return None;
+        }
+        memory_set.push_guard_area(user_stack_top, GUARD_PAGES);
+        let heap_bottom_vpn = VirtAddr::from(heap_bottom).std_ceil();
+        memory_set.push(
+            MapArea::new(
+                heap_bottom_vpn.into(),
+                heap_bottom_vpn.into(),
+                MapType::Framed,
+                MapPermission::R | MapPermission::W | MapPermission::U,
+                PageSize::Page4K,
+            ),
+            None,
+            heap_bottom,
+        );
+        memory_set
+            .start_brk
+            .store(heap_bottom as u64, Ordering::Relaxed);
+        memory_set.brk.store(heap_bottom as u64, Ordering::Relaxed);
+
+        #[cfg(target_arch = "riscv64")]
+        memory_set.install_kernel_space();
+
+        Some((
+            memory_set,
+            heap_bottom,
+            user_stack_top,
+            final_entry,
+            main_entry,
+            phdr_addr,
+            phnum,
+            phent,
+            interp_base,
+        ))
+    }
+
+    /// Insert the non-overlapping VMAs that implement a single PT_LOAD.
+    /// Full file pages can be shared through the page cache.  The final
+    /// partial page is private and explicitly zero-filled after p_filesz;
+    /// subsequent BSS pages are lazy anonymous frames.
+    fn map_elf_file_segment(
+        &self,
+        file: Arc<dyn File + Send + Sync>,
+        start: usize,
+        file_offset: usize,
+        file_size: usize,
+        mem_size: usize,
+        permission: MapPermission,
+    ) -> Option<VirtPageNum> {
+        if file_size > mem_size || start % PAGE_SIZE != file_offset % PAGE_SIZE {
+            return None;
+        }
+        if start >= USER_TRAMPOLINE || mem_size > USER_TRAMPOLINE - start {
+            return None;
+        }
+        if mem_size == 0 {
+            // There is no VMA to insert for a zero-sized PT_LOAD. Returning
+            // zero keeps it out of the image end calculation.
+            return Some(VirtPageNum(0));
+        }
+
+        let page_mask = PAGE_SIZE - 1;
+        let map_start = start & !page_mask;
+        let file_end = start.checked_add(file_size)?;
+        let mem_end = start.checked_add(mem_size)?;
+        let segment_end = elf_align_up(mem_end, PAGE_SIZE)?;
+        if segment_end > USER_TRAMPOLINE {
+            return None;
+        }
+        let base_file_page = file_offset / PAGE_SIZE;
+
+        if file_size != 0 {
+            let full_file_end = file_end & !page_mask;
+            if map_start < full_file_end {
+                self.insert_elf_file_area(
+                    map_start,
+                    full_file_end,
+                    permission,
+                    file.clone(),
+                    base_file_page,
+                    true,
+                    None,
+                )?;
+            }
+            if file_end & page_mask != 0 {
+                let tail_start = full_file_end;
+                let tail_file_page = base_file_page.checked_add((tail_start - map_start) / PAGE_SIZE)?;
+                self.insert_elf_file_area(
+                    tail_start,
+                    tail_start.checked_add(PAGE_SIZE)?,
+                    permission,
+                    file,
+                    tail_file_page,
+                    false,
+                    Some(file_end),
+                )?;
+            }
+        }
+
+        let bss_start = if file_size == 0 {
+            map_start
+        } else {
+            elf_align_up(file_end, PAGE_SIZE)?
+        };
+        if bss_start < segment_end {
+            self.insert_elf_anonymous_area(bss_start, segment_end, permission)?;
+        }
+        Some(VirtAddr::from(mem_end).std_ceil())
+    }
+
+    fn insert_elf_file_area(
+        &self,
+        start: usize,
+        end: usize,
+        permission: MapPermission,
+        file: Arc<dyn File + Send + Sync>,
+        page_offset: usize,
+        page_cache_cow: bool,
+        file_zero_from: Option<usize>,
+    ) -> Option<()> {
+        if start >= end || start % PAGE_SIZE != 0 || end % PAGE_SIZE != 0 {
+            return None;
+        }
+        let mut areas = self.areas.write();
+        if Self::has_conflict_locked(&areas, start, end - start) {
+            warn!("MemorySet::from_elf_file: overlapping PT_LOAD VMA");
+            return None;
+        }
+        let mut area = MapArea::new(
+            start.into(),
+            end.into(),
+            MapType::File,
+            permission,
+            PageSize::Page4K,
+        );
+        area.backing_file = Some((file, page_offset));
+        area.page_cache_cow = page_cache_cow;
+        area.file_zero_from = file_zero_from;
+        let key = area.vpn_range.get_start();
+        areas.insert(key, Arc::new(VersionedArea::new(area)));
+        Some(())
+    }
+
+    fn insert_elf_anonymous_area(
+        &self,
+        start: usize,
+        end: usize,
+        permission: MapPermission,
+    ) -> Option<()> {
+        if start >= end || start % PAGE_SIZE != 0 || end % PAGE_SIZE != 0 {
+            return None;
+        }
+        let mut areas = self.areas.write();
+        if Self::has_conflict_locked(&areas, start, end - start) {
+            warn!("MemorySet::from_elf_file: overlapping PT_LOAD BSS VMA");
+            return None;
+        }
+        let area = MapArea::new(
+            start.into(),
+            end.into(),
+            MapType::Framed,
+            permission,
+            PageSize::Page4K,
+        );
+        let key = area.vpn_range.get_start();
+        areas.insert(key, Arc::new(VersionedArea::new(area)));
+        Some(())
     }
 
     /// Build address space from a main ELF and an optional interpreter loader.
@@ -1827,7 +2454,7 @@ impl MemorySet {
             let key = area.vpn_range.get_start();
             areas.insert(key, Arc::new(VersionedArea::new(area)));
         } else {
-            let file = file_opt.clone().unwrap();
+        let file = file_opt.clone().unwrap();
             let mut area = MapArea::new(
                 VirtAddr::from(start_va),
                 VirtAddr::from(start_va + length),
@@ -2151,7 +2778,6 @@ impl MemorySet {
             permission |= MapPermission::U;
         }
 
-        let pte_flags = PTEFlags::from_bits(permission.bits).unwrap();
         let mut covered_until = start_vpn;
         let mut affected: Vec<(VirtPageNum, Arc<VersionedArea>)> = Vec::new();
         let mut permissions_tightened = false;
@@ -2224,6 +2850,7 @@ impl MemorySet {
             let area_end = area.vpn_range.get_end();
             if area_start >= start_vpn && area_end <= end_vpn {
                 area.map_perm = permission;
+                let pte_flags = PTEFlags::from_bits(area.initial_pte_permission().bits).unwrap();
                 let step = area.page_size.num_pages();
                 let mut vpn = area_start;
                 while vpn < area_end {
@@ -2549,6 +3176,14 @@ pub struct MapArea {
     pub is_locked: bool,
     // 记录文件信息和页偏移，其中页偏移的语义为映射起始页在文件中的页偏移量
     pub backing_file: Option<(Arc<dyn File + Send + Sync>, usize)>,
+    /// A private file mapping which initially maps clean page-cache frames.
+    /// Writable pages are deliberately installed read-only and become private
+    /// through the normal COW fault path on their first store.
+    page_cache_cow: bool,
+    /// ELF may end file data in the middle of a page and extend the segment
+    /// with BSS.  Such a tail is privately populated, then cleared starting
+    /// at this virtual byte address.
+    file_zero_from: Option<usize>,
     /// 匿名共享映射登记，懒分配，用于子进程继承父进程的共享匿名映射
     ///
     /// 每次共享匿名映射缺页先查该表，如果存在则直接克隆 FrameTracker，
@@ -2582,6 +3217,8 @@ impl MapArea {
             is_locked: false,
             page_size,
             backing_file: None,
+            page_cache_cow: false,
+            file_zero_from: None,
             anonymous_shared_frames: None,
             futex_mapping_id: futex_mapping_id_alloc(),
             futex_mapping_start: start_vpn,
@@ -2622,6 +3259,8 @@ impl MapArea {
             is_shared: another.is_shared,
             is_locked: another.is_locked,
             backing_file: another.backing_file.clone(),
+            page_cache_cow: another.page_cache_cow,
+            file_zero_from: another.file_zero_from,
             anonymous_shared_frames: another.anonymous_shared_frames.clone(),
             futex_mapping_id: another.futex_mapping_id,
             futex_mapping_start: another.futex_mapping_start,
@@ -2685,6 +3324,8 @@ impl MapArea {
             is_shared: self.is_shared,
             is_locked: self.is_locked,
             backing_file,
+            page_cache_cow: self.page_cache_cow,
+            file_zero_from: self.file_zero_from,
             anonymous_shared_frames: self.anonymous_shared_frames.clone(),
             futex_mapping_id: self.futex_mapping_id,
             futex_mapping_start: self.futex_mapping_start,
@@ -2737,7 +3378,7 @@ impl MapArea {
                 }
             }
             MapType::File => {
-                return if self.is_shared {
+                return if self.is_shared || self.page_cache_cow {
                     self.try_map_shared_file_page(page_table, vpn, page_size)
                 } else {
                     self.try_map_private_file_pages(page_table, vpn, page_size)
@@ -2750,7 +3391,7 @@ impl MapArea {
                 return false;
             }
         }
-        let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+        let pte_flags = PTEFlags::from_bits(self.initial_pte_permission().bits).unwrap();
         #[cfg(target_arch = "loongarch64")]
         // la64在内核态不需要用页表
         if self.map_type != MapType::Identical && self.map_type != MapType::Windowed {
@@ -2785,20 +3426,40 @@ impl MapArea {
         let Some(file_page_offset) = base_page_offset.checked_add(relative_page) else {
             return false;
         };
-        let file_end_page_offset = VirtAddr::from(file.get_stat().size as usize).std_ceil().0;
+        let Some(file_size) = usize::try_from(file.get_stat().size).ok() else {
+            return false;
+        };
+        let file_end_page_offset = file_size
+            .checked_add(PAGE_SIZE - 1)
+            .map(|end| end / PAGE_SIZE)
+            .unwrap_or(usize::MAX);
         if file_page_offset >= file_end_page_offset {
             return false;
         }
 
-        let Some(cache) = file.get_shared_page(file_page_offset) else {
-            return false;
+        let frame = if self.page_cache_cow {
+            match file.get_file_page(file_page_offset) {
+                Some(cache) => cache.lock().frame.clone(),
+                None => {
+                    // A sparse hole is zero-filled but must not force ext4 to
+                    // allocate a block.  Keep this zero page private; a later
+                    // write will take the ordinary COW path.
+                    let Some(frame) = frame_alloc(PageSize::Page4K) else {
+                        return false;
+                    };
+                    frame
+                }
+            }
+        } else {
+            let Some(cache) = file.get_shared_page(file_page_offset) else {
+                return false;
+            };
+            let frame = cache.lock().frame.clone();
+            frame
         };
-        let page = cache.lock();
-        let frame = page.frame.clone();
         let ppn = frame.ppn;
-        drop(page);
 
-        let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+        let pte_flags = PTEFlags::from_bits(self.initial_pte_permission().bits).unwrap();
         page_table.map(vpn, ppn, pte_flags, page_size);
         self.data_frames.insert(vpn, frame);
         true
@@ -2844,6 +3505,16 @@ impl MapArea {
         }
 
         file.read_at(file_offset, UserBuffer::new(buffers));
+        if let Some(zero_from) = self.file_zero_from {
+            for (vpn, frame) in &frames {
+                let page_start = vpn.0 * PAGE_SIZE;
+                let page_end = page_start + PAGE_SIZE;
+                if zero_from < page_end {
+                    let offset = zero_from.saturating_sub(page_start);
+                    frame.get_bytes_array()[offset..].fill(0);
+                }
+            }
+        }
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         for (vpn, frame) in frames {
             let ppn = frame.ppn;
@@ -2980,6 +3651,13 @@ impl MapArea {
     }
     pub fn get_map_permission(&self) -> MapPermission {
         self.map_perm
+    }
+    fn initial_pte_permission(&self) -> MapPermission {
+        if self.page_cache_cow && self.map_perm.contains(MapPermission::W) {
+            self.map_perm & !MapPermission::W
+        } else {
+            self.map_perm
+        }
     }
     pub fn contains(&self, vpn: VirtPageNum) -> bool {
         self.vpn_range.contains(vpn)

@@ -176,6 +176,10 @@ impl File for OSInode {
         total_read
     }
 
+    fn read_kernel_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        self.inode().read_at(offset, buf)
+    }
+
     /// 带页缓存的写入，调用 VfsInode::write_at
     fn write_at(&self, offset: usize, buf: UserBuffer) -> usize {
         let inode = self.inode();
@@ -292,6 +296,10 @@ impl File for OSInode {
     fn get_shared_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         // 转发给底层的具体文件系统 Inode
         self.inode().get_shared_page(page_offset)
+    }
+
+    fn get_file_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
+        self.inode().get_file_page(page_offset)
     }
 
     fn truncate(&self, len: usize) -> bool {
