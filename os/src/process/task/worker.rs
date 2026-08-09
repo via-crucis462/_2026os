@@ -138,7 +138,7 @@ pub fn net_kernel_worker() -> ! {
 }
 
 pub fn console_kernel_worker() -> ! {
-    const CONSOLE_POLL_INTERVAL_US: usize = 2_000;
+    const CONSOLE_POLL_INTERVAL_US: usize = 10_000;
 
     loop {
         crate::console::console_poll_input();

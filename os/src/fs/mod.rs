@@ -36,6 +36,7 @@ pub use epoll::{EpollFile, EpollEvent};
 use crate::syscall::fs::Statfs;
 use crate::auth::{FileMode, PermSet, PermStat};
 use crate::mm::PhysPageNum;
+use crate::sync::{MPSafeCell, WaitQueue};
 
 /// trait File for all file types
 pub trait File: Send + Sync {
@@ -103,12 +104,32 @@ pub trait File: Send + Sync {
     fn set_flags(&self, _flags: OpenFlags) -> bool {
         false // 默认不支持修改
     }
+    /// 主要供管道使用，是否可以读取数据
     fn ready_to_read(&self) -> bool {
-        self.readable()
+        self.readable() // 默认实现为权限可读
     }
-    /// Is there space available to write right now?
+    /// 主要供管道使用，是否可以写入数据
     fn ready_to_write(&self) -> bool {
-        self.writable()
+        self.writable() // 默认实现为权限可写
+    }
+    /// Exceptional readiness reported by poll-family interfaces.  HUP/ERR
+    /// are delivered even when the caller did not include them in events.
+    fn poll_hangup(&self) -> bool {
+        false
+    }
+    fn poll_error(&self) -> bool {
+        false
+    }
+    /// Queue that poll/epoll waiters can sleep on until this file's readiness
+    /// may have changed.  Regular files are always ready in this kernel and
+    /// therefore do not need one.
+    fn poll_wait_queue(&self) -> Option<Arc<MPSafeCell<WaitQueue>>> {
+        None
+    }
+    /// Files with separate read/write state queues can override this to wait
+    /// on only the state transitions requested by the caller.
+    fn poll_wait_queues(&self, _interests: u32) -> alloc::vec::Vec<Arc<MPSafeCell<WaitQueue>>> {
+        self.poll_wait_queue().into_iter().collect()
     }
     /// 检查读错误
     /// 

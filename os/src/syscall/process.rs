@@ -28,7 +28,7 @@ use crate::process::scheduler::futex::{
 };
 use crate::lazy_static;
 use spin::Mutex;
-use crate::sync::WaitQueue;
+use crate::sync::{MPSafeCell, WaitQueue};
 use alloc::collections::VecDeque;
 use crate::process::TaskContext;
 use crate::net::socket::UdpSocket;
@@ -40,6 +40,8 @@ use alloc::collections::BTreeMap;
 static TTY_FOREGROUND_PGRP: AtomicI32 = AtomicI32::new(0);
 
 const EPOLLIN: u32 = 0x001;
+const EPOLLERR: u32 = 0x008;
+const EPOLLHUP: u32 = 0x010;
 const EPOLLOUT: u32 = 0x004;
 const EPOLLONESHOT: u32 = 1 << 30;
 const EPOLLET: u32 = 1 << 31;
@@ -368,7 +370,7 @@ pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) ->
                 let mut task_inner = task.inner_exclusive_access();
                 task_inner.blocked = original_mask;
                 drop(task_inner);
-                return 0; // 超时返回 0
+                return 0;
             }
         }
         if has_timeout {
@@ -3139,13 +3141,14 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
 
 
     let mut list = epoll_file.interest_list.lock();
-    match op {
+    let result = match op {
         EPOLL_CTL_ADD => {
             if list.contains_key(&fd) {
 
                 return EEXIST.as_isize();
             }
             list.insert(fd, event);
+            epoll_file.watched_files.lock().insert(fd, target_file_dyn.clone());
             epoll_file.last_ready.lock().remove(&fd);
             epoll_file.oneshot_disabled.lock().remove(&fd);
             0
@@ -3155,6 +3158,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
 
                 return ENOENT.as_isize();
             }
+            epoll_file.watched_files.lock().remove(&fd);
             epoll_file.last_ready.lock().remove(&fd);
             epoll_file.oneshot_disabled.lock().remove(&fd);
             0
@@ -3164,133 +3168,433 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
                 return ENOENT.as_isize();
             }
             list.insert(fd, event);
+            // Keep the original open-file description.  A MOD operates on
+            // the registration already present in this epoll instance.
             epoll_file.last_ready.lock().remove(&fd);
             epoll_file.oneshot_disabled.lock().remove(&fd);
             0
         }
         _ => EINVAL.as_isize(),
+    };
+    drop(list);
+    if result == 0 {
+        epoll_file.wake_waiters();
+    }
+    result
+}
+
+struct EpollSignalMaskGuard {
+    task: Arc<TaskControlBlock>,
+    original_mask: SignalFlags,
+    effective_mask: SignalFlags,
+}
+
+impl Drop for EpollSignalMaskGuard {
+    fn drop(&mut self) {
+        self.task.inner_exclusive_access().blocked = self.original_mask;
     }
 }
 
-pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout: i32) -> isize {
-    info!(
-        "[kernel] sys_epoll_wait: epfd={}, events_ptr=0x{:x}, maxevents={}, timeout={}ms",
-        epfd, events_ptr, maxevents, timeout
-    );
-    if events_ptr == 0 {
-        return EFAULT.as_isize();
+fn install_epoll_signal_mask(
+    sigmask_ptr: usize,
+    sigsetsize: usize,
+) -> Result<Option<EpollSignalMaskGuard>, isize> {
+    if sigmask_ptr == 0 {
+        return Ok(None);
+    }
+    if sigsetsize != core::mem::size_of::<usize>() {
+        return Err(EINVAL.as_isize());
     }
 
-    // 防御非法容量
+    let mm = current_user_mm();
+    let Some(mask_bits) = try_translated_read(&mm, sigmask_ptr as *const usize) else {
+        return Err(EFAULT.as_isize());
+    };
+    let mut temporary_mask = SignalFlags::from_bits_truncate(mask_bits as u64);
+    temporary_mask.remove(SignalFlags::SIGKILL | SignalFlags::SIGSTOP);
+
+    let task = current_task().unwrap();
+    let original_mask = {
+        let mut inner = task.inner_exclusive_access();
+        let original = inner.blocked;
+        inner.blocked = temporary_mask;
+        original
+    };
+    Ok(Some(EpollSignalMaskGuard {
+        task,
+        original_mask,
+        effective_mask: temporary_mask,
+    }))
+}
+
+fn epoll_has_deliverable_signal(effective_mask: Option<SignalFlags>) -> bool {
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    let pending = inner.pending.flags() | inner.signal.exclusive_access().pending_flags();
+    let blocked = effective_mask.unwrap_or(inner.blocked);
+    let mut deliverable = pending;
+    deliverable.remove(blocked);
+    deliverable.remove(SignalFlags::SIGKILL | SignalFlags::SIGSTOP);
+
+    // SIGKILL/SIGSTOP always interrupt.  Signals ignored explicitly, and
+    // signals whose default action is ignore, must not turn epoll_pwait into
+    // EINTR (SIGCHLD is the important case for this test: the child exits
+    // immediately after writing the watched socket).
+    if pending.intersects(SignalFlags::SIGKILL | SignalFlags::SIGSTOP) {
+        return true;
+    }
+    let actions = inner.signal_hand.exclusive_access();
+    let mut bits = deliverable.bits();
+    while bits != 0 {
+        let sig = bits.trailing_zeros() as usize;
+        bits &= !(1u64 << sig);
+        let action = actions.action(sig);
+        if action.handler == 1 {
+            continue;
+        }
+        if action.handler == 0 {
+            let flag = SignalFlags::from_bits(1u64 << sig).unwrap();
+            if matches!(
+                flag,
+                SignalFlags::SIGCHLD | SignalFlags::SIGURG | SignalFlags::SIGWINCH
+            ) {
+                continue;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+fn append_poll_wait_queue(
+    queues: &mut Vec<Arc<MPSafeCell<WaitQueue>>>,
+    queue: Arc<MPSafeCell<WaitQueue>>,
+) {
+    if !queues.iter().any(|existing| Arc::ptr_eq(existing, &queue)) {
+        queues.push(queue);
+    }
+}
+
+fn epoll_collect_ready(
+    epfd: usize,
+) -> Result<(Vec<EpollEvent>, Vec<Arc<MPSafeCell<WaitQueue>>>), isize> {
+    let task = current_task().unwrap();
+    let files = task.inner_exclusive_access().files.clone();
+    let inner = files.exclusive_access();
+
+    let epoll_file_dyn = inner
+        .fds
+        .get(epfd)
+        .and_then(|entry| entry.file.clone())
+        .ok_or_else(|| EBADF.as_isize())?;
+    let epoll_file = epoll_file_dyn
+        .as_any()
+        .downcast_ref::<EpollFile>()
+        .ok_or_else(|| EINVAL.as_isize())?;
+
+    let mut ready_events = Vec::new();
+    let mut wait_queues = Vec::new();
+
+    let list = epoll_file.interest_list.lock();
+    let watched_files = epoll_file.watched_files.lock();
+    let mut last_ready = epoll_file.last_ready.lock();
+    let mut oneshot_disabled = epoll_file.oneshot_disabled.lock();
+    for (&fd, &event) in list.iter() {
+        let requested_events = event.events;
+        if requested_events == 0 {
+            last_ready.remove(&fd);
+            continue;
+        }
+        let Some(file) = watched_files.get(&fd) else {
+            last_ready.remove(&fd);
+            continue;
+        };
+        if file.as_any().is::<EpollFile>() {
+            last_ready.remove(&fd);
+            continue;
+        }
+
+        let mut revents = 0;
+        if file.poll_error() {
+            revents |= EPOLLERR;
+        }
+        if file.poll_hangup() {
+            revents |= EPOLLHUP;
+        }
+        if requested_events & EPOLLIN != 0 && file.ready_to_read() {
+            revents |= EPOLLIN;
+        }
+        if requested_events & EPOLLOUT != 0 && file.ready_to_write() {
+            revents |= EPOLLOUT;
+        }
+        let is_ready = revents != 0;
+        let was_ready = last_ready.contains(&fd);
+        let edge_triggered = requested_events & EPOLLET != 0;
+        let oneshot = requested_events & EPOLLONESHOT != 0;
+        let deliver = is_ready
+            && !(oneshot && oneshot_disabled.contains(&fd))
+            && (!edge_triggered || !was_ready);
+        if is_ready {
+            last_ready.insert(fd);
+        } else {
+            last_ready.remove(&fd);
+        }
+        if deliver {
+            let mut ready_event = event;
+            ready_event.events = revents;
+            ready_events.push(ready_event);
+            if oneshot {
+                oneshot_disabled.insert(fd);
+            }
+        }
+    }
+
+    // Queue discovery is needed only on the sleeping path.  Avoid taking
+    // every source's queue lock when an event is already ready.
+    if ready_events.is_empty() {
+        append_poll_wait_queue(&mut wait_queues, epoll_file.waiters.clone());
+        for (&fd, &event) in list.iter() {
+            if event.events == 0 {
+                continue;
+            }
+            let Some(file) = watched_files.get(&fd) else {
+                continue;
+            };
+            if file.as_any().is::<EpollFile>() {
+                continue;
+            }
+            for queue in file.poll_wait_queues(event.events) {
+                append_poll_wait_queue(&mut wait_queues, queue);
+            }
+        }
+    }
+
+    Ok((ready_events, wait_queues))
+}
+
+fn unregister_epoll_waiter(queues: &[Arc<MPSafeCell<WaitQueue>>], tid: usize) {
+    for queue in queues {
+        queue.exclusive_access().remove_by_tid(tid);
+    }
+}
+
+/// Register first, then check readiness one final time before switching away.
+/// A source wake during the registration window sets wake_pending; a state
+/// change just before registration is caught by the final scan.
+fn block_on_epoll_queues(
+    epfd: usize,
+    queues: &[Arc<MPSafeCell<WaitQueue>>],
+    deadline_ns: Option<usize>,
+    effective_mask: Option<SignalFlags>,
+) -> Result<Option<Vec<EpollEvent>>, isize> {
+    let task = current_task().unwrap();
+    let tid = task.gettid();
+    let task_cx_ptr = {
+        let mut inner = task.inner_exclusive_access();
+        let ptr = &mut inner.thread.task_ctx as *mut TaskContext;
+        inner.wake_pending = false;
+        inner.state = crate::task::TaskStatus::BlockSaving;
+        ptr
+    };
+
+    if let Some(deadline_ns) = deadline_ns {
+        crate::process::scheduler::nanosleep::register_sleep_task(deadline_ns, task.clone());
+    }
+    for queue in queues {
+        queue.exclusive_access().push_back(task.clone());
+    }
+
+    let recheck = epoll_collect_ready(epfd);
+    match recheck {
+        Ok((ready_events, _)) if !ready_events.is_empty() => {
+            if deadline_ns.is_some() {
+                crate::process::scheduler::nanosleep::cancel_sleep_task(tid);
+            }
+            unregister_epoll_waiter(queues, tid);
+            let mut inner = task.inner_exclusive_access();
+            inner.state = crate::task::TaskStatus::Running;
+            inner.wake_pending = false;
+            Ok(Some(ready_events))
+        }
+        Ok(_) if epoll_has_deliverable_signal(effective_mask) => {
+            if deadline_ns.is_some() {
+                crate::process::scheduler::nanosleep::cancel_sleep_task(tid);
+            }
+            unregister_epoll_waiter(queues, tid);
+            let mut inner = task.inner_exclusive_access();
+            inner.state = crate::task::TaskStatus::Running;
+            inner.wake_pending = false;
+            // The outer loop observes the pending signal and returns EINTR.
+            Ok(None)
+        }
+        Err(errno) => {
+            if deadline_ns.is_some() {
+                crate::process::scheduler::nanosleep::cancel_sleep_task(tid);
+            }
+            unregister_epoll_waiter(queues, tid);
+            let mut inner = task.inner_exclusive_access();
+            inner.state = crate::task::TaskStatus::Running;
+            inner.wake_pending = false;
+            Err(errno)
+        }
+        Ok(_) => {
+            drop(task);
+            crate::process::schedule(task_cx_ptr);
+            if deadline_ns.is_some() {
+                crate::process::scheduler::nanosleep::cancel_sleep_task(tid);
+            }
+            unregister_epoll_waiter(queues, tid);
+            Ok(None)
+        }
+    }
+}
+
+fn write_epoll_events(
+    mm: &MemorySet,
+    events_ptr: usize,
+    maxevents: usize,
+    ready_events: &[EpollEvent],
+) -> isize {
+    for (count, event) in ready_events.iter().take(maxevents).enumerate() {
+        let Some(offset) = count.checked_mul(core::mem::size_of::<EpollEvent>()) else {
+            return EFAULT.as_isize();
+        };
+        let Some(event_ptr) = events_ptr.checked_add(offset) else {
+            return EFAULT.as_isize();
+        };
+        if !try_translated_write(mm, event_ptr as *mut EpollEvent, *event) {
+            return EFAULT.as_isize();
+        }
+    }
+    core::cmp::min(ready_events.len(), maxevents) as isize
+}
+
+fn sys_epoll_pwait_common(
+    epfd: usize,
+    events_ptr: usize,
+    maxevents: i32,
+    deadline_ns: Option<usize>,
+    sigmask_ptr: usize,
+    sigsetsize: usize,
+) -> isize {
     if maxevents <= 0 {
         return EINVAL.as_isize();
     }
-    // 防止随机/恶意 maxevents 导致过大分配
+    if events_ptr == 0 {
+        return EFAULT.as_isize();
+    }
     const EPOLL_MAX_EVENTS: i32 = 1024;
-    let maxevents = maxevents.min(EPOLL_MAX_EVENTS);
+    let maxevents = maxevents.min(EPOLL_MAX_EVENTS) as usize;
 
-    // 记录起始时间
-    let start_time = get_time_ms();
+    let mask_guard = match install_epoll_signal_mask(sigmask_ptr, sigsetsize) {
+        Ok(guard) => guard,
+        Err(errno) => return errno,
+    };
+    let effective_mask = mask_guard.as_ref().map(|guard| guard.effective_mask);
     let mm = current_user_mm();
 
     loop {
-        let ready_events = {
-            let task = current_task().unwrap();
-            let task_inner = task.inner_exclusive_access();
-            let pending_bits = task_inner.pending.bits()
-                | task_inner.signal.exclusive_access().pending_flags().bits();
-            let unmaskable =
-                pending_bits & ((1 << (9 - 1)) | (1 << (19 - 1)));
-            if (pending_bits & !task_inner.blocked.bits()) != 0 || unmaskable != 0 {
-                drop(task_inner);
-                return EINTR.as_isize();
-            }
-            drop(task_inner);
-            let files = task.inner_exclusive_access().files.clone();
-            let inner = files.exclusive_access();
-
-            if epfd >= inner.fds.len() { return EBADF.as_isize(); }
-            let epoll_file_dyn = match &inner.fds[epfd].file {
-                Some(f) => f.clone(),
-                None => return EBADF.as_isize(),
-            };
-            let epoll_file = match epoll_file_dyn.as_any().downcast_ref::<EpollFile>() {
-                Some(ef) => ef,
-                None => return EINVAL.as_isize(),
-            };
-
-            let mut ready_events = alloc::vec::Vec::new();
-            let list = epoll_file.interest_list.lock();
-            let mut last_ready = epoll_file.last_ready.lock();
-            let mut oneshot_disabled = epoll_file.oneshot_disabled.lock();
-            // 遍历所有被监控的 FD，检查就绪状态
-            for (&fd, &event) in list.iter() {
-                let requested_events = event.events;
-                if requested_events == 0 {
-                    last_ready.remove(&fd);
-                    continue;
-                }
-                let Some(fd_entry) = inner.fds.get(fd) else { continue; };
-                let Some(file) = &fd_entry.file else { continue; };
-                if file.as_any().is::<EpollFile>() {
-                    last_ready.remove(&fd);
-                    continue;
-                }
-                let mut revents = 0;
-                if (requested_events & EPOLLIN) != 0 && file.ready_to_read() { revents |= EPOLLIN; }
-                if (requested_events & EPOLLOUT) != 0 && file.ready_to_write() { revents |= EPOLLOUT; }
-                let is_ready = revents != 0;
-                let was_ready = last_ready.contains(&fd);
-                let edge_triggered = (requested_events & EPOLLET) != 0;
-                let oneshot = (requested_events & EPOLLONESHOT) != 0;
-                let deliver = is_ready
-                    && !(oneshot && oneshot_disabled.contains(&fd))
-                    && (!edge_triggered || !was_ready);
-                if is_ready {
-                    last_ready.insert(fd);
-                } else {
-                    last_ready.remove(&fd);
-                }
-                if deliver {
-                    let mut ready_ev = event;
-                    ready_ev.events = revents;
-                    ready_events.push((fd, ready_ev));
-                    if oneshot {
-                        oneshot_disabled.insert(fd);
-                    }
-                }
-            }
-            drop(list);
-            ready_events
-        };
-
-        // 如果找到了就绪事件，立即处理并返回
-        if !ready_events.is_empty() {
-            let mut count = 0;
-            for (_fd, event) in ready_events.iter().take(maxevents as usize) {
-                let ev_ptr = events_ptr + count * core::mem::size_of::<EpollEvent>();
-                if !try_translated_write(&mm, ev_ptr as *mut EpollEvent, *event) {
-                    return EFAULT.as_isize();
-                }
-                count += 1;
-            }
-            return count as isize;
+        if epoll_has_deliverable_signal(effective_mask) {
+            return EINTR.as_isize();
         }
 
-        // 如果没找到事件，处理超时逻辑
-        if timeout == 0 {
-            // 非阻塞模式，直接返回 0 个事件
-            return 0;
-        } else if timeout > 0 {
-            // 限时阻塞模式，看看有没有超时
-            let current_time = get_time_ms();
-            if current_time - start_time >= timeout as usize {
+        let (ready_events, wait_queues) = match epoll_collect_ready(epfd) {
+            Ok(result) => result,
+            Err(errno) => return errno,
+        };
+        if !ready_events.is_empty() {
+            return write_epoll_events(&mm, events_ptr, maxevents, &ready_events);
+        }
+        if let Some(deadline_ns) = deadline_ns {
+            if get_time_us().saturating_mul(1_000) >= deadline_ns {
                 return 0;
             }
         }
 
-        suspend_current_and_run_next();
+        match block_on_epoll_queues(epfd, &wait_queues, deadline_ns, effective_mask) {
+            Ok(Some(ready_events)) => {
+                return write_epoll_events(&mm, events_ptr, maxevents, &ready_events)
+            }
+            Ok(None) => {}
+            Err(errno) => return errno,
+        }
     }
+}
+
+pub fn sys_epoll_pwait(
+    epfd: usize,
+    events_ptr: usize,
+    maxevents: i32,
+    timeout_ms: i32,
+    sigmask_ptr: usize,
+    sigsetsize: usize,
+) -> isize {
+    let deadline_ns = if timeout_ms < 0 {
+        None
+    } else {
+        Some(
+            get_time_us()
+                .saturating_mul(1_000)
+                .saturating_add((timeout_ms as usize).saturating_mul(1_000_000)),
+        )
+    };
+    sys_epoll_pwait_common(
+        epfd,
+        events_ptr,
+        maxevents,
+        deadline_ns,
+        sigmask_ptr,
+        sigsetsize,
+    )
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct EpollPwait2TimeSpec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+pub fn sys_epoll_pwait2(
+    epfd: usize,
+    events_ptr: usize,
+    maxevents: i32,
+    timeout_ptr: usize,
+    sigmask_ptr: usize,
+    sigsetsize: usize,
+) -> isize {
+    let deadline_ns = if timeout_ptr == 0 {
+        None
+    } else {
+        let mm = current_user_mm();
+        let Some(timeout) = try_translated_read(&mm, timeout_ptr as *const EpollPwait2TimeSpec)
+        else {
+            return EFAULT.as_isize();
+        };
+        if timeout.tv_sec < 0 || timeout.tv_nsec < 0 || timeout.tv_nsec >= 1_000_000_000 {
+            return EINVAL.as_isize();
+        }
+        Some(
+            get_time_us()
+                .saturating_mul(1_000)
+                .saturating_add((timeout.tv_sec as usize).saturating_mul(1_000_000_000))
+                .saturating_add(timeout.tv_nsec as usize),
+        )
+    };
+    sys_epoll_pwait_common(
+        epfd,
+        events_ptr,
+        maxevents,
+        deadline_ns,
+        sigmask_ptr,
+        sigsetsize,
+    )
+}
+
+/// libc's epoll_wait() is implemented with epoll_pwait(..., NULL, 0) on
+/// RISC-V, but keep this helper for in-kernel callers.
+pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: i32, timeout_ms: i32) -> isize {
+    sys_epoll_pwait(epfd, events_ptr, maxevents, timeout_ms, 0, 0)
 }
 pub fn sys_sched_getscheduler(pid: isize) -> isize {
     let target_task = match resolve_sched_task(pid) {

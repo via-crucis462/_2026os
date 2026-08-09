@@ -17,7 +17,7 @@ const EPOLL_CTL_MOD: i32 = 3;
 const SYSCALL_EVENTFD2: usize = 19;
 const SYSCALL_EPOLL_CREATE1: usize = 20;
 const SYSCALL_EPOLL_CTL: usize = 21;
-const SYSCALL_EPOLL_WAIT: usize = 22;
+const SYSCALL_EPOLL_PWAIT: usize = 22;
 const SYSCALL_DUP: usize = 23;
 /// dup2 syscall
 const SYSCALL_DUP3: usize = 24;
@@ -180,6 +180,7 @@ const SYSCALL_KEYCTL: usize = 219;
 /// clone syscall
 const SYSCALL_CLONE: usize = 220;
 const SYSCALL_CLONE3: usize = 435;
+const SYSCALL_EPOLL_PWAIT2: usize = 441;
 const SYSCALL_FACCESSAT2: usize = 439;
 /// exec syscall
 const SYSCALL_EXEC: usize = 221;
@@ -429,7 +430,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_EVENTFD2 => sys_eventfd2(args[0] as u32, args[1] as i32),
         SYSCALL_EPOLL_CREATE1 => sys_epoll_create1(args[0] as i32),
         SYSCALL_EPOLL_CTL => sys_epoll_ctl(args[0], args[1] as i32, args[2], args[3]),
-        SYSCALL_EPOLL_WAIT => sys_epoll_wait(args[0], args[1], args[2] as i32, args[3] as i32),
+        SYSCALL_EPOLL_PWAIT => sys_epoll_pwait(
+            args[0],
+            args[1],
+            args[2] as i32,
+            args[3] as i32,
+            args[4],
+            args[5],
+        ),
         SYSCALL_BIND => sys_bind(args[0], args[1]as *const u8, args[2]),
         SYSCALL_LISTEN => sys_listen(args[0], args[1] as i32),
         SYSCALL_SOCKET => sys_socket(args[0], args[1], args[2]),
@@ -449,6 +457,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_CLONE3 => sys_clone3(args[0] as *const CloneArgs, args[1]),
+        SYSCALL_EPOLL_PWAIT2 => sys_epoll_pwait2(
+            args[0],
+            args[1],
+            args[2] as i32,
+            args[3],
+            args[4],
+            args[5],
+        ),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize, args[2] as *const usize),
         SYSCALL_WAITID => sys_waitid(args[0] as i32, args[1] as i32, args[2] as *mut SigInfo, args[3] as i32),
         SYSCALL_WAIT4  => sys_wait4(args[0] as i32, args[1] as *mut i32, args[2]),//注意：为了跑通脚本，暂时将waitpid和wait4合并了

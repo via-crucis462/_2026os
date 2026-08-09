@@ -1,6 +1,6 @@
 use super::*;
 use crate::process::task::TaskControlBlock;
-use crate::process::{block_current_and_run_next, wake_up_task};
+use crate::process::{block_current_and_run_next, block_current_and_run_next_if, wake_up_task};
 use crate::sync::WaitQueue;
 use spin::Mutex;
 use crate::mm::{UserBuffer, translated_user_buffer, translated_user_buffer_mut, try_translated_read, try_translated_write};
@@ -74,9 +74,10 @@ impl File for UserPageFaultInfo {
     /// read from the file to buf, return the number of bytes read
     fn read(&self, buf: UserBuffer) -> usize {
         // 阻塞直到有缺页事件
-        if !self.faulting_task.lock().is_some() {
-            block_current_and_run_next(&self.read_waiters);
-        }
+        block_current_and_run_next_if(
+            &self.read_waiters, 
+            || !self.faulting_task.lock().is_some()
+        );
         // 缺页已发生：读取 faulting_address，构造 uffd_msg 写入用户缓冲区
         let fault_addr = *self.faulting_address.lock();
         fill_uffd_msg_pagefault(buf, fault_addr)

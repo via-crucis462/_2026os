@@ -42,6 +42,8 @@ pub struct Pipe {
     buffer: Arc<MPSafeCell<PipeRingBuffer>>,
     read_waiters: Arc<Mutex<WaitQueue>>,
     write_waiters: Arc<Mutex<WaitQueue>>,
+    read_poll_waiters: Arc<MPSafeCell<WaitQueue>>,
+    write_poll_waiters: Arc<MPSafeCell<WaitQueue>>,
 }
 
 impl Pipe {
@@ -50,6 +52,8 @@ impl Pipe {
         buffer: Arc<MPSafeCell<PipeRingBuffer>>,
         read_waiters: Arc<Mutex<WaitQueue>>,
         write_waiters: Arc<Mutex<WaitQueue>>,
+        read_poll_waiters: Arc<MPSafeCell<WaitQueue>>,
+        write_poll_waiters: Arc<MPSafeCell<WaitQueue>>,
     ) -> Self {
         Self {
             readable: true,
@@ -57,6 +61,8 @@ impl Pipe {
             buffer,
             read_waiters,
             write_waiters,
+            read_poll_waiters,
+            write_poll_waiters,
         }
     }
     /// create writable pipe
@@ -64,6 +70,8 @@ impl Pipe {
         buffer: Arc<MPSafeCell<PipeRingBuffer>>,
         read_waiters: Arc<Mutex<WaitQueue>>,
         write_waiters: Arc<Mutex<WaitQueue>>,
+        read_poll_waiters: Arc<MPSafeCell<WaitQueue>>,
+        write_poll_waiters: Arc<MPSafeCell<WaitQueue>>,
     ) -> Self {
         Self {
             readable: false,
@@ -71,6 +79,8 @@ impl Pipe {
             buffer,
             read_waiters,
             write_waiters,
+            read_poll_waiters,
+            write_poll_waiters,
         }
     }
 
@@ -158,6 +168,7 @@ impl Pipe {
                 let Some(byte_ref) = buf_iter.next() else {
                     drop(ring_buffer);
                     wake_up_one(&self.write_waiters);
+                    crate::process::scheduler::wait::wake_up_all_mp(&self.write_poll_waiters);
                     return Ok(already_read);
                 };
                 unsafe {
@@ -167,12 +178,14 @@ impl Pipe {
                 if already_read == want_to_read {
                     drop(ring_buffer);
                     wake_up_one(&self.write_waiters);
+                    crate::process::scheduler::wait::wake_up_all_mp(&self.write_poll_waiters);
                     return Ok(want_to_read);
                 }
             }
 
             drop(ring_buffer);
             wake_up_one(&self.write_waiters);
+            crate::process::scheduler::wait::wake_up_all_mp(&self.write_poll_waiters);
             return Ok(already_read);
         }
     }
@@ -188,6 +201,8 @@ impl Drop for Pipe {
         if self.writable {
             Self::wake_all(&self.read_waiters);
         }
+        crate::process::scheduler::wait::wake_up_all_mp(&self.read_poll_waiters);
+        crate::process::scheduler::wait::wake_up_all_mp(&self.write_poll_waiters);
     }
 }
 
@@ -296,15 +311,21 @@ pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
     let buffer = Arc::new(MPSafeCell::new(PipeRingBuffer::new()));
     let read_waiters = Arc::new(Mutex::new(WaitQueue::new()));
     let write_waiters = Arc::new(Mutex::new(WaitQueue::new()));
+    let read_poll_waiters = Arc::new(MPSafeCell::new(WaitQueue::new()));
+    let write_poll_waiters = Arc::new(MPSafeCell::new(WaitQueue::new()));
     let read_end = Arc::new(Pipe::read_end_with_buffer(
         buffer.clone(),
         read_waiters.clone(),
         write_waiters.clone(),
+        read_poll_waiters.clone(),
+        write_poll_waiters.clone(),
     ));
     let write_end = Arc::new(Pipe::write_end_with_buffer(
         buffer.clone(),
         read_waiters,
         write_waiters,
+        read_poll_waiters,
+        write_poll_waiters,
     ));
     buffer.exclusive_access().set_write_end(&write_end);
     buffer.exclusive_access().set_read_end(&read_end);
@@ -346,6 +367,24 @@ impl File for Pipe {
         ring_buffer.available_write() > 0 || ring_buffer.all_read_ends_closed()
         
     }
+    fn poll_hangup(&self) -> bool {
+        if self.readable {
+            self.buffer.exclusive_access().all_write_ends_closed()
+        } else if self.writable {
+            self.buffer.exclusive_access().all_read_ends_closed()
+        } else {
+            false
+        }
+    }
+    fn poll_wait_queue(&self) -> Option<Arc<MPSafeCell<WaitQueue>>> {
+        if self.readable {
+            Some(self.read_poll_waiters.clone())
+        } else if self.writable {
+            Some(self.write_poll_waiters.clone())
+        } else {
+            None
+        }
+    }
     /// 检查管道读是否被打断（例如收到信号）或无法继续读取（例如写端关闭）
     fn check_read_error(&self) -> Option<Errno> {
         if self.readable && check_pending_signal() && !self.ready_to_read() {
@@ -377,6 +416,7 @@ impl File for Pipe {
                 drop(ring_buffer);
                 if already_write > 0 {
                     wake_up_one(&self.read_waiters);
+                    crate::process::scheduler::wait::wake_up_all_mp(&self.read_poll_waiters);
                 }
                 if check_pending_signal() {
                     return already_write;
@@ -408,6 +448,7 @@ impl File for Pipe {
                     if already_write == want_to_write {
                         drop(ring_buffer);
                         wake_up_one(&self.read_waiters);
+                        crate::process::scheduler::wait::wake_up_all_mp(&self.read_poll_waiters);
                         if want_to_write == 1 {
                             //report_one_byte_write_progress(&self.buffer);
                         }
@@ -416,6 +457,7 @@ impl File for Pipe {
                 } else {
                     drop(ring_buffer);
                     wake_up_one(&self.read_waiters);
+                    crate::process::scheduler::wait::wake_up_all_mp(&self.read_poll_waiters);
                     return already_write;
                 }
             }
@@ -462,12 +504,14 @@ impl File for Pipe {
                     if already_write == want_to_write {
                         drop(ring_buffer);
                         wake_up_one(&self.read_waiters);
+                        crate::process::scheduler::wait::wake_up_all_mp(&self.read_poll_waiters);
                         return Ok(want_to_write);
                     }
                 } else {
                     drop(ring_buffer);
                     if already_write > 0 {
                         wake_up_one(&self.read_waiters);
+                        crate::process::scheduler::wait::wake_up_all_mp(&self.read_poll_waiters);
                     }
                     return Ok(already_write);
                 }
@@ -475,6 +519,7 @@ impl File for Pipe {
             drop(ring_buffer);
             if already_write > 0 {
                 wake_up_one(&self.read_waiters);
+                crate::process::scheduler::wait::wake_up_all_mp(&self.read_poll_waiters);
             }
             return Ok(already_write);
         }

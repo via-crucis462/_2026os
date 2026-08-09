@@ -141,7 +141,7 @@ impl Drop for PageCache {
 }
 
 // 元数据缓存的最大数量，超过该数量时会尝试回收
-const META_CACHE_SIZE: usize = 1 << 12; // 16MB
+const META_CACHE_SIZE: usize = 1 << 16; // 256MB
 /// 数据页缓存的最大页数，超过时从 LRU 队头回收
 const DATA_CACHE_SIZE: usize = 1 << 21; // 8GB
 
@@ -524,7 +524,7 @@ pub fn sync_shared_page_cache() {
     LAST_SYNC_TIME.store(crate::arch::timer::get_time_ms(), Ordering::Release);
 }
 
-const SYNC_INTERVAL_MS: usize = 20000;
+const SYNC_INTERVAL_MS: usize = 200_000;
 static LAST_SYNC_TIME: AtomicUsize = AtomicUsize::new(0);
 
 pub fn tick_sync() {

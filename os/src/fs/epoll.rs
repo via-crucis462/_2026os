@@ -1,35 +1,53 @@
 use crate::fs::{File, Stat, Dentry};
 use crate::mm::UserBuffer;
 use crate::auth::{PermSet, PermStat, FileMode};
+use crate::process::scheduler::wait::wake_up_all_mp;
+use crate::sync::{MPSafeCell, WaitQueue};
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use spin::Mutex;
 use core::any::Any;
 
-// 1. Linux 标准的 Epoll 事件结构
+/// Epoll 事件
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct EpollEvent {
-    pub events: u32,
-    pub data: u64, // 用户态传入的 payload，原样退回
+    pub events: u32, // 监控的事件类型
+    pub data: u64, // 用户传入的标识数据
 }
 
-// 2. 真正的 Epoll 文件系统抽象
+/// Epoll 文件
 pub struct EpollFile {
-    // 监控列表：fd -> EpollEvent
+    /// 监控事件：fd -> EpollEvent
+    /// 
+    /// 与下面的 watched_files 保持一致性，epoll_ctl 添加/删除时同时修改两者
+    /// 后续考虑合并为一张表
     pub interest_list: Mutex<BTreeMap<usize, EpollEvent>>,
+    /// 文件可能在 epoll 删除前被关闭，保持文件生命周期
+    /// 
+    /// bug：文件被关闭后 fd 可能被重用，后续应该修改
+    /// 但现在的实现能跑通 buildstorm
+    pub watched_files: Mutex<BTreeMap<usize, Arc<dyn File + Send + Sync>>>,
     // Readiness state used to implement edge-triggered and one-shot delivery.
     pub last_ready: Mutex<BTreeSet<usize>>,
     pub oneshot_disabled: Mutex<BTreeSet<usize>>,
+    /// 等待队列，阻塞在 epoll_wait 上的任务
+    pub waiters: Arc<MPSafeCell<WaitQueue>>,
 }
 
 impl EpollFile {
     pub fn new() -> Self {
         Self {
             interest_list: Mutex::new(BTreeMap::new()),
+            watched_files: Mutex::new(BTreeMap::new()),
             last_ready: Mutex::new(BTreeSet::new()),
             oneshot_disabled: Mutex::new(BTreeSet::new()),
+            waiters: Arc::new(MPSafeCell::new(WaitQueue::new())),
         }
+    }
+
+    pub fn wake_waiters(&self) {
+        wake_up_all_mp(&self.waiters);
     }
 }
 
@@ -62,14 +80,18 @@ impl File for EpollFile {
     fn as_any(&self) -> &dyn Any { self }
 }
 
-// 3. 真实的 EventFd 抽象（极其常用）
+/// Event 文件
 pub struct EventFile {
     pub count: Mutex<u64>,
+    poll_waiters: Arc<MPSafeCell<WaitQueue>>,
 }
 
 impl EventFile {
     pub fn new(initval: u32) -> Self {
-        Self { count: Mutex::new(initval as u64) }
+        Self {
+            count: Mutex::new(initval as u64),
+            poll_waiters: Arc::new(MPSafeCell::new(WaitQueue::new())),
+        }
     }
 }
 
@@ -80,10 +102,15 @@ impl File for EventFile {
     fn read(&self, buf: UserBuffer) -> usize {
         // 睡眠等待至 eventfd 计数非零，然后取走整个计数
         let value = loop {
+            let mut cnt = 0;
             let mut count = self.count.lock();
             if *count == 0 {
                 drop(count);
+                if cnt % 1000 == 0 {
+                    println!("eventfd: read blocked, loop count={}", cnt);
+                }
                 crate::process::suspend_current_and_run_next();
+                cnt += 1;
                 continue;
             }
             let value = *count;
@@ -110,6 +137,8 @@ impl File for EventFile {
         }
         let mut count = self.count.lock();
         *count = count.saturating_add(value);
+        drop(count);
+        wake_up_all_mp(&self.poll_waiters);
         8
     }
     fn raw_read_at(&self, _offset: usize, buf: UserBuffer) -> usize { self.read(buf) }
@@ -130,5 +159,8 @@ impl File for EventFile {
         fn getdents(&self, _buf: &mut [u8]) -> isize { -1 }
     fn get_dentry(&self) -> Option<Arc<Dentry>> { None }
     fn lseek(&self, _offset: isize, _whence: i32) -> isize { -1 }
+    fn poll_wait_queue(&self) -> Option<Arc<MPSafeCell<WaitQueue>>> {
+        Some(self.poll_waiters.clone())
+    }
     fn as_any(&self) -> &dyn Any { self }
 }
