@@ -1,7 +1,8 @@
 //! SBI console driver, for text output
 use crate::arch::sbi::{console_getchar, console_putchar};
-use crate::sync::MPSafeCell;
+use crate::sync::{MPSafeCell, WaitQueue};
 use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::fmt::{self, Write};
 
@@ -14,6 +15,13 @@ lazy_static! {
     static ref INPUT_BUFFER: MPSafeCell<VecDeque<u8>> = MPSafeCell::new(VecDeque::new());
     /// 最近一次读取 stdin 的用户进程组（Ctrl-C 无 TIOCSPGRP 时的回退目标）
     static ref LAST_STDIN_READER_PGRP: AtomicUsize = AtomicUsize::new(0);
+    /// 等待终端输入队列，阻塞在终端读和 poll 的任务在此等待
+    static ref INPUT_WAITERS: Arc<MPSafeCell<WaitQueue>> =
+        Arc::new(MPSafeCell::new(WaitQueue::new()));
+}
+
+pub fn console_input_wait_queue() -> Arc<MPSafeCell<WaitQueue>> {
+    INPUT_WAITERS.clone()
 }
 
 // ---------- 终端行规程（tty line discipline）----------
@@ -185,6 +193,7 @@ pub fn console_peek_char() -> Option<u8> {
 /// 控制台内核 worker：周期性轮询串口，处理行规程控制字符（Ctrl-C 等）
 /// 并把普通字符放入输入缓冲，供后续 read() 使用。
 pub fn console_poll_input() {
+    let mut received = false;
     loop {
         let raw = console_getchar();
         if raw == 0 || raw == usize::MAX {
@@ -199,6 +208,10 @@ pub fn console_poll_input() {
             continue; // ^C 等已被消费并发信号
         }
         INPUT_BUFFER.exclusive_access().push_back(ch);
+        received = true;
+    }
+    if received {
+        crate::process::scheduler::wait::wake_up_all_mp(&INPUT_WAITERS);
     }
 }
 

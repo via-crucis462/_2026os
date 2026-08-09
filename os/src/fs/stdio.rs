@@ -4,7 +4,8 @@ use crate::mm::UserBuffer;
 use crate::console::{console_peek_char, console_read_char, echo_if_enabled};
 use crate::task::suspend_current_and_run_next;
 use lazy_static::*;
-use crate::sync::MPSafeCell;
+use crate::sync::{MPSafeCell, WaitQueue};
+use alloc::sync::Arc;
 use crate::auth::{PermStat, FileMode};
 use core::any::Any;
 
@@ -38,6 +39,10 @@ impl File for Stdin {
             return true;
         }
         false
+    }
+
+    fn poll_wait_queue(&self) -> Option<Arc<MPSafeCell<WaitQueue>>> {
+        Some(crate::console::console_input_wait_queue())
     }
 
     fn writable(&self) -> bool {

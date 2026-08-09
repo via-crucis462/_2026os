@@ -1,0 +1,340 @@
+
+OpenSBI v1.7
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name               : riscv-virtio,qemu
+Platform Features           : medeleg
+Platform HART Count         : 8
+Platform IPI Device         : aclint-mswi
+Platform Timer Device       : aclint-mtimer @ 10000000Hz
+Platform Console Device     : uart8250
+Platform HSM Device         : ---
+Platform PMU Device         : ---
+Platform Reboot Device      : syscon-reboot
+Platform Shutdown Device    : syscon-poweroff
+Platform Suspend Device     : ---
+Platform CPPC Device        : ---
+Firmware Base               : 0x80000000
+Firmware Size               : 403 KB
+Firmware RW Offset          : 0x40000
+Firmware RW Size            : 147 KB
+Firmware Heap Offset        : 0x54000
+Firmware Heap Size          : 67 KB (total), 4 KB (reserved), 12 KB (used), 50 KB (free)
+Firmware Scratch Size       : 4096 B (total), 1400 B (used), 2696 B (free)
+Runtime SBI Version         : 3.0
+Standard SBI Extensions     : time,rfnc,ipi,base,hsm,srst,pmu,dbcn,fwft,legacy,dbtr,sse
+Experimental SBI Extensions : none
+
+Domain0 Name                : root
+Domain0 Boot HART           : 2
+Domain0 HARTs               : 0*,1*,2*,3*,4*,5*,6*,7*
+Domain0 Region00            : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01            : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02            : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03            : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region04            : 0x0000000080040000-0x000000008007ffff M: (R,W) S/U: ()
+Domain0 Region05            : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06            : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07            : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address        : 0x0000000080200000
+Domain0 Next Arg1           : 0x000000047fe00000
+Domain0 Next Mode           : S-mode
+Domain0 SysReset            : yes
+Domain0 SysSuspend          : yes
+
+Boot HART ID                : 2
+Boot HART Domain            : root
+Boot HART Priv Version      : v1.12
+Boot HART Base ISA          : rv64imafdch
+Boot HART ISA Extensions    : sstc,zicntr,zihpm,zicboz,zicbom,sdtrig,svadu
+Boot HART PMP Count         : 16
+Boot HART PMP Granularity   : 2 bits
+Boot HART PMP Address Bits  : 54
+Boot HART MHPM Info         : 16 (0x0007fff8)
+Boot HART Debug Triggers    : 2 triggers
+Boot HART MIDELEG           : 0x0000000000001666
+Boot HART MEDELEG           : 0x0000000000f4b509
+[kernel] main_init hart_id=2
+remap_test passed!
+/**** APPS ****
+.
+..
+lost+found
+root
+proc
+run
+usr
+sys
+tmp
+bin
+lib
+sbin
+etc
+boot
+dev
+mnt
+srv
+opt
+var
+media
+home
+work
+glibc
+musl
+**************/
+[timer] STIE enabled
+[timer] global SIE enabled
+[sbi-debug] start_hart(0) addr=0x80200000 ret=0x0
+[kernel] Hello from hart 0!
+[sbi-debug] start_hart(1) addr=0x80200000 ret=0x0
+[sbi-debug] start_hart(3) addr=0x80200000 ret=0x0
+[timer] STIE enabled
+[sbi-debug] start_hart(4) addr=0x80200000 ret=0x0
+[timer] global SIE enabled
+[sbi-debug] start_hart(5) addr=0x80200000 ret=0x0
+[kernel] Hello from hart 5!
+[sbi-debug] start_hart(6) addr=0x80200000 ret=0x0
+[kernel] Hello from hart 4!
+[sbi-debug] start_hart(7) addr=0x80200000 ret=0x0
+[kernel] Hello from hart 3!
+main_init done, run tasks...
+[kernel] Hello from hart 1!
+[kernel] Hello from hart 6!
+[ti[umseerr] _s]ta rt: BSS Sand heapT IinEiti aelizedn (argc=0)a
+bled
+[timer][u ser] _SstartT: arIgv parseEd; ente ring emainn
+abled
+[timer] global SIE enabled
+[timer] global SIE enabled
+[timer] STIE enabled
+[timer] global SIE enabled
+[kernel] Hello from hart 7!
+[timer] STIE enabled
+[timer] STIE enabled
+[timer] STIE enabled
+[timer] global SIE enabled
+[timer] global SIE enabled
+[timer] global SIE enabled
+[?2004hroot@ShellCore:/# cd glibc
+[?2004l[?2004hroot@ShellCore:/glibc# ./buildstorm_testcode.sh 
+[?2004l#### OS COMP TEST GROUP START buildstorm-glibc ####
+[UNIMPLEMENTED SYSCALL] ID: 430 pid=8 tid=8 comm=mount args=[0x40853c40,0x1,0x40853c40,0xafafafafcfc3dfdf,0x2000000000000,0x2]
+[UNIMPLEMENTED SYSCALL] ID: 430 pid=8 tid=8 comm=mount args=[0x40853c40,0x1,0x40853c40,0xafafafdfcbdfd5df,0x2000000000000,0x2]
+[UNIMPLEMENTED SYSCALL] ID: 430 pid=8 tid=8 comm=mount args=[0x40853c40,0x1,0x40853c40,0x303030303030303,0x2000000000000,0x2]
+rustc 1.98.0-nightly (57d06900f 2026-05-27)
+cargo 1.98.0-nightly (fbb61be30 2026-05-26)
+BUILDSTORM_TOOLCHAIN ok
+BUILDSTORM_MINIBUILD ok
+----- pre-build tg-xtask (untimed) -----
+[1m[33mwarning[0m: failed to save last-use data
+This may prevent cargo from accurately tracking what is being used in its global cache. This information is used for automatically removing unused data in the cache.
+
+disk I/O error
+
+Caused by:
+  Error code 1034: disk I/O error
+[1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 6.47s
+----- build arceos-helloworld (timed, arch=riscv64) -----
+BUILDSTORM_BEGIN mode=multi
+warning: failed to save last-use data
+This may prevent cargo from accurately tracking what is being used in its global cache. This information is used for automatically removing unused data in the cache.
+
+disk I/O error
+
+Caused by:
+  Error code 1034: disk I/O error
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.91s
+     Running `target/debug/tg-xtask arceos build -p arceos-helloworld --arch riscv64`
+[2026-08-09T02:01:05Z INFO  axbuild::context] Workspace root: /work/tgoskits
+Using build config: /work/tgoskits/tmp/axbuild/config/arceos-helloworld/build-riscv64gc-unknown-none-elf.toml
+[2026-08-09T02:01:06Z INFO  axbuild::build::config_file] Found build config at /work/tgoskits/tmp/axbuild/config/arceos-helloworld/build-riscv64gc-unknown-none-elf.toml
+Using build config: /work/tgoskits/tmp/axbuild/config/arceos-helloworld/build-riscv64gc-unknown-none-elf.toml
+[2026-08-09T02:01:07Z INFO  axbuild::build::config_file] Found build config at /work/tgoskits/tmp/axbuild/config/arceos-helloworld/build-riscv64gc-unknown-none-elf.toml
+[axbuild] cargo build package=arceos-helloworld target=scripts/targets/std/pie/riscv64gc-unknown-linux-musl.json config=/work/tgoskits/tmp/axbuild/config/arceos-helloworld/build-riscv64gc-unknown-none-elf.toml ...
+sh -c /work/tgoskits/tmp/axbuild/std/prebuild/prebuild-riscv64gc-unknown-linux-musl-5d5e8c438d29430d.sh
+AR_riscv64gc_unknown_linux_musl=riscv64-linux-musl-ar
+AX_LOG=warn
+AX_TARGET=riscv64gc-unknown-none-elf
+CARGO_UNSTABLE_JSON_TARGET_SPEC=true
+CC_riscv64gc_unknown_linux_musl=riscv64-linux-musl-cc
+CFLAGS_riscv64gc_unknown_linux_musl=-march=rv64gc -mabi=lp64d -mcmodel=medany -fno-stack-protector
+CXXFLAGS_riscv64gc_unknown_linux_musl=-march=rv64gc -mabi=lp64d -mcmodel=medany -fno-stack-protector
+SMP=1
+cargo build --config /work/tgoskits/tmp/axbuild/std/config-riscv64gc-unknown-linux-musl-dynamic.toml -p arceos-helloworld --target scripts/targets/std/pie/riscv64gc-unknown-linux-musl.json -Z unstable-options --target-dir /work/tgoskits/target --features arceos,ax-std/irq,ax-std/paging,ax-std/smp,ax-std/std-compat -Z json-target-spec --release --message-format json-render-diagnostics
+warning: failed to save last-use data
+This may prevent cargo from accurately tracking what is being used in its global cache. This information is used for automatically removing unused data in the cache.
+
+disk I/O error
+
+Caused by:
+  Error code 1034: disk I/O error
+   Compiling compiler_builtins v0.1.160 (/root/.rustup/toolchains/nightly-2026-05-28-riscv64gc-unknown-linux-gnu/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins)
+   Compiling core v0.0.0 (/root/.rustup/toolchains/nightly-2026-05-28-riscv64gc-unknown-linux-gnu/lib/rustlib/src/rust/library/core)
+   Compiling libc v0.2.185
+   Compiling std v0.0.0 (/root/.rustup/toolchains/nightly-2026-05-28-riscv64gc-unknown-linux-gnu/lib/rustlib/src/rust/library/std)
+   Compiling thiserror v2.0.18
+   Compiling heapless v0.9.3
+   Compiling ax-errno v0.6.1 (/work/tgoskits/components/axerrno)
+   Compiling num-traits v0.2.19
+   Compiling ax-percpu v0.4.14 (/work/tgoskits/components/percpu/percpu)
+   Compiling radium v0.7.0
+   Compiling libc v0.2.186
+   Compiling rust_decimal v1.42.1
+   Compiling anyhow v1.0.103
+   Compiling ax-alloc v0.8.12 (/work/tgoskits/os/arceos/modules/axalloc)
+   Compiling someboot v0.3.5 (/work/tgoskits/platforms/someboot)
+   Compiling ax-driver v0.12.0 (/work/tgoskits/drivers/ax-driver)
+   Compiling somehal v0.8.0 (/work/tgoskits/platforms/somehal)
+   Compiling axplat-dyn v0.7.12 (/work/tgoskits/platforms/axplat-dyn)
+   Compiling ax-hal v0.5.28 (/work/tgoskits/os/arceos/modules/axhal)
+   Compiling ax-task v0.6.4 (/work/tgoskits/os/arceos/modules/axtask)
+   Compiling ax-runtime v0.10.4 (/work/tgoskits/os/arceos/modules/axruntime)
+   Compiling scope-local v0.4.2 (/work/tgoskits/components/scope-local)
+   Compiling ax-posix-api v0.5.29 (/work/tgoskits/os/arceos/api/arceos_posix_api)
+   Compiling rustc-std-workspace-core v1.99.0 (/root/.rustup/toolchains/nightly-2026-05-28-riscv64gc-unknown-linux-gnu/lib/rustlib/src/rust/library/rustc-std-workspace-core)
+   Compiling alloc v0.0.0 (/root/.rustup/toolchains/nightly-2026-05-28-riscv64gc-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc)
+   Compiling rustc-demangle v0.1.27
+   Compiling cfg-if v1.0.4
+   Compiling panic_abort v0.0.0 (/root/.rustup/toolchains/nightly-2026-05-28-riscv64gc-unknown-linux-gnu/lib/rustlib/src/rust/library/panic_abort)
+   Compiling rustc-literal-escaper v0.0.7
+   Compiling rustc-std-workspace-alloc v1.99.0 (/root/.rustup/toolchains/nightly-2026-05-28-riscv64gc-unknown-linux-gnu/lib/rustlib/src/rust/library/rustc-std-workspace-alloc)
+   Compiling hashbrown v0.17.1
+   Compiling unwind v0.0.0 (/root/.rustup/toolchains/nightly-2026-05-28-riscv64gc-unknown-linux-gnu/lib/rustlib/src/rust/library/unwind)
+   Compiling std_detect v0.1.5 (/root/.rustup/toolchains/nightly-2026-05-28-riscv64gc-unknown-linux-gnu/lib/rustlib/src/rust/library/std_detect)
+   Compiling panic_unwind v0.0.0 (/root/.rustup/toolchains/nightly-2026-05-28-riscv64gc-unknown-linux-gnu/lib/rustlib/src/rust/library/panic_unwind)
+   Compiling proc_macro v0.0.0 (/root/.rustup/toolchains/nightly-2026-05-28-riscv64gc-unknown-linux-gnu/lib/rustlib/src/rust/library/proc_macro)
+   Compiling log v0.4.33
+   Compiling byteorder v1.5.0
+   Compiling bitflags v2.13.0
+   Compiling as-any v0.3.2
+   Compiling scopeguard v1.2.0
+   Compiling rdif-def v0.3.0 (/work/tgoskits/drivers/interface/rdif-def)
+   Compiling stable_deref_trait v1.2.1
+   Compiling lock_api v0.4.14
+   Compiling bit_field v0.10.3
+   Compiling rdif-base v0.8.3 (/work/tgoskits/drivers/interface/rdif-base)
+   Compiling ax-kernel-guard v0.3.11 (/work/tgoskits/components/kernel_guard)
+   Compiling derive_more v2.1.1
+   Compiling hash32 v0.3.1
+   Compiling spin v0.12.0
+   Compiling ax-kspin v0.3.15 (/work/tgoskits/components/kspin)
+   Compiling pci_types v0.10.1
+   Compiling tock-registers v0.10.1
+   Compiling irq-framework v0.3.0 (/work/tgoskits/components/irq-framework)
+   Compiling spinning_top v0.3.0
+   Compiling ax-memory-addr v0.6.9 (/work/tgoskits/memory/memory_addr)
+   Compiling mmio-api v0.2.2 (/work/tgoskits/memory/mmio-api)
+   Compiling futures-sink v0.3.32
+   Compiling rdif-msi v0.2.0 (/work/tgoskits/drivers/interface/rdif-msi)
+   Compiling strum v0.27.2
+   Compiling rdif-pcie v0.2.5 (/work/tgoskits/drivers/interface/rdif-pcie)
+   Compiling acpi v6.1.1
+   Compiling futures-core v0.3.32
+   Compiling rdif-clk v0.5.4 (/work/tgoskits/drivers/interface/rdif-clk)
+   Compiling rdif-power v0.8.0 (/work/tgoskits/drivers/interface/rdif-power)
+   Compiling fdt-raw v0.3.0
+   Compiling rdif-reset v0.1.0 (/work/tgoskits/drivers/interface/rdif-reset)
+   Compiling futures-task v0.3.32
+   Compiling pcie v0.6.7 (/work/tgoskits/drivers/pci/pcie)
+   Compiling pin-project-lite v0.2.17
+   Compiling fdt-edit v0.2.3
+   Compiling slab v0.4.12
+   Compiling futures-channel v0.3.32
+   Compiling rdif-intc v0.15.0 (/work/tgoskits/drivers/interface/rdif-intc)
+   Compiling futures-util v0.3.32
+   Compiling arrayvec v0.7.7
+   Compiling futures-io v0.3.32
+   Compiling rdif-pinctrl v0.1.2 (/work/tgoskits/drivers/interface/rdif-pinctrl)
+   Compiling tap v1.0.1
+   Compiling embedded-hal v1.0.0
+   Compiling bytemuck v1.25.0
+   Compiling wyz v0.5.1
+   Compiling const-str v1.1.0
+   Compiling rdrive v0.23.6 (/work/tgoskits/drivers/rdrive)
+   Compiling const-default v1.0.0
+   Compiling riscv-types v0.1.0
+   Compiling critical-section v1.2.0
+   Compiling num-align v0.1.0
+   Compiling funty v2.0.0
+   Compiling futures v0.3.32
+   Compiling rdif-serial v0.9.0 (/work/tgoskits/drivers/interface/rdif-serial)
+   Compiling riscv v0.16.1
+   Compiling rlsf v0.2.2
+   Compiling rgb v0.8.53
+   Compiling ranges-ext v0.6.4 (/work/tgoskits/memory/ranges-ext)
+   Compiling bitvec v1.1.1
+   Compiling buddy-slab-allocator v0.4.6 (/work/tgoskits/memory/buddy-slab-allocator)
+   Compiling spinning_top v0.2.5
+   Compiling ax-plat v0.12.0 (/work/tgoskits/platforms/ax-plat)
+   Compiling sbi-spec v0.0.9
+   Compiling axpanic v0.1.1 (/work/tgoskits/components/axpanic)
+   Compiling utf8-width v0.1.8
+   Compiling mbarrier v0.1.3
+   Compiling dma-api v0.9.3 (/work/tgoskits/memory/dma-api)
+   Compiling sbi-rt v0.0.4
+   Compiling byte-unit v5.2.5
+   Compiling aml v0.16.4
+   Compiling some-serial v0.7.0 (/work/tgoskits/drivers/serial/some-serial)
+   Compiling ansi_rgb v0.2.0
+   Compiling kernutil v0.2.2 (/work/tgoskits/components/kernutil)
+   Compiling page-table-generic v0.7.4 (/work/tgoskits/memory/page-table-generic)
+   Compiling ax-page-table-entry v0.8.10 (/work/tgoskits/memory/page_table_entry)
+   Compiling numeric-enum-macro v0.2.0
+   Compiling uguid v2.2.1
+   Compiling axklib v0.7.5 (/work/tgoskits/components/axklib)
+   Compiling axbacktrace v0.4.5 (/work/tgoskits/components/axbacktrace)
+   Compiling ax-riscv-plic v0.4.9 (/work/tgoskits/drivers/intc/riscv_plic)
+   Compiling riscv_goldfish v0.1.1
+   Compiling ax-page-table-multiarch v0.8.13 (/work/tgoskits/memory/page_table_multiarch)
+   Compiling ax-cpu v0.8.3 (/work/tgoskits/components/axcpu)
+   Compiling fdt-parser v0.4.19
+   Compiling ax-memory-set v0.6.12 (/work/tgoskits/memory/memory_set)
+   Compiling ax-lazyinit v0.4.8 (/work/tgoskits/components/ax-lazyinit)
+   Compiling ax-log v0.5.18 (/work/tgoskits/os/arceos/modules/axlog)
+   Compiling chrono v0.4.45
+   Compiling linux-raw-sys v0.12.1
+   Compiling memchr v2.8.2
+   Compiling ax-ctor-bare v0.4.8 (/work/tgoskits/components/ctor_bare/ctor_bare)
+warning: function `set_fdt_addr_phys_if_valid` is never used
+  --> platforms/someboot/src/fdt/mod.rs:32:15
+   |
+32 | pub(crate) fn set_fdt_addr_phys_if_valid(fdt_addr: usize) -> bool {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling axpoll v0.5.1 (/work/tgoskits/components/axpoll)
+   Compiling ax-io v0.6.1 (/work/tgoskits/components/axio)
+   Compiling bitmaps v3.2.1
+warning: `someboot` (lib) generated 1 warning
+   Compiling flatten_objects v0.2.4
+   Compiling ax-mm v0.5.28 (/work/tgoskits/os/arceos/modules/axmm)
+   Compiling ax-sync v0.5.28 (/work/tgoskits/os/arceos/modules/axsync)
+   Compiling ax-api v0.7.4 (/work/tgoskits/os/arceos/api/arceos_api)
+   Compiling ax-std v0.5.28 (/work/tgoskits/os/arceos/ulib/axstd)
+   Compiling arceos-helloworld v0.1.0 (/work/tgoskits/apps/arceos/helloworld)
+    Finished `release` profile [optimized] target(s) in 16m 03s
+Converting ELF to BIN format...
+  elf: /work/tgoskits/target/riscv64gc-unknown-linux-musl/release/arceos-helloworld
+  bin: /work/tgoskits/target/riscv64gc-unknown-linux-musl/release/arceos-helloworld.bin
+/root/.rustup/toolchains/nightly-2026-05-28-riscv64gc-unknown-linux-gnu/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/llvm-objcopy --strip-all -O binary /work/tgoskits/target/riscv64gc-unknown-linux-musl/release/arceos-helloworld /work/tgoskits/target/riscv64gc-unknown-linux-musl/release/arceos-helloworld.bin
+[axbuild] cargo build package=arceos-helloworld target=scripts/targets/std/pie/riscv64gc-unknown-linux-musl.json config=/work/tgoskits/tmp/axbuild/config/arceos-helloworld/build-riscv64gc-unknown-none-elf.toml ... done (1002.88s)
+[axbuild] cargo build elf=/work/tgoskits/target/riscv64gc-unknown-linux-musl/release/arceos-helloworld
+[axbuild] cargo build artifact_dir=/work/tgoskits/target/riscv64gc-unknown-linux-musl/release
+BUILDSTORM_COMPILE mode=multi ok=true elapsed_s=1018.63 cores=8 bytes=1681000 arch=riscv64
+#### OS COMP TEST GROUP END buildstorm-glibc ####
+[?2004hroot@ShellCore:/glibc# exit
+[?2004lexit
+init: shell exited with status 0, restarting...
+[user] _start: main returned 0; exiting
+[kernel] Idle process exit with exit_code 0 ...
+[kernel] Panicked at src/process/task/exit.rs:42 All applications completed!
+syncing disks...
+shutting down...

@@ -220,164 +220,80 @@ const POLLIN: i16 = 0x001;
 const POLLOUT: i16 = 0x004;
 const POLLERR: i16 = 0x008;
 const POLLNVAL: i16 = 0x020;
-const POLLHUP: u16 = 0x0010;
+const POLLHUP: i16 = 0x0010;
 
-pub fn sys_ppoll(ufds_ptr: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> isize {
+pub fn sys_ppoll(
+    ufds_ptr: usize,
+    nfds: usize,
+    tmo_p: usize,
+    sigmask_ptr: usize,
+    sigsetsize: usize,
+) -> isize {
     debug!("[kernel] sys_ppoll: ufds=0x{:x}, nfds={}, tmo_p=0x{:x}", ufds_ptr, nfds, tmo_p);
     if ufds_ptr == 0 && nfds > 0 {
-        return EFAULT.as_isize(); // EFAULT
+        return EFAULT.as_isize();
     }
     // Linux rejects a pollfd array larger than the caller's open-file limit.
     if nfds > current_task().unwrap().nofile_limit() {
         return EINVAL.as_isize();
     }
-    let mm = current_user_mm();
 
-    // 解析超时时间
-    let has_timeout = tmo_p != 0;
-    let mut deadline_us: usize = 0;
-    if has_timeout {
-        let timespec = {
-            if let Some(ts) = try_translated_read(&mm, tmo_p as *const TimeSpec) {
-                ts
-            } else {
-                return EFAULT.as_isize();
-            }
+    let mm = current_user_mm();
+    let deadline_ns = if tmo_p != 0 {
+        let Some(timespec) = try_translated_read(&mm, tmo_p as *const TimeSpec) else {
+            return EFAULT.as_isize();
         };
         if timespec.tv_nsec >= 1_000_000_000 {
             return EINVAL.as_isize();
         }
-        const MAX_PPOLL_TIMEOUT_SEC: usize = 86400;
-        if timespec.tv_sec > MAX_PPOLL_TIMEOUT_SEC {
-            return EINVAL.as_isize();
-        }
-        let timeout_us = timespec.tv_sec.saturating_mul(1_000_000)
-            .saturating_add((timespec.tv_nsec + 999) / 1_000);
-        deadline_us = get_time_us().saturating_add(timeout_us);
-    } else {
-        deadline_us = usize::MAX;
-    }
-
-    // Read the temporary mask before taking the task lock.  Calling
-    // Read user memory before taking task_inner; lazy fault-in may need to
-    // inspect the current trap context.
-    let mask_val = if _sigmask != 0 {
-        match try_translated_read(&mm, _sigmask as *const usize) {
-            Some(val) => Some(val),
-            None => return EFAULT.as_isize(),
-        }
+        let timeout_ns = timespec
+            .tv_sec
+            .saturating_mul(1_000_000_000)
+            .saturating_add(timespec.tv_nsec);
+        Some(
+            get_time_us()
+                .saturating_mul(1_000)
+                .saturating_add(timeout_ns),
+        )
     } else {
         None
     };
 
-    // 备份原始掩码，并应用临时掩码
-    let task = current_task().unwrap();
-    let mut task_inner = task.inner_exclusive_access();
-    let original_mask = task_inner.blocked;
-
-    if let Some(mask_val) = mask_val {
-        task_inner.blocked = SignalFlags::from_bits_truncate(mask_val as u64);
-    }
-    drop(task_inner);
+    let mask_guard = match install_temporary_signal_mask(sigmask_ptr, sigsetsize) {
+        Ok(guard) => guard,
+        Err(errno) => return errno,
+    };
+    let effective_mask = mask_guard.as_ref().map(|guard| guard.effective_mask);
 
     loop {
-        {
-            let task = current_task().unwrap();
-            // --- 检查信号 (使用当前的临时掩码) ---
-            let mut task_inner = task.inner_exclusive_access();
-            let pending_bits = task_inner.pending.bits()
-                | task_inner.signal.exclusive_access().pending_flags().bits();
-            let pending = pending_bits & !task_inner.blocked.bits();
-            // 特判 SIGKILL(9) 和 SIGSTOP(19) 这两个绝对不可屏蔽的信号
-            let unmaskable = pending_bits & ((1 << (9 - 1)) | (1 << (19 - 1)));
+        if has_interrupting_signal(effective_mask) {
+            return EINTR.as_isize();
+        }
 
-            if (pending | unmaskable) != 0 {
-                debug!("[PROBE 1] ppoll return -4. pending signals: {:#x}, current mask: {:#x}",
-                         pending_bits, task_inner.blocked.bits());
-                task_inner.blocked = original_mask;
-                drop(task_inner); // 放锁
-                return EINTR.as_isize(); // EINTR
-            }
-            drop(task_inner);
-            // ----------------------------------------
-
-            // Extract only the file table, then release task_inner before
-            // touching user memory.
-            let fd_table = {
-                let inner = task.inner_exclusive_access();
-                let fd_table = inner.files.exclusive_access().fds.clone();
-                fd_table
-            }; // inner 在此释放
-            // 防止随机/恶意 nfds 导致死循环
-            const POLL_MAX: usize = 1024;
-            let nfds = nfds.min(POLL_MAX);
-            let mut ready_count = 0;
-
-            // --- 遍历轮询所有 fd ---
-            for i in 0..nfds {
-                let pollfd_ptr = (ufds_ptr + i * core::mem::size_of::<PollFd>()) as *mut PollFd;
-                let mut pollfd = {
-                    if let Some(pf) = try_translated_read(&mm, pollfd_ptr) {
-                        pf
-                    } else {
-                        task.inner_exclusive_access().blocked = original_mask;
-                        return EFAULT.as_isize();
-                    }
-                };
-
-                let fd = pollfd.fd;
-                pollfd.revents = 0;
-
-                if fd < 0 { continue; }
-                let fd_usize = fd as usize;
-
-                if fd_usize >= fd_table.len() || fd_table[fd_usize].file.is_none() {
-                    pollfd.revents = POLLNVAL;
-                    ready_count += 1;
-                } else {
-                    let file = fd_table[fd_usize].file.as_ref().unwrap();
-
-                    // 检查读
-                    if (pollfd.events & POLLIN) != 0 && file.ready_to_read() {
-                        pollfd.revents |= POLLIN;
-                    }
-                    // 检查写
-                    if (pollfd.events & POLLOUT) != 0 && file.ready_to_write() {
-                        pollfd.revents |= POLLOUT;
-                    }
-
-                    if pollfd.revents != 0 {
-                        ready_count += 1;
-                    }
-                }
-                if !try_translated_write(&mm, pollfd_ptr, pollfd) {
-                    task.inner_exclusive_access().blocked = original_mask;
-                    return EFAULT.as_isize();
-                }
-                //trace!("[kernel] ppoll fd={} target_events=0x{:x} ready_revents=0x{:x}", pollfd.fd, pollfd.events, pollfd.revents);
-            }
-
-            // 如果找到了就绪事件，恢复掩码并返回
-            if ready_count > 0 {
-                let mut task_inner = task.inner_exclusive_access();
-                task_inner.blocked = original_mask;
-                drop(task_inner);
-                return ready_count as isize;
-            }
-
-            // 如果没找到事件，处理超时逻辑
-            if has_timeout && get_time_us() >= deadline_us {
-                let mut task_inner = task.inner_exclusive_access();
-                task_inner.blocked = original_mask;
-                drop(task_inner);
+        let (ready_count, wait_queues) = match ppoll_collect_ready(&mm, ufds_ptr, nfds) {
+            Ok(result) => result,
+            Err(errno) => return errno,
+        };
+        if ready_count > 0 {
+            return ready_count as isize;
+        }
+        if let Some(deadline_ns) = deadline_ns {
+            if get_time_us().saturating_mul(1_000) >= deadline_ns {
                 return 0;
             }
         }
-        if has_timeout {
-            let deadline_ns = deadline_us.saturating_mul(1_000);
-            crate::process::scheduler::nanosleep::sleep_current_until(deadline_ns);
-        } else {
-            suspend_current_and_run_next();
+
+        match block_on_ppoll_queues(
+            &mm,
+            ufds_ptr,
+            nfds,
+            &wait_queues,
+            deadline_ns,
+            effective_mask,
+        ) {
+            Ok(Some(ready_count)) => return ready_count as isize,
+            Ok(None) => {}
+            Err(errno) => return errno,
         }
     }
 }
@@ -3183,22 +3099,22 @@ pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event_ptr: usize) -> isize
     result
 }
 
-struct EpollSignalMaskGuard {
+struct TemporarySignalMaskGuard {
     task: Arc<TaskControlBlock>,
     original_mask: SignalFlags,
     effective_mask: SignalFlags,
 }
 
-impl Drop for EpollSignalMaskGuard {
+impl Drop for TemporarySignalMaskGuard {
     fn drop(&mut self) {
         self.task.inner_exclusive_access().blocked = self.original_mask;
     }
 }
 
-fn install_epoll_signal_mask(
+fn install_temporary_signal_mask(
     sigmask_ptr: usize,
     sigsetsize: usize,
-) -> Result<Option<EpollSignalMaskGuard>, isize> {
+) -> Result<Option<TemporarySignalMaskGuard>, isize> {
     if sigmask_ptr == 0 {
         return Ok(None);
     }
@@ -3220,14 +3136,14 @@ fn install_epoll_signal_mask(
         inner.blocked = temporary_mask;
         original
     };
-    Ok(Some(EpollSignalMaskGuard {
+    Ok(Some(TemporarySignalMaskGuard {
         task,
         original_mask,
         effective_mask: temporary_mask,
     }))
 }
 
-fn epoll_has_deliverable_signal(effective_mask: Option<SignalFlags>) -> bool {
+fn has_interrupting_signal(effective_mask: Option<SignalFlags>) -> bool {
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
     let pending = inner.pending.flags() | inner.signal.exclusive_access().pending_flags();
@@ -3237,7 +3153,7 @@ fn epoll_has_deliverable_signal(effective_mask: Option<SignalFlags>) -> bool {
     deliverable.remove(SignalFlags::SIGKILL | SignalFlags::SIGSTOP);
 
     // SIGKILL/SIGSTOP always interrupt.  Signals ignored explicitly, and
-    // signals whose default action is ignore, must not turn epoll_pwait into
+    // signals whose default action is ignore, must not turn a poll-family wait into
     // EINTR (SIGCHLD is the important case for this test: the child exits
     // immediately after writing the watched socket).
     if pending.intersects(SignalFlags::SIGKILL | SignalFlags::SIGSTOP) {
@@ -3273,6 +3189,86 @@ fn append_poll_wait_queue(
     if !queues.iter().any(|existing| Arc::ptr_eq(existing, &queue)) {
         queues.push(queue);
     }
+}
+
+fn pollfd_user_ptr(ufds_ptr: usize, index: usize) -> Option<*mut PollFd> {
+    let offset = index.checked_mul(core::mem::size_of::<PollFd>())?;
+    ufds_ptr.checked_add(offset).map(|ptr| ptr as *mut PollFd)
+}
+
+/// Scan the caller's pollfd array and write every revents field.  Keeping the
+/// Arc clones from the fd table until queue discovery pins the same open-file
+/// descriptions even if another thread closes and reuses one of the fd slots.
+fn ppoll_collect_ready(
+    mm: &MemorySet,
+    ufds_ptr: usize,
+    nfds: usize,
+) -> Result<(usize, Vec<Arc<MPSafeCell<WaitQueue>>>), isize> {
+    let task = current_task().unwrap();
+    let files = task.inner_exclusive_access().files.clone();
+    let fd_table = files.exclusive_access().fds.clone();
+
+    let mut ready_count = 0;
+    let mut wait_sources: Vec<(Arc<dyn File + Send + Sync>, u32)> = Vec::new();
+
+    for index in 0..nfds {
+        let Some(pollfd_ptr) = pollfd_user_ptr(ufds_ptr, index) else {
+            return Err(EFAULT.as_isize());
+        };
+        let Some(mut pollfd) = try_translated_read(mm, pollfd_ptr) else {
+            return Err(EFAULT.as_isize());
+        };
+        pollfd.revents = 0;
+
+        if pollfd.fd >= 0 {
+            let file = fd_table
+                .get(pollfd.fd as usize)
+                .and_then(|entry| entry.file.as_ref());
+            let Some(file) = file else {
+                pollfd.revents = POLLNVAL;
+                ready_count += 1;
+                if !try_translated_write(mm, pollfd_ptr, pollfd) {
+                    return Err(EFAULT.as_isize());
+                }
+                continue;
+            };
+
+            if file.poll_error() {
+                pollfd.revents |= POLLERR;
+            }
+            if file.poll_hangup() {
+                pollfd.revents |= POLLHUP;
+            }
+            if pollfd.events & POLLIN != 0 && file.ready_to_read() {
+                pollfd.revents |= POLLIN;
+            }
+            if pollfd.events & POLLOUT != 0 && file.ready_to_write() {
+                pollfd.revents |= POLLOUT;
+            }
+
+            if pollfd.revents != 0 {
+                ready_count += 1;
+            } else {
+                wait_sources.push((file.clone(), pollfd.events as u32));
+            }
+        }
+
+        if !try_translated_write(mm, pollfd_ptr, pollfd) {
+            return Err(EFAULT.as_isize());
+        }
+    }
+
+    if ready_count != 0 {
+        return Ok((ready_count, Vec::new()));
+    }
+
+    let mut wait_queues = Vec::new();
+    for (file, interests) in wait_sources {
+        for queue in file.poll_wait_queues(interests) {
+            append_poll_wait_queue(&mut wait_queues, queue);
+        }
+    }
+    Ok((0, wait_queues))
 }
 
 fn epoll_collect_ready(
@@ -3372,9 +3368,79 @@ fn epoll_collect_ready(
     Ok((ready_events, wait_queues))
 }
 
-fn unregister_epoll_waiter(queues: &[Arc<MPSafeCell<WaitQueue>>], tid: usize) {
+fn unregister_poll_waiter(queues: &[Arc<MPSafeCell<WaitQueue>>], tid: usize) {
     for queue in queues {
         queue.exclusive_access().remove_by_tid(tid);
+    }
+}
+
+/// ppoll mirrors epoll's register-then-recheck protocol, but rechecks the
+/// original pollfd array so each wake observes level-triggered readiness.
+fn block_on_ppoll_queues(
+    mm: &MemorySet,
+    ufds_ptr: usize,
+    nfds: usize,
+    queues: &[Arc<MPSafeCell<WaitQueue>>],
+    deadline_ns: Option<usize>,
+    effective_mask: Option<SignalFlags>,
+) -> Result<Option<usize>, isize> {
+    let task = current_task().unwrap();
+    let tid = task.gettid();
+    let task_cx_ptr = {
+        let mut inner = task.inner_exclusive_access();
+        let ptr = &mut inner.thread.task_ctx as *mut TaskContext;
+        inner.wake_pending = false;
+        inner.state = crate::task::TaskStatus::BlockSaving;
+        ptr
+    };
+
+    if let Some(deadline_ns) = deadline_ns {
+        crate::process::scheduler::nanosleep::register_sleep_task(deadline_ns, task.clone());
+    }
+    for queue in queues {
+        queue.exclusive_access().push_back(task.clone());
+    }
+
+    match ppoll_collect_ready(mm, ufds_ptr, nfds) {
+        Ok((ready_count, _)) if ready_count > 0 => {
+            if deadline_ns.is_some() {
+                crate::process::scheduler::nanosleep::cancel_sleep_task(tid);
+            }
+            unregister_poll_waiter(queues, tid);
+            let mut inner = task.inner_exclusive_access();
+            inner.state = crate::task::TaskStatus::Running;
+            inner.wake_pending = false;
+            Ok(Some(ready_count))
+        }
+        Ok(_) if has_interrupting_signal(effective_mask) => {
+            if deadline_ns.is_some() {
+                crate::process::scheduler::nanosleep::cancel_sleep_task(tid);
+            }
+            unregister_poll_waiter(queues, tid);
+            let mut inner = task.inner_exclusive_access();
+            inner.state = crate::task::TaskStatus::Running;
+            inner.wake_pending = false;
+            Ok(None)
+        }
+        Err(errno) => {
+            if deadline_ns.is_some() {
+                crate::process::scheduler::nanosleep::cancel_sleep_task(tid);
+            }
+            unregister_poll_waiter(queues, tid);
+            let mut inner = task.inner_exclusive_access();
+            inner.state = crate::task::TaskStatus::Running;
+            inner.wake_pending = false;
+            Err(errno)
+        }
+        Ok(_) => {
+            drop(task);
+            crate::process::schedule(task_cx_ptr);
+            if deadline_ns.is_some() {
+                crate::process::scheduler::nanosleep::cancel_sleep_task(tid);
+            }
+            unregister_poll_waiter(queues, tid);
+            Ok(None)
+        }
     }
 }
 
@@ -3410,17 +3476,17 @@ fn block_on_epoll_queues(
             if deadline_ns.is_some() {
                 crate::process::scheduler::nanosleep::cancel_sleep_task(tid);
             }
-            unregister_epoll_waiter(queues, tid);
+            unregister_poll_waiter(queues, tid);
             let mut inner = task.inner_exclusive_access();
             inner.state = crate::task::TaskStatus::Running;
             inner.wake_pending = false;
             Ok(Some(ready_events))
         }
-        Ok(_) if epoll_has_deliverable_signal(effective_mask) => {
+        Ok(_) if has_interrupting_signal(effective_mask) => {
             if deadline_ns.is_some() {
                 crate::process::scheduler::nanosleep::cancel_sleep_task(tid);
             }
-            unregister_epoll_waiter(queues, tid);
+            unregister_poll_waiter(queues, tid);
             let mut inner = task.inner_exclusive_access();
             inner.state = crate::task::TaskStatus::Running;
             inner.wake_pending = false;
@@ -3431,7 +3497,7 @@ fn block_on_epoll_queues(
             if deadline_ns.is_some() {
                 crate::process::scheduler::nanosleep::cancel_sleep_task(tid);
             }
-            unregister_epoll_waiter(queues, tid);
+            unregister_poll_waiter(queues, tid);
             let mut inner = task.inner_exclusive_access();
             inner.state = crate::task::TaskStatus::Running;
             inner.wake_pending = false;
@@ -3443,7 +3509,7 @@ fn block_on_epoll_queues(
             if deadline_ns.is_some() {
                 crate::process::scheduler::nanosleep::cancel_sleep_task(tid);
             }
-            unregister_epoll_waiter(queues, tid);
+            unregister_poll_waiter(queues, tid);
             Ok(None)
         }
     }
@@ -3486,7 +3552,7 @@ fn sys_epoll_pwait_common(
     const EPOLL_MAX_EVENTS: i32 = 1024;
     let maxevents = maxevents.min(EPOLL_MAX_EVENTS) as usize;
 
-    let mask_guard = match install_epoll_signal_mask(sigmask_ptr, sigsetsize) {
+    let mask_guard = match install_temporary_signal_mask(sigmask_ptr, sigsetsize) {
         Ok(guard) => guard,
         Err(errno) => return errno,
     };
@@ -3494,7 +3560,7 @@ fn sys_epoll_pwait_common(
     let mm = current_user_mm();
 
     loop {
-        if epoll_has_deliverable_signal(effective_mask) {
+        if has_interrupting_signal(effective_mask) {
             return EINTR.as_isize();
         }
 
