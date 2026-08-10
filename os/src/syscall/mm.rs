@@ -136,7 +136,8 @@ const MREMAP_FIXED: usize = 2;
 /// 目前实现：
 /// - 缩小：直接 munmap 尾部；
 /// - 扩大且尾部空闲：原地扩展（匿名映射）；
-/// - 否则若带 MREMAP_MAYMOVE：新映射 + 拷贝 + 解除旧映射；
+/// - 否则若带 MREMAP_MAYMOVE：私有匿名映射优先零拷贝移动 PTE/帧；
+///   其他映射暂时回退为新映射 + 拷贝 + 解除旧映射；
 /// - MREMAP_FIXED 暂未实现，返回 EINVAL。
 pub fn sys_mremap(
     old_addr: usize,
@@ -150,7 +151,6 @@ pub fn sys_mremap(
         || old_size == 0
         || new_size == 0
         || old_addr.checked_add(old_size).map_or(true, |e| e >= USER_APP_MAX_SIZE)
-        || old_addr.checked_add(new_size).map_or(true, |e| e >= USER_APP_MAX_SIZE)
         || (flags & !(MREMAP_MAYMOVE | MREMAP_FIXED)) != 0
     {
         return EINVAL.as_isize();
@@ -160,8 +160,12 @@ pub fn sys_mremap(
         return EINVAL.as_isize();
     }
 
-    let old_sz = (old_size + page - 1) & !(page - 1);
-    let new_sz = (new_size + page - 1) & !(page - 1);
+    let Some(old_sz) = old_size.checked_add(page - 1).map(|size| size & !(page - 1)) else {
+        return EINVAL.as_isize();
+    };
+    let Some(new_sz) = new_size.checked_add(page - 1).map(|size| size & !(page - 1)) else {
+        return EINVAL.as_isize();
+    };
     if old_sz == new_sz {
         return old_addr as isize;
     }
@@ -195,7 +199,19 @@ pub fn sys_mremap(
         return ENOMEM.as_isize();
     }
 
-    // 移动：新映射 + 拷贝 + 解除旧映射
+    // 移动私有匿名 VMA 时，PTE 和 FrameTracker 可以直接换到新地址，
+    // 不需要触及用户数据，也不会把懒分配页提前 fault-in。
+    let mm = current_user_mm();
+    match mm.mremap_move_private_anon(old_addr, old_sz, new_sz) {
+        Ok(addr) => return addr as isize,
+        Err(errno) if errno != EINVAL.as_isize() => return errno,
+        Err(_) => {
+            // 文件映射、共享匿名映射和非完整 VMA 尚未具备可移动的
+            // backing/共享身份协议，保留下面的兼容性回退。
+        }
+    }
+
+    // 兼容性回退：新映射 + 拷贝 + 解除旧映射。
     let new_addr = match mmap::do_mmap(
         0,
         new_sz,

@@ -612,5 +612,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         );*/
     trace!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
     info!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
+    if ret == Errno::EFAULT.as_isize() {
+        println!("[K] hart[{}] PID{} syscall {} returned EFAULT", get_hart_id(), current_task().unwrap().getpid(), syscall_id);
+    }
     ret
 }

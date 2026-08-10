@@ -25,6 +25,7 @@ pub const SYSCALL_WAITPID: usize = 260;
 pub const SYSCALL_SET_PRIORITY: usize = 140;
 pub const SYSCALL_SBRK: usize = 214;
 pub const SYSCALL_MUNMAP: usize = 215;
+pub const SYSCALL_MREMAP: usize = 216;
 pub const SYSCALL_MMAP: usize = 222;
 pub const SYSCALL_SPAWN: usize = 400;
 pub const SYSCALL_MAIL_READ: usize = 401;

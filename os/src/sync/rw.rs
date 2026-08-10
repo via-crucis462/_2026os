@@ -9,6 +9,10 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicIsize, Ordering};
 
+/// 写者优先自旋读写锁
+///
+/// 写者等待其他访问者完成，但阻碍新读者进入；
+/// 读者等待写者完成，读者可并发访问。
 pub struct RwLock<T: ?Sized> {
     /// 读者数量（>=0），或 -1 表示写者持有
     state: AtomicIsize,
@@ -134,6 +138,28 @@ impl<T: ?Sized> DerefMut for RwLockWriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
         // SAFETY: 持有写锁期间独占访问。
         unsafe { &mut *self.lock.inner.get() }
+    }
+}
+
+impl<'a, T: ?Sized> RwLockWriteGuard<'a, T> {
+    /// 原子化降级为读者，返回新 guard
+    #[inline]
+    pub fn downgrade(self) -> RwLockReadGuard<'a, T> {
+        let lock = self.lock;
+
+        // 将写者（自身）在写的状态原子化改为读者（自身）在读的状态。
+        // 状态转换不能放在 debug_assert 的参数中，否则 release 构建会
+        // 连同 swap 一起删除，留下永久写锁。
+        let previous = lock.state.swap(1, Ordering::AcqRel);
+        debug_assert_eq!(previous, -1);
+
+        // 删除但不执行析构
+        core::mem::forget(self);
+
+        RwLockReadGuard {
+            lock,
+            _marker: PhantomData,
+        }
     }
 }
 

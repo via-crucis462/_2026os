@@ -322,6 +322,44 @@ impl PageTable {
         assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
         *pte = PageTableEntry::empty();
     }
+
+    /// 迁移一个页表项到另一个虚拟页号，要求源页号已映射，目标页号未映射
+    pub(crate) fn move_entry(
+        &mut self,
+        src: VirtPageNum,
+        dst: VirtPageNum,
+        page_size: PageSize,
+    ) -> bool {
+        if src == dst {
+            return true;
+        }
+
+        let Some((entry, src_page_size)) = self.find_pte(src) else {
+            return false;
+        };
+        if !entry.is_valid() || src_page_size != page_size {
+            return false;
+        }
+        if self.translate(dst).is_some_and(|pte| pte.is_valid()) {
+            return false;
+        }
+
+        let Some(dst_pte) = self.find_pte_create(dst, page_size) else {
+            return false;
+        };
+        if dst_pte.is_valid() {
+            return false;
+        }
+        *dst_pte = entry;
+
+        let Some((src_pte, src_page_size)) = self.find_pte_mut(src) else {
+            unreachable!("source PTE disappeared while page table write lock is held");
+        };
+        debug_assert_eq!(src_page_size, page_size);
+        *src_pte = PageTableEntry::empty();
+        true
+    }
+
     /// get the page table entry from the virtual page number
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.find_pte(vpn).map(|(pte, _)| pte)
@@ -424,8 +462,7 @@ fn pte_allows_user_access(pte: PageTableEntry, write: bool) -> bool {
 
 /// 获用户空间虚拟地址的相应缓冲区
 /// 
-/// 待完善为 RCU 实现
-/// 当前为 areas.read() -> area.read() -> page_table.read() 的读锁访问
+/// 当前为 areas.read() -> area.read() -> page_table.read() 的读锁访问。
 fn pin_user_segment(
     mm: &MemorySet,
     va: VirtAddr,
@@ -563,7 +600,12 @@ fn pin_user_range_once(
     PinUserRangeResult::Pinned(result)
 }
 
-fn handle_fault_in_range(mm: &MemorySet, start: usize, len: usize, write: bool) -> bool {
+fn handle_fault_in_range(
+    mm: &MemorySet,
+    start: usize,
+    len: usize,
+    write: bool,
+) -> bool {
     // A generic kernel copy can target a remote mm and can be called while
     // the current task's inner lock is held.  It therefore must not recover
     // a current trap context here.  `handle_page_fault` only uses this value
@@ -578,30 +620,35 @@ fn handle_fault_in_range(mm: &MemorySet, start: usize, len: usize, write: bool) 
     }
 }
 
-/// 固定待访问地址空间的页帧，返回 buffer
+/// 固定待访问地址空间的页帧，返回固定得到的 buffer
 fn pin_user_range(
     mm: &MemorySet,
     start: usize,
     len: usize,
     write: bool,
 ) -> Option<Vec<UserBufferSegment>> {
-    const MAX_RETRIES: usize = 2;
+    // A concurrent VMA/PTE transition can invalidate an otherwise valid pin
+    // attempt.  `NeedsFault` is not itself an invalid user pointer: in
+    // particular, fork can make a private writable PTE read-only for COW.
+    const MAX_TRANSIENT_RETRIES: usize = 8;
 
     let mut retries = 0;
-    let mut faulted = false;
+    let mut faults = 0;
     loop {
         match pin_user_range_once(mm, start, len, write) {
             PinUserRangeResult::Pinned(result) => return Some(result),
-            PinUserRangeResult::NeedsFault if !faulted => {
+            PinUserRangeResult::NeedsFault => {
+                faults += 1;
+                if faults > MAX_TRANSIENT_RETRIES {
+                    return None;
+                }
+
                 if !handle_fault_in_range(mm, start, len, write) {
                     return None;
                 }
-                faulted = true;
                 retries = 0;
             }
-            PinUserRangeResult::Retry if retries < MAX_RETRIES => {
-                // 当用户有别的写者在高频访问，重试两次还没拿到锁就返回 None。
-                // 这里不太规范，理论上应该走不到这里，暂时能跑，待进一步完善。
+            PinUserRangeResult::Retry if retries < MAX_TRANSIENT_RETRIES => {
                 retries += 1;
             }
             PinUserRangeResult::NeedsFault

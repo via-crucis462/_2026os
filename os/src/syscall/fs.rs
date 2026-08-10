@@ -951,6 +951,17 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     total_written as isize
 }
 pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut Statx) -> isize {
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_NO_AUTOMOUNT: u32 = 0x800;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_STATX_FORCE_SYNC: u32 = 0x2000;
+    const AT_STATX_DONT_SYNC: u32 = 0x4000;
+    const AT_STATX_SYNC_TYPE: u32 = AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC; // 0x6000
+    const AT_ALLOWED_FLAGS: u32 =
+        AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE;
+    const STATX_RESERVED: u32 = 0x8000_0000;
+
+    // 1. 与 Linux 一致：先拷贝路径（路径指针非法 → EFAULT），再做参数校验
     let mm = current_user_mm();
     let path_str = {
         if let Some(s) = try_translated_str(&mm, path) {
@@ -960,10 +971,24 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
         }
     };
     //println!("kernel:pid[{}] sys_statx: dirfd={}, path={}, flags=0x{:x}, mask=0x{:x}", task.process().pid.0, dirfd, path_str, flags, mask);
-    const AT_EMPTY_PATH: u32 = 0x1000;
+
+    // 2. do_statx：mask 的保留位（bit31, STATX__RESERVED）置位 → EINVAL
+    if (mask & STATX_RESERVED) != 0 {
+        return EINVAL.as_isize();
+    }
+    // 3. do_statx：AT_STATX_SYNC_TYPE 三个位全部置 1 是保留值 → EINVAL
+    if (flags & AT_STATX_SYNC_TYPE) == AT_STATX_SYNC_TYPE {
+        return EINVAL.as_isize();
+    }
+    // 4. vfs_statx：未知标志位 → EINVAL
+    if (flags & !AT_ALLOWED_FLAGS) != 0 {
+        return EINVAL.as_isize();
+    }
+
     if path_str.is_empty() {
+        // 空路径：不带 AT_EMPTY_PATH 时内核返回 ENOENT（不是 EINVAL）
         if (flags & AT_EMPTY_PATH) == 0 {
-            return EINVAL.as_isize(); // 无效参数 
+            return ENOENT.as_isize();
         }
 
         let files = current_files();
@@ -995,6 +1020,18 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
         return 0;
     }
 
+    // ---- 路径长度校验：整条路径 > PATH_MAX(4096) 或任一分量 > NAME_MAX(255) → ENAMETOOLONG ----
+    const PATH_MAX_LEN: usize = 4096;
+    const NAME_MAX_LEN: usize = 255;
+    if path_str.len() > PATH_MAX_LEN {
+        return ENAMETOOLONG.as_isize();
+    }
+    for comp in path_str.split('/') {
+        if comp.len() > NAME_MAX_LEN {
+            return ENAMETOOLONG.as_isize();
+        }
+    }
+
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
     } else if dirfd == AT_FDCWD {
@@ -1005,34 +1042,43 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
         if dirfd < 0 || dirfd as usize >= inner.fds.len() {
             return EBADF.as_isize();
         }
-        if let Some(file) = &inner.fds[dirfd as usize].file {
-            if let Some(dentry) = file.get_dentry() {
-                dentry
-            } else {
-                return EBADF.as_isize();
-            }
-        } else {
-            return EBADF.as_isize();
+        match &inner.fds[dirfd as usize].file {
+            Some(file) => match file.get_dentry() {
+                Some(dentry) => {
+                    // 相对路径从 dirfd 开始解析：dirfd 必须指向目录，否则 ENOTDIR
+                    if (dentry.inode.get_stat().mode & 0o170000) != 0o040000 {
+                        return ENOTDIR.as_isize();
+                    }
+                    dentry
+                }
+                // 有效 fd 但无 dentry（管道/终端/设备等非目录）→ ENOTDIR
+                None => return ENOTDIR.as_isize(),
+            },
+            None => return EBADF.as_isize(),
         }
     };
 
-    let follow_links = (flags & (1 << 8)) == 0; // AT_SYMLINK_NOFOLLOW (0x100)
-    if let Ok(target_dentry) = start_dentry.find_tree(&path_str, follow_links) {
-        let mut stat = target_dentry.inode.get_statx();
-        // 检查是否有缓存的时间数据，如果有则覆盖 stat 中的时间字段
-        if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&stat.stx_ino) {
-            stat.stx_atime.tv_sec = asec;
-            stat.stx_atime.tv_nsec = ansec as u32;
-            stat.stx_mtime.tv_sec = msec;
-            stat.stx_mtime.tv_nsec = mnsec as u32;
-        }
+    let follow_links = (flags & AT_SYMLINK_NOFOLLOW) == 0;
+    match start_dentry.find_tree(&path_str, follow_links) {
+        Ok(target_dentry) => {
+            let mut stat = target_dentry.inode.get_statx();
+            // 检查是否有缓存的时间数据，如果有则覆盖 stat 中的时间字段
+            if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&stat.stx_ino) {
+                stat.stx_atime.tv_sec = asec;
+                stat.stx_atime.tv_nsec = ansec as u32;
+                stat.stx_mtime.tv_sec = msec;
+                stat.stx_mtime.tv_nsec = mnsec as u32;
+            }
 
-        if !try_translated_write(&mm, st, stat) {
-            return EFAULT.as_isize();
+            if !try_translated_write(&mm, st, stat) {
+                return EFAULT.as_isize();
+            }
+            0
         }
-        0
-    } else {
-        return ENOENT.as_isize(); // 文件不存在
+        // find_tree 错误码：0=ELOOP(符号链接循环), 1=ENOTDIR(中间分量非目录), 2=ENOENT(不存在)
+        Err(0) => ELOOP.as_isize(),
+        Err(1) => ENOTDIR.as_isize(),
+        Err(_) => ENOENT.as_isize(),
     }
 }
 

@@ -1944,10 +1944,14 @@ impl MemorySet {
         let vpn = VirtAddr::from(bad_addr).std_floor();
         let old_frame = {
             // Keep the tree lookup, VMA state and PTE replacement in one
-            // lock-order-consistent transaction.  A removed VMA can therefore
+            // lock-order-consistent transaction. A removed VMA can therefore
             // never be resurrected by a late COW fault.
             let areas = self.areas.read();
-            let Some((_, area_arc)) = areas.range(..=vpn).next_back() else {
+            let Some(area_arc) = areas
+                .range(..=vpn)
+                .next_back()
+                .map(|(_, area)| Arc::clone(area))
+            else {
                 return false;
             };
             let mut area = area_arc.write();
@@ -1972,13 +1976,15 @@ impl MemorySet {
             if !pte.is_valid() || pte.writable() {
                 return false;
             }
-            let old_ppn = pte.ppn();
+
             let Some(tracked_frame) = area.frame_for_vpn(vpn) else {
                 return false;
             };
-            if tracked_frame.page_size != page_size || tracked_frame.ppn != old_ppn {
+            if tracked_frame.page_size != page_size || tracked_frame.ppn != pte.ppn() {
                 return false;
             }
+
+            let old_ppn = pte.ppn();
 
             let Some(new_frame) = frame_alloc(page_size) else {
                 return false;
@@ -2003,8 +2009,26 @@ impl MemorySet {
         drop(old_frame);
         true
     }
+    /// Resolve a COW transition, or observe that another writable pin resolved
+    /// it after this caller's first PTE check. The latter is a valid optimistic
+    /// retry outcome rather than an invalid user pointer.
+    fn resolve_cow_or_observe_writable(&self, bad_addr: usize) -> bool {
+        let vpn = VirtAddr::from(bad_addr).std_floor();
+        self.handle_cow_fault(bad_addr)
+            || self
+                .page_table
+                .read()
+                .translate(vpn)
+                .is_some_and(|pte| pte.is_valid() && pte.writable())
+    }
+
     //用于内核态给用户空间写入数据，判断是否是copy页时使用
-    pub fn ensure_writable_user_range(&self, start: usize, len: usize, sp: usize) -> bool {
+    pub fn ensure_writable_user_range(
+        &self,
+        start: usize,
+        len: usize,
+        sp: usize,
+    ) -> bool {
         if len == 0 {
             return true;
         }
@@ -2042,25 +2066,19 @@ impl MemorySet {
                     pt.translate(vpn).map_or(false, |pte| pte.is_valid())
                 };
                 if valid {
-                    if !self.handle_cow_fault(page_start) {
+                    if !self.resolve_cow_or_observe_writable(page_start) {
                         return false;
                     }
                 } else {
                     if !self.handle_page_fault(page_start, sp) {
                         return false;
                     }
-                    let ok = {
+                    let writable = {
                         let pt = self.page_table.read();
-                        match pt.translate(vpn) {
-                            Some(pte) if pte.is_valid() && pte.writable() => true,
-                            Some(pte) if pte.is_valid() => {
-                                drop(pt);
-                                self.handle_cow_fault(page_start)
-                            }
-                            _ => false,
-                        }
+                        pt.translate(vpn)
+                            .is_some_and(|pte| pte.is_valid() && pte.writable())
                     };
-                    if !ok {
+                    if !writable && !self.resolve_cow_or_observe_writable(page_start) {
                         return false;
                     }
                 }
@@ -2160,11 +2178,12 @@ impl MemorySet {
     }
 
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
-        // Keep the VMA-tree and this area's state stable through the page-table
-        // lookup.  Writers use the same order, so there is no retry loop or
-        // address-space-wide transaction gate on normal translations.
+        // Keep the tree and this VMA stable through the page-table lookup.
         let areas = self.areas.read();
-        let (_, area_arc) = areas.range(..=vpn).next_back()?;
+        let area_arc = areas
+            .range(..=vpn)
+            .next_back()
+            .map(|(_, area)| Arc::clone(area))?;
         let area = area_arc.read();
         if !area.contains(vpn) {
             return None;
@@ -2179,7 +2198,10 @@ impl MemorySet {
     pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
         let vpn = va.std_floor();
         let areas = self.areas.read();
-        let (_, area_arc) = areas.range(..=vpn).next_back()?;
+        let area_arc = areas
+            .range(..=vpn)
+            .next_back()
+            .map(|(_, area)| Arc::clone(area))?;
         let area = area_arc.read();
         if !area.contains(vpn) {
             return None;
@@ -2200,7 +2222,10 @@ impl MemorySet {
     pub fn futex_key(&self, va: VirtAddr, private_requested: bool) -> Option<FutexKey> {
         let vpn = va.std_floor();
         let areas = self.areas.read();
-        let (_, area_arc) = areas.range(..=vpn).next_back()?;
+        let area_arc = areas
+            .range(..=vpn)
+            .next_back()
+            .map(|(_, area)| Arc::clone(area))?;
         let area = area_arc.read();
         if !area.contains(vpn) || !area.map_perm.contains(MapPermission::U) {
             return None;
@@ -2407,8 +2432,10 @@ impl MemorySet {
             Some(file_inner.ok_or_else(|| Errno::EBADF.as_isize())?)
         };
 
-        // 地址选择与插入在同一次 areas 写锁内完成
+        // 地址选择与插入在同一次 areas 写锁内完成。
         let mut areas = self.areas.write();
+        let mut released_frames = Vec::new();
+        let mut needs_tlb_flush = false;
         let find_free_area = || -> Result<usize, isize> {
             match Self::find_free_area_locked(length, &areas) {
                 Some(new_addr) => Ok(new_addr),
@@ -2426,10 +2453,8 @@ impl MemorySet {
         } else {
             if Self::has_conflict_locked(&areas, addr, length) {
                 if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED) {
-                    let released_frames = self.munmap_locked(&mut areas, addr, length);
-                    #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
-                    self.flush_tlb_targets();
-                    drop(released_frames);
+                    released_frames = self.munmap_locked(&mut areas, addr, length);
+                    needs_tlb_flush = true;
                 } else {
                     return Err(Errno::EEXIST.as_isize());
                 }
@@ -2454,7 +2479,7 @@ impl MemorySet {
             let key = area.vpn_range.get_start();
             areas.insert(key, Arc::new(VersionedArea::new(area)));
         } else {
-        let file = file_opt.clone().unwrap();
+            let file = file_opt.clone().unwrap();
             let mut area = MapArea::new(
                 VirtAddr::from(start_va),
                 VirtAddr::from(start_va + length),
@@ -2468,6 +2493,18 @@ impl MemorySet {
             areas.insert(key, Arc::new(VersionedArea::new(area)));
         }
 
+        if needs_tlb_flush {
+            // Keep the new fixed mapping private from layout writers until
+            // shootdown has invalidated the old translation.  The old frames
+            // are released only after this shared guard is gone.
+            let areas = areas.downgrade();
+            #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
+            self.flush_tlb_targets();
+            drop(areas);
+        } else {
+            drop(areas);
+        }
+        drop(released_frames);
         Ok(start_va)
     }
 
@@ -2528,6 +2565,12 @@ impl MemorySet {
     pub fn munmap(&self, start: usize, length: usize) -> Result<(), isize> {
         let mut areas = self.areas.write();
         let released_frames = self.munmap_locked(&mut areas, start, length);
+
+        // The VMA tree and PTEs are now committed.  Retain only a shared
+        // transaction while shootdown completes: readers can observe the new
+        // state, but another layout writer cannot interleave before the old
+        // translations have been invalidated.
+        let areas = areas.downgrade();
         #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
         self.flush_tlb_targets();
         drop(areas);
@@ -2696,22 +2739,32 @@ impl MemorySet {
         new_size: usize,
     ) -> Result<usize, isize> {
         let old_start_vpn = VirtAddr::from(old_addr).std_floor();
-        let old_end_vpn = VirtAddr::from(old_addr + old_size).std_ceil();
-        let new_end_vpn = VirtAddr::from(old_addr + new_size).std_ceil();
+        let old_end = old_addr
+            .checked_add(old_size)
+            .ok_or(Errno::EINVAL.as_isize())?;
+        let new_end = old_addr
+            .checked_add(new_size)
+            .ok_or(Errno::ENOMEM.as_isize())?;
+        let old_end_vpn = VirtAddr::from(old_end).std_ceil();
+        let new_end_vpn = VirtAddr::from(new_end).std_ceil();
 
         let mut areas = self.areas.write();
-        let area_arc = {
-            areas
-                .values()
-                .find(|a| {
-                    let area = a.read();
-                    area.vpn_range.get_start().0 * PAGE_SIZE <= old_addr
-                        && old_addr + old_size <= area.vpn_range.get_end().0 * PAGE_SIZE
-                        && area.map_type == MapType::Framed
-                })
-                .cloned()
+        // This implementation changes a single VMA's end in place.  Accepting
+        // a subrange would silently discard its prefix by changing the tree
+        // key/range, so the requested old range must be the complete VMA.
+        let area_arc = areas
+            .get(&old_start_vpn)
+            .cloned()
+            .ok_or(Errno::ENOMEM.as_isize())?;
+        {
+            let area = area_arc.read();
+            if area.vpn_range.get_start() != old_start_vpn
+                || area.vpn_range.get_end() != old_end_vpn
+                || area.map_type != MapType::Framed
+            {
+                return Err(Errno::ENOMEM.as_isize());
+            }
         }
-        .ok_or(Errno::ENOMEM.as_isize())?;
 
         // 扩展区间必须空闲，否则无法原地扩大
         if Self::has_conflict_locked(&areas, old_addr + old_size, new_size - old_size) {
@@ -2720,6 +2773,134 @@ impl MemorySet {
 
         area_arc.write().resize(old_start_vpn, new_end_vpn);
         Ok(old_addr)
+    }
+
+    /// Move one complete private anonymous VMA without copying its user pages.
+    ///
+    /// The current shared-anonymous frame registry is keyed by virtual page
+    /// number, so shared mappings cannot safely use this path yet.  File VMAs
+    /// similarly need separate backing-offset handling.  Restricting this
+    /// first path to private anonymous 4 KiB mappings keeps their existing
+    /// COW, frame ownership and lazy-allocation semantics intact.
+    pub fn mremap_move_private_anon(
+        &self,
+        old_addr: usize,
+        old_size: usize,
+        new_size: usize,
+    ) -> Result<usize, isize> {
+        if old_size == 0 || new_size < old_size {
+            return Err(Errno::EINVAL.as_isize());
+        }
+
+        let old_start_vpn = VirtAddr::from(old_addr).std_floor();
+        let old_end_vpn = VirtAddr::from(
+            old_addr
+                .checked_add(old_size)
+                .ok_or(Errno::EINVAL.as_isize())?,
+        )
+        .std_ceil();
+
+        let mut areas = self.areas.write();
+        let area_arc = areas
+            .get(&old_start_vpn)
+            .cloned()
+            .ok_or(Errno::EINVAL.as_isize())?;
+
+        let new_addr = Self::find_free_area_locked(new_size, &areas)
+            .ok_or(Errno::ENOMEM.as_isize())?;
+        let new_start_vpn = VirtAddr::from(new_addr).std_floor();
+        let new_end_vpn = VirtAddr::from(
+            new_addr
+                .checked_add(new_size)
+                .ok_or(Errno::ENOMEM.as_isize())?,
+        )
+        .std_ceil();
+
+        let mut area = area_arc.write();
+        if area.vpn_range.get_start() != old_start_vpn
+            || area.vpn_range.get_end() != old_end_vpn
+            || area.map_type != MapType::Framed
+            || area.page_size != Page4K
+            || area.is_shared
+            || area.backing_file.is_some()
+            || area.anonymous_shared_frames.is_some()
+        {
+            return Err(Errno::EINVAL.as_isize());
+        }
+
+        // Validate the entire resident subset before changing any PTE.  A
+        // private anonymous VMA may have lazy holes; such pages move only as
+        // metadata and will fault in normally at their new virtual address.
+        let resident: Vec<(VirtPageNum, PhysPageNum)> = area
+            .data_frames
+            .iter()
+            .map(|(vpn, frame)| (*vpn, frame.ppn))
+            .collect();
+        let translate_vpn = |vpn: VirtPageNum| -> Result<VirtPageNum, isize> {
+            let offset = vpn
+                .0
+                .checked_sub(old_start_vpn.0)
+                .ok_or(Errno::EINVAL.as_isize())?;
+            let moved = VirtPageNum(
+                new_start_vpn
+                    .0
+                    .checked_add(offset)
+                    .ok_or(Errno::ENOMEM.as_isize())?,
+            );
+            if vpn < old_start_vpn || vpn >= old_end_vpn || moved >= new_end_vpn {
+                return Err(Errno::EINVAL.as_isize());
+            }
+            Ok(moved)
+        };
+
+        let mut pt = self.page_table.write();
+        for (old_vpn, ppn) in &resident {
+            let new_vpn = translate_vpn(*old_vpn)?;
+            let Some((pte, page_size)) = pt.translate_and_get_size(*old_vpn) else {
+                return Err(Errno::EINVAL.as_isize());
+            };
+            if !pte.is_valid()
+                || page_size != Page4K
+                || pte.ppn() != *ppn
+                || pt.translate(new_vpn).is_some_and(|pte| pte.is_valid())
+            {
+                return Err(Errno::EINVAL.as_isize());
+            }
+        }
+        for (old_vpn, _) in &resident {
+            let new_vpn = translate_vpn(*old_vpn)?;
+            assert!(
+                pt.move_entry(*old_vpn, new_vpn, Page4K),
+                "mremap validated PTE changed while page table lock was held"
+            );
+        }
+
+        let old_frames = core::mem::take(&mut area.data_frames);
+        let mut moved_frames = BTreeMap::new();
+        for (old_vpn, frame) in old_frames {
+            let new_vpn = translate_vpn(old_vpn)?;
+            assert!(moved_frames.insert(new_vpn, frame).is_none());
+        }
+        area.data_frames = moved_frames;
+        area.vpn_range = VPNRange::new(new_start_vpn, new_end_vpn);
+        drop(pt);
+        drop(area);
+
+        let removed = areas
+            .remove(&old_start_vpn)
+            .expect("mremap source VMA disappeared while areas write lock was held");
+        debug_assert!(Arc::ptr_eq(&removed, &area_arc));
+        assert!(areas.insert(new_start_vpn, area_arc).is_none());
+
+        // Both the old and new virtual addresses may have stale translations.
+        // Keep layout writers out until the shootdown completes; no moved frame
+        // is dropped, but the old address must be invalid before return.
+        let areas = areas.downgrade();
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
+        self.flush_tlb_targets();
+        drop(areas);
+
+        Ok(new_addr)
     }
 
     fn split_area_at(
@@ -2951,16 +3132,19 @@ impl MemorySet {
     pub fn handle_page_fault(&self, bad_addr: usize, sp: usize) -> bool {
         let vpn = VirtAddr::from(bad_addr).std_floor();
 
-        // Locate and populate an existing VMA while retaining the tree read
-        // lock.  This prevents a concurrent munmap/rekey from removing the
-        // VMA after lookup but before the new PTE is published.
-        let mapped = {
+        // 拿到缺页地址对应的区域（如果有的话），并尝试映射该页
+        //
+        // 如果释放 areas 锁后的窗口内，该 area 被其他写者修改，其实也会按新的区域校验范围和权限，仍然是安全的：
+        // 不过这要求写者在摘除区域前先将区域缩小到不包含该页，或者在修改权限前先将该所有页 unmap 掉。
+        let mapped_area = {
             let areas = self.areas.read();
-            match areas
+            areas
                 .range(..=vpn)
                 .next_back()
                 .map(|(_, area)| Arc::clone(area))
-            {
+        };
+        let mapped = {
+            match mapped_area {
                 Some(area_arc) => {
                     let mut area = area_arc.write();
                     if !area.contains(vpn) {
@@ -2976,7 +3160,7 @@ impl MemorySet {
                         let page_size = area.page_size;
                         let mut pt = self.page_table.write();
                         if pt.translate(vpn).is_some_and(|pte| pte.is_valid()) {
-                            // 已经映射却还报 Fault，通常是非法写只读段。
+                            // 已经映射却还报 Fault，通常是非法写只读段，或 tlb 未更新等
                             Some(false)
                         } else {
                             Some(area.try_map_one(&mut pt, vpn, page_size))
@@ -3031,6 +3215,14 @@ impl MemorySet {
             // 扩张会改变区域起点，需要同时更新 BTreeMap 键，
             // 因此整个过程持有 areas 写锁（锁序：areas -> area -> PageTable）。
             let mut areas = self.areas.write();
+            // 候选是在前一个读事务中收集的。解除映射或地址复用可能已经
+            // 删除/替换该键；只有仍然是同一个 Arc 才允许提交扩张。
+            let Some(current_arc) = areas.get(&old_start_vpn) else {
+                continue;
+            };
+            if !Arc::ptr_eq(current_arc, &area_arc) {
+                continue;
+            }
             let mut area = area_arc.write();
             // 重校验：区域未被并发修改
             let start_vpn = area.vpn_range.get_start();
