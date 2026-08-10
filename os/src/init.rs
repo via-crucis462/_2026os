@@ -11,6 +11,6 @@ lazy_static!(
 );
 
 pub fn mount_tmp_busybox() {
-    ROOT_DENTRY.mount_child("init".to_string(), INIT_DIR.clone());
-    INIT_DIR.insert("busybox".to_string(), BUSYBOX_INODE.clone());
+    let init_dentry = ROOT_DENTRY.mount_child("init".to_string(), INIT_DIR.clone());
+    init_dentry.mount_child("busybox".to_string(), BUSYBOX_INODE.clone());
 }

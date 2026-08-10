@@ -7,9 +7,11 @@ use crate::mm::get_free_frames;
 use crate::syscall::fs::Statfs;
 use alloc::format;
 use crate::mm::MapPermission;
-use crate::fs::DirEntry;
 use crate::process::TaskStatus;
 use crate::fs::ino::get_next_ino;
+use crate::syscall::errno::Errno;
+
+const USIZE_DECIMAL_LEN: usize = core::mem::size_of::<usize>() * 3;
 
 fn get_task(pid: usize) -> Option<Arc<crate::task::TaskStruct>> {
     crate::process::registry::TID2TCB
@@ -34,7 +36,28 @@ fn list_process_ids() -> alloc::vec::Vec<usize> {
         .collect::<alloc::vec::Vec<_>>();
     pids.sort_unstable();
     pids.dedup();
+    // Directory names are sorted lexicographically, not numerically.  Keep
+    // only PID values in the snapshot and compare their decimal names using
+    // stack storage rather than allocating one String per PID.
+    pids.sort_unstable_by(|left, right| {
+        let mut left_buf = [0u8; USIZE_DECIMAL_LEN];
+        let mut right_buf = [0u8; USIZE_DECIMAL_LEN];
+        pid_name(*left, &mut left_buf).cmp(pid_name(*right, &mut right_buf))
+    });
     pids
+}
+
+fn pid_name(pid: usize, buf: &mut [u8; USIZE_DECIMAL_LEN]) -> &[u8] {
+    let mut value = pid;
+    let mut start = buf.len();
+    loop {
+        start -= 1;
+        buf[start] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            return &buf[start..];
+        }
+    }
 }
 
 fn dirent_type_from_mode(mode: u32) -> u8 {
@@ -46,30 +69,53 @@ fn dirent_type_from_mode(mode: u32) -> u8 {
     }
 }
 
-fn write_dirents(offset: &mut usize, buf: &mut [u8], entries: &[(String, u32, u8)]) -> isize {
+fn write_dirent(
+    buf: &mut [u8],
+    buf_offset: usize,
+    entry_offset: usize,
+    name: &[u8],
+    ino: u32,
+    d_type: u8,
+) -> Option<usize> {
+    let name_len = name.len().min(255);
+    let reclen = (8 + 8 + 2 + 1 + name_len + 1 + 7) & !7;
+    let end = buf_offset.checked_add(reclen)?;
+    if end > buf.len() {
+        return None;
+    }
+
+    buf[buf_offset..buf_offset + 8].copy_from_slice(&(ino as u64).to_ne_bytes());
+    buf[buf_offset + 8..buf_offset + 16]
+        .copy_from_slice(&((entry_offset + 1) as i64).to_ne_bytes());
+    buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(reclen as u16).to_ne_bytes());
+    buf[buf_offset + 18] = d_type;
+    buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(&name[..name_len]);
+    buf[buf_offset + 19 + name_len..end].fill(0);
+    Some(end)
+}
+
+fn write_dirents(offset: &mut usize, buf: &mut [u8], entries: &[(&str, u32, u8)]) -> isize {
     let mut buf_offset = 0usize;
     while *offset < entries.len() {
         let (name, ino, d_type) = &entries[*offset];
-        let mut dirent = DirEntry::new(name.clone(), *ino, *d_type);
-        let reclen = dirent.d_reclen as usize;
-        if buf_offset + reclen > buf.len() {
+        let Some(next_buf_offset) = write_dirent(
+            buf,
+            buf_offset,
+            *offset,
+            name.as_bytes(),
+            *ino,
+            *d_type,
+        ) else {
             break;
-        }
-        dirent.d_off = (*offset + 1) as i64;
-        buf[buf_offset..buf_offset + 8].copy_from_slice(&dirent.d_ino.to_ne_bytes());
-        buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&dirent.d_off.to_ne_bytes());
-        buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&dirent.d_reclen.to_ne_bytes());
-        buf[buf_offset + 18] = dirent.d_type;
-        let name_len = name.len().min(255);
-        buf[buf_offset + 19..buf_offset + 19 + name_len]
-            .copy_from_slice(&dirent.d_name[..name_len]);
-        for byte in &mut buf[buf_offset + 19 + name_len..buf_offset + reclen] {
-            *byte = 0;
-        }
-        buf_offset += reclen;
+        };
+        buf_offset = next_buf_offset;
         *offset += 1;
     }
-    buf_offset as isize
+    if buf_offset == 0 && *offset < entries.len() {
+        Errno::EINVAL.as_isize()
+    } else {
+        buf_offset as isize
+    }
 }
 
 fn proc_state_char(pid: usize) -> char {
@@ -193,12 +239,12 @@ impl VfsInode for ProcPidDirInode {
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
         let entries = [
-            (String::from("exe"), (12000 + self.pid) as u32, 10u8),
-            (String::from("maps"), 8888u32, 8u8),
-            (String::from("ns"), 2u32, 4u8),
-            (String::from("oom_score_adj"), 998u32, 8u8),
-            (String::from("stat"), (11000 + self.pid) as u32, 8u8),
-            (String::from("status"), 999u32, 8u8),
+            ("exe", (12000 + self.pid) as u32, 10u8),
+            ("maps", 8888u32, 8u8),
+            ("ns", 2u32, 4u8),
+            ("oom_score_adj", 998u32, 8u8),
+            ("stat", (11000 + self.pid) as u32, 8u8),
+            ("status", 999u32, 8u8),
         ];
         write_dirents(offset, buf, &entries)
     }
@@ -213,18 +259,15 @@ impl ProcExeSymlinkInode {
     pub fn new(pid: usize) -> Self {
         Self { pid, ino: get_next_ino() }
     }
-
-    fn target(&self) -> String {
-        get_task(self.pid)
-            .map(|task| task.inner_exclusive_access().exe_path.clone())
-            .unwrap_or_default()
-    }
 }
 
 impl VfsInode for ProcExeSymlinkInode {
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        let target = self.target();
-        let data = target.as_bytes();
+        let Some(task) = get_task(self.pid) else {
+            return 0;
+        };
+        let inner = task.inner_exclusive_access();
+        let data = inner.exe_path.as_bytes();
         if offset >= data.len() {
             return 0;
         }
@@ -234,10 +277,16 @@ impl VfsInode for ProcExeSymlinkInode {
     }
 
     fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
-    fn get_size(&self) -> usize { self.target().len() }
+    fn get_size(&self) -> usize {
+        get_task(self.pid)
+            .map(|task| task.inner_exclusive_access().exe_path.len())
+            .unwrap_or_default()
+    }
     fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {
-        let size = self.target().len() as i64;
+        let size = get_task(self.pid)
+            .map(|task| task.inner_exclusive_access().exe_path.len() as i64)
+            .unwrap_or_default();
         Stat {
             dev: 0,
             ino: self.ino,
@@ -515,6 +564,12 @@ impl VfsInode for ProcRootInode {
         None
     }
 
+    fn cache_lookup_results(&self) -> bool {
+        // Process IDs can appear and disappear without a Dentry namespace
+        // mutation, so both positive and negative results would go stale.
+        false
+    }
+
     fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
     fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
@@ -535,20 +590,81 @@ impl VfsInode for ProcRootInode {
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
-        let mut entries: alloc::vec::Vec<(String, u32, u8)> = self
-            .static_entries
-            .entries_snapshot()
-            .into_iter()
-            .map(|(name, inode)| {
-                let stat = inode.get_stat();
-                (name, stat.ino as u32, dirent_type_from_mode(stat.mode))
-            })
-            .collect();
-        for pid in list_process_ids() {
-            entries.push((pid.to_string(), (10000 + pid) as u32, 4u8));
-        }
-        entries.sort_by(|left, right| left.0.cmp(&right.0));
-        write_dirents(offset, buf, &entries)
+        let pids = list_process_ids();
+        self.static_entries.with_entries(|static_entries| {
+            let mut static_iter = static_entries.iter();
+            let mut static_entry = static_iter.next();
+            let mut pid_index = 0usize;
+            let mut entry_index = 0usize;
+            let mut buf_offset = 0usize;
+
+            while static_entry.is_some() || pid_index < pids.len() {
+                let mut pid_buf = [0u8; USIZE_DECIMAL_LEN];
+                let next_pid_name = pids
+                    .get(pid_index)
+                    .map(|pid| pid_name(*pid, &mut pid_buf));
+                let use_static = match (&static_entry, next_pid_name) {
+                    (Some((name, _)), Some(pid_name)) => name.as_bytes() <= pid_name,
+                    (Some(_), None) => true,
+                    (None, Some(_)) => false,
+                    (None, None) => break,
+                };
+
+                if entry_index < *offset {
+                    if use_static {
+                        static_entry = static_iter.next();
+                    } else {
+                        pid_index += 1;
+                    }
+                    entry_index += 1;
+                    continue;
+                }
+
+                let next_buf_offset = if use_static {
+                    let (name, inode) = static_entry.expect("static entry must be present");
+                    let stat = inode.get_stat();
+                    write_dirent(
+                        buf,
+                        buf_offset,
+                        entry_index,
+                        name.as_bytes(),
+                        stat.ino as u32,
+                        dirent_type_from_mode(stat.mode),
+                    )
+                } else {
+                    let pid = pids[pid_index];
+                    write_dirent(
+                        buf,
+                        buf_offset,
+                        entry_index,
+                        next_pid_name.expect("PID entry must be present"),
+                        (10000 + pid) as u32,
+                        4,
+                    )
+                };
+                let Some(next_buf_offset) = next_buf_offset else {
+                    break;
+                };
+
+                buf_offset = next_buf_offset;
+                entry_index += 1;
+                *offset = entry_index;
+                if use_static {
+                    static_entry = static_iter.next();
+                } else {
+                    pid_index += 1;
+                }
+            }
+
+            if buf_offset == 0
+                && entry_index == *offset
+                && (static_entry.is_some() || pid_index < pids.len())
+            {
+                Errno::EINVAL.as_isize()
+            } else {
+                buf_offset as isize
+            }
+        })
     }
     
     fn statfs(&self) -> Statfs {
@@ -683,14 +799,9 @@ impl ProcSelfSymlinkInode {
 
 impl VfsInode for ProcSelfSymlinkInode {
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
- 
-        let current_task = crate::task::current_task().unwrap();
-        let pid = current_task.getpid();
-        
-
-        let target = pid.to_string();
-        let data = target.as_bytes();
-
+        let pid = crate::task::current_task().unwrap().getpid();
+        let mut target_buf = [0u8; USIZE_DECIMAL_LEN];
+        let data = pid_name(pid, &mut target_buf);
 
         if offset >= data.len() {
             return 0;
@@ -701,9 +812,9 @@ impl VfsInode for ProcSelfSymlinkInode {
     }
 
     fn get_stat(&self) -> Stat {
-
         let pid = crate::task::current_task().unwrap().getpid();
-        let target_len = pid.to_string().len();
+        let mut target_buf = [0u8; USIZE_DECIMAL_LEN];
+        let target_len = pid_name(pid, &mut target_buf).len();
 
         Stat {
             dev: 0,
@@ -729,7 +840,11 @@ impl VfsInode for ProcSelfSymlinkInode {
     }
 
     fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
-    fn get_size(&self) -> usize { 0 }
+    fn get_size(&self) -> usize {
+        let pid = crate::task::current_task().unwrap().getpid();
+        let mut target_buf = [0u8; USIZE_DECIMAL_LEN];
+        pid_name(pid, &mut target_buf).len()
+    }
     fn ino(&self) -> u64 { self.ino }
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
     impl_default_statx!();

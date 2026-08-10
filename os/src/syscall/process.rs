@@ -11,7 +11,7 @@ use crate::process::{
     wait4_block_current, waitid_block_current,
 };
 
-use crate::mm::{prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_read, try_translated_write};
+use crate::mm::{UserCStringError, prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_str_with_limit, try_translated_read, try_translated_write};
 use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, USER_STACK_SIZE, get_hart_id};
 use crate::process::{FdFlags, FileDescriptor};    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
@@ -1238,18 +1238,30 @@ pub fn sys_renameat2(
 
             // Commit the cache update only after the filesystem operation succeeded.
             if same_dir {
+                // Readers check `children` before `negative_children`. Clear
+                // negatives before publishing the renamed entry, otherwise a
+                // lockless reader can observe old-negative/new-positive in
+                // the opposite order and report a transient false ENOENT.
+                old_parent.invalidate_negative_child_locked(&old_name);
+                old_parent.invalidate_negative_child_locked(&new_name);
                 let mut children = old_parent.children.lock();
                 let moved_dentry = children.remove(&old_name).unwrap_or(moved_dentry);
-                children.remove(&new_name);
+                if let Some(replaced_dentry) = children.remove(&new_name) {
+                    replaced_dentry.mark_unlinked();
+                }
                 moved_dentry.relocate(new_name.clone(), Arc::downgrade(&new_parent));
                 children.insert(new_name.clone(), moved_dentry);
             } else {
+                old_parent.invalidate_negative_child_locked(&old_name);
+                new_parent.invalidate_negative_child_locked(&new_name);
                 let moved_dentry = old_parent
                     .children
                     .lock()
                     .remove(&old_name)
                     .unwrap_or(moved_dentry);
-                new_parent.children.lock().remove(&new_name);
+                if let Some(replaced_dentry) = new_parent.children.lock().remove(&new_name) {
+                    replaced_dentry.mark_unlinked();
+                }
                 moved_dentry.relocate(new_name.clone(), Arc::downgrade(&new_parent));
                 new_parent.children.lock().insert(new_name.clone(), moved_dentry);
             }
@@ -1688,14 +1700,15 @@ pub fn sys_get_mempolicy(
 // args 参数数组，必须以0结尾
 // envp 环境变量数组，必须以0结尾
 pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize) -> isize {
+    const EXEC_PATH_MAX_LEN: usize = 4095;
+    const EXEC_STRING_MAX_LEN: usize = 128 * 1024;
+
     let mm = current_user_mm();
     let task = current_task().unwrap();
-    let path_str = {
-        if let Some(path) = try_translated_str(&mm, path){
-            normalize_leading_dot_path(path)
-        } else {
-            return EFAULT.as_isize();
-        }
+    let path_str = match try_translated_str_with_limit(&mm, path, EXEC_PATH_MAX_LEN) {
+        Ok(path) => normalize_leading_dot_path(path),
+        Err(UserCStringError::TooLong) => return ENAMETOOLONG.as_isize(),
+        Err(UserCStringError::Invalid) => return EFAULT.as_isize(),
     };
      if path_str.len() >= 4096 { // PATH_MAX
         return ENAMETOOLONG.as_isize();
@@ -1717,12 +1730,14 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
                 }
             };
             if arg_str_ptr == 0 { break; }
-            let arg_str = {
-                if let Some(s) = try_translated_str(&mm, arg_str_ptr as *const u8) {
-                    s
-                } else {
-                    return EFAULT.as_isize();
-                }
+            let arg_str = match try_translated_str_with_limit(
+                &mm,
+                arg_str_ptr as *const u8,
+                EXEC_STRING_MAX_LEN,
+            ) {
+                Ok(arg) => arg,
+                Err(UserCStringError::TooLong) => return E2BIG.as_isize(),
+                Err(UserCStringError::Invalid) => return EFAULT.as_isize(),
             };
             args_vec.push(arg_str);
             unsafe { args = args.add(1); }
@@ -1742,12 +1757,14 @@ pub fn sys_exec(path: *const u8, mut args: *const usize, mut envs: *const usize)
                 }
             };
             if env_str_ptr == 0 { break; }
-            let env_str = {
-                if let Some(s) = try_translated_str(&mm, env_str_ptr as *const u8) {
-                    s
-                } else {
-                    return EFAULT.as_isize();
-                }
+            let env_str = match try_translated_str_with_limit(
+                &mm,
+                env_str_ptr as *const u8,
+                EXEC_STRING_MAX_LEN,
+            ) {
+                Ok(env) => env,
+                Err(UserCStringError::TooLong) => return E2BIG.as_isize(),
+                Err(UserCStringError::Invalid) => return EFAULT.as_isize(),
             };
             envs_vec.push(env_str);
             unsafe { envs = envs.add(1); }

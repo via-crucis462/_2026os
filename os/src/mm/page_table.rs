@@ -439,6 +439,8 @@ enum PinUserSegmentResult {
     Invalid,
 }
 
+const MAX_TRANSIENT_USER_PIN_RETRIES: usize = 8;
+
 #[inline]
 fn area_allows_user_access(permission: MapPermission, write: bool) -> bool {
     permission.contains(MapPermission::U)
@@ -620,6 +622,47 @@ fn handle_fault_in_range(
     }
 }
 
+/// Pin at most one translated user-memory segment without allocating the
+/// `Vec` used by multi-page callers.  The returned segment owns its frame
+/// reference, so it remains valid after page-table and VMA locks are dropped.
+fn pin_user_segment_with_retry(
+    mm: &MemorySet,
+    start: usize,
+    len: usize,
+    write: bool,
+) -> Option<(UserBufferSegment, usize)> {
+    let end = start.checked_add(len)?;
+    if len == 0 {
+        return None;
+    }
+
+    let mut retries = 0;
+    let mut faults = 0;
+    loop {
+        match pin_user_segment(mm, VirtAddr::from(start), end, write) {
+            PinUserSegmentResult::Pinned(segment, count) if count != 0 => {
+                return Some((segment, count));
+            }
+            PinUserSegmentResult::Pinned(_, _) => return None,
+            PinUserSegmentResult::NeedsFault => {
+                faults += 1;
+                if faults > MAX_TRANSIENT_USER_PIN_RETRIES
+                    || !handle_fault_in_range(mm, start, len, write)
+                {
+                    return None;
+                }
+                retries = 0;
+            }
+            PinUserSegmentResult::Retry if retries < MAX_TRANSIENT_USER_PIN_RETRIES => {
+                retries += 1;
+            }
+            PinUserSegmentResult::NeedsFault
+            | PinUserSegmentResult::Retry
+            | PinUserSegmentResult::Invalid => return None,
+        }
+    }
+}
+
 /// 固定待访问地址空间的页帧，返回固定得到的 buffer
 fn pin_user_range(
     mm: &MemorySet,
@@ -630,8 +673,6 @@ fn pin_user_range(
     // A concurrent VMA/PTE transition can invalidate an otherwise valid pin
     // attempt.  `NeedsFault` is not itself an invalid user pointer: in
     // particular, fork can make a private writable PTE read-only for COW.
-    const MAX_TRANSIENT_RETRIES: usize = 8;
-
     let mut retries = 0;
     let mut faults = 0;
     loop {
@@ -639,7 +680,7 @@ fn pin_user_range(
             PinUserRangeResult::Pinned(result) => return Some(result),
             PinUserRangeResult::NeedsFault => {
                 faults += 1;
-                if faults > MAX_TRANSIENT_RETRIES {
+                if faults > MAX_TRANSIENT_USER_PIN_RETRIES {
                     return None;
                 }
 
@@ -648,7 +689,7 @@ fn pin_user_range(
                 }
                 retries = 0;
             }
-            PinUserRangeResult::Retry if retries < MAX_TRANSIENT_RETRIES => {
+            PinUserRangeResult::Retry if retries < MAX_TRANSIENT_USER_PIN_RETRIES => {
                 retries += 1;
             }
             PinUserRangeResult::NeedsFault
@@ -705,37 +746,107 @@ pub fn translated_user_buffer_mut(mm: &MemorySet, ptr: *mut u8, len: usize) -> O
 }
 
 /// Translate&Copy a ptr[u8] array end with `\0` to a `String` Vec through page table
-pub fn translated_str(mm: &MemorySet, ptr: *const u8) -> String {
-    let mut string = String::new();
-    let mut va = ptr as usize;
-    loop {
-        let ch = try_translated_read(mm, va as *const u8)
-            .unwrap_or_else(|| panic!("translated_str: user ptr is not readable"));
-        if ch == 0 {
-            break;
-        }
-        string.push(ch as char);
-        va += 1;
-    }
-    string
+/// Maximum length accepted by the generic C-string copy helper.  Pathname
+/// callers impose their own, smaller PATH_MAX limits after copying; argv and
+/// environment users still need a larger bound.
+const MAX_USER_CSTRING_LEN: usize = 128 * 1024;
+
+/// Why a C-string copy stopped before reaching a terminator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UserCStringError {
+    Invalid,
+    TooLong,
 }
 
-/// +错误处理
-pub fn try_translated_str(mm: &MemorySet, ptr: *const u8) -> Option<String> {
+/// Copy a NUL-terminated userspace string a page at a time.
+///
+/// The former implementation called `try_translated_read::<u8>` once per
+/// byte.  Each call pinned a user range and allocated a segment Vec, making a
+/// short pathname perform dozens of VMA/page-table lookups.  Limiting every
+/// pin to the current base page preserves the important property that bytes
+/// after the terminating NUL need not be mapped.
+fn copy_user_cstring(
+    mm: &MemorySet,
+    ptr: *const u8,
+    max_len: usize,
+) -> Result<String, UserCStringError> {
     if ptr as isize <= 0 {
-        return None;
+        return Err(UserCStringError::Invalid);
     }
-    let mut string = String::new();
+
+    let mut string = String::with_capacity(64);
     let mut va = ptr as usize;
-    loop {
-        let ch = try_translated_read(mm, va as *const u8)?;
-        if ch == 0 {
-            break;
+    let mut copied = 0usize;
+    // Scan one extra byte so callers can accept an exactly `max_len` byte
+    // string while recognizing an unterminated or longer input.
+    let scan_limit = max_len.checked_add(1).ok_or(UserCStringError::TooLong)?;
+
+    while copied < scan_limit {
+        let page_remaining = PAGE_SIZE - (va & (PAGE_SIZE - 1));
+        let chunk_len = core::cmp::min(page_remaining, scan_limit - copied);
+        let (segment, segment_len) = pin_user_segment_with_retry(mm, va, chunk_len, false)
+            .ok_or(UserCStringError::Invalid)?;
+        let bytes = &segment[..];
+        let take = bytes
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(bytes.len());
+        if copied > max_len || take > max_len - copied {
+            return Err(UserCStringError::TooLong);
         }
-        string.push(ch as char);
-        va += 1;
+        let prefix = &bytes[..take];
+        if prefix.is_ascii() {
+            // ASCII is valid UTF-8, so the common pathname case can append a
+            // complete page fragment with one allocation-aware copy.
+            string.push_str(unsafe { core::str::from_utf8_unchecked(prefix) });
+        } else {
+            string.reserve(take);
+            for &byte in prefix {
+                // Keep the legacy byte-to-char conversion semantics.  VFS
+                // pathname validation remains responsible for rejecting names
+                // it cannot represent safely.
+                string.push(byte as char);
+            }
+        }
+
+        if take != bytes.len() {
+            return Ok(string);
+        }
+
+        va = va
+            .checked_add(segment_len)
+            .ok_or(UserCStringError::Invalid)?;
+        copied = copied
+            .checked_add(segment_len)
+            .ok_or(UserCStringError::TooLong)?;
     }
-    Some(string)
+
+    Err(UserCStringError::TooLong)
+}
+
+pub fn translated_str(mm: &MemorySet, ptr: *const u8) -> String {
+    copy_user_cstring(mm, ptr, MAX_USER_CSTRING_LEN).unwrap_or_else(|_| {
+        panic!("translated_str: user ptr is not readable or string is too long")
+    })
+}
+
+/// Translate a NUL-terminated string from userspace, returning None for an
+/// invalid pointer or an unterminated string over the generic safety limit.
+pub fn try_translated_str(mm: &MemorySet, ptr: *const u8) -> Option<String> {
+    copy_user_cstring(mm, ptr, MAX_USER_CSTRING_LEN).ok()
+}
+
+/// Translate a C string with a caller-specific byte limit.
+///
+/// Pathname syscalls use this to return `ENAMETOOLONG`, while exec can map an
+/// oversized argv/environment string to `E2BIG`, instead of conflating either
+/// case with an invalid userspace address.
+pub fn try_translated_str_with_limit(
+    mm: &MemorySet,
+    ptr: *const u8,
+    max_len: usize,
+) -> Result<String, UserCStringError> {
+    copy_user_cstring(mm, ptr, max_len)
 }
 
 /// 从给定地址读取数据并返回T

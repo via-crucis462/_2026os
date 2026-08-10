@@ -3,7 +3,7 @@ use crate::PAGE_SIZE;
 use crate::auth::FileMode;
 use crate::process::FdFlags;
 use crate::fs::{create_fifo_in_dentry, create_file_in_dentry, is_fifo_mode, make_pipe, open_fifo_file, Dentry, File, OpenFlags, ROOT_DENTRY, Stat, Statx, file_name, make_dir, open_file, parent_path, S_IFMT, UserPageFaultInfo};
-use crate::mm::{PageSize, UserBuffer, prepare_user_read, prepare_user_write, translated_user_buffer, try_translated_read, try_translated_str, try_translated_write};
+use crate::mm::{PageSize, UserBuffer, UserCStringError, prepare_user_read, prepare_user_write, translated_user_buffer, try_translated_read, try_translated_str, try_translated_str_with_limit, try_translated_write};
 use crate::process::current_user_mm;
 use crate::task::current_task;
 use alloc::{task, vec};
@@ -47,6 +47,8 @@ const O_RDWR: u32 = 0o2;
 use super::errno::Errno::*;
 
 const AT_REMOVEDIR: usize = 0x200;
+const PATH_MAX_LEN: usize = 4096;
+const NAME_MAX_LEN: usize = 255;
 
 /// riscv64 `struct flock` 用户态 ABI：
 /// short l_type; short l_whence; off_t l_start; off_t l_len; pid_t l_pid
@@ -103,12 +105,10 @@ pub struct Statfs {
 }
 pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
     let mm = current_user_mm();
-    let path_str = {
-        if let Some(s) = try_translated_str(&mm, path) {
-            s
-        } else {
-            return EFAULT.as_isize();
-        }
+    let path_str = match try_translated_str_with_limit(&mm, path, PATH_MAX_LEN) {
+        Ok(path) => path,
+        Err(UserCStringError::TooLong) => return ENAMETOOLONG.as_isize(),
+        Err(UserCStringError::Invalid) => return EFAULT.as_isize(),
     };
     trace!("kernel:pid[{}] sys_statfs path={}", current_task().unwrap().getpid(), path_str);
 
@@ -963,12 +963,10 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
 
     // 1. 与 Linux 一致：先拷贝路径（路径指针非法 → EFAULT），再做参数校验
     let mm = current_user_mm();
-    let path_str = {
-        if let Some(s) = try_translated_str(&mm, path) {
-            s
-        } else {
-            return EFAULT.as_isize();
-        }
+    let path_str = match try_translated_str_with_limit(&mm, path, PATH_MAX_LEN) {
+        Ok(path) => path,
+        Err(UserCStringError::TooLong) => return ENAMETOOLONG.as_isize(),
+        Err(UserCStringError::Invalid) => return EFAULT.as_isize(),
     };
     //println!("kernel:pid[{}] sys_statx: dirfd={}, path={}, flags=0x{:x}, mask=0x{:x}", task.process().pid.0, dirfd, path_str, flags, mask);
 
@@ -1021,8 +1019,6 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
     }
 
     // ---- 路径长度校验：整条路径 > PATH_MAX(4096) 或任一分量 > NAME_MAX(255) → ENAMETOOLONG ----
-    const PATH_MAX_LEN: usize = 4096;
-    const NAME_MAX_LEN: usize = 255;
     if path_str.len() > PATH_MAX_LEN {
         return ENAMETOOLONG.as_isize();
     }
@@ -1140,11 +1136,16 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
     }
     // 路径获取
     let mm = current_user_mm();
-    let path_str = normalize_leading_dot_path(
-        if let Some(s) = try_translated_str(&mm, _path) { s } else { return EFAULT.as_isize(); }
-    );
+    let path_str = match try_translated_str_with_limit(&mm, _path, PATH_MAX_LEN) {
+        Ok(path) => path,
+        Err(UserCStringError::TooLong) => return ENAMETOOLONG.as_isize(),
+        Err(UserCStringError::Invalid) => return EFAULT.as_isize(),
+    };
     if path_str.is_empty() {
         return ENOENT.as_isize();
+    }
+    if path_str.len() > PATH_MAX_LEN || path_str.split('/').any(|part| part.len() > NAME_MAX_LEN) {
+        return ENAMETOOLONG.as_isize();
     }
     // 获取工作路径并查找
     let base_dentry = if path_str.starts_with('/') {
@@ -1157,21 +1158,22 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
         if _dirfd < 0 || _dirfd as usize >= inner.fds.len() {
             return EBADF.as_isize();
         }
-        if let Some(file) = &inner.fds[_dirfd as usize].file {
-            if let Some(dentry) = file.get_dentry() {
-                dentry
-            } else {
-                return ENOTDIR.as_isize();
-            }
-        } else {
-            return EBADF.as_isize();
+        let dentry = match &inner.fds[_dirfd as usize].file {
+            Some(file) => file.get_dentry(),
+            None => return EBADF.as_isize(),
+        };
+        drop(inner);
+        match dentry {
+            Some(dentry) if (dentry.inode.get_stat().mode & S_IFMT) == 0o040000 => dentry,
+            Some(_) | None => return ENOTDIR.as_isize(),
         }
     };
     // 查找路径对应的 dentry
     let link_dentry = match base_dentry.find_tree(&path_str, false) {
         Ok(d) => d,
-        Err(_) => return ENOENT.as_isize(),
+        Err(0) => return ELOOP.as_isize(),
         Err(1) => return ENOTDIR.as_isize(),
+        Err(_) => return ENOENT.as_isize(),
     };
     // 文件类型检查
     let st = link_dentry.inode.get_stat();
@@ -1179,19 +1181,30 @@ pub fn sys_readlinkat(_dirfd: isize, _path: *const u8, _buf: *mut u8, _len: usiz
     if !is_symlink {
         return EINVAL.as_isize();
     }
-    // 读取符号链接内容
-    let mut target = alloc::vec![0u8; st.size as usize];
-    let read_len = link_dentry.inode.read_at(0, &mut target);
-    let copy_len = core::cmp::min(read_len, _len);
-    let mut user_bufs = crate::mm::translated_byte_buffer_mut(&mm, _buf, copy_len);
+    // Read directly into the pinned userspace segments.  A readlink caller may
+    // provide a buffer much shorter than the link target, so allocating and
+    // reading the complete target here only adds copy and heap traffic.
+    let Ok(link_len) = usize::try_from(st.size) else {
+        return EIO.as_isize();
+    };
+    let copy_len = core::cmp::min(link_len, _len);
+    if copy_len == 0 {
+        return 0;
+    }
+    let Some(mut user_buf) = crate::mm::translated_user_buffer_mut(&mm, _buf, copy_len) else {
+        return EFAULT.as_isize();
+    };
     let mut copied = 0usize;
-    for seg in user_bufs.iter_mut() {
+    for seg in user_buf.buffers.iter_mut() {
         if copied >= copy_len {
             break;
         }
         let take = core::cmp::min(seg.len(), copy_len - copied);
-        seg[..take].copy_from_slice(&target[copied..copied + take]);
-        copied += take;
+        let read_len = link_dentry.inode.read_at(copied, &mut seg[..take]);
+        copied += read_len;
+        if read_len != take {
+            break;
+        }
     }
     copied as isize
 }
@@ -1432,50 +1445,81 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
         }
     };
 
-    // 找到目标文件的 dentry
-    let target_dentry = base_dir.find_tree(&path_str, false);
-    let target = match target_dentry {
-        Ok(d) => d,
+    // Resolve the parent first. The final component is intentionally looked
+    // up only after taking its namespace lock: a concurrent rename may replace
+    // the same name between an unlocked lookup and the actual deletion.
+    let parent_path_str = parent_path(&path_str);
+    let name = file_name(&path_str);
+    let parent = match base_dir.find_tree(&parent_path_str, true) {
+        Ok(parent) => parent,
+        Err(0) => return ELOOP.as_isize(),
         Err(1) => return ENOTDIR.as_isize(),
         Err(_) => return ENOENT.as_isize(),
     };
-    let stat = target.inode.get_stat();
-    let is_dir = (stat.mode & 0o040000) != 0; // 判断是否为目录
-    // 类型检查
-    let removing_dir = (flags & AT_REMOVEDIR) != 0;
-    if is_dir && !removing_dir { return EISDIR.as_isize();}
-    if !is_dir && removing_dir { return ENOTDIR.as_isize();}
-    // 找到上级目录
-    let parent_path_str = parent_path(&path_str);
-    let name = file_name(&path_str);
-    let parent_dentry = base_dir.find_tree(&parent_path_str, true);
-    if let Ok(parent) = parent_dentry {
-        // 检查父目录权限：
-        // - 写权限(w)：unlink 本质是修改目录条目
-        // - 执行权限(x)：必须能 search 进入该目录
-        let parent_stat = parent.inode.get_stat();
-        let parent_mode = FileMode::from_bits_truncate(parent_stat.mode as u16);
-        if !parent_mode.contains(FileMode::U_WRITE) || !parent_mode.contains(FileMode::U_EXECUTE) {
-            return EACCES.as_isize();
-        }
-        let _namespace_guard = parent.namespace_lock.lock();
-        // 尝试删除
-        if let Some(_inode_id) = parent.inode.delete_dir_entry(&name) {
-            if removing_dir {
-                // Drop the directory's implicit '.' link and the parent's
-                // link contributed by the child's implicit '..'.
-                target.inode.dec_link_count();
-                parent.inode.dec_link_count();
-            }
-            parent.children.lock().remove(&name);
-            return 0;
-        } else {
-            // 驱动引起的删除不成功
-            error!("kernel:pid[{}] VFS failed to delete '{}'. Underlay FS returned None.", task.getpid(), name);
-            return EACCES.as_isize();
-        }
+    // 检查父目录权限：
+    // - 写权限(w)：unlink 本质是修改目录条目
+    // - 执行权限(x)：必须能 search 进入该目录
+    let parent_stat = parent.inode.get_stat();
+    let parent_mode = FileMode::from_bits_truncate(parent_stat.mode as u16);
+    if !parent_mode.contains(FileMode::U_WRITE) || !parent_mode.contains(FileMode::U_EXECUTE) {
+        return EACCES.as_isize();
     }
-    ENOTDIR.as_isize() // 父目录不存在
+    let _namespace_guard = parent.namespace_lock.lock();
+    // A namespace mount shadows any same-named backing entry. Deleting
+    // through the mount point must not leak through to and remove that hidden
+    // lower entry.
+    if parent.mounted_children.lock().contains_key(&name) {
+        return EBUSY.as_isize();
+    }
+
+    // This is the current lower binding for `name`, not a dentry observed
+    // before acquiring `namespace_lock`. `find_lower_child_locked` also
+    // refreshes a missing lower positive cache entry if necessary.
+    let Some(target) = parent.find_lower_child_locked(&name) else {
+        return ENOENT.as_isize();
+    };
+    let stat = target.inode.get_stat();
+    let is_dir = (stat.mode & 0o040000) != 0;
+    let removing_dir = (flags & AT_REMOVEDIR) != 0;
+    if is_dir && !removing_dir {
+        return EISDIR.as_isize();
+    }
+    if !is_dir && removing_dir {
+        return ENOTDIR.as_isize();
+    }
+
+    // 尝试删除
+    if let Some(inode_id) = parent.inode.delete_dir_entry(&name) {
+        // All kernel namespace mutations of this parent share the lock, so a
+        // mismatch signals a lower filesystem operation that bypassed the VFS
+        // lock. Do not mark an unrelated cached dentry unlinked.
+        if inode_id as u64 != target.inode.ino() {
+            error!(
+                "kernel:pid[{}] unlink '{}' removed inode {} but resolved inode {}",
+                task.getpid(),
+                name,
+                inode_id,
+                target.inode.ino(),
+            );
+            parent.children.lock().remove(&name);
+            parent.invalidate_negative_child_locked(&name);
+            return EIO.as_isize();
+        }
+        if removing_dir {
+            // Drop the directory's implicit '.' link and the parent's link
+            // contributed by the child's implicit '..'.
+            target.inode.dec_link_count();
+            parent.inode.dec_link_count();
+        }
+        target.mark_unlinked();
+        parent.children.lock().remove(&name);
+        parent.invalidate_negative_child_locked(&name);
+        return 0;
+    } else {
+        // 驱动引起的删除不成功
+        error!("kernel:pid[{}] VFS failed to delete '{}'. Underlay FS returned None.", task.getpid(), name);
+        return EACCES.as_isize();
+    }
 }
 pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usize) -> isize {
     trace!(
@@ -1584,60 +1628,99 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
         if !file.readable() {
             return EACCES.as_isize(); // 权限不足
         }
+        let stat = file.get_stat();
+        if (stat.mode & S_IFMT) != 0o040000 {
+            return ENOTDIR.as_isize();
+        }
+        if file.get_dentry().is_some_and(|dentry| dentry.is_unlinked()) {
+            return ENOENT.as_isize();
+        }
+        // An open descriptor keeps the inode alive after rmdir, but its
+        // directory link count has reached zero.  Linux reports ENOENT for
+        // enumeration through such a descriptor.
+        if stat.nlink == 0 {
+            return ENOENT.as_isize();
+        }
         trace!("kernel:pid[{}] sys_getdents: fd={}, count={}", task.getpid(), fd, count);
-        let mut bufs = crate::mm::translated_byte_buffer_mut(&mm, dirp, count);
-        if bufs.is_empty() {
-            return EFAULT.as_isize();
+        if count == 0 {
+            return EINVAL.as_isize();
         }
 
-        // The user buffer can cross page boundaries.  Stage each VFS read in
-        // a contiguous buffer, but never ask the VFS for more data than we
-        // can copy back to userspace in this syscall.
+        // The VFS interface currently emits into a contiguous buffer. Start
+        // with only the current user page so EOF does not inspect an unrelated
+        // later page. After producing the first record, retain the larger
+        // window for the normal bulk-enumeration path.
         const CHUNK: usize = 32768;
-        let user_len = core::cmp::min(
-            count,
-            bufs.iter().fold(0usize, |len, buf| len.saturating_add(buf.len())),
-        );
-        if user_len == 0 {
-            return EFAULT.as_isize();
-        }
-        let mut chunk = alloc::vec![0u8; core::cmp::min(CHUNK, user_len)];
-        let mut seg_idx = 0usize;
-        let mut seg_off = 0usize;
+        let mut chunk = alloc::vec![0u8; core::cmp::min(CHUNK, count)];
         let mut total: usize = 0;
-        while total < user_len {
-            let request_len = core::cmp::min(chunk.len(), user_len - total);
-            let n = file.getdents(&mut chunk[..request_len]);
-            if n <= 0 {
-                if total == 0 {
-                    return n;
+        let mut first_window = true;
+        'enumerate: while total < count {
+            let max_request_len = core::cmp::min(chunk.len(), count - total);
+            let Some(user_ptr) = (dirp as usize).checked_add(total) else {
+                return if total == 0 { EFAULT.as_isize() } else { total as isize };
+            };
+            let page_remaining = PAGE_SIZE - (user_ptr & (PAGE_SIZE - 1));
+            let mut request_len = if first_window {
+                core::cmp::min(max_request_len, page_remaining)
+            } else {
+                max_request_len
+            };
+
+            loop {
+                let Some(mut bufs) = crate::mm::try_translated_byte_buffer_mut(
+                    &mm,
+                    user_ptr as *mut u8,
+                    request_len,
+                ) else {
+                    return if total == 0 { EFAULT.as_isize() } else { total as isize };
+                };
+
+                let n = file.getdents(&mut chunk[..request_len]);
+                // A first record can begin near the end of a user page. All
+                // directory VFS implementations leave their cursor unchanged
+                // when returning EINVAL for an empty output buffer, so grow
+                // just enough to include the next page and retry.
+                if n == EINVAL.as_isize()
+                    && first_window
+                    && request_len < max_request_len
+                {
+                    let next_request_len = core::cmp::min(
+                        max_request_len,
+                        request_len.saturating_add(PAGE_SIZE),
+                    );
+                    if next_request_len > request_len {
+                        request_len = next_request_len;
+                        continue;
+                    }
                 }
-                break;
-            }
-            let n = n as usize;
-            if n > request_len {
-                // A VFS implementation must not return more than its input
-                // buffer.  Returning such a length would expose uninitialised
-                // userspace bytes as directory records.
-                return EIO.as_isize();
-            }
-            let mut copied = 0usize;
-            while copied < n && seg_idx < bufs.len() {
-                if seg_off == bufs[seg_idx].len() {
-                    seg_idx += 1;
-                    seg_off = 0;
-                    continue;
+
+                if n <= 0 {
+                    if total == 0 {
+                        return n;
+                    }
+                    break 'enumerate;
                 }
-                let c = core::cmp::min(n - copied, bufs[seg_idx].len() - seg_off);
-                bufs[seg_idx][seg_off..seg_off + c].copy_from_slice(&chunk[copied..copied + c]);
-                copied += c;
-                seg_off += c;
-            }
-            if copied != n {
-                return EFAULT.as_isize();
-            }
-            total += copied;
-            if total == user_len {
+                let n = n as usize;
+                if n > request_len {
+                    // A VFS implementation must not return more than its input
+                    // buffer.  Returning such a length would expose uninitialised
+                    // userspace bytes as directory records.
+                    return EIO.as_isize();
+                }
+                let mut copied = 0usize;
+                for seg in bufs.iter_mut() {
+                    if copied == n {
+                        break;
+                    }
+                    let c = core::cmp::min(n - copied, seg.len());
+                    seg[..c].copy_from_slice(&chunk[copied..copied + c]);
+                    copied += c;
+                }
+                if copied != n {
+                    return EFAULT.as_isize();
+                }
+                total += copied;
+                first_window = false;
                 break;
             }
         }
@@ -2718,6 +2801,9 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
     // 通过父目录的 inode 创建符号链接
     //warn!("parent_path_str={}, name={}, target_str={}", parent_dentry.inode.type_name(), name, target_str);
     if let Some(symlink_inode) = parent_dentry.inode.create_symlink(&name, &target_str) {
+        // Match the lockless lookup order: remove a prior miss before making
+        // the new positive dentry visible.
+        parent_dentry.invalidate_negative_child_locked(&name);
         // 将新创建的 Inode 挂到 VFS 树
         let mut children = parent_dentry.children.lock();
         let new_dentry = Dentry::new(

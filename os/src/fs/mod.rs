@@ -301,6 +301,18 @@ pub enum RenameError {
     Invalid,
     Io,
 }
+
+/// Result of resolving a single name in a filesystem directory.
+///
+/// `find` predates error reporting and therefore still exposes `Option` to
+/// existing callers.  Dentry caching needs the distinction, however: only a
+/// definitive `Missing` result is safe to retain as a negative dentry.
+pub enum LookupOutcome {
+    Found(Arc<dyn VfsInode>),
+    Missing,
+    Failed,
+}
+
 pub const UTIME_NOW: usize = 0x3fffffff;
 pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub trait VfsInode: Send + Sync {
@@ -333,8 +345,27 @@ pub trait VfsInode: Send + Sync {
     fn get_stat(&self) -> Stat;
     fn get_statx(&self) -> Statx;
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>>;
+    /// Whether `Dentry` may cache positive and negative name lookup results
+    /// for this directory. Dynamic directories such as `/proc` must opt out.
+    fn cache_lookup_results(&self) -> bool {
+        true
+    }
+    /// A status-preserving form of `find` for Dentry lookup. Filesystems that
+    /// can distinguish an absent entry from an I/O or parsing failure should
+    /// override this; the default keeps legacy in-memory implementations
+    /// source-compatible.
+    fn find_with_outcome(&self, name: &str) -> LookupOutcome {
+        match self.find(name) {
+            Some(inode) => LookupOutcome::Found(inode),
+            None => LookupOutcome::Missing,
+        }
+    }
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
     fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
+    /// Remove `name` and return the inode number that was actually unlinked.
+    ///
+    /// Callers use this to verify that a lookup and deletion stayed bound to
+    /// the same object while holding the parent namespace lock.
     fn delete_dir_entry(&self, name: &str) -> Option<u32>;
     // 用于unlink时调整链接数
     fn dec_link_count(&self) -> bool {

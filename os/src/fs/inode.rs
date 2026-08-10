@@ -1,29 +1,52 @@
 #[allow(unused)]
 use super::File;
+use super::VfsInode;
+use crate::auth::PermStat;
+use crate::fs::file_tree::*;
+use crate::fs::TimeSpec;
+use crate::mm::PhysPageNum;
+use crate::mm::UserBuffer;
 use crate::task::current_task;
+use alloc::string::String;
 use alloc::sync::Arc;
 use bitflags::*;
-use crate::fs::file_tree::*;
-use super::VfsInode;
-use spin::Mutex;
-use crate::mm::UserBuffer;
-use crate::fs::TimeSpec;
-use crate::auth::PermStat;
 use core::any::Any;
-use crate::mm::PhysPageNum;
-
+use spin::Mutex;
 
 pub struct OSInode {
     readable: bool,
     writable: bool,
     append: bool,
     inner: Mutex<OSInodeInner>,
-    pub dentry: Arc<Dentry>, 
+    pub dentry: Arc<Dentry>,
 }
 
 pub struct OSInodeInner {
-    offset: usize,  //记录当前文件的读写偏移量，read/write系统调用会更新这个偏移量
+    offset: usize, //记录当前文件的读写偏移量，read/write系统调用会更新这个偏移量
+    dirent_overlay: Option<DirentOverlayCursor>,
+}
+
+/// Per-open-directory enumeration state. The mount snapshot makes one
+/// `getdents` stream internally consistent even if the namespace changes
+/// while userspace is draining it.
+struct DirentOverlayCursor {
+    mounted_children: alloc::vec::Vec<(String, Arc<Dentry>)>,
+    /// A lower record with this name has already been rewritten to represent
+    /// the mount, so it must not be appended again after lower enumeration.
+    shadowed: alloc::vec::Vec<bool>,
+    lower_done: bool,
     mounted_offset: usize,
+}
+
+impl DirentOverlayCursor {
+    fn new(mounted_children: alloc::vec::Vec<(String, Arc<Dentry>)>) -> Self {
+        Self {
+            shadowed: alloc::vec![false; mounted_children.len()],
+            mounted_children,
+            lower_done: false,
+            mounted_offset: 0,
+        }
+    }
 }
 // 判断文件类型的函数，返回值对应 Linux dirent 结构体中的 d_type 字段
 fn dirent_type_from_mode(mode: u32) -> u8 {
@@ -48,10 +71,11 @@ fn append_dirent_record(
     name: &str,
 ) -> Option<usize> {
     let name_bytes = name.as_bytes();
-    let name_len = name_bytes.len();
+    let name_len = name_bytes.len().min(255);
     let total_len = 19 + name_len + 1;
     let d_reclen = (total_len + 7) & !7;
-    if buf_offset + d_reclen > buf.len() {
+    let end = buf_offset.checked_add(d_reclen)?;
+    if end > buf.len() {
         return None;
     }
 
@@ -59,25 +83,81 @@ fn append_dirent_record(
     buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&next_offset.to_ne_bytes());
     buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(d_reclen as u16).to_ne_bytes());
     buf[buf_offset + 18] = d_type;
-    buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(name_bytes);
-    for byte in &mut buf[buf_offset + 19 + name_len..buf_offset + d_reclen] {
-        *byte = 0;
-    }
+    buf[buf_offset + 19..buf_offset + 19 + name_len]
+        .copy_from_slice(&name_bytes[..name_len]);
+    buf[buf_offset + 19 + name_len..end].fill(0);
     Some(d_reclen)
 }
 
+/// Validate packed linux_dirent64-compatible records produced by a lower
+/// filesystem. The caller must not advance its cursor before this succeeds.
+fn validate_dirent_records(buf: &[u8], byte_len: usize) -> bool {
+    if byte_len > buf.len() {
+        return false;
+    }
+
+    let mut offset = 0usize;
+    while offset < byte_len {
+        if byte_len - offset < 20 {
+            return false;
+        }
+        let reclen = u16::from_ne_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
+        if reclen < 20 || reclen % 8 != 0 {
+            return false;
+        }
+        let Some(end) = offset.checked_add(reclen) else {
+            return false;
+        };
+        if end > byte_len || !buf[offset + 19..end].contains(&0) {
+            return false;
+        }
+        offset = end;
+    }
+    true
+}
+
+/// Replace lower records masked by a mounted child in place. Keeping the
+/// lower record's name, reclen, and next cookie preserves enumeration order
+/// and avoids a duplicate mount entry at the end of the directory stream.
+fn overlay_mounted_dirent_records(
+    buf: &mut [u8],
+    byte_len: usize,
+    mounted_children: &[(String, Arc<Dentry>)],
+    shadowed: &mut [bool],
+) {
+    let mut offset = 0usize;
+    while offset < byte_len {
+        let reclen = u16::from_ne_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
+        let end = offset + reclen;
+        let name_bytes = &buf[offset + 19..end];
+        let name_len = name_bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .expect("validated dirent is missing NUL");
+
+        if let Some(index) = mounted_children
+            .iter()
+            .position(|(name, _)| name.as_bytes() == &name_bytes[..name_len])
+        {
+            let stat = mounted_children[index].1.inode.get_stat();
+            buf[offset..offset + 8].copy_from_slice(&stat.ino.to_ne_bytes());
+            buf[offset + 18] = dirent_type_from_mode(stat.mode);
+            shadowed[index] = true;
+        }
+        offset = end;
+    }
+}
+
 impl OSInode {
-    pub fn new(
-        readable: bool,
-        writable: bool,
-        append: bool,
-        dentry: Arc<Dentry>,
-    ) -> Self {
+    pub fn new(readable: bool, writable: bool, append: bool, dentry: Arc<Dentry>) -> Self {
         Self {
             readable,
             writable,
             append,
-            inner: Mutex::new(OSInodeInner { offset: 0, mounted_offset: 0 }),
+            inner: Mutex::new(OSInodeInner {
+                offset: 0,
+                dirent_overlay: None,
+            }),
             dentry,
         }
     }
@@ -96,7 +176,7 @@ impl OSInode {
         // 3. 从偏移量 0 开始读取
         let read_len = self.inode().read_at(0, &mut buffer);
         trace!("[kernel] read_all: read_len={}", read_len);
-        
+
         // 理论上 read_len 应该等于 size
         if read_len != size {
             buffer.truncate(read_len);
@@ -112,8 +192,12 @@ impl File for OSInode {
     fn info_type(&self) {
         println!("osinode");
     }
-    fn readable(&self) -> bool { self.readable }
-    fn writable(&self) -> bool { self.writable }
+    fn readable(&self) -> bool {
+        self.readable
+    }
+    fn writable(&self) -> bool {
+        self.writable
+    }
 
     fn read(&self, buf: UserBuffer) -> usize {
         let mut inner = self.inner.lock();
@@ -142,7 +226,9 @@ impl File for OSInode {
         let mut current_offset = offset;
         for slice in buf.buffers.iter_mut() {
             let read_len = self.inode().raw_read_at(current_offset, &mut *slice);
-            if read_len == 0 { break; }
+            if read_len == 0 {
+                break;
+            }
             current_offset += read_len;
             total_read += read_len;
         }
@@ -154,7 +240,9 @@ impl File for OSInode {
         let mut current_offset = offset;
         for slice in buf.buffers.iter() {
             let write_len = self.inode().raw_write_at(current_offset, &*slice);
-            if write_len == 0 { break; }
+            if write_len == 0 {
+                break;
+            }
             current_offset += write_len;
             total_write += write_len;
         }
@@ -169,7 +257,9 @@ impl File for OSInode {
         let mut current_offset = offset;
         for slice in buf.buffers.iter_mut() {
             let read_len = inode.read_at(current_offset, &mut *slice);
-            if read_len == 0 { break; }
+            if read_len == 0 {
+                break;
+            }
             current_offset += read_len;
             total_read += read_len;
         }
@@ -188,7 +278,9 @@ impl File for OSInode {
         let mut current_offset = offset;
         for slice in buf.buffers.iter() {
             let write_len = inode.write_at(current_offset, &*slice);
-            if write_len == 0 { break; }
+            if write_len == 0 {
+                break;
+            }
             current_offset += write_len;
             total_write += write_len;
         }
@@ -199,46 +291,103 @@ impl File for OSInode {
         self.inode().get_stat()
     }
 
-    fn getdents(&self, buf: &mut [u8]) -> isize{
-        let _namespace_guard = self.dentry.namespace_lock.lock();
+    fn getdents(&self, buf: &mut [u8]) -> isize {
         let mut inner = self.inner.lock();
-        let read_bytes = self.inode().getdents(&mut inner.offset, buf);
-        if read_bytes < 0 {
-            return read_bytes;
+        let OSInodeInner {
+            offset,
+            dirent_overlay,
+        } = &mut *inner;
+        if dirent_overlay.is_none() {
+            // A mount-table snapshot is enough for one opened directory. Do
+            // not hold this namespace lock while lower getdents may perform
+            // storage I/O.
+            let mounted_children = {
+                let _namespace_guard = self.dentry.namespace_lock.lock();
+                self.dentry.mounted_children_with_names_snapshot()
+            };
+            *dirent_overlay = Some(DirentOverlayCursor::new(mounted_children));
+        }
+
+        let overlay = dirent_overlay
+            .as_mut()
+            .expect("directory overlay cursor was just initialized");
+
+        let mut buf_offset = 0usize;
+        if !overlay.lower_done {
+            // Do not publish a new lower cursor until the packed result is
+            // fully validated. A malformed lower implementation cannot make
+            // us silently skip records on the next call.
+            let mut next_offset = *offset;
+            let read_bytes = self.inode().getdents(&mut next_offset, buf);
+            if read_bytes < 0 {
+                return read_bytes;
+            }
+            let read_bytes = read_bytes as usize;
+            if !validate_dirent_records(buf, read_bytes) {
+                return crate::syscall::errno::Errno::EIO.as_isize();
+            }
+
+            if read_bytes != 0 {
+                overlay_mounted_dirent_records(
+                    buf,
+                    read_bytes,
+                    &overlay.mounted_children,
+                    &mut overlay.shadowed,
+                );
+                *offset = next_offset;
+                buf_offset = read_bytes;
+
+                // Ext4 exposes a byte-size end marker. Zero-size virtual
+                // directories use opaque entry-index cookies, so only a
+                // following zero-byte read confirms their lower EOF.
+                let lower_size = self.inode().get_size();
+                if lower_size == 0 || next_offset < lower_size {
+                    return buf_offset as isize;
+                }
+                overlay.lower_done = true;
+            } else {
+                let lower_size = self.inode().get_size();
+                // A zero-sized userspace buffer can make ext4 return zero
+                // without advancing. It is not lower EOF and must not expose
+                // mounts ahead of lower entries.
+                if lower_size != 0 && next_offset < lower_size && next_offset == *offset {
+                    return 0;
+                }
+                *offset = next_offset;
+                overlay.lower_done = true;
+            }
         }
 
         let lower_size = self.inode().get_size();
-        if inner.offset < lower_size {
-            return read_bytes;
-        }
+        while overlay.mounted_offset < overlay.mounted_children.len() {
+            let mount_index = overlay.mounted_offset;
+            if overlay.shadowed[mount_index] {
+                overlay.mounted_offset += 1;
+                continue;
+            }
 
-        let mounted_children = self.dentry.mounted_children_snapshot();
-        if mounted_children.is_empty() {
-            return read_bytes;
-        }
-
-        let mut buf_offset = read_bytes as usize;
-        let mut mount_index = inner.mounted_offset;
-        while mount_index < mounted_children.len() {
-            let child = &mounted_children[mount_index];
-            let child_name = child.name();
+            let (name, child) = &overlay.mounted_children[mount_index];
             let stat = child.inode.get_stat();
-            let next_offset = (lower_size + mount_index + 1) as i64;
+            let next_offset = lower_size.saturating_add(mount_index).saturating_add(1) as i64;
             let Some(written) = append_dirent_record(
                 buf,
                 buf_offset,
                 stat.ino,
                 next_offset,
                 dirent_type_from_mode(stat.mode),
-                child_name.as_str(),
+                name,
             ) else {
                 break;
             };
             buf_offset += written;
-            mount_index += 1;
+            overlay.mounted_offset += 1;
         }
-        inner.mounted_offset = mount_index;
-        buf_offset as isize
+
+        if buf_offset == 0 && overlay.mounted_offset < overlay.mounted_children.len() {
+            crate::syscall::errno::Errno::EINVAL.as_isize()
+        } else {
+            buf_offset as isize
+        }
     }
 
     fn get_dentry(&self) -> Option<Arc<super::Dentry>> {
@@ -263,8 +412,8 @@ impl File for OSInode {
         const SEEK_CUR: i32 = 1; // 从当前位置算起
         const SEEK_END: i32 = 2; // 从文件末尾算起
 
-        let mut inner = self.inner.lock(); 
-        
+        let mut inner = self.inner.lock();
+
         let current_offset = inner.offset as isize;
 
         // 2. 根据 whence 计算新的偏移量
@@ -272,9 +421,9 @@ impl File for OSInode {
             SEEK_SET => offset,
             SEEK_CUR => current_offset + offset,
             SEEK_END => {
-                let file_size = self.inode().get_size() as isize; 
+                let file_size = self.inode().get_size() as isize;
                 file_size + offset
-            },
+            }
             _ => return -22, // EINVAL (Invalid argument) whence 参数不合法
         };
 
@@ -283,16 +432,31 @@ impl File for OSInode {
             return -22; // EINVAL
         }
 
+        let is_dir = (self.inode().get_stat().mode & 0o170000) == 0o040000;
+        let has_mount_overlay = inner
+            .dirent_overlay
+            .as_ref()
+            .is_some_and(|overlay| !overlay.mounted_children.is_empty())
+            || !self.dentry.mounted_children.lock().is_empty();
+        if is_dir && has_mount_overlay && new_offset != 0 {
+            // Native directory cookies and the appended mount-only records
+            // belong to different cursor domains.  Rewind is exact; accepting
+            // other seeks would either duplicate a shadowed mount or skip it.
+            return crate::syscall::errno::Errno::EINVAL.as_isize();
+        }
+
         // 4. 更新 inode 内部的偏移量
         inner.offset = new_offset as usize;
-        if new_offset == 0 {
-            inner.mounted_offset = 0;
-        }
-        
+        // Directory offsets from the lower filesystem and synthesized mount
+        // records form one stream. Any seek starts a fresh snapshot; this is
+        // fully reliable for SEEK_SET(0), while arbitrary seekdir-style
+        // cookies remain unsupported by the current VFS interface.
+        inner.dirent_overlay = None;
+
         // 5. 成功返回新的偏移量
         new_offset as isize
     }
-    
+
     fn get_shared_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         // 转发给底层的具体文件系统 Inode
         self.inode().get_shared_page(page_offset)
@@ -306,7 +470,9 @@ impl File for OSInode {
         self.inode().truncate(len)
     }
 
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 bitflags! {
@@ -322,7 +488,7 @@ bitflags! {
         const CREATE = 1 << 6;
         /// append each write at the current end of file
         const APPEND = 1 << 10;
-        
+
         /// truncate file size to 0
         const TRUNC = 1 << 9;
         /// 非阻塞模式 (O_NONBLOCK)
@@ -355,14 +521,25 @@ impl OpenFlags {
         self.contains(Self::NOFOLLOW)
     }
 }
-pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> Option<Arc<OSInode>> {
-    warn!("VFS: pid{} open_file - path='{}', flags={:?},cwd={}", current_task().unwrap().getpid(), path, flags, base.name());
+pub fn open_file(
+    base: Arc<Dentry>,
+    path: &str,
+    flags: OpenFlags,
+    mode: u32,
+) -> Option<Arc<OSInode>> {
+    warn!(
+        "VFS: pid{} open_file - path='{}', flags={:?},cwd={}",
+        current_task().unwrap().getpid(),
+        path,
+        flags,
+        base.name()
+    );
     let start_node = if path.starts_with('/') {
         ROOT_DENTRY.clone() // 绝对路径，从根开始
     } else {
         base // 相对路径，从 base 开始
     };
-    
+
     // 使用全局 Dentry 树递归查找路径，并自动填充缓存
     // 1. 查找文件是否已存在
     let target_dentry = if let Ok(dentry) = start_node.find_tree(path, !flags.is_nofollow()) {
@@ -378,7 +555,7 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> O
             return None;
         }
         // 创建新文件的逻辑（简化处理，只创建空文件）
-    // 2.1.2 创建新文件
+        // 2.1.2 创建新文件
         let parent_path = parent_path(path);
         let Ok(parent_dentry) = start_node.find_tree(&parent_path, true) else {
             return None;
@@ -404,7 +581,7 @@ pub fn open_file(base: Arc<Dentry>,path: &str, flags: OpenFlags, mode: u32) -> O
     )))
 }
 
-pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
+pub fn make_dir(path: &str, _mode: u32) -> Option<u32> {
     // 获取目标路径的起点
     let start = if path.starts_with('/') {
         ROOT_DENTRY.clone()
@@ -417,16 +594,22 @@ pub fn make_dir(path: &str , _mode: u32) -> Option<u32> {
     // 从起点开始检查目标路径是否已存在
     if let Ok(_) = start.find_tree(path, true) {
         info!("VFS: make_dir - target '{}' already exists", path);
-        return None; 
+        return None;
     }
     let parent_path = parent_path(path);
     let Ok(parent_dentry) = start.find_tree(&parent_path, true) else {
-        info!("VFS: make_dir - parent path '{}' does not exist", parent_path);
+        info!(
+            "VFS: make_dir - parent path '{}' does not exist",
+            parent_path
+        );
         return None;
     };
     let dir_name = file_name(path);
-    info!("VFS: make_dir - creating directory '{}' in parent '{}'", dir_name, parent_path);
-    let new_dentry = create_dir_in_dentry(&parent_dentry, dir_name , _mode);
+    info!(
+        "VFS: make_dir - creating directory '{}' in parent '{}'",
+        dir_name, parent_path
+    );
+    let new_dentry = create_dir_in_dentry(&parent_dentry, dir_name, _mode);
     Some(new_dentry.inode.get_stat().ino as u32)
 }
 
@@ -435,17 +618,19 @@ pub fn list_apps() {
     println!("/**** APPS ****");
     let mut buf = [0u8; 4096];
     let mut file_offset = 0;
-    let len = ROOT_DENTRY.inode.getdents(&mut file_offset,&mut buf);
+    let len = ROOT_DENTRY.inode.getdents(&mut file_offset, &mut buf);
     if len > 0 {
         let mut offset = 0;
         while offset < len as usize {
             let entry = unsafe { &*(buf[offset..].as_ptr() as *const super::DirEntry) };
-            if entry.d_reclen == 0 { break; }
-            
+            if entry.d_reclen == 0 {
+                break;
+            }
+
             let name_len = entry.d_name.iter().position(|&c| c == 0).unwrap_or(256);
             let name = core::str::from_utf8(&entry.d_name[..name_len]).unwrap_or("");
             println!("{}", name);
-            
+
             offset += entry.d_reclen as usize;
         }
     }

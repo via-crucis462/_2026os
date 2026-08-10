@@ -13,6 +13,7 @@ use crate::mm::frame_alloc;
 use crate::mm::PageSize::Page4K;
 use crate::mm::{user_buffer, PageSize};
 use crate::mm::{FrameTracker, PhysPageNum};
+use crate::syscall::errno::Errno;
 use crate::syscall::fs::Statfs;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -57,7 +58,7 @@ impl TmpfsFileInode {
 
     pub fn new_with_data(data: &[u8]) -> Self {
         let inode = Self::new(0o777);
-        inode.write_at(0, data); 
+        inode.write_at(0, data);
         inode
     }
 }
@@ -66,19 +67,19 @@ impl super::VfsInode for TmpfsFileInode {
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let size = *self.size.lock();
         if offset >= size {
-            return 0; 
+            return 0;
         }
         let read_len = core::cmp::min(buf.len(), size - offset);
-        
+
         let pages = self.pages.lock();
         let mut current_offset = offset;
         let mut buf_idx = 0;
-        
+
         while buf_idx < read_len {
             let page_idx = current_offset / PAGE_SIZE;
             let page_inner_offset = current_offset % PAGE_SIZE;
             let bytes_to_read = core::cmp::min(read_len - buf_idx, PAGE_SIZE - page_inner_offset);
-            
+
             if let Some(frame) = pages.get(&page_idx) {
                 let src = &frame.ppn.get_bytes_array()
                     [page_inner_offset..page_inner_offset + bytes_to_read];
@@ -87,7 +88,7 @@ impl super::VfsInode for TmpfsFileInode {
                 // 稀疏文件未分配页则填 0
                 buf[buf_idx..buf_idx + bytes_to_read].fill(0);
             }
-            
+
             current_offset += bytes_to_read;
             buf_idx += bytes_to_read;
         }
@@ -99,29 +100,29 @@ impl super::VfsInode for TmpfsFileInode {
         let mut size = self.size.lock();
         let mut pages = self.pages.lock();
         let end_offset = offset + buf.len();
-        
+
         let mut current_offset = offset;
         let mut buf_idx = 0;
-        
+
         while buf_idx < buf.len() {
             let page_idx = current_offset / PAGE_SIZE;
             let page_inner_offset = current_offset % PAGE_SIZE;
             let bytes_to_write = core::cmp::min(buf.len() - buf_idx, PAGE_SIZE - page_inner_offset);
-            
+
             // 如果这一页还没创建，直接调用内核页分配器占领一个物理页
             let frame = pages.entry(page_idx).or_insert_with(|| {
                 crate::mm::frame_alloc(Page4K)
                     .expect("[Tmpfs] Failed to allocate physical page frame")
             });
-            
+
             let dest = &mut frame.ppn.get_bytes_array()
                 [page_inner_offset..page_inner_offset + bytes_to_write];
             dest.copy_from_slice(&buf[buf_idx..buf_idx + bytes_to_write]);
-            
+
             current_offset += bytes_to_write;
             buf_idx += bytes_to_write;
         }
-        
+
         if end_offset > *size {
             *size = end_offset; // 自动扩容
         }
@@ -146,10 +147,7 @@ impl super::VfsInode for TmpfsFileInode {
         // 扩张：tmpfs 用惰性分配策略，跳过
         true
     }
-    fn get_shared_page(
-        &self,
-        page_offset: usize,
-    ) -> Option<Arc<crate::mm::mmap::PageCache>> {
+    fn get_shared_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         let mut frames = self.pages.lock();
         // 如果 mmap 映射的页超出了当前文件大小，Linux 允许直接分配空白页给它
         let frame = frames.entry(page_offset).or_insert_with(|| {
@@ -160,10 +158,7 @@ impl super::VfsInode for TmpfsFileInode {
         let page_cache = crate::mm::mmap::PageCache::from_frame(frame.clone());
         Some(Arc::new(page_cache))
     }
-    fn get_file_page(
-        &self,
-        page_offset: usize,
-    ) -> Option<Arc<crate::mm::mmap::PageCache>> {
+    fn get_file_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         if let Some(frame) = self.pages.lock().get(&page_offset).cloned() {
             return Some(Arc::new(crate::mm::mmap::PageCache::from_frame(frame)));
         }
@@ -182,7 +177,7 @@ impl super::VfsInode for TmpfsFileInode {
         stat.blocks = (file_size + 511) / 512;
         stat
     }
-    
+
     fn get_statx(&self) -> super::Statx {
         super::stat_to_statx(self.get_stat())
     }
@@ -202,7 +197,7 @@ impl super::VfsInode for TmpfsFileInode {
         true
     }
     fn set_time(&self, atime: &super::TimeSpec, mtime: &super::TimeSpec) -> isize {
-        //println!("VFS: set_time called on TmpfsFileInode, atime=({}, {}), mtime=({}, {})", 
+        //println!("VFS: set_time called on TmpfsFileInode, atime=({}, {}), mtime=({}, {})",
         //    atime.tv_sec, atime.tv_nsec, mtime.tv_sec, mtime.tv_nsec);
         let mut stat = self.stat.lock();
         stat.atime_sec = atime.tv_sec as i64;
@@ -263,6 +258,19 @@ impl TmpfsDirInode {
             .map(|(name, inode)| (name.clone(), inode.clone()))
             .collect()
     }
+
+    /// Run a short operation while the directory entry map is stable.
+    ///
+    /// `getdents` only needs the map to remain stable while it fills one
+    /// kernel buffer.  Keeping that lock avoids cloning every name and inode
+    /// on each call, while retaining the existing index-based cursor model.
+    pub(crate) fn with_entries<R>(
+        &self,
+        f: impl FnOnce(&BTreeMap<String, Arc<dyn VfsInode>>) -> R,
+    ) -> R {
+        let entries = self.entries.lock();
+        f(&entries)
+    }
 }
 
 fn tmpfs_dirent_type_from_mode(mode: u32) -> u8 {
@@ -291,12 +299,12 @@ impl super::VfsInode for TmpfsDirInode {
     fn ino(&self) -> u64 {
         self.stat.lock().ino
     }
-    
+
     fn get_stat(&self) -> super::Stat {
         *self.stat.lock()
     }
-    
-    fn get_statx(&self) -> super::Statx { 
+
+    fn get_statx(&self) -> super::Statx {
         super::stat_to_statx(self.get_stat())
     }
     fn get_perm(&self) -> PermStat {
@@ -336,7 +344,7 @@ impl super::VfsInode for TmpfsDirInode {
                 .insert(name.to_string(), symlink_inode.clone());
             return Some(symlink_inode);
         }
-       let new_file: Arc<dyn super::VfsInode> = Arc::new(TmpfsFileInode::new(mode));
+        let new_file: Arc<dyn super::VfsInode> = Arc::new(TmpfsFileInode::new(mode));
         self.entries
             .lock()
             .insert(name.to_string(), new_file.clone());
@@ -353,19 +361,15 @@ impl super::VfsInode for TmpfsDirInode {
 
     fn delete_dir_entry(&self, name: &str) -> Option<u32> {
         let mut entries = self.entries.lock();
-        if entries.remove(name).is_some() {
-            Some(0) 
-        } else {
-            None 
-        }
+        entries.remove(name).map(|inode| inode.ino() as u32)
     }
 
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
-        let entries = self.entries_snapshot();
-        let mut buf_offset = 0;
+        let entries = self.entries.lock();
+        let mut buf_offset = 0usize;
+        let mut next_offset = *offset;
 
-        while *offset < entries.len() {
-            let (name, inode) = &entries[*offset];
+        for (name, inode) in entries.iter().skip(next_offset) {
             let name_bytes = name.as_bytes();
             let name_len = name_bytes.len().min(255);
             let total_len = 8 + 8 + 2 + 1 + name_len + 1;
@@ -375,7 +379,7 @@ impl super::VfsInode for TmpfsDirInode {
             }
 
             let stat = inode.get_stat();
-            let d_off = (*offset + 1) as i64;
+            let d_off = (next_offset + 1) as i64;
             buf[buf_offset..buf_offset + 8].copy_from_slice(&stat.ino.to_ne_bytes());
             buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&d_off.to_ne_bytes());
             buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(d_reclen as u16).to_ne_bytes());
@@ -387,10 +391,16 @@ impl super::VfsInode for TmpfsDirInode {
             }
 
             buf_offset += d_reclen;
-            *offset += 1;
+            next_offset += 1;
         }
 
-        buf_offset as isize
+        *offset = next_offset;
+
+        if buf_offset == 0 && next_offset < entries.len() {
+            Errno::EINVAL.as_isize()
+        } else {
+            buf_offset as isize
+        }
     }
     fn statfs(&self) -> Statfs {
         Statfs {
@@ -426,8 +436,8 @@ impl super::VfsInode for TmpfsDirInode {
         Some(symlink_inode)
     }
     fn set_time(&self, _atime: &super::TimeSpec, _mtime: &super::TimeSpec) -> isize {
-       // println!("VFS: set_time called on TmpfsDirInode, atime=({}, {}), mtime=({}, {})", 
-       //     _atime.tv_sec, _atime.tv_nsec, _mtime.tv_sec, _mtime.tv_nsec);
+        // println!("VFS: set_time called on TmpfsDirInode, atime=({}, {}), mtime=({}, {})",
+        //     _atime.tv_sec, _atime.tv_nsec, _mtime.tv_sec, _mtime.tv_nsec);
         let mut stat = self.stat.lock();
         stat.atime_sec = _atime.tv_sec as i64;
         stat.atime_nsec = _atime.tv_nsec as i64;
@@ -526,12 +536,14 @@ fn existing_or_mount_dir(parent: &Arc<Dentry>, name: &str, mode: u32) -> Arc<Den
         .unwrap_or_else(|| parent.mount_child(name.to_string(), Arc::new(TmpfsDirInode::new(mode))))
 }
 
-/// Insert a compatibility file only if neither the image nor an earlier setup
-/// step already provides it.
-fn insert_if_missing(parent: &Arc<Dentry>, name: &str, inode: Arc<dyn VfsInode>) -> Arc<Dentry> {
+/// Mount a kernel-provided compatibility entry only if neither the image nor
+/// an earlier mount already provides it.  These entries intentionally live in
+/// `mounted_children`, so they overlay but never become lower filesystem
+/// dentry-cache entries.
+fn mount_if_missing(parent: &Arc<Dentry>, name: &str, inode: Arc<dyn VfsInode>) -> Arc<Dentry> {
     parent
         .find_child(name)
-        .unwrap_or_else(|| parent.insert(name.to_string(), inode))
+        .unwrap_or_else(|| parent.mount_child(name.to_string(), inode))
 }
 
 fn setup_common_env(root: &Arc<Dentry>) {
@@ -544,21 +556,21 @@ fn setup_common_env(root: &Arc<Dentry>) {
     existing_or_mount_dir(&var, "tmp", 0o1777);
 
     let dev = existing_or_mount_dir(root, "dev", 0o755);
-    // These are kernel-provided device implementations, not compatibility
-    // files from either disk image.
-    dev.insert("shm".to_string(), Arc::new(TmpfsDirInode::new(0o1777)));
-    dev.insert("null".to_string(), Arc::new(NullInode::new()));
-    dev.insert("zero".to_string(), Arc::new(ZeroInode::new()));
-    dev.insert("rtc".to_string(), Arc::new(RtcInode::new()));
-    dev.insert("urandom".to_string(), Arc::new(UrandomInode::new()));
-    dev.insert("random".to_string(), Arc::new(UrandomInode::new()));
-    dev.insert("tty".to_string(), Arc::new(TtyInode::new()));
-    dev.insert(
+    // Kernel-provided device nodes are mounted overlays, never entries in the
+    // lower filesystem dentry cache.
+    dev.mount_child("shm".to_string(), Arc::new(TmpfsDirInode::new(0o1777)));
+    dev.mount_child("null".to_string(), Arc::new(NullInode::new()));
+    dev.mount_child("zero".to_string(), Arc::new(ZeroInode::new()));
+    dev.mount_child("rtc".to_string(), Arc::new(RtcInode::new()));
+    dev.mount_child("urandom".to_string(), Arc::new(UrandomInode::new()));
+    dev.mount_child("random".to_string(), Arc::new(UrandomInode::new()));
+    dev.mount_child("tty".to_string(), Arc::new(TtyInode::new()));
+    dev.mount_child(
         "loop-control".to_string(),
         Arc::new(LoopControlInode::new()),
     );
     for index in 0..8 {
-        dev.insert(
+        dev.mount_child(
             alloc::format!("loop{}", index),
             create_loop_device(None, 0, 0),
         );
@@ -612,12 +624,12 @@ fn setup_preliminary_compat_env(root: &Arc<Dentry>) {
     let passwd_content =
         "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n";
     let group_content = "root:x:0:\nnobody:x:65534:\n";
-    insert_if_missing(
+    mount_if_missing(
         &etc_dentry,
         "passwd",
         Arc::new(TmpfsFileInode::new_with_data(passwd_content.as_bytes())),
     );
-    insert_if_missing(
+    mount_if_missing(
         &etc_dentry,
         "group",
         Arc::new(TmpfsFileInode::new_with_data(group_content.as_bytes())),
@@ -637,14 +649,14 @@ fn setup_preliminary_compat_env(root: &Arc<Dentry>) {
     // loop 测例检查的文件。仅补缺，避免覆盖镜像自己的 modules/sysfs。
     let lib_modules = existing_or_mount_dir(&lib_dentry, "modules", 0o755);
     let lib_modules_rcore = existing_or_mount_dir(&lib_modules, "5.10.0-rcore", 0o755);
-    insert_if_missing(
+    mount_if_missing(
         &lib_modules_rcore,
         "modules.builtin",
         Arc::new(TmpfsFileInode::new_with_data(
             b"kernel/drivers/block/loop.ko\n",
         )),
     );
-    insert_if_missing(
+    mount_if_missing(
         &lib_modules_rcore,
         "modules.dep",
         Arc::new(TmpfsFileInode::new_with_data(b"")),
@@ -677,7 +689,7 @@ fn setup_preliminary_compat_env(root: &Arc<Dentry>) {
                     &usr_local_bin_dentry,
                 ] {
                     if directory.find_child(app).is_none() {
-                        directory.insert(app.to_string(), bb_inode.clone());
+                        directory.mount_child(app.to_string(), bb_inode.clone());
                     }
                 }
             }
@@ -728,17 +740,17 @@ fn setup_preliminary_compat_env(root: &Arc<Dentry>) {
     }
     //返回简单的“语言、国家、字符编码”的一套环境变量并挂载
     let locale_content = "#!/bin/sh\necho \"LANG=C\"\necho \"LC_ALL=C\"\n";
-    insert_if_missing(
+    mount_if_missing(
         &bin_dentry,
         "locale",
         Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())),
     );
-    insert_if_missing(
+    mount_if_missing(
         &sbin_dentry,
         "locale",
         Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())),
     );
-    insert_if_missing(
+    mount_if_missing(
         &usr_bin_dentry,
         "locale",
         Arc::new(TmpfsFileInode::new_with_data(locale_content.as_bytes())),
@@ -752,53 +764,53 @@ fn setup_preliminary_compat_env(root: &Arc<Dentry>) {
     fi
     exec /musl/busybox sh -c "$*"
     "#;
-    insert_if_missing(
+    mount_if_missing(
         &bin_dentry,
         "rsh",
         Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())),
     );
-    insert_if_missing(
+    mount_if_missing(
         &sbin_dentry,
         "rsh",
         Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())),
     );
-    insert_if_missing(
+    mount_if_missing(
         &usr_bin_dentry,
         "rsh",
         Arc::new(TmpfsFileInode::new_with_data(fake_rsh.as_bytes())),
     );
     //setkey命令
     let fake_setkey = "#!/bin/sh\nexit 0\n";
-    insert_if_missing(
+    mount_if_missing(
         &bin_dentry,
         "setkey",
         Arc::new(TmpfsFileInode::new_with_data(fake_setkey.as_bytes())),
     );
-    insert_if_missing(
+    mount_if_missing(
         &sbin_dentry,
         "setkey",
         Arc::new(TmpfsFileInode::new_with_data(fake_setkey.as_bytes())),
     );
     // 伪造并转发 expr 命令给 busybox
     let fake_expr = "#!/bin/sh\nexec /musl/busybox expr \"$@\"\n";
-    insert_if_missing(
+    mount_if_missing(
         &bin_dentry,
         "expr",
         Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())),
     );
-    insert_if_missing(
+    mount_if_missing(
         &usr_bin_dentry,
         "expr",
         Arc::new(TmpfsFileInode::new_with_data(fake_expr.as_bytes())),
     );
 
     let fake_ip = "#!/bin/sh\nexec /musl/busybox ip \"$@\"\n";
-    insert_if_missing(
+    mount_if_missing(
         &sbin_dentry,
         "ip",
         Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())),
     );
-    insert_if_missing(
+    mount_if_missing(
         &bin_dentry,
         "ip",
         Arc::new(TmpfsFileInode::new_with_data(fake_ip.as_bytes())),
@@ -848,19 +860,19 @@ fn mount_hugepages() -> Arc<super::Dentry> {
     let kernel_dentry = if let Ok(kernel) = sys_dentry.find_tree("/sys/kernel", true) {
         kernel
     } else {
-        sys_dentry.insert("kernel".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+        sys_dentry.mount_child("kernel".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
     let mm_dentry = if let Ok(mm) = kernel_dentry.find_tree("/sys/kernel/mm", true) {
         mm
     } else {
-        kernel_dentry.insert("mm".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+        kernel_dentry.mount_child("mm".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
     };
     let hugepages_dentry =
         if let Ok(hugepages) = mm_dentry.find_tree("/sys/kernel/mm/hugepages", true) {
-        hugepages
-    } else {
-        mm_dentry.insert("hugepages".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
-    };
+            hugepages
+        } else {
+            mm_dentry.mount_child("hugepages".to_string(), Arc::new(TmpfsDirInode::new(0o777)))
+        };
     info!("[VFS] Mounted /sys/kernel/mm/hugepages");
     hugepages_dentry
 }
@@ -869,7 +881,7 @@ pub struct TmpfsFsSymbolicLinkInode {
     stat: Mutex<Stat>,
 }
 impl VfsInode for TmpfsFsSymbolicLinkInode {
-    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize { 
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let target_bytes = self.target.as_bytes();
         if offset >= target_bytes.len() {
             return 0;
@@ -941,7 +953,7 @@ impl VfsInode for TmpfsFsSymbolicLinkInode {
         self.stat.lock().ino
     }
 }
-impl TmpfsFsSymbolicLinkInode{
+impl TmpfsFsSymbolicLinkInode {
     fn new(target: String) -> Self {
         let mut stat = Stat::default();
         stat.mode = 0o120777; // S_IFLNK

@@ -242,7 +242,8 @@ pub fn mount_loop_device(loop_device: Arc<LoopDevice>, mount_point: &str) -> Res
     let name = file_name(mount_point);
     
     if let Ok(parent_dentry) = ROOT_DENTRY.find_tree(&parent_dir, true) {
-        parent_dentry.insert(name, root_inode);
+        // A filesystem root belongs in the namespace overlay table.
+        parent_dentry.mount_child(name, root_inode);
         Ok(id)
     } else {
         return Err(Errno::ENOENT.as_isize());
