@@ -371,6 +371,16 @@ pub trait VfsInode: Send + Sync {
     fn dec_link_count(&self) -> bool {
         false
     }
+    /// Return whether a directory contains no entries other than `.` and
+    /// `..`. Filesystems which cannot provide a reliable answer retain the
+    /// legacy permissive behaviour; on-disk filesystems should override this
+    /// before accepting rmdir.
+    fn directory_is_empty(&self) -> bool {
+        true
+    }
+    /// Perform filesystem-specific accounting after a directory has been
+    /// unlinked. The VFS has already adjusted link counts at this point.
+    fn directory_unlinked(&self) {}
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize;
     fn rename_dir_entry(
         &self,

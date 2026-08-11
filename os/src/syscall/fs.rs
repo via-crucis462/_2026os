@@ -1495,6 +1495,9 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
     if !is_dir && removing_dir {
         return ENOTDIR.as_isize();
     }
+    if removing_dir && !target.inode.directory_is_empty() {
+        return ENOTEMPTY.as_isize();
+    }
 
     // 尝试删除
     if let Some(inode_id) = parent.inode.delete_dir_entry(&name) {
@@ -1518,6 +1521,7 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
             // contributed by the child's implicit '..'.
             target.inode.dec_link_count();
             parent.inode.dec_link_count();
+            target.inode.directory_unlinked();
         }
         target.mark_unlinked();
         parent.children.lock().remove(&name);

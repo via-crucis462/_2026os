@@ -12,9 +12,15 @@ pub struct Ext4SuperBlock {
     pub inodes_per_group: u32,
     pub first_data_block: u32,
     pub incompat_features: u32,
+    pub compat_features: u32,
     pub ro_compat_features: u32,
     pub uuid: [u8; 16],
     pub checksum_seed: u32,
+    pub checksum_type: u8,
+    pub want_extra_isize: u16,
+    pub reserved_gdt_blocks: u16,
+    pub first_ino: u32,
+    pub backup_bgs: [u32; 2],
     pub desc_size: u32, // 组描述符大小，可能是32或64
 }
 
@@ -26,6 +32,9 @@ impl Ext4SuperBlock {
         if magic != EXT4_MAGIC as u16 {
             panic!("Not a valid ext4 superblock: magic = 0x{:X}", magic);
         }
+        if ext4_superblock_disk.s_blocks_count_hi != 0 {
+            panic!("[ext4] filesystems larger than 2^32 blocks are unsupported");
+        }
         Self {
             total_blocks: ext4_superblock_disk.s_blocks_count_lo,
             total_inodes: ext4_superblock_disk.s_inodes_count,
@@ -35,9 +44,15 @@ impl Ext4SuperBlock {
             inodes_per_group: ext4_superblock_disk.s_inodes_per_group,
             first_data_block: ext4_superblock_disk.s_first_data_block,
             incompat_features: ext4_superblock_disk.s_feature_incompat,
+            compat_features: ext4_superblock_disk.s_feature_compat,
             ro_compat_features: ext4_superblock_disk.s_feature_ro_compat,
             uuid: ext4_superblock_disk.s_uuid,
             checksum_seed: ext4_superblock_disk.s_checksum_seed,
+            checksum_type: ext4_superblock_disk.s_checksum_type,
+            want_extra_isize: ext4_superblock_disk.s_want_extra_isize,
+            reserved_gdt_blocks: ext4_superblock_disk.s_reserved_gdt_blocks,
+            first_ino: ext4_superblock_disk.s_first_ino,
+            backup_bgs: ext4_superblock_disk.s_backup_bgs,
             // 暂未检查是否正确，但测试发现能跑
             desc_size: if (ext4_superblock_disk.s_feature_incompat & 0x0080) != 0 {
                 ext4_superblock_disk.s_desc_size as u32
@@ -47,7 +62,41 @@ impl Ext4SuperBlock {
         }
     }
     pub fn group_num(&self) -> u32 {
-        (self.total_blocks + self.blocks_per_group - 1) / self.blocks_per_group
+        self.total_blocks
+            .saturating_sub(self.first_data_block)
+            .saturating_add(self.blocks_per_group - 1)
+            / self.blocks_per_group
+    }
+
+    pub fn has_metadata_csum(&self) -> bool {
+        (self.ro_compat_features & 0x0400) != 0 && self.checksum_type == 1
+    }
+
+    pub fn has_csum_seed(&self) -> bool {
+        (self.incompat_features & 0x2000) != 0
+    }
+
+    pub fn has_bigalloc(&self) -> bool {
+        (self.ro_compat_features & 0x0200) != 0
+    }
+
+    pub fn has_journal(&self) -> bool {
+        (self.compat_features & 0x0004) != 0
+    }
+
+    pub fn needs_recovery(&self) -> bool {
+        (self.incompat_features & 0x0004) != 0
+    }
+
+    /// The filesystem-wide checksum seed used by metadata_csum objects.
+    /// Older ext4 filesystems derive it from the UUID; newer filesystems may
+    /// store a precomputed seed in s_checksum_seed.
+    pub fn metadata_checksum_seed(&self) -> u32 {
+        if self.has_csum_seed() {
+            self.checksum_seed
+        } else {
+            super::checksum::crc32c(!0u32, &self.uuid)
+        }
     }
 }
 #[repr(C, packed)]

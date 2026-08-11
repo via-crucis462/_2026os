@@ -4,6 +4,7 @@ pub mod ext4inode;
 pub mod ext4;
 pub mod vfs;
 pub mod ext4_dir_entry;
+pub mod checksum;
 pub use crate::drivers::block::*;
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +46,37 @@ pub fn block_modify_inode(
     inode_id: u32, 
     f: impl FnOnce(&mut Ext4InodeDisk)
 ) {
+    block_modify_inode_raw(fs, inode_id, |raw_inode| {
+        let disk_inode = unsafe {
+            &mut *(raw_inode.as_mut_ptr() as *mut Ext4InodeDisk)
+        };
+        f(disk_inode);
+    });
+}
+
+/// Modify an inode through its complete on-disk byte representation and
+/// refresh metadata_csum before releasing the cache lock.  The legacy typed
+/// inode view is intentionally kept as a small compatibility wrapper above;
+/// checksum calculation must never be limited to that 128-byte view.
+pub fn block_modify_inode_raw(
+    fs: &Arc<Ext4FS>,
+    inode_id: u32,
+    f: impl FnOnce(&mut [u8]),
+) {
     let (block_id, offset) = fs.get_inode_pos(inode_id);
-    block_modify(&fs.block_dev, block_id as usize, offset, f);
+    let cache = get_block_cache(block_id as usize, fs.block_dev.clone());
+    let mut block = cache.lock();
+    let inode_size = fs.superblock.inode_size as usize;
+    let bytes = block.frame.get_bytes_array();
+    let raw_inode = &mut bytes[offset..offset + inode_size];
+    f(raw_inode);
+    if fs.superblock.has_metadata_csum() {
+        let _ = checksum::set_inode_checksum(
+            fs.superblock.metadata_checksum_seed(),
+            inode_id,
+            raw_inode,
+        );
+    }
+    block.dirty = true;
+    block.state = crate::drivers::block::cache::CacheState::Dirty;
 }

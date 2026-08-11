@@ -431,14 +431,20 @@ impl PageCacheManager {
         // 分批收集
         use core::ops::Bound;
         const SYNC_BATCH: usize = 1024;
-        let mut cursor = 0u64;
+        // `0` is a valid physical block (and contains the ext4 superblock).
+        // Starting with Excluded(0) silently left it dirty forever.
+        let mut cursor: Option<u64> = None;
         loop {
             let batch: Vec<Arc<PageCache>> = {
                 let map = self.page_cache_map.read();
-                map.range((Bound::Excluded(cursor), Bound::Unbounded))
+                let lower = match cursor {
+                    Some(block_id) => Bound::Excluded(block_id),
+                    None => Bound::Unbounded,
+                };
+                map.range((lower, Bound::Unbounded))
                     .take(SYNC_BATCH)
                     .map(|(id, cache)| {
-                        cursor = *id;
+                        cursor = Some(*id);
                         cache.clone()
                     })
                     .collect()

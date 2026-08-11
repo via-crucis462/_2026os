@@ -1,6 +1,7 @@
-use super::block_modify_inode;
+use super::{block_modify_inode, block_modify_inode_raw};
 use super::ext4_dir_entry::Ext4DirEntry;
-use super::ext4inode::{Ext4ExtentHeader, Ext4Inode, Ext4InodeDisk, EXT4_EXTENTS_FL};
+use super::ext4inode::{Ext4Inode, Ext4InodeDisk, EXT4_EXTENTS_FL};
+use super::Ext4FS;
 use crate::ext4fs::BLOCK_SZ;
 use crate::fs::TimeSpec;
 use crate::fs::{LookupOutcome, RenameError, VfsInode};
@@ -9,6 +10,34 @@ use crate::syscall::fs::Statfs;
 use alloc::sync::Arc;
 use alloc::vec;
 use core::sync::atomic::Ordering;
+
+fn initialize_new_inode(fs: &Arc<Ext4FS>, inode_id: u32, mode: u32, links: u16) {
+    let generation = fs
+        .get_disk_inode(inode_id)
+        .i_generation
+        .wrapping_add(1);
+    let want_extra_isize = fs.superblock.want_extra_isize;
+    let use_extents = (fs.superblock.incompat_features & 0x40) != 0;
+    block_modify_inode_raw(fs, inode_id, |raw| {
+        // A reused inode must not retain stale ACL, extent, timestamp, or
+        // checksum-related extra fields from its previous owner.
+        raw.fill(0);
+        raw[0..2].copy_from_slice(&(mode as u16).to_le_bytes());
+        raw[0x1a..0x1c].copy_from_slice(&links.to_le_bytes());
+        raw[0x64..0x68].copy_from_slice(&generation.to_le_bytes());
+        if raw.len() >= 0x82 {
+            raw[0x80..0x82].copy_from_slice(&want_extra_isize.to_le_bytes());
+        }
+        if use_extents {
+            raw[0x20..0x24].copy_from_slice(&EXT4_EXTENTS_FL.to_le_bytes());
+            // struct ext4_extent_header { magic, entries, max, depth, gen }
+            raw[0x28..0x34].copy_from_slice(&[
+                0x0a, 0xf3, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+            ]);
+        }
+    });
+}
 
 impl VfsInode for Ext4Inode {
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
@@ -308,36 +337,15 @@ impl VfsInode for Ext4Inode {
         let new_inode_id = self.fs.alloc_inode()?;
 
         // 3. 在磁盘上初始化该 Inode 结构
-        block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
-            disk_inode.i_mode = mode as u16;
-            disk_inode.i_size_lo = 0;
-            disk_inode.i_size_high = 0;
-            disk_inode.i_dtime = 0;
-            disk_inode.i_links_count = 1;
-            disk_inode.i_blocks_lo = 0;
-            if (self.fs.superblock.incompat_features & 0x40) != 0 {
-                disk_inode.i_flags = EXT4_EXTENTS_FL;
-                disk_inode.i_block.fill(0);
-                let header = Ext4ExtentHeader {
-                    eh_magic: 0xF30A,
-                    eh_entries: 0,
-                    eh_max: 4,
-                    eh_depth: 0,
-                    eh_generation: 0,
-                };
-                unsafe {
-                    (disk_inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader)
-                        .write_unaligned(header);
-                }
-            } else {
-                disk_inode.i_flags = 0;
-                disk_inode.i_block.fill(0);
-            }
-        });
+        initialize_new_inode(&self.fs, new_inode_id, mode, 1);
 
         // 4. 在父目录的数据块中写入目录项 (文件类型 1)
         if !self.add_dir_entry(name, new_inode_id, 1) {
-            // 失败处理（简化：返回 None，实际上可能需要回滚分配）
+            block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
+                disk_inode.i_mode = 0;
+                disk_inode.i_links_count = 0;
+            });
+            self.fs.dealloc_inode(new_inode_id);
             return None;
         }
 
@@ -391,33 +399,72 @@ impl VfsInode for Ext4Inode {
             "VFS: Creating directory '{}' with inode id {}",
             name, new_inode_id
         );
-        // 3. 在磁盘上初始化该 Inode 结构
+        // 3. 初始化完整 inode，然后建立合法的目录块。
+        initialize_new_inode(&self.fs, new_inode_id, mode, 2);
+        let Some(dir_block) = self.fs.alloc_block() else {
+            block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
+                disk_inode.i_mode = 0;
+                disk_inode.i_links_count = 0;
+            });
+            self.fs.dealloc_inode(new_inode_id);
+            return None;
+        };
+        let new_inode = self.fs.get_inode(new_inode_id);
+        let mut dir_buf = [0u8; BLOCK_SZ];
+        let tail_size = if self.fs.superblock.has_metadata_csum() { 12 } else { 0 };
+        let dotdot_len = (BLOCK_SZ - 12 - tail_size) as u16;
+        if !Ext4DirEntry::write_to(&mut dir_buf, new_inode_id, 12, b".", 2)
+            || !Ext4DirEntry::write_to(
+                &mut dir_buf[12..],
+                self.inode_id,
+                dotdot_len,
+                b"..",
+                2,
+            )
+        {
+            self.fs.dealloc_block(dir_block);
+            block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
+                disk_inode.i_mode = 0;
+                disk_inode.i_links_count = 0;
+            });
+            self.fs.dealloc_inode(new_inode_id);
+            return None;
+        }
+        if tail_size != 0 {
+            let tail_off = BLOCK_SZ - tail_size;
+            dir_buf[tail_off..].fill(0);
+            dir_buf[tail_off + 4..tail_off + 6].copy_from_slice(&12u16.to_le_bytes());
+            dir_buf[tail_off + 7] = 0xde;
+            new_inode.update_dir_block_checksum_if_needed(&mut dir_buf);
+        }
+        self.fs
+            .block_dev
+            .write_data_block(dir_block as usize, &dir_buf);
+        let mapped = if self.fs.get_disk_inode(new_inode_id).i_flags & EXT4_EXTENTS_FL != 0 {
+            new_inode.add_extent_entry(0, dir_block).is_some()
+        } else {
+            block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
+                disk_inode.i_block[0..4].copy_from_slice(&dir_block.to_le_bytes());
+                disk_inode.i_blocks_lo = (BLOCK_SZ / 512) as u32;
+            });
+            true
+        };
+        if !mapped {
+            self.fs.dealloc_block(dir_block);
+            block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
+                disk_inode.i_mode = 0;
+                disk_inode.i_links_count = 0;
+            });
+            self.fs.dealloc_inode(new_inode_id);
+            return None;
+        }
         block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
-            disk_inode.i_mode = mode as u16;
-            disk_inode.i_size_lo = 0;
-            disk_inode.i_size_high = 0;
-            disk_inode.i_dtime = 0;
-            disk_inode.i_links_count = 2;
-            disk_inode.i_blocks_lo = 0;
-            if (self.fs.superblock.incompat_features & 0x40) != 0 {
-                disk_inode.i_flags = EXT4_EXTENTS_FL;
-                disk_inode.i_block.fill(0);
-                let header = Ext4ExtentHeader {
-                    eh_magic: 0xF30A,
-                    eh_entries: 0,
-                    eh_max: 4,
-                    eh_depth: 0,
-                    eh_generation: 0,
-                };
-                unsafe {
-                    (disk_inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader)
-                        .write_unaligned(header);
-                }
-            } else {
-                disk_inode.i_flags = 0;
-                disk_inode.i_block.fill(0);
-            }
+            disk_inode.i_size_lo = BLOCK_SZ as u32;
         });
+        // `new_inode` is already present in the weak inode cache.  Keep its
+        // in-memory size in step with the initialized on-disk directory so a
+        // subsequent create inside this directory does not treat it as empty.
+        new_inode.size.store(BLOCK_SZ as u64, Ordering::Release);
 
         // 4. 在父目录的数据块中写入目录项 (文件类型 2)
         if !self.add_dir_entry(name, new_inode_id, 2) {
@@ -425,7 +472,12 @@ impl VfsInode for Ext4Inode {
                 "[ext4-create-dir] add_dir_entry failed parent ino={} new ino={} name={}",
                 self.inode_id, new_inode_id, name
             );
-            // 失败处理（简化：返回 None，实际上可能需要回滚分配）
+            new_inode.truncate(0);
+            block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
+                disk_inode.i_mode = 0;
+                disk_inode.i_links_count = 0;
+            });
+            self.fs.dealloc_inode(new_inode_id);
             return None;
         }
 
@@ -436,6 +488,7 @@ impl VfsInode for Ext4Inode {
                 p_disk_inode.i_size_lo = 4096;
             }
         });
+        self.fs.adjust_used_dirs(new_inode_id, 1);
 
         Some(self.fs.get_inode(new_inode_id))
     }
@@ -447,6 +500,14 @@ impl VfsInode for Ext4Inode {
     fn dec_link_count(&self) -> bool {
         self.fs.decrease_link_count(self.inode_id);
         true
+    }
+
+    fn directory_is_empty(&self) -> bool {
+        Ext4Inode::directory_is_empty(self)
+    }
+
+    fn directory_unlinked(&self) {
+        self.fs.adjust_used_dirs(self.inode_id, -1);
     }
 
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
