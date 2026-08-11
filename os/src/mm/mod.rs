@@ -36,7 +36,7 @@ pub use memory_set::flush_kernel_tlb_targets;
 #[cfg(target_arch = "riscv64")]
 pub use crate::arch::mm::tlb::{active_tokens, running_harts, switch_mm};
 #[cfg(target_arch = "loongarch64")]
-pub use crate::arch::mm::tlb::{handle_tlb_ipi, leave_user_mm, switch_mm};
+pub use crate::arch::mm::tlb::{enter_user_mm, leave_user_mm};
 #[allow(unused)]
 pub use memory_set::{MapArea, MapType, VersionedArea};
 pub use page_table::*;

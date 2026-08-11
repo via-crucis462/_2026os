@@ -648,7 +648,7 @@ impl MemorySet {
 
     #[cfg(target_arch = "loongarch64")]
     pub fn flush_tlb_targets(&self) {
-        crate::arch::mm::tlb::flush_tlb_targets(self.token(), self.asid());
+        crate::arch::mm::tlb::flush_tlb_targets();
     }
 
     /// 只刷新本核 TLB
@@ -3342,12 +3342,9 @@ impl MemorySet {
 
 impl Drop for MemorySet {
     fn drop(&mut self) {
-        let token = self.token();
-        #[cfg(target_arch = "loongarch64")]
-        crate::arch::mm::tlb::retire_mm(token, self.asid());
-
         #[cfg(target_arch = "riscv64")]
         {
+            let token = self.token();
             self.flush_tlb_targets();
             // 页表帧所有权移交 tlb 层：若仍有核的 satp 指向该页表
             // （空闲核有意保留 warm satp 不切换），帧会延迟到最后一个

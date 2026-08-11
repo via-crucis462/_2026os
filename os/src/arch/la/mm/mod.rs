@@ -125,6 +125,15 @@ pub fn flush_tlb_for_asid(asid: usize) {
     }
 }
 
+/// 刷新本核所有非全局 TLB 项
+pub fn flush_user_tlb() {
+    unsafe {
+        asm!("dbar 0");
+        asm!("invtlb 0x3, $r0, $r0");
+        asm!("dbar 0");
+    }
+}
+
 // 修改根页表地址
 /*
 pub fn la_app_init_mem(token: usize) {

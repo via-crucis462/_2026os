@@ -33,6 +33,8 @@ pub const IOCSR_IPI_SEND_BLOCKING: u32 = 1 << 31;
 
 /// Runtime IPI vector reserved for synchronous TLB shootdowns.
 pub const TLB_SHOOTDOWN_IPI: u32 = 1 << 1;
+/// The architectural IPI line is reported through `CSR.ESTAT.IS[12]`.
+pub const IPI_INTERRUPT_BIT: usize = 1 << 12;
 
 pub const LOONGARCH_IOCSR_MBUF_SEND: usize = 0x1048;
 pub const IOCSR_MBUF_SEND_BLOCKING: u64 = 1 << 31;
@@ -111,25 +113,33 @@ pub fn send_ipi_single(cpu: usize, action: u32) {
 
 /// Enable the runtime TLB IPI on the current hart and route IPI interrupts.
 pub fn init_runtime_ipi() {
-    iocsr_write_u32(LOONGARCH_IOCSR_IPI_CLEAR, TLB_SHOOTDOWN_IPI);
+    // Firmware may have used a different IPI action while bringing this hart
+    // online. Clear every stale action before enabling the runtime vector so a
+    // level-triggered IPI line cannot immediately retrigger in user mode.
+    iocsr_write_u32(LOONGARCH_IOCSR_IPI_CLEAR, u32::MAX);
+    unsafe { asm!("dbar 0") };
     let enabled = iocsr_read_u32(LOONGARCH_IOCSR_IPI_EN);
     iocsr_write_u32(LOONGARCH_IOCSR_IPI_EN, enabled | TLB_SHOOTDOWN_IPI);
     unsafe {
         let mut ecfg: usize;
         asm!("csrrd {}, 0x4", out(reg) ecfg);
-        asm!("csrwr {}, 0x4", inout(reg) (ecfg | (1 << 12)) => _);
+        asm!("csrwr {}, 0x4", inout(reg) (ecfg | IPI_INTERRUPT_BIT) => _);
     }
 }
 
-/// Clear the runtime TLB IPI if it is pending on the current hart.
-pub fn clear_tlb_shootdown_ipi() -> bool {
-    let pending = iocsr_read_u32(LOONGARCH_IOCSR_IPI_STATUS) & TLB_SHOOTDOWN_IPI;
+/// Atomically consume the IPI actions observed on the current hart.
+///
+/// The architectural IPI line is level triggered. Clearing only the TLB
+/// action would leave another pending action asserting `ESTAT.IS[12]`, causing
+/// a user trap loop. The caller dispatches the returned action bits after the
+/// whole snapshot has been acknowledged.
+pub fn take_ipi_actions() -> u32 {
+    let pending = iocsr_read_u32(LOONGARCH_IOCSR_IPI_STATUS);
     if pending != 0 {
         iocsr_write_u32(LOONGARCH_IOCSR_IPI_CLEAR, pending);
-        true
-    } else {
-        false
+        unsafe { asm!("dbar 0") };
     }
+    pending
 }
 
 /// Raise the TLB IPI on every hart selected by `hart_mask`.

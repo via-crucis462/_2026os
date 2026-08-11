@@ -528,12 +528,15 @@ pub fn trap_handler() -> ! {
     //11_0000_0000_0000_0000=>页表
     //3_0000_0000_0000_0000=>取指操作页无效例外
     
-    let tlb_ipi = ((estat >> 12) & 1) != 0
-        && crate::arch::la::ipi::clear_tlb_shootdown_ipi();
-    if tlb_ipi {
-        crate::mm::handle_tlb_ipi();
+    // Vol. 1 defines the architectural IPI line as ESTAT.IS[12]. Its IOCSR
+    // status may contain actions unrelated to a TLB shootdown, so acknowledge
+    // the complete snapshot. `leave_user_mm` above has already completed a
+    // matching shootdown before this handler takes any page-table lock.
+    let ipi_pending = estat & crate::arch::la::ipi::IPI_INTERRUPT_BIT != 0;
+    if ipi_pending {
+        crate::arch::la::ipi::take_ipi_actions();
     }
-    let cause = if tlb_ipi {
+    let cause = if ipi_pending {
         Cause::Ipi
     } else if ((estat >> 11) & 1)  != 0 {
         Cause::TimeInterrupt
@@ -848,7 +851,7 @@ pub fn trap_return() -> ! {
         euen |= 0x3;
         asm!("csrwr {}, 0x2", inout(reg) euen => _);
     }
-    crate::mm::switch_mm(user_satp, id);
+    crate::mm::enter_user_mm();
 
     // crate::arch::mm::prepare_user_tlb();
     // crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置

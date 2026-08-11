@@ -23,6 +23,7 @@ endif
 
 LA_KERNEL_ELF := target/loongarch64-unknown-none/$(MODE)/os
 LA_KERNEL_BIN := $(LA_KERNEL_ELF).bin
+LA_MEM ?= 36G
 
 # Building mode argument
 ifeq ($(MODE), release)
@@ -128,7 +129,7 @@ run-la: build-la run-inner-la
 run-inner-la:
 	@rm -f kernel_output.log
 	@qemu-system-loongarch64 \
-		-m 1G\
+		-m $(LA_MEM) \
 		-machine virt \
 		-nographic \
 		-kernel $(LA_KERNEL_ELF) \
