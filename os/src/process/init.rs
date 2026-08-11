@@ -72,7 +72,7 @@ impl TaskStruct {
 				flags: 0,
 				errno: 0,
 				oom_score_adj: 0,
-				sched_policy: SCHED_IDLE, // initproc默认用SCHED_IDLE策略
+				sched_policy: SCHED_OTHER,
 				sched_priority: 0,
 				prio: 120,
 				static_prio: 120,
@@ -162,6 +162,12 @@ static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
 	bytes: *include_bytes!("../arch/riscv/initproc_uptime"),
 	#[cfg(initproc = "mmbench")]
 	bytes: *include_bytes!("../arch/riscv/initproc_mmbench"),
+	#[cfg(initproc = "memory_probe")]
+	bytes: *include_bytes!("../arch/riscv/initproc_memory_probe"),
+	#[cfg(initproc = "sched_probe")]
+	bytes: *include_bytes!("../arch/riscv/initproc_sched_probe"),
+	#[cfg(initproc = "wake_op_probe")]
+	bytes: *include_bytes!("../arch/riscv/initproc_wake_op_probe"),
 };
 
 #[link_section = ".data"]

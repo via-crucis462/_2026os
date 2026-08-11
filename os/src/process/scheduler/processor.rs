@@ -4,7 +4,7 @@ use crate::process::scheduler::idle_tasks;
 use crate::process::scheduler::nanosleep::wake_expired_sleep_tasks;
 use crate::process::scheduler::runqueue::{
     advance_cfs_min_vruntime, enqueue_task_on_cpu, fetch_task, SCHED_BATCH, SCHED_IDLE,
-    SCHED_OTHER,
+    SCHED_OTHER, SCHED_RR
 };
 use crate::process::{TaskContext, TaskControlBlock, TaskStatus};
 #[cfg(target_arch = "riscv64")]
@@ -206,7 +206,7 @@ pub fn run_tasks() {
                 }
             }
         } else {
-            crate::arch::timer::set_next_trigger(SCHED_OTHER);
+            crate::arch::timer::set_next_trigger(SCHED_RR);
             #[cfg(target_arch = "loongarch64")]
             #[cfg(board = "virt")]
             unsafe {

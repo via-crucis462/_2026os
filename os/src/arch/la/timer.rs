@@ -7,7 +7,7 @@ use crate::process::scheduler::runqueue::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, S
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-const DEFAULT_TIME_SLICE_MS: usize = 10;
+const DEFAULT_TIME_SLICE_MS: usize = 50;
 const FIFO_TIME_SLICE_MS: usize = 50;
 const RR_TIME_SLICE_MS: usize = 1;
 const IDLE_TIME_SLICE_MS: usize = 20;
