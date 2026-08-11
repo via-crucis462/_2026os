@@ -40,14 +40,16 @@ impl Drop for ASIDHandle {
         #[cfg(target_arch = "riscv64")]
         return;
 
+        /* 改为 trap 返回前统一清空
         #[cfg(target_arch = "loongarch64")]
         unsafe{
             asm!(
                 // 回收时清空对应tlb表项
-                "invtlb 0x4, {}, $r0",
+                "invtlb 0, {}, $r0",
                 in(reg) self.0
             );
         }
+        */
 
         #[cfg(target_arch = "loongarch64")]
         ASID_ALLOCATOR.exclusive_access().dealloc(self.0);

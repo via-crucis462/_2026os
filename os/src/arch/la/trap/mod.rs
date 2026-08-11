@@ -588,7 +588,7 @@ pub fn trap_handler() -> ! {
             }
             suspend_current_and_run_next();
         }
-        Cause::Ipi => {}
+        Cause::Ipi => {} // trap 返回会自动刷 tlb
         Cause::Other => {
             if ecode == 0x9 {
                 let cx = current_trap_cx();

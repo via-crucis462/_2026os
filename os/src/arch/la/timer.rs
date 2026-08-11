@@ -174,8 +174,9 @@ pub fn set_next_trigger(policy: isize) {
     let ticks = timer_frequency()
         .saturating_mul(time_slice_ms_for_policy(policy))
         / MSEC_PER_SEC;
-    let ticks = ticks.max(1);
-    let tcfg = (ticks << 2) | 0b01;
+    // TCFG stores the raw countdown value; its low two bits are control bits.
+    let ticks = ticks.max(4) & !0b11;
+    let tcfg = ticks | 0b01;
     unsafe {
         asm!("csrwr {}, 0x44", inout(reg) 1usize => _);
         asm!("csrwr {}, 0x41", inout(reg) tcfg => _);

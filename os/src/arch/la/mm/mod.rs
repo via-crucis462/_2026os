@@ -120,16 +120,16 @@ pub fn flush_tlb_for_asid(asid: usize) {
     unsafe {
         asm!("dbar 0");
         // op 0x4 invalidates non-global entries matching the supplied ASID.
-        asm!("invtlb 0x4, {asid}, $r0", asid = in(reg) asid);
+        asm!("invtlb 0, {asid}, $r0", asid = in(reg) asid);
         asm!("dbar 0");
     }
 }
 
-/// 刷新本核所有非全局 TLB 项
+/// 刷新所有 tlb 项
 pub fn flush_user_tlb() {
     unsafe {
         asm!("dbar 0");
-        asm!("invtlb 0x3, $r0, $r0");
+        asm!("invtlb 0, $r0, $r0");
         asm!("dbar 0");
     }
 }
