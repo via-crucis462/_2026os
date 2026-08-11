@@ -186,8 +186,11 @@ fn main_init(hart_id: usize) {
     MAIN_HART_ID.store(hart_id, Ordering::Release);
     crate::process::init::add_initproc();
     crate::process::init::add_timer_worker();
+    #[cfg(not(initproc = "default"))]
     crate::process::init::add_net_worker();
+    #[cfg(not(initproc = "default"))]
     crate::process::init::add_console_worker();
+    #[cfg(not(initproc = "default"))]
     crate::process::init::add_writeback_worker();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger(process::scheduler::runqueue::SCHED_OTHER);

@@ -961,12 +961,16 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
         AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE;
     const STATX_RESERVED: u32 = 0x8000_0000;
 
-    // 1. 与 Linux 一致：先拷贝路径（路径指针非法 → EFAULT），再做参数校验
+    // 1. 拷贝路径，允许空路径
     let mm = current_user_mm();
-    let path_str = match try_translated_str_with_limit(&mm, path, PATH_MAX_LEN) {
-        Ok(path) => path,
-        Err(UserCStringError::TooLong) => return ENAMETOOLONG.as_isize(),
-        Err(UserCStringError::Invalid) => return EFAULT.as_isize(),
+    let path_str = if path.is_null() && (flags & AT_EMPTY_PATH) != 0 {
+        String::new()
+    } else {
+        match try_translated_str_with_limit(&mm, path, PATH_MAX_LEN) {
+            Ok(path) => path,
+            Err(UserCStringError::TooLong) => return ENAMETOOLONG.as_isize(),
+            Err(UserCStringError::Invalid) => return EFAULT.as_isize(),
+        }
     };
     //println!("kernel:pid[{}] sys_statx: dirfd={}, path={}, flags=0x{:x}, mask=0x{:x}", task.process().pid.0, dirfd, path_str, flags, mask);
 
@@ -989,21 +993,25 @@ pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut 
             return ENOENT.as_isize();
         }
 
-        let files = current_files();
-        let inner = files.exclusive_access();
-        if dirfd < 0 || dirfd as usize >= inner.fds.len() {
-            return EBADF.as_isize(); 
-        }
-
-        let Some(file) = inner.fds[dirfd as usize].file.as_ref() else {
-            return EBADF.as_isize();
-        };
-        let file = file.clone();
-        drop(inner);
-        let mut statx_data = if let Some(dentry) = file.get_dentry() {
-            dentry.inode.get_statx()
+        let mut statx_data = if dirfd == AT_FDCWD {
+            current_pwd().inode.get_statx()
         } else {
-            crate::fs::stat_to_statx(file.get_stat())
+            let files = current_files();
+            let inner = files.exclusive_access();
+            if dirfd < 0 || dirfd as usize >= inner.fds.len() {
+                return EBADF.as_isize();
+            }
+
+            let Some(file) = inner.fds[dirfd as usize].file.as_ref() else {
+                return EBADF.as_isize();
+            };
+            let file = file.clone();
+            drop(inner);
+            if let Some(dentry) = file.get_dentry() {
+                dentry.inode.get_statx()
+            } else {
+                crate::fs::stat_to_statx(file.get_stat())
+            }
         };
         // 检查是否有缓存的时间数据，如果有则覆盖 stat 中的时间字段
         if let Some(&(asec, ansec, msec, mnsec)) = TIME_CACHE.lock().get(&statx_data.stx_ino) {
@@ -2817,18 +2825,39 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
         EACCES.as_isize()
     }
 }
-/// fsync: 将文件描述符关联文件的数据同步到磁盘
-/// 当前实现刷所有缓存而不是只刷指定文件
-/// 
-/// TODO: 完全实现 fsync 语义
-pub fn sys_fsync(_fd: usize) -> isize {
-    // Per-file durability and descriptor validation are not implemented.
-    ENOSYS.as_isize()
+/// Check that a descriptor still names an open file without cloning the file
+/// object or holding the descriptor table across any I/O.
+fn fd_is_open(fd: usize) -> bool {
+    let files = current_files();
+    let table = files.exclusive_access();
+    table
+        .fds
+        .get(fd)
+        .and_then(|entry| entry.file.as_ref())
+        .is_some()
+}
+
+/// fsync: accept the writeback request and let the writeback worker persist
+/// dirty cache pages asynchronously.
+///
+/// This intentionally implements writeback-only rather than POSIX durability
+/// semantics.  In particular, a successful return does not mean the device
+/// has completed a flush.  It avoids serializing Cargo's SQLite cache commits
+/// behind a global page-cache scan while preserving EBADF for invalid fds.
+pub fn sys_fsync(fd: usize) -> isize {
+    if !fd_is_open(fd) {
+        return EBADF.as_isize();
+    }
+    0
+}
+
+/// fdatasync currently has the same writeback-only policy as fsync.
+pub fn sys_fdatasync(fd: usize) -> isize {
+    sys_fsync(fd)
 }
 
 /// sync: 将所有文件系统缓存同步到磁盘
 pub fn sys_sync() -> isize {
     crate::mm::mmap::sync_shared_page_cache();
-    crate::drivers::block::cache::block_cache_sync_all();
     0
 }

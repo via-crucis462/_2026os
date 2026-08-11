@@ -192,21 +192,21 @@ lazy_static! {
 
 pub fn add_timer_worker() {
 	let worker_task =
-		TaskStruct::new_kernel_worker(crate::process::task::worker::timer_kernel_worker, SCHED_OTHER);
+		TaskStruct::new_kernel_worker(crate::process::task::worker::timer_kernel_worker, SCHED_IDLE);
 	add_task(worker_task.clone());
 	info!("add_timer_worker: pid={}", worker_task.getpid());
 }
 
 pub fn add_net_worker() {
 	let worker_task =
-		TaskStruct::new_kernel_worker(crate::process::task::worker::net_kernel_worker, SCHED_OTHER);
+		TaskStruct::new_kernel_worker(crate::process::task::worker::net_kernel_worker, SCHED_IDLE);
 	add_task(worker_task.clone());
 	info!("add_net_worker: pid={}", worker_task.getpid());
 }
 
 pub fn add_console_worker() {
 	let worker_task =
-		TaskStruct::new_kernel_worker(crate::process::task::worker::console_kernel_worker, SCHED_OTHER);
+		TaskStruct::new_kernel_worker(crate::process::task::worker::console_kernel_worker, SCHED_IDLE);
 	add_task(worker_task.clone());
 	info!("add_console_worker: pid={}", worker_task.getpid());
 }

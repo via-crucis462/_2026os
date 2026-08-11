@@ -7,7 +7,7 @@ use crate::process::{TaskContext, TaskControlBlock, TaskStatus};
 use crate::process::scheduler::processor::{current_task, schedule};
 use crate::process::scheduler::runqueue::wake_up_task;
 use crate::sync::MPSafeCell;
-use alloc::{collections::BinaryHeap, sync::Arc};
+use alloc::{collections::BinaryHeap, sync::Arc, vec::Vec};
 use lazy_static::*;
 
 struct SleepEntry {
@@ -78,6 +78,20 @@ impl SleepQueue {
 			None
 		}
 	}
+
+	fn pop_all_expired(&mut self, now_ns: usize) -> Vec<Arc<TaskControlBlock>> {
+		let mut tasks = Vec::new();
+		while self
+			.inner
+			.peek()
+			.map_or(false, |entry| entry.deadline_ns <= now_ns)
+		{
+			if let Some(entry) = self.inner.pop() {
+				tasks.push(entry.task);
+			}
+		}
+		tasks
+	}
 }
 
 lazy_static! {
@@ -107,17 +121,13 @@ pub fn sleep_current_until(deadline_ns: usize) {
 	register_sleep_task(deadline_ns, task);
 	schedule(task_cx_ptr);
 }
-// 处理到期任务
+// 处理到期任务：锁内一次性收集所有到期任务，锁外统一唤醒
 pub fn wake_expired_sleep_tasks() {
-	loop {
-		let task = {
-			let now_ns = monotonic_now_ns();
-			SLEEP_QUEUE.exclusive_access().pop_expired(now_ns)
-		};
-		let Some(task) = task else {
-			break;
-		};
-
+	let tasks = {
+		let now_ns = monotonic_now_ns();
+		SLEEP_QUEUE.exclusive_access().pop_all_expired(now_ns)
+	};
+	for task in tasks {
 		wake_up_task(task);
 	}
 }
