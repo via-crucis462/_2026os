@@ -1,0 +1,39 @@
+test	host_wall_s_1cb5	host_wall_s_current	ratio_cur_over_1cb5	linux_guest_s_note	remark
+sysbench_total	28.566	34.476	1.21	-	同一镜像/同一 QEMU 参数，宿主高精度计时
+mprotect_8	0.787	3.026	3.85	0.09	8 个独立进程
+mprotect_t_8	3.772	25.574	6.78	0.43	8 线程共享 mm，最接近 rustc 模型
+mmap_t_8	14.483	17.189	1.19	0.52	8 线程共享 mm
+mm_mix_8	-	156.278	-	-	自定义混合压力：mmap/munmap/mprotect/缺页
+mm_mix_16	-	>180 (RC=124)	-	-	16 线程 180s 未完成，疑似写者饥饿/严重串行
+
+single_op	1cb5_ns_per_iter	current_ns_per_iter	ratio_cur_over_1cb5	linux_ns_per_iter_prev	note
+getpid	3056.9	5619.3	1.84	1391	guest 时钟，同环境比较
+clock_gettime	5066.3	7041.4	1.39	183	guest 时钟
+open_close_hit	42714.7	40390.4	0.95	34929	guest 时钟
+statx_hit	27611.3	35458.2	1.28	13400	guest 时钟
+pread_4k	10496.8	11534.6	1.10	5800	guest 时钟
+mmap_munmap_4k	19947.9	38731.3	1.94	24100	guest 时钟
+mprotect_4k	6057.6	31878.7	5.26	3060	guest 时钟
+pagefault_touch	5883.0	12803.0	2.18	2580	guest 时钟
+futex_pingpong	3610.4	6990.0	1.94	3360	guest 时钟
+fork_exec_wait_ms	87.960	40.375	0.46	4.60	当前反而快一半
+
+method:
+1. 同一 sdcard-rv.img，debugfs 修复元数据并写入 /bench/sysbench*。
+2. QEMU: -machine virt -smp 8 -m 16G -bios default，同一命令参数。
+3. 宿主侧 while-read + date +%s.%N 对串口每行打时间戳。
+4. 1cb5 = /tmp/bisect-kernels/kernel-1cb5，改动前的 mm 实现；current = kernel-rv (2026-08-05 17:04)。
+5. Linux 数值来自 benchmarks/RESULTS.md 之前同一 QEMU TCG 的 guest 测量，仅作参考。
+
+conclusion:
+- 细粒度锁没有带来净收益，反而 mprotect_t_8 从 3.8s 恶化到 25.6s（6.8x）。
+- 单线程 mprotect 从 6.1us 恶化到 31.9us（5.3x），mmap 约 1.9x。
+- 未复现经典 ABBA 死锁；最可疑的是 spin::RwLock 写者饥饿（该实现注释明确 unfair to writers）+ mprotect/munmap 仍全量扫描并锁所有 area。
+
+rerun-20260805-18:30 (writer-preferring RwLock + mprotect 窗口扫描 + find_area_arc range 查找)
+test	host_wall_s_new	note
+mprotect_t_8	0.967	旧 3.77s；写者优先锁解决读者饥饿，窗口扫描去掉全量 area 上锁
+mprotect_8	~0.6	旧 0.79s；guest clock 显示 nan，按宿主时间戳估算
+mprotect_4k	9.168 us/iter	旧 6.06us；单线程仍慢 1.5x，来自写锁+校验开销
+pagefault_touch	10.47 us/iter	旧 5.88us；find_area_arc 已改 range 查找，剩余为页表写锁/帧分配
+mmap_munmap_4k	36.6 us/iter	旧 19.9us；mmap 仍全表 find_free_area，未优化
