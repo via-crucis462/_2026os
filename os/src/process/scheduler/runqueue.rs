@@ -142,19 +142,19 @@ impl Rqinner {
 		let task = self.pop_next_task()?;
 		{
 			let mut inner = task.inner_exclusive_access();
+			// pop_next_task removed it from the scheduler-class queue.
+			inner.on_rq = false;
 			if inner.state == TaskStatus::Zombie {
-				inner.on_rq = false;
 				return None;
 			}
 			let target_allowed = target_cpu < usize::BITS as usize
 				&& inner.cpus_allowed & (1usize << target_cpu) != 0;
 			if inner.on_main_hart || !target_allowed || !inner.rt.migratable {
 				drop(inner);
-				self.enqueue_task(Arc::clone(&task));
+				self.enqueue_task(task);
 				return None;
 			}
 			inner.cpu = target_cpu;
-			inner.on_rq = false;
 		}
 		Some(task)
 	}

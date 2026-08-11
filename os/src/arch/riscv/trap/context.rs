@@ -92,10 +92,10 @@ impl TrapContext {
             let mut sstatus = sstatus::read();
  
             sstatus.set_spp(SPP::User); 
-            // VF2 bring-up keeps asynchronous S-mode interrupts disabled.
-            // sret copies SPIE into SIE, so the initial user context must not
-            // inherit a stale SPIE value left by firmware.
+            #[cfg(board = "visionfive2")]
             sstatus.set_spie(false);
+            #[cfg(board = "virt")]
+            sstatus.set_spie(true);
 
             let mut cx = Self {
                 x: [0; 32],

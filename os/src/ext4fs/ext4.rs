@@ -1,4 +1,5 @@
 use super::*;
+use super::ext4inode::EXT4_EXTENTS_FL;
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -6,6 +7,174 @@ use spin::Mutex;
 
 const EXT4_BG_INODE_UNINIT: u16 = 0x0001;
 const EXT4_BG_BLOCK_UNINIT: u16 = 0x0002;
+
+const JBD2_MAGIC: u32 = 0xc03b_3998;
+const JBD2_SUPERBLOCK_V1: u32 = 3;
+const JBD2_SUPERBLOCK_V2: u32 = 4;
+const JBD2_SUPERBLOCK_SIZE: usize = 1024;
+const JBD2_BLOCKSIZE_OFFSET: usize = 0x0c;
+const JBD2_MAXLEN_OFFSET: usize = 0x10;
+const JBD2_FIRST_OFFSET: usize = 0x14;
+const JBD2_START_OFFSET: usize = 0x1c;
+const JBD2_FEATURE_INCOMPAT_OFFSET: usize = 0x28;
+const JBD2_CHECKSUM_TYPE_OFFSET: usize = 0x50;
+const JBD2_HEAD_OFFSET: usize = 0x58;
+const JBD2_CHECKSUM_OFFSET: usize = 0xfc;
+const JBD2_CRC32C_CHECKSUM: u8 = 4;
+const JBD2_FEATURE_INCOMPAT_CSUM_V2: u32 = 0x0000_0008;
+const JBD2_FEATURE_INCOMPAT_CSUM_V3: u32 = 0x0000_0010;
+
+fn read_le_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    bytes
+        .get(offset..offset + 2)
+        .map(|value| u16::from_le_bytes(value.try_into().unwrap()))
+}
+
+fn read_le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    bytes
+        .get(offset..offset + 4)
+        .map(|value| u32::from_le_bytes(value.try_into().unwrap()))
+}
+
+fn read_be_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    bytes
+        .get(offset..offset + 4)
+        .map(|value| u32::from_be_bytes(value.try_into().unwrap()))
+}
+
+/// Empty the journal's on-disk log head without attempting transaction replay.
+///
+/// JBD2 stores all superblock fields in big endian.  Its checksum covers the
+/// first 1024 bytes with the checksum field zeroed, unlike ext4 metadata
+/// checksums which use little endian storage.
+fn clear_jbd2_journal_start_in_raw(journal: &mut [u8]) -> Result<bool, &'static str> {
+    if journal.len() < JBD2_SUPERBLOCK_SIZE {
+        return Err("journal superblock is shorter than 1024 bytes");
+    }
+    let journal = &mut journal[..JBD2_SUPERBLOCK_SIZE];
+    if read_be_u32(journal, 0) != Some(JBD2_MAGIC) {
+        return Err("journal block does not contain a JBD2 superblock");
+    }
+    let journal_type = match read_be_u32(journal, 4) {
+        Some(JBD2_SUPERBLOCK_V1) => JBD2_SUPERBLOCK_V1,
+        Some(JBD2_SUPERBLOCK_V2) => JBD2_SUPERBLOCK_V2,
+        _ => return Err("unsupported JBD2 superblock type"),
+    };
+    if read_be_u32(journal, JBD2_BLOCKSIZE_OFFSET) != Some(BLOCK_SZ as u32) {
+        return Err("journal block size does not match ext4 block size");
+    }
+
+    let incompat = if journal_type == JBD2_SUPERBLOCK_V2 {
+        read_be_u32(journal, JBD2_FEATURE_INCOMPAT_OFFSET)
+            .ok_or("truncated JBD2 incompatibility features")?
+    } else {
+        0
+    };
+    let has_checksum = incompat
+        & (JBD2_FEATURE_INCOMPAT_CSUM_V2 | JBD2_FEATURE_INCOMPAT_CSUM_V3)
+        != 0;
+    if has_checksum && journal[JBD2_CHECKSUM_TYPE_OFFSET] != JBD2_CRC32C_CHECKSUM {
+        return Err("unsupported JBD2 checksum type");
+    }
+
+    let old_start = read_be_u32(journal, JBD2_START_OFFSET)
+        .ok_or("truncated JBD2 journal start")?;
+    let old_checksum = if has_checksum {
+        read_be_u32(journal, JBD2_CHECKSUM_OFFSET)
+            .ok_or("truncated JBD2 journal checksum")?
+    } else {
+        0
+    };
+
+    journal[JBD2_START_OFFSET..JBD2_START_OFFSET + 4].copy_from_slice(&0u32.to_be_bytes());
+    // `s_head` is only defined in a v2 journal superblock. Repair it when
+    // the static layout is sane, but do not let damaged layout fields prevent
+    // clearing `s_start`: the latter is what prevents stale replay.
+    let head_repaired = if journal_type == JBD2_SUPERBLOCK_V2 {
+        let maxlen = read_be_u32(journal, JBD2_MAXLEN_OFFSET).unwrap();
+        let first = read_be_u32(journal, JBD2_FIRST_OFFSET).unwrap();
+        let old_head = read_be_u32(journal, JBD2_HEAD_OFFSET).unwrap();
+        if first != 0 && first < maxlen && (old_head < first || old_head >= maxlen) {
+            journal[JBD2_HEAD_OFFSET..JBD2_HEAD_OFFSET + 4].copy_from_slice(&first.to_be_bytes());
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let changed = if has_checksum {
+        journal[JBD2_CHECKSUM_OFFSET..JBD2_CHECKSUM_OFFSET + 4].fill(0);
+        let checksum = checksum::crc32c(!0u32, journal);
+        journal[JBD2_CHECKSUM_OFFSET..JBD2_CHECKSUM_OFFSET + 4]
+            .copy_from_slice(&checksum.to_be_bytes());
+        old_start != 0 || head_repaired || old_checksum != checksum
+    } else {
+        old_start != 0 || head_repaired
+    };
+    Ok(changed)
+}
+
+#[cfg(test)]
+mod journal_tests {
+    use super::*;
+
+    #[test]
+    fn clearing_jbd2_start_recomputes_the_big_endian_checksum() {
+        let mut journal = [0u8; JBD2_SUPERBLOCK_SIZE];
+        journal[0..4].copy_from_slice(&JBD2_MAGIC.to_be_bytes());
+        journal[4..8].copy_from_slice(&JBD2_SUPERBLOCK_V2.to_be_bytes());
+        journal[JBD2_BLOCKSIZE_OFFSET..JBD2_BLOCKSIZE_OFFSET + 4]
+            .copy_from_slice(&(BLOCK_SZ as u32).to_be_bytes());
+        journal[JBD2_MAXLEN_OFFSET..JBD2_MAXLEN_OFFSET + 4]
+            .copy_from_slice(&8192u32.to_be_bytes());
+        journal[JBD2_FIRST_OFFSET..JBD2_FIRST_OFFSET + 4].copy_from_slice(&1u32.to_be_bytes());
+        journal[JBD2_START_OFFSET..JBD2_START_OFFSET + 4]
+            .copy_from_slice(&0x143cu32.to_be_bytes());
+        journal[JBD2_FEATURE_INCOMPAT_OFFSET..JBD2_FEATURE_INCOMPAT_OFFSET + 4]
+            .copy_from_slice(&JBD2_FEATURE_INCOMPAT_CSUM_V3.to_be_bytes());
+        journal[JBD2_CHECKSUM_TYPE_OFFSET] = JBD2_CRC32C_CHECKSUM;
+        journal[JBD2_HEAD_OFFSET..JBD2_HEAD_OFFSET + 4].copy_from_slice(&0x1a92u32.to_be_bytes());
+        journal[0x80] = 0xa5;
+
+        assert!(clear_jbd2_journal_start_in_raw(&mut journal).unwrap());
+        assert_eq!(read_be_u32(&journal, JBD2_START_OFFSET), Some(0));
+        let stored = read_be_u32(&journal, JBD2_CHECKSUM_OFFSET).unwrap();
+        journal[JBD2_CHECKSUM_OFFSET..JBD2_CHECKSUM_OFFSET + 4].fill(0);
+        assert_eq!(stored, checksum::crc32c(!0u32, &journal));
+    }
+
+    #[test]
+    fn clearing_jbd2_start_repairs_an_invalid_head() {
+        let mut journal = [0u8; JBD2_SUPERBLOCK_SIZE];
+        journal[0..4].copy_from_slice(&JBD2_MAGIC.to_be_bytes());
+        journal[4..8].copy_from_slice(&JBD2_SUPERBLOCK_V2.to_be_bytes());
+        journal[JBD2_BLOCKSIZE_OFFSET..JBD2_BLOCKSIZE_OFFSET + 4]
+            .copy_from_slice(&(BLOCK_SZ as u32).to_be_bytes());
+        journal[JBD2_MAXLEN_OFFSET..JBD2_MAXLEN_OFFSET + 4]
+            .copy_from_slice(&64u32.to_be_bytes());
+        journal[JBD2_FIRST_OFFSET..JBD2_FIRST_OFFSET + 4].copy_from_slice(&1u32.to_be_bytes());
+        journal[JBD2_HEAD_OFFSET..JBD2_HEAD_OFFSET + 4].copy_from_slice(&64u32.to_be_bytes());
+
+        assert!(clear_jbd2_journal_start_in_raw(&mut journal).unwrap());
+        assert_eq!(read_be_u32(&journal, JBD2_HEAD_OFFSET), Some(1));
+    }
+
+    #[test]
+    fn clearing_v1_journal_start_does_not_repurpose_reserved_v2_fields() {
+        let mut journal = [0u8; JBD2_SUPERBLOCK_SIZE];
+        journal[0..4].copy_from_slice(&JBD2_MAGIC.to_be_bytes());
+        journal[4..8].copy_from_slice(&JBD2_SUPERBLOCK_V1.to_be_bytes());
+        journal[JBD2_BLOCKSIZE_OFFSET..JBD2_BLOCKSIZE_OFFSET + 4]
+            .copy_from_slice(&(BLOCK_SZ as u32).to_be_bytes());
+        journal[JBD2_START_OFFSET..JBD2_START_OFFSET + 4].copy_from_slice(&7u32.to_be_bytes());
+        journal[JBD2_HEAD_OFFSET..JBD2_HEAD_OFFSET + 4].copy_from_slice(&0xdecafbad_u32.to_be_bytes());
+
+        assert!(clear_jbd2_journal_start_in_raw(&mut journal).unwrap());
+        assert_eq!(read_be_u32(&journal, JBD2_START_OFFSET), Some(0));
+        assert_eq!(read_be_u32(&journal, JBD2_HEAD_OFFSET), Some(0xdecafbad));
+    }
+}
 
 #[allow(dead_code)]
 pub struct Ext4FS{
@@ -25,6 +194,176 @@ pub struct Ext4FS{
 }
 
 impl Ext4FS {
+    fn valid_journal_block(&self, block: u64) -> Result<usize, &'static str> {
+        if block == 0 || block >= self.superblock.total_blocks as u64 {
+            return Err("journal mapping points outside the filesystem");
+        }
+        Ok(block as usize)
+    }
+
+    /// Find logical block zero in the internal journal inode. The journal is
+    /// normally a single extent, but follow a bounded extent tree so images
+    /// made by regular Linux tools do not depend on that implementation detail.
+    fn journal_superblock_block(&self) -> Result<usize, &'static str> {
+        if self.superblock.journal_dev != 0 {
+            return Err("the journal is on an external device");
+        }
+        let journal_inum = self.superblock.journal_inum;
+        if journal_inum == 0 || journal_inum > self.superblock.total_inodes {
+            return Err("the internal journal inode number is invalid");
+        }
+
+        let inode = self.get_disk_inode(journal_inum);
+        if inode.i_flags & EXT4_EXTENTS_FL == 0 {
+            let block = read_le_u32(&inode.i_block, 0)
+                .ok_or("the legacy journal inode has no direct block zero")?;
+            return self.valid_journal_block(block as u64);
+        }
+
+        let mut node = [0u8; BLOCK_SZ];
+        node[..inode.i_block.len()].copy_from_slice(&inode.i_block);
+        let mut node_len = inode.i_block.len();
+        let mut parent_depth = None;
+        let mut visited = [usize::MAX; 8];
+        let mut visited_len = 0;
+
+        loop {
+            if node_len < 12 || read_le_u16(&node, 0) != Some(0xf30a) {
+                return Err("the journal inode has an invalid extent header");
+            }
+            let entries = read_le_u16(&node, 2).ok_or("truncated extent entries")? as usize;
+            let max_entries = read_le_u16(&node, 4).ok_or("truncated extent capacity")? as usize;
+            let depth = read_le_u16(&node, 6).ok_or("truncated extent depth")?;
+            let capacity = (node_len - 12) / 12;
+            if entries == 0 || entries > max_entries || max_entries > capacity {
+                return Err("the journal inode has malformed extents");
+            }
+            if let Some(parent_depth) = parent_depth {
+                if depth.checked_add(1) != Some(parent_depth) {
+                    return Err("the journal extent tree has inconsistent depth");
+                }
+            }
+
+            // Logical block zero can only be covered by the first extent or
+            // index whose logical start is zero. Keep the generic selection
+            // rule so malformed ordering cannot underflow an offset.
+            let mut selected = None;
+            for entry in 0..entries {
+                let offset = 12 + entry * 12;
+                let logical = read_le_u32(&node, offset).ok_or("truncated extent entry")?;
+                if logical > 0 {
+                    break;
+                }
+                selected = Some(offset);
+            }
+            let offset = selected.ok_or("journal extents do not map logical block zero")?;
+
+            if depth == 0 {
+                let logical_start = read_le_u32(&node, offset).unwrap();
+                let raw_len = read_le_u16(&node, offset + 4).unwrap();
+                let len = if raw_len > 0x8000 {
+                    raw_len - 0x8000
+                } else {
+                    raw_len
+                } as u32;
+                if logical_start != 0 || len == 0 {
+                    return Err("journal extent does not cover logical block zero");
+                }
+                let start_lo = read_le_u32(&node, offset + 8).unwrap() as u64;
+                let start_hi = read_le_u16(&node, offset + 6).unwrap() as u64;
+                let physical = (start_hi << 32) | start_lo;
+                return self.valid_journal_block(physical);
+            }
+
+            if depth as usize >= visited.len() {
+                return Err("the journal extent tree is too deep");
+            }
+            let child_lo = read_le_u32(&node, offset + 4).unwrap() as u64;
+            let child_hi = read_le_u16(&node, offset + 8).unwrap() as u64;
+            let child = self.valid_journal_block((child_hi << 32) | child_lo)?;
+            if visited[..visited_len].contains(&child) {
+                return Err("the journal extent tree contains a cycle");
+            }
+            visited[visited_len] = child;
+            visited_len += 1;
+            self.block_dev.raw_read_block(child, &mut node);
+            node_len = BLOCK_SZ;
+            parent_depth = Some(depth);
+        }
+    }
+
+    /// Clear an internal JBD2 log before clearing ext4's RECOVER flag. If the
+    /// order were reversed, Linux or e2fsck could later replay stale journal
+    /// transactions over this filesystem's direct metadata writes.
+    fn discard_internal_journal(&self) -> Result<bool, &'static str> {
+        let journal_block = self.journal_superblock_block()?;
+        let cache = get_block_cache(journal_block, self.block_dev.clone());
+        let changed = {
+            let mut block = cache.lock();
+            let bytes = block.frame.get_bytes_array();
+            let changed = clear_jbd2_journal_start_in_raw(bytes)?;
+            if changed {
+                block.dirty = true;
+                block.state = crate::drivers::block::cache::CacheState::Dirty;
+            }
+            changed
+        };
+        if changed {
+            cache.sync();
+        }
+        Ok(changed)
+    }
+
+    /// Persist the fact that recovery was skipped. Primary metadata can be
+    /// usable, but a discarded journal cannot honestly be described as a
+    /// clean unmount.
+    fn persist_forced_recovery_state(&mut self) {
+        let cache = get_block_cache(0, self.block_dev.clone());
+        {
+            let mut block = cache.lock();
+            let bytes = block.frame.get_bytes_array();
+            let raw_superblock = &mut bytes[superblock::EXT4_SUPERBLOCK_OFFSET
+                ..superblock::EXT4_SUPERBLOCK_OFFSET + checksum::EXT4_SUPERBLOCK_SIZE];
+            let recovery_cleared = superblock::clear_needs_recovery_in_raw(raw_superblock);
+            let error_marked = superblock::mark_recovery_discarded_in_raw(raw_superblock);
+            if recovery_cleared || error_marked {
+                if self.superblock.has_metadata_csum() {
+                    let _ = checksum::set_superblock_checksum(raw_superblock);
+                }
+                block.dirty = true;
+                block.state = crate::drivers::block::cache::CacheState::Dirty;
+            }
+        }
+        cache.sync();
+        self.superblock.clear_needs_recovery();
+        self.superblock.mark_recovery_discarded();
+    }
+
+    /// This filesystem updates metadata directly and has no JBD2 replay
+    /// implementation. Prefer the primary metadata, explicitly empty the
+    /// internal log when possible, then keep mounting instead of panicking.
+    fn discard_unreplayed_journal(&mut self) {
+        if self.superblock.has_journal() {
+            match self.discard_internal_journal() {
+                Ok(true) => info!("[ext4] discarded unreplayed JBD2 transactions"),
+                Ok(false) => info!("[ext4] JBD2 log was already empty"),
+                Err(reason) => warn!(
+                    "[ext4] cannot empty the unreplayed JBD2 log ({}); clearing RECOVER as a best-effort mount",
+                    reason
+                ),
+            }
+        } else {
+            warn!("[ext4] RECOVER is set without a journal; clearing the stale recovery request");
+        }
+
+        if self.superblock.has_pending_orphan_recovery() {
+            warn!(
+                "[ext4] orphan recovery is pending but unsupported; mount will use primary metadata"
+            );
+        }
+        self.persist_forced_recovery_state();
+    }
+
     pub fn open(block_dev: Arc<dyn BlockDevice>) -> Self {
         let superblock = Ext4SuperBlock::new(Ext4SuperBlockDisk::new(block_dev.clone()));
         if superblock.has_bigalloc() {
@@ -39,14 +378,6 @@ impl Ext4FS {
         }
         if superblock.incompat_features & 0x0010 != 0 {
             panic!("[ext4] META_BG filesystems are not supported for writable mounts");
-        }
-        // This filesystem updates metadata directly and deliberately does not
-        // implement JBD2.  Replaying an older journal after our writes could
-        // restore stale allocation metadata over the new contents.
-        if superblock.has_journal() && superblock.needs_recovery() {
-            panic!(
-                "[ext4] refusing writable mount with an unrecovered journal; run fsck first"
-            );
         }
         let group_num = superblock.group_num();
         let mut block_groups = Vec::new();
@@ -76,13 +407,20 @@ impl Ext4FS {
             block_groups.push(Arc::new(Mutex::new(group)));
         }
 
-        Self {
+        let mut fs = Self {
             block_dev,
             superblock,
             block_groups,
             metadata_lock: Mutex::new(()),
             inodes: Mutex::new(BTreeMap::new()),
+        };
+        if fs.superblock.needs_recovery() {
+            warn!(
+                "[ext4] journal recovery requested; mounting from primary metadata and discarding unreplayed JBD2 transactions"
+            );
+            fs.discard_unreplayed_journal();
         }
+        fs
     }
 
     fn group_desc_pos(&self, group_id: u32) -> (usize, usize) {

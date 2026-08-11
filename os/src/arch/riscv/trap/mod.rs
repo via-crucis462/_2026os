@@ -58,6 +58,7 @@ pub fn enable_timer_interrupt() {
     unsafe {
         riscv::register::sstatus::set_sie();
     }
+    #[cfg(board = "visionfive2")]
     println!("[timer] global SIE enabled");
 }
 
