@@ -162,12 +162,6 @@ static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
 	bytes: *include_bytes!("../arch/riscv/initproc_uptime"),
 	#[cfg(initproc = "mmbench")]
 	bytes: *include_bytes!("../arch/riscv/initproc_mmbench"),
-	#[cfg(initproc = "memory_probe")]
-	bytes: *include_bytes!("../arch/riscv/initproc_memory_probe"),
-	#[cfg(initproc = "sched_probe")]
-	bytes: *include_bytes!("../arch/riscv/initproc_sched_probe"),
-	#[cfg(initproc = "wake_op_probe")]
-	bytes: *include_bytes!("../arch/riscv/initproc_wake_op_probe"),
 };
 
 #[link_section = ".data"]

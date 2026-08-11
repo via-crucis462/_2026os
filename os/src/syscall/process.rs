@@ -12,7 +12,7 @@ use crate::process::{
 };
 
 use crate::mm::{UserCStringError, prepare_user_read, prepare_user_write, translated_read, try_translated_str, try_translated_str_with_limit, try_translated_read, try_translated_write};
-use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, USER_STACK_SIZE, get_hart_id};
+use crate::{PAGE_SIZE, USER_APP_MAX_SIZE, get_hart_id};
 use crate::process::{FdFlags, FileDescriptor};    // 引入当前进程获取方法
 use crate::net::socket::TcpSocket;
 use alloc::collections::btree_map::Values;
@@ -5350,6 +5350,10 @@ pub fn sys_futex(uaddr: *mut i32, op: i32, val: i32, timeout: *const TimeSpec, u
         }
         FUTEX_WAKE_OP => {
             // 可能需要进一步完善
+            println!(
+                "sys_futex: FUTEX_WAKE_OP not fully implemented, uaddr={:?}, op={}, val={}, timeout={:?}, uaddr2={:?}, val3={}",
+                uaddr, op, val, timeout, uaddr2, val3
+            );
             let mut total_woken = 0usize;
             let targets = [
                 (uaddr, val.max(0) as usize),

@@ -15,8 +15,9 @@ pub const WINDOW_MASK: usize = 0xF000_0000_0000_0000;
 pub const PAGE_SIZE: usize = 0x1000;
 pub const PAGE_SIZE_BITS: usize = 12;
 
-/// user app's stack size
-pub const USER_STACK_SIZE: usize = 0x10_0000; // 1MB
+/// User stack virtual reservation. Physical pages and page-table leaves are
+/// created on demand by the ordinary VMA fault path.
+pub const USER_STACK_SIZE: usize = 0x8000_0000; // 2 GiB
 /// kernel stack size
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 16;
 /// kernel heap size

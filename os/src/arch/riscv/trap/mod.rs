@@ -169,11 +169,10 @@ pub fn trap_handler() -> ! {
                     break 'fault;
                 };
                 let files = task.inner_exclusive_access().files.clone();
-
-                // 【修改 1】：获取当前的栈指针 SP
+                // Fault resolution no longer uses SP; retain it only for a
+                // useful diagnostic if this address is ultimately invalid.
                 let sp = current_trap_cx().x[2];
                 let vpn = VirtAddr::from(stval).std_floor();
-                //
                 if scause.cause() == Trap::Exception(Exception::StorePageFault)
                     && mm.set_pte_dirty(vpn)
                 {
@@ -181,7 +180,7 @@ pub fn trap_handler() -> ! {
                 } else if mm.handle_cow_fault(stval) {
                     info!("[WATCHDOG][COW] : {:#x}, PC: {:#x}", stval, sepc);
                     break 'fault;
-                } else if mm.handle_page_fault(stval, sp) {
+                } else if mm.handle_page_fault(stval) {
                     info!("[WATCHDOG] : {:#x}, PC: {:#x}", stval, sepc);
                     break 'fault;
                 } else if mm.check_mmap_page_fault(stval){

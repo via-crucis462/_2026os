@@ -609,16 +609,13 @@ fn handle_fault_in_range(
     write: bool,
 ) -> bool {
     // A generic kernel copy can target a remote mm and can be called while
-    // the current task's inner lock is held.  It therefore must not recover
-    // a current trap context here.  `handle_page_fault` only uses this value
-    // for grow-down stack expansion; normal lazy allocation and COW happen
-    // inside an existing VMA regardless of it.  Actual user faults retain the
-    // architectural SP and are the only path allowed to extend a stack VMA.
-    const NO_STACK_EXPANSION_SP: usize = 0;
+    // the current task's inner lock is held.  Fault-in is VMA-based and does
+    // not need an architectural stack pointer because stacks are fixed sparse
+    // VMAs rather than grow-down mappings.
     if write {
-        mm.ensure_writable_user_range(start, len, NO_STACK_EXPANSION_SP)
+        mm.ensure_writable_user_range(start, len)
     } else {
-        mm.ensure_readable_user_range(start, len, NO_STACK_EXPANSION_SP)
+        mm.ensure_readable_user_range(start, len)
     }
 }
 

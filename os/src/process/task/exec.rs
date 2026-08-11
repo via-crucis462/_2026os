@@ -299,7 +299,7 @@ impl TaskStruct {
 		fn prepare_stack_pages(memory_set: &mut MemorySet, start: usize, end: usize) {
 			let mut page = start / PAGE_SIZE * PAGE_SIZE;
 			while page < end {
-				memory_set.handle_page_fault(page, end);
+				memory_set.handle_page_fault(page);
 				page += PAGE_SIZE;
 			}
 		}

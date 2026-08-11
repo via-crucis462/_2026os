@@ -348,15 +348,13 @@ impl TaskStruct {
 		}
 		// CLONE_CHILD_SETTID：向子地址空间的 *ctid 写入自身 TID
 		if flags & CLONE_CHILD_SETTID != 0 {
-			let (child_mm, child_sp) = {
+			let child_mm = {
 				let child_inner = child.inner_exclusive_access();
-				let child_mm = child_inner.mm.as_ref().unwrap().clone();
-				(child_mm, child_inner.get_trap_cx().get_sp())
+				child_inner.mm.as_ref().unwrap().clone()
 			};
 			if !child_mm.ensure_writable_user_range(
 				ctid,
 				core::mem::size_of::<u32>(),
-				child_sp,
 			) || !crate::mm::try_translated_write(&child_mm, ctid as *mut u32, child_tid)
 			{
 				return Errno::EFAULT.as_isize();

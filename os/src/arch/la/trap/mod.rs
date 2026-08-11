@@ -633,7 +633,6 @@ pub fn trap_handler() -> ! {
                     panic!("unreachable: exited task without mm");
                 };
                 let memory_set = mm;
-                let sp = current_trap_cx().r[3];
                 let vpn = VirtAddr::from(badv).std_floor();
                 if ecode == 4 {
                     warn!("PME fault");
@@ -654,7 +653,7 @@ pub fn trap_handler() -> ! {
                 if memory_set.handle_cow_fault(badv) {
                     break 'fault;
                 }
-                if memory_set.handle_page_fault(badv, sp) {
+                if memory_set.handle_page_fault(badv) {
                     break 'fault;
                 }
                 // A concurrent fault or a permission relaxation may already

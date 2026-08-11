@@ -222,7 +222,7 @@ pub(super) fn push_signal_frame(
 	};
 
 	let mm = task_inner.mm.as_ref()?.clone();
-	if !mm.ensure_writable_user_range(frame_sp, frame_size, user_sp) {
+	if !mm.ensure_writable_user_range(frame_sp, frame_size) {
 		return None;
 	}
 	if !try_translated_write(&mm, frame_sp as *mut SignalFrame, frame) {
@@ -245,11 +245,9 @@ pub(crate) fn restore_signal_context(task_inner: &mut TaskControlBlockInner) -> 
 	let _saved_mask = task_inner.signal_mask_backup.pop()?;
 	let mut trap_ctx = task_inner.trap_ctx_backup.pop()?;
 	let mm = task_inner.mm.as_ref()?.clone();
-	let user_sp = trap_ctx.get_sp();
 	if !mm.ensure_readable_user_range(
 		ucontext_ptr,
 		core::mem::size_of::<SignalUserContext>(),
-		user_sp,
 	) {
 		return None;
 	}

@@ -206,7 +206,7 @@ pub fn run_tasks() {
                 }
             }
         } else {
-            crate::arch::timer::set_next_trigger(SCHED_RR);
+            crate::arch::timer::set_next_trigger(SCHED_IDLE);
             #[cfg(target_arch = "loongarch64")]
             #[cfg(board = "virt")]
             unsafe {
