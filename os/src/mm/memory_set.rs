@@ -651,7 +651,7 @@ impl MemorySet {
 
     #[cfg(target_arch = "loongarch64")]
     pub fn flush_tlb_targets(&self) {
-        crate::arch::mm::tlb::flush_tlb_targets();
+        crate::arch::mm::tlb::flush_tlb_targets(self.token(), self.asid());
     }
 
     /// 只刷新本核 TLB
@@ -3270,6 +3270,9 @@ impl MemorySet {
 
 impl Drop for MemorySet {
     fn drop(&mut self) {
+        #[cfg(target_arch = "loongarch64")]
+        crate::arch::mm::tlb::retire_mm(self.token(), self.asid());
+
         #[cfg(target_arch = "riscv64")]
         {
             let token = self.token();

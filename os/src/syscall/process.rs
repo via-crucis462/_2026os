@@ -5537,6 +5537,15 @@ pub struct RiscvHwprobe {
     pub value: u64,
 }
 
+/// Flush the RISC-V instruction cache.
+///
+/// The kernel does not yet implement instruction-cache synchronization, so
+/// preserve the Linux ABI while reporting that the operation is unavailable.
+#[cfg(target_arch = "riscv64")]
+pub fn sys_riscv_flush_icache(_start: usize, _end: usize, _flags: usize) -> isize {
+    ENOSYS.as_isize()
+}
+
 /// 查询RISC-V硬件属性。
 #[cfg(target_arch = "riscv64")]
 pub fn sys_riscv_hwprobe(

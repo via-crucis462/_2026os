@@ -4,7 +4,7 @@
 //! 合并的目的主要是相比旧实现减少一次数据拷贝，但可能不完善
 
 use super::BlockDevice;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -141,9 +141,75 @@ impl Drop for PageCache {
 }
 
 // 元数据缓存的最大数量，超过该数量时会尝试回收
-const META_CACHE_SIZE: usize = 1 << 16; // 256MB
+const META_CACHE_SIZE: usize = 1 << 18; // 1GB
 /// 数据页缓存的最大页数，超过时从 LRU 队头回收
+#[cfg(target_arch = "riscv64")]
 const DATA_CACHE_SIZE: usize = 1 << 21; // 8GB
+#[cfg(target_arch = "loongarch64")]
+const DATA_CACHE_SIZE: usize = 1 << 22; // 16GB
+
+type LogicalPageKey = (u64, usize);
+
+/// 文件页双向索引表
+///
+/// 在原有 (ino, logical_id) -> physical_id 单向表的基础上，
+/// 增加反向索引便于释放时的快速查找，避免全表扫描
+struct CacheIdMap {
+    logical_to_physical: BTreeMap<LogicalPageKey, u64>,
+    physical_to_logical: BTreeMap<u64, BTreeSet<LogicalPageKey>>,
+}
+
+impl CacheIdMap {
+    fn new() -> Self {
+        Self {
+            logical_to_physical: BTreeMap::new(),
+            physical_to_logical: BTreeMap::new(),
+        }
+    }
+
+    fn insert(&mut self, key: LogicalPageKey, block_id: u64) {
+        if let Some(old_block_id) = self.logical_to_physical.insert(key, block_id) {
+            if old_block_id != block_id {
+                self.remove_reverse(old_block_id, key);
+            }
+        }
+        self.physical_to_logical
+            .entry(block_id)
+            .or_default()
+            .insert(key);
+    }
+
+    fn get(&self, key: &LogicalPageKey) -> Option<u64> {
+        self.logical_to_physical.get(key).copied()
+    }
+
+    fn remove_block(&mut self, block_id: u64) {
+        let Some(keys) = self.physical_to_logical.remove(&block_id) else {
+            return;
+        };
+        for key in keys {
+            if self.logical_to_physical.get(&key) == Some(&block_id) {
+                self.logical_to_physical.remove(&key);
+            }
+        }
+    }
+
+    fn remove_reverse(&mut self, block_id: u64, key: LogicalPageKey) {
+        let remove_entry = if let Some(keys) = self.physical_to_logical.get_mut(&block_id) {
+            keys.remove(&key);
+            keys.is_empty()
+        } else {
+            false
+        };
+        if remove_entry {
+            self.physical_to_logical.remove(&block_id);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.logical_to_physical.len()
+    }
+}
 
 /// 页缓存管理器
 /// 
@@ -153,8 +219,8 @@ const DATA_CACHE_SIZE: usize = 1 << 21; // 8GB
 /// 
 pub struct PageCacheManager {
     /// (ino, logical_block_id) -> physical_block_id
-    page_cache_id_map: Mutex<BTreeMap<(u64, usize), u64>>,
-    /// physical_block_id -> cached
+    page_cache_id_map: Mutex<CacheIdMap>,
+    /// physical_block_id -> cache
     page_cache_map: RwLock<BTreeMap<u64, Arc<PageCache>>>,
     /// 元数据缓存条目数（避免每次 miss 都全表扫描判断是否超限）
     meta_count: AtomicUsize,
@@ -165,7 +231,7 @@ pub struct PageCacheManager {
 impl PageCacheManager {
     fn new() -> Self {
         Self {
-            page_cache_id_map: Mutex::new(BTreeMap::new()),
+            page_cache_id_map: Mutex::new(CacheIdMap::new()),
             page_cache_map: RwLock::new(BTreeMap::new()),
             meta_count: AtomicUsize::new(0),
             data_count: AtomicUsize::new(0),
@@ -321,10 +387,7 @@ impl PageCacheManager {
             } else {
                 self.meta_count.fetch_sub(1, Ordering::Relaxed);
             }
-            // 同步清理 (ino, logical_block) -> block_id 映射，避免表项残留
-            self.page_cache_id_map
-                .lock()
-                .retain(|_, v| *v != block_id);
+            self.page_cache_id_map.lock().remove_block(block_id);
             true
         } else {
             false
@@ -348,10 +411,7 @@ impl PageCacheManager {
         }
         map.remove(&block_id);
         drop(map);
-        // 清理指向该物理块的 (ino, logical_block) 映射
-        self.page_cache_id_map
-            .lock()
-            .retain(|_, v| *v != block_id);
+        self.page_cache_id_map.lock().remove_block(block_id);
     }
     /// 封装原本 BlockCacheManager 的功能，获取元数据块缓存
     pub fn get_block_cache(
@@ -415,7 +475,7 @@ impl PageCacheManager {
         ino: u64,
         logical_block: usize,
     ) -> Option<Arc<PageCache>> {
-        let block_id = *self.page_cache_id_map.lock().get(&(ino, logical_block))?;
+        let block_id = self.page_cache_id_map.lock().get(&(ino, logical_block))?;
         self.page_cache_map.read().get(&block_id).cloned()
     }
     pub fn write_back_page_cache(

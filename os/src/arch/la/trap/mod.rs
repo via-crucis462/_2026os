@@ -508,9 +508,6 @@ pub fn trap_handler() -> ! {
     //println!("[kernel] trap_handler called CPU ID: {}", get_hart_id());
     // 设置内核态异常入口，防止嵌套中断时重入 __alltraps 破坏上下文
     set_kernel_trap_entry();
-    // Must precede every lock that a page-table modifier may hold. This closes
-    // the user/kernel transition race with synchronous TLB shootdowns.
-    crate::mm::leave_user_mm();
     trace!("[kernel] called trap_handler");
     let estat :usize;
     let era :usize;
@@ -524,6 +521,16 @@ pub fn trap_handler() -> ! {
         asm!("csrrd {}, 0x7", out(reg) badv);
         asm!("csrrd {}, 0x8", out(reg) badi);
     };
+    // Clear the delivered action before publishing its sequence ack. A later
+    // shootdown may reuse the same level-triggered action bit immediately after
+    // the ack and must not be consumed by this trap instance.
+    let ipi_pending = estat & crate::arch::la::ipi::IPI_INTERRUPT_BIT != 0;
+    if ipi_pending {
+        crate::arch::la::ipi::take_ipi_actions();
+    }
+    // Must precede every lock that a page-table modifier may hold. This closes
+    // the user/kernel transition race with synchronous TLB shootdowns.
+    crate::mm::leave_user_mm();
     // 具体需要查表，位于手册111页表格
     //11_0000_0000_0000_0000=>页表
     //3_0000_0000_0000_0000=>取指操作页无效例外
@@ -532,10 +539,6 @@ pub fn trap_handler() -> ! {
     // status may contain actions unrelated to a TLB shootdown, so acknowledge
     // the complete snapshot. `leave_user_mm` above has already completed a
     // matching shootdown before this handler takes any page-table lock.
-    let ipi_pending = estat & crate::arch::la::ipi::IPI_INTERRUPT_BIT != 0;
-    if ipi_pending {
-        crate::arch::la::ipi::take_ipi_actions();
-    }
     let cause = if ipi_pending {
         Cause::Ipi
     } else if ((estat >> 11) & 1)  != 0 {
@@ -854,7 +857,7 @@ pub fn trap_return() -> ! {
         euen |= 0x3;
         asm!("csrwr {}, 0x2", inout(reg) euen => _);
     }
-    crate::mm::enter_user_mm();
+    crate::mm::enter_user_mm(user_satp, id);
 
     // crate::arch::mm::prepare_user_tlb();
     // crate::arch::mm::la_app_init_mem(user_satp); //改为在restore中设置
