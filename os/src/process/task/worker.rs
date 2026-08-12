@@ -48,6 +48,7 @@ impl TaskStruct {
                 sid: pid.0,
                 state: TaskStatus::Ready,
                 wake_pending: false,
+                wake_source_cpu: None,
                 exit_state: 0,
                 exit_code: 0,
                 exit_signal: 0,

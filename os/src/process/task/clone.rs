@@ -262,6 +262,7 @@ impl TaskStruct {
 					sid,
 					state: TaskStatus::Ready,
 					wake_pending: false,
+					wake_source_cpu: None,
 					exit_state: 0,
 					exit_code: 0,
 					exit_signal: (flags & CSIGNAL) as i32, // 退出时向父进程发送的信号

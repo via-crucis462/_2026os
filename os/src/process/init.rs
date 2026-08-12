@@ -66,6 +66,7 @@ impl TaskStruct {
 				sid: pid_handle.0,
 				state: TaskStatus::Ready,
 				wake_pending: false,
+				wake_source_cpu: None,
 				exit_state: 0,
 				exit_code: 0,
 				exit_signal: 0,
@@ -160,6 +161,8 @@ static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
 	bytes: *include_bytes!("../arch/riscv/initproc_ctidtest"),
 	#[cfg(initproc = "uptime")]
 	bytes: *include_bytes!("../arch/riscv/initproc_uptime"),
+	#[cfg(initproc = "waitbench")]
+	bytes: *include_bytes!("../arch/riscv/initproc_waitbench"),
 	#[cfg(initproc = "mmbench")]
 	bytes: *include_bytes!("../arch/riscv/initproc_mmbench"),
 };

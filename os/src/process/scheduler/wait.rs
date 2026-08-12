@@ -26,6 +26,8 @@ where
             return false;
         }
         let ptr = &mut task_inner.thread.task_ctx as *mut TaskContext;
+		task_inner.wake_pending = false;
+		task_inner.wake_source_cpu = None;
         task_inner.state = TaskStatus::BlockSaving;
         ptr
     };
@@ -40,6 +42,8 @@ pub fn block_current_and_run_next(queue: &Mutex<WaitQueue>) {
     let task_cx_ptr = {
         let mut task_inner = task.inner_exclusive_access();
         let ptr = &mut task_inner.thread.task_ctx as *mut TaskContext;
+		task_inner.wake_pending = false;
+		task_inner.wake_source_cpu = None;
         task_inner.state = TaskStatus::BlockSaving;
         drop(task_inner);
         let mut guard = queue.lock();
@@ -63,6 +67,8 @@ where
     let task_cx_ptr = {
         let mut task_inner = task.inner_exclusive_access();
         let ptr = &mut task_inner.thread.task_ctx as *mut TaskContext;
+		task_inner.wake_pending = false;
+		task_inner.wake_source_cpu = None;
         task_inner.state = TaskStatus::BlockSaving;
         ptr
     };
@@ -89,6 +95,8 @@ where
     let task_cx_ptr = {
         let mut task_inner = task.inner_exclusive_access();
         let ptr = &mut task_inner.thread.task_ctx as *mut TaskContext;
+		task_inner.wake_pending = false;
+		task_inner.wake_source_cpu = None;
         task_inner.state = TaskStatus::BlockSaving;
         ptr
     };
@@ -112,6 +120,7 @@ pub fn wake_up_one(queue: &Mutex<WaitQueue>) -> bool {
                     // 任务准备阻塞但还没保存好上下文（切换到调度函数），
                     // 标记为希望唤醒，调度器检查到会将其视作 Ready。
                     inner.wake_pending = true;
+					inner.wake_source_cpu = Some(crate::get_hart_id());
                     drop(inner);
                     return true;
                 }
@@ -155,11 +164,11 @@ pub(crate) fn wake_up_all_mp(queue: &MPSafeCell<WaitQueue>) -> usize {
         tasks
     };
 
-    let mut count = 0;
-    for task in tasks {
-        if wake_up_task(task) {
-            count += 1;
-        }
+	let mut count = 0;
+	for task in tasks {
+		if wake_up_task(task) {
+			count += 1;
+		}
     }
     count
 }

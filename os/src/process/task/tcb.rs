@@ -124,6 +124,8 @@ pub struct TaskStructInner {
     pub state: TaskStatus,        // 进程运行状态
     /// 阻塞切换期间收到唤醒请求（由唤醒者置位，调度器完成切换后消费）
     pub wake_pending: bool,
+    /// 在 BlockSaving 期间发起唤醒的 CPU；提交阻塞切换后据此重新选择目标 CPU。
+    pub wake_source_cpu: Option<usize>,
     pub exit_state: i64,            // 进程退出状态
     pub exit_code: i32,     // 进程退出码
     pub exit_signal: i32,   // 进程退出信号

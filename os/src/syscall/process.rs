@@ -3407,6 +3407,7 @@ fn block_on_ppoll_queues(
         let mut inner = task.inner_exclusive_access();
         let ptr = &mut inner.thread.task_ctx as *mut TaskContext;
         inner.wake_pending = false;
+		inner.wake_source_cpu = None;
         inner.state = crate::task::TaskStatus::BlockSaving;
         ptr
     };
@@ -3427,6 +3428,7 @@ fn block_on_ppoll_queues(
             let mut inner = task.inner_exclusive_access();
             inner.state = crate::task::TaskStatus::Running;
             inner.wake_pending = false;
+			inner.wake_source_cpu = None;
             Ok(Some(ready_count))
         }
         Ok(_) if has_interrupting_signal(effective_mask) => {
@@ -3437,6 +3439,7 @@ fn block_on_ppoll_queues(
             let mut inner = task.inner_exclusive_access();
             inner.state = crate::task::TaskStatus::Running;
             inner.wake_pending = false;
+			inner.wake_source_cpu = None;
             Ok(None)
         }
         Err(errno) => {
@@ -3447,6 +3450,7 @@ fn block_on_ppoll_queues(
             let mut inner = task.inner_exclusive_access();
             inner.state = crate::task::TaskStatus::Running;
             inner.wake_pending = false;
+			inner.wake_source_cpu = None;
             Err(errno)
         }
         Ok(_) => {
@@ -3476,6 +3480,7 @@ fn block_on_epoll_queues(
         let mut inner = task.inner_exclusive_access();
         let ptr = &mut inner.thread.task_ctx as *mut TaskContext;
         inner.wake_pending = false;
+		inner.wake_source_cpu = None;
         inner.state = crate::task::TaskStatus::BlockSaving;
         ptr
     };
@@ -3497,6 +3502,7 @@ fn block_on_epoll_queues(
             let mut inner = task.inner_exclusive_access();
             inner.state = crate::task::TaskStatus::Running;
             inner.wake_pending = false;
+			inner.wake_source_cpu = None;
             Ok(Some(ready_events))
         }
         Ok(_) if has_interrupting_signal(effective_mask) => {
@@ -3507,6 +3513,7 @@ fn block_on_epoll_queues(
             let mut inner = task.inner_exclusive_access();
             inner.state = crate::task::TaskStatus::Running;
             inner.wake_pending = false;
+			inner.wake_source_cpu = None;
             // The outer loop observes the pending signal and returns EINTR.
             Ok(None)
         }
@@ -3518,6 +3525,7 @@ fn block_on_epoll_queues(
             let mut inner = task.inner_exclusive_access();
             inner.state = crate::task::TaskStatus::Running;
             inner.wake_pending = false;
+			inner.wake_source_cpu = None;
             Err(errno)
         }
         Ok(_) => {

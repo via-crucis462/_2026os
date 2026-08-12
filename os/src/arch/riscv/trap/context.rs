@@ -92,10 +92,10 @@ impl TrapContext {
             let mut sstatus = sstatus::read();
  
             sstatus.set_spp(SPP::User); 
-            // #[cfg(board = "visionfive2")]
-            sstatus.set_spie(false);
-            // #[cfg(board = "virt")]
-            // sstatus.set_spie(true);
+            // User-mode timer and scheduler IPIs must be enabled after sret.
+            // The kernel still runs with SIE cleared while handling a trap;
+            // SPIE only controls the restored user-mode interrupt enable bit.
+            sstatus.set_spie(true);
 
             let mut cx = Self {
                 x: [0; 32],

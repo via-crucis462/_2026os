@@ -17,9 +17,9 @@ use crate::mm::VirtAddr;
 use crate::net::net_poll;
 use crate::syscall::syscall;
 use crate::task::{
-    add_task, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token,
+    current_add_signal, current_task, current_tid, current_trap_cx, current_user_token,
     exit_current_and_run_next, handle_signals, suspend_current_and_run_next, KernelStack,
-    SignalFlags, TaskStatus,
+    SignalFlags,
 };
 use crate::{get_hart_id, get_time_ms, KERNEL_STACK_SIZE, PAGE_SIZE};
 use alloc::sync::Arc;
@@ -34,6 +34,7 @@ global_asm!(include_str!("trap.S"));
 /// Initialize trap handling
 pub fn init() {
     set_kernel_trap_entry();
+    crate::arch::ipi::init_runtime_ipi();
 }
 
 fn set_kernel_trap_entry() {
@@ -52,14 +53,18 @@ fn set_user_trap_entry() {
 pub fn enable_timer_interrupt() {
     unsafe {
         riscv::register::sie::set_stimer();
+        riscv::register::sie::set_ssoft();
     }
     println!("[timer] STIE enabled");
-    #[cfg(board = "visionfive2")]
+    // `trap_from_kernel()` has no save/restore frame and is deliberately
+    // non-returning.  Keep global supervisor interrupts masked while the
+    // scheduler executes in kernel context, including its idle WFI path.
+    // `TrapContext::app_init_context()` sets SPIE, so `sret` still restores
+    // SIE for user execution and both timer and scheduler SSIP interrupts
+    // remain deliverable there.
     unsafe {
-        riscv::register::sstatus::set_sie();
+        riscv::register::sstatus::clear_sie();
     }
-    #[cfg(board = "visionfive2")]
-    println!("[timer] global SIE enabled");
 }
 
 /// trap handler
@@ -150,6 +155,12 @@ pub fn trap_handler() -> ! {
             // net_poll();
             // crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
+        }
+        Trap::Interrupt(Interrupt::SupervisorSoft) => {
+            // Scheduler IPIs are sent only while the target is in idle WFI and
+            // are normally consumed by the idle loop. A late software
+            // interrupt therefore needs acknowledgement, not a forced switch.
+            crate::arch::ipi::acknowledge_scheduler_ipi();
         }
         Trap::Exception(Exception::StorePageFault)
         | Trap::Exception(Exception::LoadPageFault)
@@ -286,10 +297,12 @@ pub fn trap_handler() -> ! {
                                 let mut guard = uffd.read_waiters.lock();
                                 if let Some(handler) = guard.pop_front() {
                                     drop(guard);
-                                    let mut h_inner = handler.inner_exclusive_access();
-                                    h_inner.state = TaskStatus::Ready;
-                                    drop(h_inner);
-                                    add_task(handler);
+                                    // The reader can still be in BlockSaving.
+                                    // Keep the transition through the normal
+                                    // wake path so the scheduler either records
+                                    // the early wake or performs placement and
+                                    // the remote reschedule notification.
+                                    crate::process::scheduler::runqueue::wake_up_task(handler);
                                 }
                                 uffd_handled = true;
                                 break;

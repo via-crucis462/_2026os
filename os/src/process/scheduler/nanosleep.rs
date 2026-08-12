@@ -115,6 +115,8 @@ pub fn sleep_current_until(deadline_ns: usize) {
 	let task_cx_ptr = {
 		let mut inner = task.inner_exclusive_access();
 		let ptr = &mut inner.thread.task_ctx as *mut TaskContext;
+		inner.wake_pending = false;
+		inner.wake_source_cpu = None;
 		inner.state = TaskStatus::BlockSaving;
 		ptr
 	};

@@ -588,7 +588,11 @@ pub fn trap_handler() -> ! {
             }
             suspend_current_and_run_next();
         }
-        Cause::Ipi => {} // trap 返回会自动刷 tlb
+        // The LoongArch kernel disables CRMD.IE. An IPI does not preempt an
+        // arbitrary kernel section, and `idle 0` consumes the pending action
+        // after it returns to this scheduler loop. Keep the established TLB
+        // shootdown protocol untouched here.
+        Cause::Ipi => {}
         Cause::Other => {
             if ecode == 0x9 {
                 let cx = current_trap_cx();
