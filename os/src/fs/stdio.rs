@@ -10,7 +10,6 @@ use crate::auth::{PermStat, FileMode};
 use core::any::Any;
 
 lazy_static! {
-    pub static ref STDOUT_LOCK: MPSafeCell<()> = MPSafeCell::new(());
     static ref STDIN_BUFFERED_CHAR: MPSafeCell<Option<u8>> = MPSafeCell::new(None);
 }
 
@@ -138,7 +137,12 @@ impl File for Stdout {
         0
     }
     fn write(&self, user_buf: UserBuffer) -> usize {
-        // 按字节直接转发，不解释为 UTF-8
+        // Keep one write(2) contiguous on the physical console.  The UART
+        // driver serializes individual characters, but that still lets output
+        // from concurrent processes interleave at character granularity.
+        // Use the same lock as kernel print!/println! so all console sources
+        // share one serialization boundary.
+        let _console_lock = crate::console::CONSOLE_LOCK.exclusive_access();
         for buffer in user_buf.buffers.iter() {
             for &b in buffer.iter() {
                 crate::arch::sbi::console_putchar(b as usize);
@@ -187,8 +191,13 @@ impl File for Stderr {
         0
     }
     fn write(&self, user_buf: UserBuffer) -> usize {
+        // stderr is the same physical console as stdout.  Lock the whole
+        // syscall, including all page-spanning UserBuffer segments.
+        let _console_lock = crate::console::CONSOLE_LOCK.exclusive_access();
         for buffer in user_buf.buffers.iter() {
-            print!("{}", core::str::from_utf8(&*buffer).unwrap());
+            for &b in buffer.iter() {
+                crate::arch::sbi::console_putchar(b as usize);
+            }
         }
         user_buf.len()
     }

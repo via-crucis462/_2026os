@@ -92,10 +92,10 @@ impl TrapContext {
             let mut sstatus = sstatus::read();
  
             sstatus.set_spp(SPP::User); 
-            #[cfg(board = "visionfive2")]
+            // #[cfg(board = "visionfive2")]
             sstatus.set_spie(false);
-            #[cfg(board = "virt")]
-            sstatus.set_spie(true);
+            // #[cfg(board = "virt")]
+            // sstatus.set_spie(true);
 
             let mut cx = Self {
                 x: [0; 32],

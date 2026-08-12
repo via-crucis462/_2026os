@@ -21,7 +21,7 @@ pub const USER_STACK_SIZE: usize = 0x8000_0000; // 2 GiB
 /// kernel stack size
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 16;
 /// kernel heap size
-pub const KERNEL_HEAP_SIZE: usize = 0x2000_0000; // 512MB
+pub const KERNEL_HEAP_SIZE: usize = 0x6000_0000; // 1.5GiB
 
 /// the virtual addr of trampoline
 /// 由于映射窗口的存在，trampoline的地址不需要设置在高位了，直接放在内核空间的末尾就行
@@ -29,9 +29,6 @@ pub const KERNEL_HEAP_SIZE: usize = 0x2000_0000; // 512MB
 /// the virtual addr of trap context 
 /// pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
 
-#[cfg(board = "virt")]
-pub const CLOCK_FREQ: usize = 12500000;
-#[cfg(board = "2k1000")]
 pub const CLOCK_FREQ: usize = 100000000;
 
 #[cfg(board = "virt")]

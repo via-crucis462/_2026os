@@ -282,7 +282,7 @@ fn init_other_hart(hart_id: usize) {
     }
     MAIN_HART_ID.store(current_hart, Ordering::Release);
     let start_addr = _start as *const () as usize;
-    for i in 0..CPU_CORE_NUM {
+    for i in 0..8 {//CPU_CORE_NUM {
         if i == current_hart {
             continue;
         }
