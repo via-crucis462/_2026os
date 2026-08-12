@@ -12,7 +12,8 @@
 
 ![alt text](docs/final-images/rank-final1.png)
 
-现有特性与测评情况详见[参赛文档](#参赛文档)。
+线上决赛 BuildStorm 的文档位于[调优文档](docs/调优文档.pdf)，
+现有特性与测评情况详见[参赛文档](#参赛文档)章节。
 
 项目成员：
 - 唐博文：3556495919@qq.com
@@ -20,6 +21,11 @@
 - 高铭均：1273938538@qq.com
 
 ## 参赛文档
+
+
+线上决赛 BuildStorm 的文档位于[调优文档](docs/调优文档.pdf)。
+
+---
 
 初赛阶段的项目介绍可以在[初赛文档](docs/初赛文档.md)查看。
 
@@ -30,6 +36,42 @@
 
 
 ## 决赛阶段性介绍
+
+项目仓库结构如下：
+
+```
+.
+├── Makefile                      # 顶层构建入口：make test-rv / test-la / debug-* 等
+├── os/                           # 内核主体（RISC-V 与 LoongArch 双架构）
+│   ├── src/
+│   │   ├── arch/                 # 架构相关代码（riscv/、la/）
+│   │   ├── drivers/              # 磁盘、网络、串口等设备驱动
+│   │   ├── ext4fs/               # ext4 文件系统实现
+│   │   ├── fs/                   # 文件系统抽象、页缓存与块缓存
+│   │   ├── mm/                   # 内存管理：地址空间、页表、RCU 等
+│   │   ├── process/              # 线程组 / 进程模型与调度器
+│   │   ├── sync/                 # 锁、等待队列等同步原语
+│   │   ├── ipc/                  # 进程间通信
+│   │   ├── net/                  # 网络协议栈
+│   │   ├── syscall/              # 系统调用层
+│   │   ├── auth/                 # 权限与用户身份
+│   │   └── ...
+│   ├── build.rs
+│   └── Cargo.toml
+├── user/                         # 用户态程序与初始化程序
+│   ├── src/bin/                  # initproc 等二进制
+│   ├── user-la/                  # LoongArch 用户程序
+│   └── user-rv/                  # RISC-V 用户程序
+├── boot/                         # uImage 打包脚本、busybox 等启动相关内容
+├── toolkits/                     # 开发板烧写、测评镜像制作等工具
+├── benchmarks/                   # 性能基准与对比测试（mmbench、sysbench、iozone 等）
+├── docs/                         # 参赛文档、日志与测试结果
+├── ref/                          # 参考资料（Linux 6.18 源码、龙芯手册）
+├── sdcard-rv.img / sdcard-la.img # 构建产物：ext4 根文件系统镜像
+├── kernel-la                     # 构建产物：LoongArch 内核镜像
+├── inst                          # 板卡调试命令备忘
+└── ...
+```
 
 相较于初赛阶段（基于 rCore），我们的内核新增/优化了以下特性：
 
