@@ -1,21 +1,44 @@
-use alloc::sync::{Arc, Weak};
+use super::{LookupOutcome, VfsInode};
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
-use alloc::collections::BTreeMap;
-use spin::Mutex;
+use alloc::sync::{Arc, Weak};
+use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::*;
-use super::{VfsInode};
+use spin::Mutex;
 
 use crate::drivers::block::BLOCK_DEVICE;
 use crate::process::current_task;
 
+const NEGATIVE_DENTRY_LIMIT: usize = 256;
+
 pub struct Dentry {
     pub inode: Arc<dyn VfsInode>,
     location: Mutex<DentryLocation>,
+    /// POSIX 记录锁表；同一 dentry（同一文件）的所有打开者共享
+    pub file_locks: Mutex<alloc::vec::Vec<super::FileLock>>,
     /// 对当前目录的操作（如插入、删除、查找）都应加此锁
     /// 保证不发生数据竞争
     pub namespace_lock: Mutex<()>,
+    /// 子目录（文件）正缓存
+    /// 
+    /// 目标文件系统的子目录和文件的缓存，
+    /// 它们是从 backing filesystem 查找的结果。
     pub children: Mutex<BTreeMap<String, Arc<Dentry>>>,
+    /// 挂载子目录
+    /// 
+    /// 被挂载到当前目录的子目录和文件的缓存，
+    /// 它们是 overlay filesystem 的结果。
     pub mounted_children: Mutex<BTreeMap<String, Arc<Dentry>>>,
+    /// 子目录负缓存
+    /// 
+    /// 这些名字在 backing filesystem 中不存在，查找失败时插入到这。
+    /// 新增的子目录或文件会清除对应的负缓存，并添加到正缓存中。
+    negative_children: Mutex<BTreeMap<String, ()>>,
+    /// 记录当前 inode 已经不再被任何父目录引用
+    /// 
+    /// 当 inode 被 unlink 后，dentry 仍然可能被其他地方引用（如打开的文件描述符），
+    /// 但它已经不再属于任何目录树的一部分了。
+    unlinked: AtomicBool,
 }
 
 struct DentryLocation {
@@ -24,17 +47,16 @@ struct DentryLocation {
 }
 
 impl Dentry {
-    pub fn new(
-        name: String,
-        inode: Arc<dyn VfsInode>,
-        parent: Weak<Dentry>,
-    ) -> Arc<Self> {
+    pub fn new(name: String, inode: Arc<dyn VfsInode>, parent: Weak<Dentry>) -> Arc<Self> {
         Arc::new(Self {
             inode,
             location: Mutex::new(DentryLocation { name, parent }),
+            file_locks: Mutex::new(alloc::vec::Vec::new()),
             namespace_lock: Mutex::new(()),
             children: Mutex::new(BTreeMap::new()),
             mounted_children: Mutex::new(BTreeMap::new()),
+            negative_children: Mutex::new(BTreeMap::new()),
+            unlinked: AtomicBool::new(false),
         })
     }
 
@@ -51,86 +73,142 @@ impl Dentry {
         location.name = name;
         location.parent = parent;
     }
-    /*
-    pub fn find(self: &Arc<Self>, name: &str) -> Arc<dyn VfsInode> {
-        // 1. 挂载点优先
-        let mounted_children = self.mounted_children.lock();
-        if let Some(child) = mounted_children.get(name) {
-            return child.inode.clone();
-        }
-        drop(mounted_children);
-
-        // 2. 尝试从当前节点的缓存中获取
-        let mut children = self.children.lock();
-        if let Some(child) = children.get(name) {
-            return child.inode.clone();
-        }
-
-        // 3. 缓存未击中，调用底层磁盘接口查找
-        // 注意：这里调用 self.inode.find 是 VfsInode 特征定义的磁盘查找接口
-        if let Some(vfs_inode) = self.inode.find(name) {
-            // 找到了，将其包装成 Dentry 并插入缓存树
-            let new_child = Self::new(
-                String::from(name),
-                vfs_inode.clone(),
-                Arc::downgrade(self),
-            );
-            children.insert(String::from(name), new_child);
-            return vfs_inode;
-        }
-
-        // 4. 磁盘也没找到，按照要求 panic
-        panic!("VFS: File '{}' not found in directory '{}'", name, self.name);
-    }
-    */
-    /// 创建新节点，将其作为self的子节点插入树
-    /// bug/特性：getdents不遍历children，只遍历mounted_children
-    pub fn insert(self: &Arc<Self>, name: String, inode: Arc<dyn VfsInode>) -> Arc<Self> {
-        let _namespace_guard = self.namespace_lock.lock();
-        self.insert_locked(name, inode)
-    }
-
-    fn insert_locked(self: &Arc<Self>, name: String, inode: Arc<dyn VfsInode>) -> Arc<Self> {
+    /// Publish a successful backing-filesystem mutation while the caller holds
+    /// `namespace_lock`. This is deliberately private: kernel-created pseudo
+    /// files and mounted filesystems must use `mount_child`.
+    fn cache_lower_child_locked(
+        self: &Arc<Self>,
+        name: String,
+        inode: Arc<dyn VfsInode>,
+    ) -> Arc<Self> {
+        self.negative_children.lock().remove(&name);
         let mut children = self.children.lock();
         if let Some(child) = children.get(&name) {
             return child.clone();
         }
-        
+
         let new_child = Self::new(
             name.clone(),
             inode,
             Arc::downgrade(self), // 使用 Weak 防止循环引用
         );
-        
+
         children.insert(name, new_child.clone());
         new_child
     }
 
-    /// 在目前的实现中，专用于虚拟文件夹挂载
-    /// bug/特性：getdents不遍历children，只遍历mounted_children
+    /// Install a namespace overlay below this dentry.
+    ///
+    /// The overlay is intentionally separate from the backing filesystem's
+    /// positive and negative caches. `find_child` and `getdents` give it
+    /// precedence over a same-named lower entry.
     pub fn mount_child(self: &Arc<Self>, name: String, inode: Arc<dyn VfsInode>) -> Arc<Self> {
         let _namespace_guard = self.namespace_lock.lock();
+        self.negative_children.lock().remove(&name);
         let mut mounted_children = self.mounted_children.lock();
         if let Some(child) = mounted_children.get(&name) {
             return child.clone();
         }
 
-        let new_child = Self::new(
-            name.clone(),
-            inode,
-            Arc::downgrade(self),
-        );
+        let new_child = Self::new(name.clone(), inode, Arc::downgrade(self));
 
         mounted_children.insert(name, new_child.clone());
         new_child
     }
-    pub fn mounted_children_snapshot(self: &Arc<Self>) -> alloc::vec::Vec<Arc<Dentry>> {
-        self.mounted_children.lock().values().cloned().collect()
+
+    /// Clear an entry from the negative cache while the caller holds
+    /// `namespace_lock`.  Namespace mutations outside this module (unlink and
+    /// rename) use this after updating their positive dentry cache.
+    pub fn invalidate_negative_child_locked(&self, name: &str) {
+        self.negative_children.lock().remove(name);
+    }
+
+    pub fn mark_unlinked(&self) {
+        self.unlinked.store(true, Ordering::Release);
+    }
+
+    pub fn is_unlinked(&self) -> bool {
+        self.unlinked.load(Ordering::Acquire)
+    }
+
+    fn is_negative_cached(&self, name: &str) -> bool {
+        self.negative_children.lock().contains_key(name)
+    }
+
+    fn remember_negative_locked(&self, name: &str) {
+        let mut negatives = self.negative_children.lock();
+        if negatives.len() >= NEGATIVE_DENTRY_LIMIT {
+            negatives.clear();
+        }
+        negatives.insert(String::from(name), ());
+    }
+
+    /// Resolve a backing-filesystem child while the caller holds this
+    /// directory's `namespace_lock`.
+    ///
+    /// Mount overlays deliberately are not considered here: callers that
+    /// mutate a lower directory must reject an overlay before invoking this
+    /// helper. Keeping the final-component lookup and mutation under the same
+    /// lock prevents an unlink from deleting a name that a concurrent rename
+    /// has rebound in the meantime.
+    pub(crate) fn find_lower_child_locked(self: &Arc<Self>, name: &str) -> Option<Arc<Dentry>> {
+        let cacheable = self.inode.cache_lookup_results();
+        if cacheable {
+            if let Some(child) = self.children.lock().get(name).cloned() {
+                return Some(child);
+            }
+            if self.is_negative_cached(name) {
+                return None;
+            }
+        }
+
+        let vfs_inode = match self.inode.find_with_outcome(name) {
+            LookupOutcome::Found(inode) => inode,
+            LookupOutcome::Missing => {
+                if cacheable {
+                    self.remember_negative_locked(name);
+                }
+                return None;
+            }
+            LookupOutcome::Failed => {
+                // `find_child` cannot yet return an errno, but a transient
+                // lookup failure must never be retained as a negative dentry.
+                return None;
+            }
+        };
+        let new_child = Self::new(String::from(name), vfs_inode, Arc::downgrade(self));
+        if cacheable {
+            // Readers check positives before negatives. Clear a prior miss
+            // before publishing the positive binding.
+            self.negative_children.lock().remove(name);
+            let mut children = self.children.lock();
+            if let Some(child) = children.get(name) {
+                return Some(child.clone());
+            }
+            children.insert(String::from(name), new_child.clone());
+        }
+        Some(new_child)
+    }
+    /// Snapshot mount names with their dentries. Callers use the name rather
+    /// than `Dentry::name()` while enumerating, avoiding a location lock per
+    /// directory record.
+    pub fn mounted_children_with_names_snapshot(
+        self: &Arc<Self>,
+    ) -> alloc::vec::Vec<(String, Arc<Dentry>)> {
+        self.mounted_children
+            .lock()
+            .iter()
+            .map(|(name, child)| (name.clone(), child.clone()))
+            .collect()
     }
     /// 递归查找完整路径，例如 "bin/sh" 或 "/bin/sh"
     /// 将self作为起点，不考虑路径是否以'/'开头
     /// find_tree中，err返回0时是符号链接循环(ELOOP)，返回1时是路径中间有文件(ENOTDIR)，返回2时是路径不存在(ENOENT)
-    pub fn find_tree(self: &Arc<Self>, path: &str, follow_links: bool) -> Result<Arc<Dentry>, usize> {
+    pub fn find_tree(
+        self: &Arc<Self>,
+        path: &str,
+        follow_links: bool,
+    ) -> Result<Arc<Dentry>, usize> {
         if path.is_empty() {
             return Ok(self.clone());
         }
@@ -141,7 +219,7 @@ impl Dentry {
             self.clone()
         };
         // 2. 将路径拆解为动态组件队列 (忽略 ".")
-        let mut components: alloc::vec::Vec<String> = path
+        let mut components: VecDeque<String> = path
             .split('/')
             .filter(|s| !s.is_empty() && *s != ".")
             .map(String::from)
@@ -149,8 +227,7 @@ impl Dentry {
         let mut symlink_depth = 0;
         const MAX_SYMLINK_DEPTH: usize = 8; // 最大软链接解析深度
         // 3. 核心迭代解析循环
-        while !components.is_empty() {
-            let comp = components.remove(0); // 取出当前要解析的层级
+        while let Some(comp) = components.pop_front() {
             // 处理上一级目录 ".."
             if comp == ".." {
                 if let Some(parent) = current.parent().upgrade() {
@@ -177,20 +254,27 @@ impl Dentry {
                 // 深度检查，防止 A -> B -> A 死循环炸掉内核栈
                 symlink_depth += 1;
                 if symlink_depth > MAX_SYMLINK_DEPTH {
-                    warn!("[VFS] find_tree: ELOOP (Too many levels of symbolic links) path='{}'", path);
+                    warn!(
+                        "[VFS] find_tree: ELOOP (Too many levels of symbolic links) path='{}'",
+                        path
+                    );
                     return Err(0); // 返回错误码表示符号链接循环
                 }
                 // 读取软链接指向的目标路径
                 let size = stat.size as usize;
                 let mut buffer = alloc::vec![0u8; size];
                 let read_len = next.inode.read_at(0, &mut buffer);
-                let target_path = alloc::string::String::from_utf8_lossy(&buffer[..read_len]).into_owned();
+                // Keep valid UTF-8 targets borrowed from `buffer` while their
+                // path components are copied into the expansion queue.  The
+                // old `into_owned()` made an otherwise redundant full-target
+                // allocation and copy on every followed symlink.
+                let target_path = alloc::string::String::from_utf8_lossy(&buffer[..read_len]);
                 // 如果软链接目标是绝对路径，起点直接切回根目录
                 if target_path.starts_with('/') {
                     current = ROOT_DENTRY.clone();
                 }
                 // 把软链接目标拆解，作为新的路径前缀塞入队列
-                let mut new_comps: alloc::vec::Vec<String> = target_path
+                let mut new_comps: VecDeque<String> = target_path
                     .split('/')
                     .filter(|s| !s.is_empty() && *s != ".")
                     .map(String::from)
@@ -200,7 +284,6 @@ impl Dentry {
                 components = new_comps;
             } else {
                 // 普通文件或目录，正常步进
-                let stat = next.inode.get_stat();
                 let is_dir = (stat.mode & 0o170000) == 0o040000; // S_IFDIR
                 // 如果不是目录但后面还有路径组件，说明中间有个路径是文件，在unlink中要做出区分
                 if !is_dir && !components.is_empty() {
@@ -215,34 +298,39 @@ impl Dentry {
 
     /// 查找子节点（单级）：返回的是 Dentry 包装，以便继续向下查找
     pub fn find_child(self: &Arc<Self>, name: &str) -> Option<Arc<Dentry>> {
-        trace!("[kernel] Dentry::find_child: parent={}, name={}", self.name(), name);
+        trace!(
+            "[kernel] Dentry::find_child: parent={}, name={}",
+            self.name(),
+            name
+        );
+        let cacheable = self.inode.cache_lookup_results();
+        // 快速路径：缓存命中时只拿各自的 children/mounted_children 锁，
+        // 不拿 namespace_lock，避免同一目录下所有路径解析被串行化。
+        if let Some(child) = self.mounted_children.lock().get(name).cloned() {
+            return Some(child);
+        }
+        if cacheable {
+            if let Some(child) = self.children.lock().get(name).cloned() {
+                return Some(child);
+            }
+        }
+        if cacheable && self.is_negative_cached(name) {
+            return None;
+        }
+
+        // 慢速路径：拿 namespace_lock 后双检，再落磁盘。
         let _namespace_guard = self.namespace_lock.lock();
-        //先看虚拟挂载点
-        let mounted_children = self.mounted_children.lock();
-        if let Some(child) = mounted_children.get(name) {
-            return Some(child.clone());
+        if let Some(child) = self.mounted_children.lock().get(name).cloned() {
+            return Some(child);
         }
-        drop(mounted_children);
-
-        let mut children = self.children.lock();
-        // 1. 尝试从当前节点的缓存中获取
-        if let Some(child) = children.get(name) {
-            return Some(child.clone());
+        if let Some(child) = self.find_lower_child_locked(name) {
+            return Some(child);
         }
-
-        // 2. 缓存未击中，调用底层磁盘接口查找
-        if let Some(vfs_inode) = self.inode.find(name) {
-            // 找到了，将其包装成 Dentry 并插入缓存树
-            let new_child = Self::new(
-                String::from(name),
-                vfs_inode.clone(),
-                Arc::downgrade(self),
-            );
-            children.insert(String::from(name), new_child.clone());
-            return Some(new_child);
-        }
-        // 3. 磁盘也没找到，按照要求 panic
-        trace!("VFS: File '{}' not found in directory '{}'", name, self.name());
+        trace!(
+            "VFS: File '{}' not found in directory '{}'",
+            name,
+            self.name()
+        );
         None
     }
 
@@ -290,9 +378,9 @@ pub fn parent_path(path: &str) -> String {
     if let Some(pos) = path.rfind('/') {
         if pos == 0 {
             String::from("/")
-        }else{
+        } else {
             String::from(&path[..pos])
-        }   
+        }
     } else {
         String::from(".")
     }
@@ -336,13 +424,15 @@ pub fn create_file_in_dentry(parent: &Arc<Dentry>, name: String, mode: u32) -> A
     // open(O_CREAT) 传入的 mode 通常只包含权限位；inode 的 st_mode 还必须包含
     // S_IFREG，否则 stat(2) 无法把它识别为普通文件，`test -f` 会失败。
     let mode = (mode & 0o7777) | 0o100000;
-    let vfs_inode = parent.inode.create_file(&name, mode)
+    let vfs_inode = parent
+        .inode
+        .create_file(&name, mode)
         .expect("VFS: Failed to create file in disk");
 
     set_owner_from_current(&vfs_inode);
 
-    // 将新创建的 Inode 插入 Dentry 缓存树
-    parent.insert_locked(name, vfs_inode)
+    // Publish the successful backing-filesystem mutation in its positive cache.
+    parent.cache_lower_child_locked(name, vfs_inode)
 }
 
 pub fn create_dir_in_dentry(parent: &Arc<Dentry>, name: String, _mode: u32) -> Arc<Dentry> {
@@ -355,11 +445,13 @@ pub fn create_dir_in_dentry(parent: &Arc<Dentry>, name: String, _mode: u32) -> A
     }
     // 解码权限：取 _mode 的低 9 位（权限位）并加上目录类型标志 0o040000 (S_IFDIR)
     let mode = (_mode & 0o777) | 0o040000;
-    let vfs_inode = parent.inode.create_dir(&name, mode)
+    let vfs_inode = parent
+        .inode
+        .create_dir(&name, mode)
         .expect("VFS: Failed to create directory in disk");
 
     set_owner_from_current(&vfs_inode);
 
-    // 将新创建的 Inode 插入 Dentry 缓存树
-    parent.insert_locked(name, vfs_inode)
+    // Publish the successful backing-filesystem mutation in its positive cache.
+    parent.cache_lower_child_locked(name, vfs_inode)
 }

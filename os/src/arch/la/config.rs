@@ -15,12 +15,13 @@ pub const WINDOW_MASK: usize = 0xF000_0000_0000_0000;
 pub const PAGE_SIZE: usize = 0x1000;
 pub const PAGE_SIZE_BITS: usize = 12;
 
-/// user app's stack size
-pub const USER_STACK_SIZE: usize = 0x10_0000; // 1MB
+/// User stack virtual reservation. Physical pages and page-table leaves are
+/// created on demand by the ordinary VMA fault path.
+pub const USER_STACK_SIZE: usize = 0x8000_0000; // 2 GiB
 /// kernel stack size
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 16;
 /// kernel heap size
-pub const KERNEL_HEAP_SIZE: usize = 0x2000_0000; // 512MB
+pub const KERNEL_HEAP_SIZE: usize = 0x6000_0000; // 1.5GiB
 
 /// the virtual addr of trampoline
 /// 由于映射窗口的存在，trampoline的地址不需要设置在高位了，直接放在内核空间的末尾就行
@@ -28,15 +29,27 @@ pub const KERNEL_HEAP_SIZE: usize = 0x2000_0000; // 512MB
 /// the virtual addr of trap context 
 /// pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
 
-#[cfg(board = "virt")]
-pub const CLOCK_FREQ: usize = 12500000;
-#[cfg(board = "2k1000")]
 pub const CLOCK_FREQ: usize = 100000000;
 
-#[cfg(board = "virt")]
-pub const CPU_CORE_NUM: usize = 8;
-#[cfg(board = "2k1000")]
-pub const CPU_CORE_NUM: usize = 2;
+const fn parse_cpu_num(value: &str) -> usize {
+    let bytes = value.as_bytes();
+    assert!(!bytes.is_empty(), "CPU_NUM must not be empty");
+    let mut cpu_num = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        assert!(bytes[index].is_ascii_digit(), "CPU_NUM must be a decimal integer");
+        cpu_num = cpu_num * 10 + (bytes[index] - b'0') as usize;
+        index += 1;
+    }
+    assert!(cpu_num > 0, "CPU_NUM must be greater than zero");
+    assert!(cpu_num <= usize::BITS as usize, "CPU_NUM exceeds the CPU mask width");
+    cpu_num
+}
+
+pub const CPU_CORE_NUM: usize = match option_env!("CPU_NUM") {
+    Some(value) => parse_cpu_num(value),
+    None => 1,
+};
 
 /// 为 DMA 设备预留的内存空间大小
 pub const DMA_SIZE: usize = 0x100_0000; // 16MB

@@ -26,6 +26,8 @@ where
             return false;
         }
         let ptr = &mut task_inner.thread.task_ctx as *mut TaskContext;
+		task_inner.wake_pending = false;
+		task_inner.wake_source_cpu = None;
         task_inner.state = TaskStatus::BlockSaving;
         ptr
     };
@@ -40,6 +42,8 @@ pub fn block_current_and_run_next(queue: &Mutex<WaitQueue>) {
     let task_cx_ptr = {
         let mut task_inner = task.inner_exclusive_access();
         let ptr = &mut task_inner.thread.task_ctx as *mut TaskContext;
+		task_inner.wake_pending = false;
+		task_inner.wake_source_cpu = None;
         task_inner.state = TaskStatus::BlockSaving;
         drop(task_inner);
         let mut guard = queue.lock();
@@ -63,6 +67,8 @@ where
     let task_cx_ptr = {
         let mut task_inner = task.inner_exclusive_access();
         let ptr = &mut task_inner.thread.task_ctx as *mut TaskContext;
+		task_inner.wake_pending = false;
+		task_inner.wake_source_cpu = None;
         task_inner.state = TaskStatus::BlockSaving;
         ptr
     };
@@ -89,6 +95,8 @@ where
     let task_cx_ptr = {
         let mut task_inner = task.inner_exclusive_access();
         let ptr = &mut task_inner.thread.task_ctx as *mut TaskContext;
+		task_inner.wake_pending = false;
+		task_inner.wake_source_cpu = None;
         task_inner.state = TaskStatus::BlockSaving;
         ptr
     };
@@ -99,16 +107,40 @@ where
 }
 
 pub fn wake_up_one(queue: &Mutex<WaitQueue>) -> bool {
-    if let Some(task) = queue.lock().pop_front() {
-        while task.inner_exclusive_access().state == TaskStatus::BlockSaving {
-            //println!("wake_up_one: task is still saving context");
-            core::hint::spin_loop();
-            //println!("wake_up_one: rechecking task status...");
+    'outer: loop {
+        let Some(task) = queue.lock().pop_front() else {
+            return false;
+        };
+        // 在任务锁下处理状态：BlockSaving 挂起唤醒请求（不自旋），
+        // Blocked 直接唤醒，其余视为陈旧条目丢弃并继续找下一个。
+        loop {
+            let mut inner = task.inner_exclusive_access();
+            match inner.state {
+                TaskStatus::BlockSaving => {
+                    // 任务准备阻塞但还没保存好上下文（切换到调度函数），
+                    // 标记为希望唤醒，调度器检查到会将其视作 Ready。
+                    inner.wake_pending = true;
+					inner.wake_source_cpu = Some(crate::get_hart_id());
+                    drop(inner);
+                    return true;
+                }
+                TaskStatus::Blocked => {
+                    drop(inner);
+                    wake_up_task(task);
+                    return true;
+                }
+                _ => {
+                    warn!(
+                        "[wake_up_one] dropping non-blocked queue entry pid={} tid={} state={:?}",
+                        task.getpid(),
+                        task.gettid(),
+                        inner.state,
+                    );
+                    drop(inner);
+                    continue 'outer;
+                }
+            }
         }
-		wake_up_task(task);
-        true
-    } else {
-        false
     }
 }
 
@@ -132,12 +164,11 @@ pub(crate) fn wake_up_all_mp(queue: &MPSafeCell<WaitQueue>) -> usize {
         tasks
     };
 
-    let count = tasks.len();
-    for task in tasks {
-        while task.inner_exclusive_access().state == TaskStatus::BlockSaving {
-            core::hint::spin_loop();
-        }
-        wake_up_task(task);
+	let mut count = 0;
+	for task in tasks {
+		if wake_up_task(task) {
+			count += 1;
+		}
     }
     count
 }

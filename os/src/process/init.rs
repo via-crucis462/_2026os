@@ -65,13 +65,15 @@ impl TaskStruct {
 				pgid: pid_handle.0,
 				sid: pid_handle.0,
 				state: TaskStatus::Ready,
+				wake_pending: false,
+				wake_source_cpu: None,
 				exit_state: 0,
 				exit_code: 0,
 				exit_signal: 0,
 				flags: 0,
 				errno: 0,
 				oom_score_adj: 0,
-				sched_policy: SCHED_IDLE, // initproc默认用SCHED_IDLE策略
+				sched_policy: SCHED_OTHER,
 				sched_priority: 0,
 				prio: 120,
 				static_prio: 120,
@@ -79,7 +81,7 @@ impl TaskStruct {
 				se: SchedEntity::new(),
 				rt: SchedRtEntity::new(),
 				dl: SchedDlEntity::new(),
-				mm: Some(Arc::new(MPSafeCell::new(memory_set))),
+				mm: Some(Arc::new(memory_set)),
 				fs: Arc::new(MPSafeCell::new(FsStruct::new(ROOT_DENTRY.clone(), ROOT_DENTRY.clone()))),
 				files: Arc::new(MPSafeCell::new(FileDescriptorTable::new())),
 				exe_path: String::from("/initproc"),
@@ -124,7 +126,7 @@ impl TaskStruct {
 		*trap_cx = TrapContext::app_init_context(
 			entry_point,
 			initial_user_sp,
-			KERNEL_SPACE.exclusive_access().token(),
+			KERNEL_SPACE.token(),
 			kernel_stack_top,
 			trap_handler as *const () as usize,
 		);
@@ -150,7 +152,19 @@ static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
 	#[cfg(initproc = "sh")]
 	bytes: *include_bytes!("../arch/riscv/initproc_sh"),
 	#[cfg(initproc = "ltp")]
-	bytes: *include_bytes!("../arch/riscv/initproc_ltp")
+	bytes: *include_bytes!("../arch/riscv/initproc_ltp"),
+	#[cfg(initproc = "mmtest")]
+	bytes: *include_bytes!("../arch/riscv/initproc_mmtest"),
+	#[cfg(initproc = "cargotest")]
+	bytes: *include_bytes!("../arch/riscv/initproc_cargotest"),
+	#[cfg(initproc = "ctidtest")]
+	bytes: *include_bytes!("../arch/riscv/initproc_ctidtest"),
+	#[cfg(initproc = "uptime")]
+	bytes: *include_bytes!("../arch/riscv/initproc_uptime"),
+	#[cfg(initproc = "waitbench")]
+	bytes: *include_bytes!("../arch/riscv/initproc_waitbench"),
+	#[cfg(initproc = "mmbench")]
+	bytes: *include_bytes!("../arch/riscv/initproc_mmbench"),
 };
 
 #[link_section = ".data"]
@@ -162,7 +176,15 @@ static INITPROC_DATA: &'static InitProcData<[u8]> = &InitProcData {
 	#[cfg(initproc = "sh")]
 	bytes: *include_bytes!("../arch/la/initproc_sh"),
 	#[cfg(initproc = "ltp")]
-	bytes: *include_bytes!("../arch/la/initproc_ltp")
+	bytes: *include_bytes!("../arch/la/initproc_ltp"),
+	#[cfg(initproc = "mmtest")]
+	bytes: *include_bytes!("../arch/la/initproc_mmtest"),
+	#[cfg(initproc = "cargotest")]
+	bytes: *include_bytes!("../arch/la/initproc_cargotest"),
+	#[cfg(initproc = "ctidtest")]
+	bytes: *include_bytes!("../arch/la/initproc_ctidtest"),
+	#[cfg(initproc = "uptime")]
+	bytes: *include_bytes!("../arch/la/initproc_uptime"),
 };
 
 lazy_static! {
@@ -173,16 +195,23 @@ lazy_static! {
 
 pub fn add_timer_worker() {
 	let worker_task =
-		TaskStruct::new_kernel_worker(crate::process::task::worker::timer_kernel_worker, SCHED_OTHER);
+		TaskStruct::new_kernel_worker(crate::process::task::worker::timer_kernel_worker, SCHED_IDLE);
 	add_task(worker_task.clone());
 	info!("add_timer_worker: pid={}", worker_task.getpid());
 }
 
 pub fn add_net_worker() {
 	let worker_task =
-		TaskStruct::new_kernel_worker(crate::process::task::worker::net_kernel_worker, SCHED_OTHER);
+		TaskStruct::new_kernel_worker(crate::process::task::worker::net_kernel_worker, SCHED_IDLE);
 	add_task(worker_task.clone());
 	info!("add_net_worker: pid={}", worker_task.getpid());
+}
+
+pub fn add_console_worker() {
+	let worker_task =
+		TaskStruct::new_kernel_worker(crate::process::task::worker::console_kernel_worker, SCHED_IDLE);
+	add_task(worker_task.clone());
+	info!("add_console_worker: pid={}", worker_task.getpid());
 }
 
 pub fn add_writeback_worker() {

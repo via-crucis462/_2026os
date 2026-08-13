@@ -1,7 +1,7 @@
 //! Linux idle scheduling class 的每 CPU 状态。
 
 use crate::process::TaskControlBlock;
-use crate::process::scheduler::runqueue::RQ_ARRAY;
+use crate::process::scheduler::runqueue::{steal_task_from_cpu, StealResult, RQ_ARRAY};
 use alloc::sync::Arc;
 
 /// Linux idle class 不维护普通队列，每 CPU 固定持有一个 `rq->idle`。
@@ -32,6 +32,9 @@ impl IdleRq {
 /// 函数寻找可运行任务数最多的远端 CPU，并从其运行队列中窃取一个
 /// 普通可迁移任务。它运行在内核调度循环中，不代表一个独立的用户任务。
 pub fn idle_tasks(cpu_id: usize) -> Option<Arc<TaskControlBlock>> {
+	if cpu_id >= RQ_ARRAY.len() {
+		return None;
+	}
 	let mut busiest_cpu = None;
 	let mut busiest_load = 0;
 
@@ -39,7 +42,9 @@ pub fn idle_tasks(cpu_id: usize) -> Option<Arc<TaskControlBlock>> {
 		if remote_cpu == cpu_id {
 			continue;
 		}
-		let load = RQ_ARRAY[remote_cpu].inner_exclusive_access().nr_running;
+		// Avoid serialising every idle scan on a remote rq lock. The following
+		// steal transaction validates the candidate under that source rq's lock.
+		let load = RQ_ARRAY[remote_cpu].view.snapshot().runnable_count;
 		if load > busiest_load {
 			busiest_load = load;
 			busiest_cpu = Some(remote_cpu);
@@ -47,13 +52,19 @@ pub fn idle_tasks(cpu_id: usize) -> Option<Arc<TaskControlBlock>> {
 	}
 
 	let remote_cpu = busiest_cpu?;
-	if busiest_load <= 1 {
+	// `runnable_count` includes a remote CPU's current task, while only tasks
+	// already queued in the exact rq can be pulled. A value of two can therefore
+	// mean one running task plus one valid steal candidate.
+	if busiest_load == 0 {
 		return None;
 	}
 
-	RQ_ARRAY[remote_cpu]
-		.inner_exclusive_access()
-		.steal_task(cpu_id)
+	let result = steal_task_from_cpu(remote_cpu, cpu_id);
+	match result {
+		StealResult::Stolen(task, _) => Some(task),
+		StealResult::Dropped(_) => None,
+		StealResult::None => None,
+	}
 }
 
 /// 兼容原有单数命名的空闲负载均衡入口。

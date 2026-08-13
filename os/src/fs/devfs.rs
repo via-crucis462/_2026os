@@ -259,14 +259,14 @@ impl VfsInode for RtcInode {
 pub fn mount_devfs() {
     info!("[VFS] Mounting pseudo-filesystem: /dev");
     // 这里用 TmpfsDirInode 替代你之前写的只读的 DevDirInode
-    let dev_dentry = ROOT_DENTRY.insert(String::from("dev"), Arc::new(TmpfsDirInode::new(0o777)));
+    let dev_dentry = ROOT_DENTRY.mount_child(String::from("dev"), Arc::new(TmpfsDirInode::new(0o777)));
     
-    dev_dentry.insert(String::from("null"), Arc::new(NullInode));
-    dev_dentry.insert(String::from("zero"), Arc::new(ZeroInode));
-    dev_dentry.insert(String::from("rtc"), Arc::new(RtcInode));
+    dev_dentry.mount_child(String::from("null"), Arc::new(NullInode));
+    dev_dentry.mount_child(String::from("zero"), Arc::new(ZeroInode));
+    dev_dentry.mount_child(String::from("rtc"), Arc::new(RtcInode));
     
     // shm 共享内存目录，内部是共享内存文件
-    dev_dentry.insert(String::from("shm"), Arc::new(TmpfsDirInode::new(0o777))); 
+    dev_dentry.mount_child(String::from("shm"), Arc::new(TmpfsDirInode::new(0o777)));
 } */
 
 impl NullInode {

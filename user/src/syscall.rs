@@ -25,6 +25,7 @@ pub const SYSCALL_WAITPID: usize = 260;
 pub const SYSCALL_SET_PRIORITY: usize = 140;
 pub const SYSCALL_SBRK: usize = 214;
 pub const SYSCALL_MUNMAP: usize = 215;
+pub const SYSCALL_MREMAP: usize = 216;
 pub const SYSCALL_MMAP: usize = 222;
 pub const SYSCALL_SPAWN: usize = 400;
 pub const SYSCALL_MAIL_READ: usize = 401;
@@ -212,8 +213,8 @@ pub fn sys_set_priority(prio: isize) -> isize {
     syscall(SYSCALL_SET_PRIORITY, [prio as usize, 0, 0])
 }
 
-pub fn sys_sbrk(size: i32) -> isize {
-    syscall(SYSCALL_SBRK, [size as usize, 0, 0])
+pub fn sys_sbrk(addr: usize) -> isize {
+    syscall(SYSCALL_SBRK, [addr, 0, 0])
 }
 
 pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {

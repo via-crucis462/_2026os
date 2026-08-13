@@ -1,11 +1,18 @@
+//! 页表定义与软件页表翻译
+//! 
+//! 当前的软件页表翻译参考了 linux 的 GUP，
+//! 会在写/引用操作前先将相应物理页的 FrameTracker 引用计数 +1。
+//! 
+//! 锁序按照 mm 的一致协议
+
+use super::memory_set::{MapArea, MapPermission, MemorySet};
 use super::{
-    frame_alloc, pte::*, FrameTracker, PTEFlags, PhysAddr, PhysPageNum, StepByOne, VirtAddr,
-    VirtPageNum,
+    frame_alloc, pte::*, FrameTracker, PTEFlags, PhysAddr, PhysPageNum, UserBuffer,
+    UserBufferSegment, VirtAddr, VirtPageNum,
 };
-use crate::arch::config::PAGE_SIZE;
-use crate::mm::MapArea;
-use crate::process::{current_task, current_user_token};
+use crate::arch::config::{PAGE_SIZE, USER_TRAMPOLINE};
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -52,6 +59,20 @@ pub struct PageTable {
     frames: Vec<FrameTracker>,
 }
 
+fn is_static_user_trampoline(vpn: VirtPageNum, pte: PageTableEntry, page_size: PageSize) -> bool {
+    extern "C" {
+        fn strampoline();
+    }
+
+    let trampoline_vpn = VirtAddr::from(USER_TRAMPOLINE).std_floor();
+    let trampoline_ppn =
+        PhysAddr::from(strampoline as *const () as usize & !crate::CACHED_KERNEL_BASE).std_floor();
+    vpn == trampoline_vpn
+        && pte.ppn() == trampoline_ppn
+        && page_size == PageSize::Page4K
+        && !pte.writable()
+}
+
 /// Assume that it won't oom when creating/mapping.
 impl PageTable {
     /// Create a new page table
@@ -62,6 +83,7 @@ impl PageTable {
             frames: vec![frame],
         }
     }
+    /* 弃用，可能有生命周期问题
     /// 从现有页表创建一个新的页表，复制内核高半的根项
     pub fn alias_of(other: &PageTable) -> Self {
         Self {
@@ -69,20 +91,7 @@ impl PageTable {
             frames: Vec::new(),
         }
     }
-    /// 从token创建一个新的页表
-    ///
-    /// LA64根页表地址存储在CSR.PGDL或H，
-    /// 这里存储的是2级页表的物理地址，因为弃用了3，4级页表
-    /// 参考rv64的rcore理解即可
-    pub fn from_token(token: usize) -> Self {
-        Self {
-            #[cfg(target_arch = "riscv64")]
-            root_ppn: PhysPageNum::from(token & ((1usize << 44) - 1)),
-            #[cfg(target_arch = "loongarch64")]
-            root_ppn: PhysAddr(token).std_floor(),
-            frames: Vec::new(),
-        }
-    }
+    */
     /// 复制内核根页表的高半根项到当前页表。
     ///
     /// 根项指向的下级表仍由内核页表持有；用户页表只拥有自己的根表
@@ -96,6 +105,9 @@ impl PageTable {
         entries.copy_from_slice(&kernel.root_ppn.get_pte_array()[KERNEL_ROOT_START..]);
         self.root_ppn.get_pte_array()[KERNEL_ROOT_START..].copy_from_slice(&entries);
     }
+
+    /* 页表遍历/创建相关方法 */
+
     /// Find PageTableEntry by VirtPageNum, create a frame for a 4KB page table if not exist
     #[cfg(target_arch = "riscv64")]
     fn find_pte_create(
@@ -152,27 +164,26 @@ impl PageTable {
     }
 
     /// Find PageTableEntry by VirtPageNum
+    ///
+    /// 找到后读取一份，不返回可变引用
     #[cfg(target_arch = "riscv64")]
-    pub fn find_pte(&self, vpn: VirtPageNum) -> Option<(&mut PageTableEntry, PageSize)> {
+    pub fn find_pte(&self, vpn: VirtPageNum) -> Option<(PageTableEntry, PageSize)> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
-        let mut pte_opt: Option<&mut PageTableEntry> = None;
-        let mut page_size: Option<PageSize> = None;
         for (i, idx) in idxs.iter().enumerate() {
-            let pte = &mut ppn.get_pte_array()[*idx];
+            let pte = ppn.get_pte_array_ref()[*idx];
             //println!("find_pte: vpn = {:?}, i = {}", vpn, i);
             // 标准页叶子节点需要v，大页叶子节点有rwx任一即可
             if (i == 2 && pte.is_valid())
                 || (i < 2 && (pte.readable() || pte.writable() || pte.executable()))
             {
-                pte_opt = Some(pte);
-                page_size = Some(match i {
+                let page_size = match i {
                     0 => PageSize::Page1G,
                     1 => PageSize::Page2M,
                     2 => PageSize::Page4K,
                     _ => unreachable!(),
-                });
-                return Some((pte_opt.unwrap(), page_size.unwrap()));
+                };
+                return Some((pte, page_size));
             }
             // 如果不是叶子节点但无效，说明没有映射
             if !pte.is_valid() {
@@ -183,12 +194,11 @@ impl PageTable {
         None
     }
     #[cfg(target_arch = "loongarch64")]
-    pub fn find_pte(&self, vpn: VirtPageNum) -> Option<(&mut PageTableEntry, PageSize)> {
+    pub fn find_pte(&self, vpn: VirtPageNum) -> Option<(PageTableEntry, PageSize)> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
-        let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
-            let pte = &mut ppn.get_pte_array()[*idx];
+            let pte = ppn.get_pte_array_ref()[*idx];
             //println!("find_pte: vpn = {:?}, i = {}", vpn, i);
             if pte.is_empty() {
                 //println!("find_pte: vpn = {:?}, i = {}, pte is empty", vpn, i);
@@ -209,10 +219,64 @@ impl PageTable {
         }
         None
     }
+    /// 从虚拟页号找到页表项的可变引用
+    ///
+    /// 需要在页表写锁内完成对本函数返回的 PTE 的修改
+    #[cfg(target_arch = "riscv64")]
+    pub(crate) fn find_pte_mut(
+        &mut self,
+        vpn: VirtPageNum,
+    ) -> Option<(&mut PageTableEntry, PageSize)> {
+        let idxs = vpn.indexes();
+        let mut ppn = self.root_ppn;
+        for (i, idx) in idxs.iter().enumerate() {
+            let pte = &mut ppn.get_pte_array()[*idx];
+            if (i == 2 && pte.is_valid())
+                || (i < 2 && (pte.readable() || pte.writable() || pte.executable()))
+            {
+                let page_size = match i {
+                    0 => PageSize::Page1G,
+                    1 => PageSize::Page2M,
+                    2 => PageSize::Page4K,
+                    _ => unreachable!(),
+                };
+                return Some((pte, page_size));
+            }
+            if !pte.is_valid() {
+                return None;
+            }
+            ppn = pte.ppn();
+        }
+        None
+    }
+    #[cfg(target_arch = "loongarch64")]
+    pub(crate) fn find_pte_mut(
+        &mut self,
+        vpn: VirtPageNum,
+    ) -> Option<(&mut PageTableEntry, PageSize)> {
+        let idxs = vpn.indexes();
+        let mut ppn = self.root_ppn;
+        for (i, idx) in idxs.iter().enumerate() {
+            let pte = &mut ppn.get_pte_array()[*idx];
+            if pte.is_empty() {
+                return None;
+            }
+            if i == 2 || pte.is_huge_page() {
+                let page_size = match i {
+                    0 => PageSize::Page1G,
+                    1 => PageSize::Page2M,
+                    2 => PageSize::Page4K,
+                    _ => unreachable!(),
+                };
+                return Some((pte, page_size));
+            }
+            ppn = pte.ppn();
+        }
+        None
+    }
     /// set the map between virtual page number and physical page number
     #[allow(unused)]
     #[cfg(target_arch = "riscv64")]
-
     pub fn map(
         &mut self,
         vpn: VirtPageNum,
@@ -254,16 +318,54 @@ impl PageTable {
     /// remove the map between virtual page number and physical page number
     #[allow(unused)]
     pub fn unmap(&mut self, vpn: VirtPageNum) {
-        let (pte, page_size) = self.find_pte(vpn).unwrap();
+        let (pte, _page_size) = self.find_pte_mut(vpn).unwrap();
         assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
         *pte = PageTableEntry::empty();
     }
+
+    /// 迁移一个页表项到另一个虚拟页号，要求源页号已映射，目标页号未映射
+    pub(crate) fn move_entry(
+        &mut self,
+        src: VirtPageNum,
+        dst: VirtPageNum,
+        page_size: PageSize,
+    ) -> bool {
+        if src == dst {
+            return true;
+        }
+
+        let Some((entry, src_page_size)) = self.find_pte(src) else {
+            return false;
+        };
+        if !entry.is_valid() || src_page_size != page_size {
+            return false;
+        }
+        if self.translate(dst).is_some_and(|pte| pte.is_valid()) {
+            return false;
+        }
+
+        let Some(dst_pte) = self.find_pte_create(dst, page_size) else {
+            return false;
+        };
+        if dst_pte.is_valid() {
+            return false;
+        }
+        *dst_pte = entry;
+
+        let Some((src_pte, src_page_size)) = self.find_pte_mut(src) else {
+            unreachable!("source PTE disappeared while page table write lock is held");
+        };
+        debug_assert_eq!(src_page_size, page_size);
+        *src_pte = PageTableEntry::empty();
+        true
+    }
+
     /// get the page table entry from the virtual page number
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
-        self.find_pte(vpn).map(|(pte, size)| *pte)
+        self.find_pte(vpn).map(|(pte, _)| pte)
     }
     pub fn translate_and_get_size(&self, vpn: VirtPageNum) -> Option<(PageTableEntry, PageSize)> {
-        self.find_pte(vpn).map(|(pte, size)| (*pte, size))
+        self.find_pte(vpn)
     }
     pub fn translate_create(
         &mut self,
@@ -278,7 +380,7 @@ impl PageTable {
     }
     #[cfg(target_arch = "riscv64")]
     pub fn set_entry(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
-        let (pte, _size) = self.find_pte(vpn).unwrap();
+        let (pte, _size) = self.find_pte_mut(vpn).unwrap();
         let mut final_flags = flags | PTEFlags::V | PTEFlags::A;
         if flags.contains(PTEFlags::W) && !flags.contains(PTEFlags::U) {
             final_flags |= PTEFlags::D;
@@ -287,7 +389,7 @@ impl PageTable {
     }
     #[cfg(target_arch = "loongarch64")]
     pub fn set_entry(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
-        let (pte, size) = self.find_pte(vpn).unwrap();
+        let (pte, _size) = self.find_pte_mut(vpn).unwrap();
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
         if (flags & PTEFlags::W) != PTEFlags::empty() {
             pte.set_dirty();
@@ -323,373 +425,464 @@ impl PageTable {
         core::mem::take(&mut self.frames)
     }
 }
+enum PinUserRangeResult {
+    Pinned(Vec<UserBufferSegment>),
+    NeedsFault,
+    Retry, // 用户页表在 pin 过程中被修改，用于 RCU，但目前没有实现
+    Invalid,
+}
 
-/// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
-/// 其中ptr是用户空间地址
-pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
-    let page_table = PageTable::from_token(token);
-    let mut start = ptr as usize;
-    let end = start + len;
-    let mut v = Vec::new();
-    while start < end {
-        let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.std_floor();
-        let (ppn, size) = match page_table.translate_and_get_size(vpn) {
-            Some((pte, size)) if pte.is_valid() => (pte.ppn(), size),
-            _ => {
-                if token != current_user_token() {
-                    return Vec::new();
-                }
-                let task = current_task().unwrap();
-                let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
-                    return Vec::new();
-                };
-                let sp = crate::task::current_trap_cx().get_sp();
-                let mut memory = mm.exclusive_access();
-                if memory.handle_page_fault(start, sp) {
-                    let (pte, size) = page_table.find_pte(vpn).unwrap();
-                    (pte.ppn(), size)
-                } else {
-                    return Vec::new();
-                }
-            }
-        };
-        vpn.step_by(size.num_pages());
-        let mut end_va: VirtAddr = vpn.into();
-        end_va = end_va.min(VirtAddr::from(end));
-        if end_va.actual_page_offset(size) == 0 {
-            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..]);
+enum PinUserSegmentResult {
+    Pinned(UserBufferSegment, usize),
+    NeedsFault,
+    Retry,
+    Invalid,
+}
+
+const MAX_TRANSIENT_USER_PIN_RETRIES: usize = 8;
+
+#[inline]
+fn area_allows_user_access(permission: MapPermission, write: bool) -> bool {
+    permission.contains(MapPermission::U)
+        && if write {
+            permission.contains(MapPermission::W)
         } else {
-            v.push(
-                &mut ppn.get_bytes_array_with_size(size)
-                    [start_va.actual_page_offset(size)..end_va.actual_page_offset(size)],
-            );
+            permission.contains(MapPermission::R)
         }
-        start = end_va.into();
+}
+
+#[inline]
+fn pte_allows_user_access(pte: PageTableEntry, write: bool) -> bool {
+    pte.is_valid()
+        && pte.user_accessible()
+        && if write {
+            pte.writable()
+        } else {
+            pte.readable()
+        }
+}
+
+/// 获用户空间虚拟地址的相应缓冲区
+/// 
+/// 当前为 areas.read() -> area.read() -> page_table.read() 的读锁访问。
+fn pin_user_segment(
+    mm: &MemorySet,
+    va: VirtAddr,
+    end: usize,
+    write: bool,
+) -> PinUserSegmentResult {
+    if va.0 >= end {
+        return PinUserSegmentResult::Invalid;
     }
-    v
+
+    let vpn = va.std_floor();
+    let areas = mm.areas.read();
+    let area = areas
+        .range(..=vpn)
+        .next_back()
+        .map(|(_, area)| Arc::clone(area));
+
+    let Some(area) = area else {
+        // The user trampoline is intentionally not represented by a VMA.  It
+        // is the sole untracked mapping accepted by the generic user-buffer
+        // API, and only for read access.
+        let page_table = mm.page_table.read();
+        let Some((pte, page_size)) = page_table.translate_and_get_size(vpn) else {
+            return PinUserSegmentResult::Invalid;
+        };
+        if write {
+            return PinUserSegmentResult::Invalid;
+        }
+        if !pte_allows_user_access(pte, false) || !is_static_user_trampoline(vpn, pte, page_size) {
+            return if pte.is_valid() {
+                PinUserSegmentResult::Retry
+            } else {
+                PinUserSegmentResult::Invalid
+            };
+        }
+        let offset = va.actual_page_offset(page_size);
+        let count = core::cmp::min(page_size.size() - offset, end - va.0);
+        return match unsafe {
+            UserBufferSegment::from_untracked_phys(pte.ppn(), page_size, offset, count)
+        } {
+            Some(segment) => PinUserSegmentResult::Pinned(segment, count),
+            None => PinUserSegmentResult::Invalid,
+        };
+    };
+
+    let area = area.read();
+    if !area.contains(vpn) {
+        // The predecessor VMA changed while the tree lookup was being made.
+        return PinUserSegmentResult::Retry;
+    }
+    let permission = area.get_map_permission();
+    let frame_backed = area.is_frame_backed_mapping();
+    // `area` is already a VersionedAreaReadGuard.  Use the guarded MapArea
+    // directly: calling VersionedArea::frame_for_vpn here would attempt to
+    // lock the same non-reentrant mutex a second time.
+    let frame = MapArea::frame_for_vpn(&area, vpn);
+    let page_table = mm.page_table.read();
+    let Some((pte, page_size)) = page_table.translate_and_get_size(vpn) else {
+        return if frame.is_none() && frame_backed && area_allows_user_access(permission, write) {
+            PinUserSegmentResult::NeedsFault
+        } else if frame_backed {
+            PinUserSegmentResult::Retry
+        } else {
+            PinUserSegmentResult::Invalid
+        };
+    };
+
+    if !area_allows_user_access(permission, write) || !pte.user_accessible() {
+        return PinUserSegmentResult::Invalid;
+    }
+    let Some(frame) = frame else {
+        // A valid PTE without a tracked frame is not a user-page pin.  This
+        // can be a transient replacement window, but must never become a bare
+        // PPN direct-map pointer.
+        return if frame_backed {
+            PinUserSegmentResult::Retry
+        } else {
+            PinUserSegmentResult::Invalid
+        };
+    };
+    if frame.page_size != page_size || frame.ppn != pte.ppn() {
+        return if frame_backed {
+            PinUserSegmentResult::Retry
+        } else {
+            PinUserSegmentResult::Invalid
+        };
+    }
+
+    if !pte_allows_user_access(pte, write) {
+        // A writable VMA with a present read-only PTE is the normal COW case.
+        // Let the current task resolve it once, then validate from scratch.
+        return if write && frame_backed && permission.contains(MapPermission::W) {
+            PinUserSegmentResult::NeedsFault
+        } else {
+            PinUserSegmentResult::Invalid
+        };
+    }
+
+    let offset = va.actual_page_offset(page_size);
+    let count = core::cmp::min(page_size.size() - offset, end - va.0);
+    match UserBufferSegment::from_frame(frame, offset, count) {
+        Some(segment) => PinUserSegmentResult::Pinned(segment, count),
+        None => PinUserSegmentResult::Invalid,
+    }
+}
+
+/// 获取一段用户缓冲区
+fn pin_user_range_once(
+    mm: &MemorySet,
+    start: usize,
+    len: usize,
+    write: bool,
+) -> PinUserRangeResult {
+    let Some(end) = start.checked_add(len) else {
+        return PinUserRangeResult::Invalid;
+    };
+    if len == 0 {
+        return PinUserRangeResult::Pinned(Vec::new());
+    }
+    let mut cursor = start;
+    let mut result = Vec::new();
+    while cursor < end {
+        match pin_user_segment(mm, VirtAddr::from(cursor), end, write) {
+            PinUserSegmentResult::Pinned(segment, count) if count != 0 => {
+                result.push(segment);
+                cursor += count;
+            }
+            PinUserSegmentResult::Pinned(_, _) => return PinUserRangeResult::Invalid,
+            PinUserSegmentResult::NeedsFault => return PinUserRangeResult::NeedsFault,
+            PinUserSegmentResult::Retry => return PinUserRangeResult::Retry,
+            PinUserSegmentResult::Invalid => return PinUserRangeResult::Invalid,
+        }
+    }
+
+    PinUserRangeResult::Pinned(result)
+}
+
+fn handle_fault_in_range(
+    mm: &MemorySet,
+    start: usize,
+    len: usize,
+    write: bool,
+) -> bool {
+    // A generic kernel copy can target a remote mm and can be called while
+    // the current task's inner lock is held.  Fault-in is VMA-based and does
+    // not need an architectural stack pointer because stacks are fixed sparse
+    // VMAs rather than grow-down mappings.
+    if write {
+        mm.ensure_writable_user_range(start, len)
+    } else {
+        mm.ensure_readable_user_range(start, len)
+    }
+}
+
+/// Pin at most one translated user-memory segment without allocating the
+/// `Vec` used by multi-page callers.  The returned segment owns its frame
+/// reference, so it remains valid after page-table and VMA locks are dropped.
+fn pin_user_segment_with_retry(
+    mm: &MemorySet,
+    start: usize,
+    len: usize,
+    write: bool,
+) -> Option<(UserBufferSegment, usize)> {
+    let end = start.checked_add(len)?;
+    if len == 0 {
+        return None;
+    }
+
+    let mut retries = 0;
+    let mut faults = 0;
+    loop {
+        match pin_user_segment(mm, VirtAddr::from(start), end, write) {
+            PinUserSegmentResult::Pinned(segment, count) if count != 0 => {
+                return Some((segment, count));
+            }
+            PinUserSegmentResult::Pinned(_, _) => return None,
+            PinUserSegmentResult::NeedsFault => {
+                faults += 1;
+                if faults > MAX_TRANSIENT_USER_PIN_RETRIES
+                    || !handle_fault_in_range(mm, start, len, write)
+                {
+                    return None;
+                }
+                retries = 0;
+            }
+            PinUserSegmentResult::Retry if retries < MAX_TRANSIENT_USER_PIN_RETRIES => {
+                retries += 1;
+            }
+            PinUserSegmentResult::NeedsFault
+            | PinUserSegmentResult::Retry
+            | PinUserSegmentResult::Invalid => return None,
+        }
+    }
+}
+
+/// 固定待访问地址空间的页帧，返回固定得到的 buffer
+fn pin_user_range(
+    mm: &MemorySet,
+    start: usize,
+    len: usize,
+    write: bool,
+) -> Option<Vec<UserBufferSegment>> {
+    // A concurrent VMA/PTE transition can invalidate an otherwise valid pin
+    // attempt.  `NeedsFault` is not itself an invalid user pointer: in
+    // particular, fork can make a private writable PTE read-only for COW.
+    let mut retries = 0;
+    let mut faults = 0;
+    loop {
+        match pin_user_range_once(mm, start, len, write) {
+            PinUserRangeResult::Pinned(result) => return Some(result),
+            PinUserRangeResult::NeedsFault => {
+                faults += 1;
+                if faults > MAX_TRANSIENT_USER_PIN_RETRIES {
+                    return None;
+                }
+
+                if !handle_fault_in_range(mm, start, len, write) {
+                    return None;
+                }
+                retries = 0;
+            }
+            PinUserRangeResult::Retry if retries < MAX_TRANSIENT_USER_PIN_RETRIES => {
+                retries += 1;
+            }
+            PinUserRangeResult::NeedsFault
+            | PinUserRangeResult::Retry
+            | PinUserRangeResult::Invalid => return None,
+        }
+    }
+}
+
+pub fn translated_byte_buffer(mm: &MemorySet, ptr: *const u8, len: usize) -> Vec<UserBufferSegment> {
+    pin_user_range(mm, ptr as usize, len, false).unwrap_or_default()
 }
 
 pub fn try_translated_byte_buffer(
-    token: usize,
+    mm: &MemorySet,
     ptr: *const u8,
     len: usize,
-) -> Option<Vec<&'static mut [u8]>> {
-    if !prepare_user_read(token, ptr as usize, len) {
-        return None;
-    }
-    let page_table = PageTable::from_token(token);
-    let mut start = ptr as usize;
-    let end = start + len;
-    let mut v = Vec::new();
-    while start < end {
-        let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.std_floor();
-        let (ppn, size) = match page_table.translate_and_get_size(vpn) {
-            Some((pte, size)) if pte.is_valid() => (pte.ppn(), size),
-            _ => return None,
-        };
-        vpn.step_by(size.num_pages());
-        let mut end_va: VirtAddr = vpn.into();
-        end_va = end_va.min(VirtAddr::from(end));
-        if end_va.actual_page_offset(size) == 0 {
-            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..]);
-        } else {
-            v.push(
-                &mut ppn.get_bytes_array_with_size(size)
-                    [start_va.actual_page_offset(size)..end_va.actual_page_offset(size)],
-            );
-        }
-        start = end_va.into();
-    }
-    Some(v)
+) -> Option<Vec<UserBufferSegment>> {
+    pin_user_range(mm, ptr as usize, len, false)
 }
 
-pub fn prepare_user_read(token: usize, ptr: usize, len: usize) -> bool {
-    if len == 0 {
-        return true;
-    }
-    let page_table = PageTable::from_token(token);
-    let mut start = ptr;
-    let Some(end) = start.checked_add(len) else {
-        return false;
-    };
-    let mut ready = true;
-    while start < end {
-        let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.std_floor();
-        let p_s = page_table.find_pte(vpn);
-        let size = match p_s {
-            Some((pte, size)) if pte.is_valid() && pte.readable() => size,
-            _ => {
-                ready = false;
-                break;
-            }
-        };
-        vpn.step_by(size.num_pages());
-        let mut end_va: VirtAddr = vpn.into();
-        end_va = end_va.min(VirtAddr::from(end));
-        start = end_va.into();
-    }
-    if ready {
-        return true;
-    }
-    if token != current_user_token() {
-        warn!(
-            "prepare_user_read: token mismatch, token = {:#x}, current_user_token = {:#x}",
-            token,
-            current_user_token()
-        );
-    }
-    let task = current_task().unwrap();
-    let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
-        return false;
-    };
-    let sp = crate::task::current_trap_cx().get_sp();
-    let result = mm
-        .exclusive_access()
-        .ensure_readable_user_range(ptr, len, sp);
-    result
+pub fn translated_user_buffer(mm: &MemorySet, ptr: *const u8, len: usize) -> Option<UserBuffer> {
+    pin_user_range(mm, ptr as usize, len, false).map(UserBuffer::new)
 }
 
-pub fn prepare_user_write(token: usize, ptr: usize, len: usize) -> bool {
-    if len == 0 {
-        return true;
-    }
-    let page_table = PageTable::from_token(token);
-    let mut start = ptr;
-    let Some(end) = start.checked_add(len) else {
-        return false;
-    };
-    let mut ready = true;
-    while start < end {
-        let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.std_floor();
-        let p_s = page_table.find_pte(vpn);
-        let size = match p_s {
-            Some((pte, size)) if pte.is_valid() && pte.writable() => {
-                size
-            }
-            _ => {
-                ready = false;
-                break;
-            }
-        };
-        vpn.step_by(size.num_pages());
-        let mut end_va: VirtAddr = vpn.into();
-        end_va = end_va.min(VirtAddr::from(end));
-        start = end_va.into();
-    }
-    if ready {
-        return true;
-    }
-    if token != current_user_token() {
-        warn!(
-            "prepare_user_write: token mismatch, token = {:#x}, current_user_token = {:#x}",
-            token,
-            current_user_token()
-        );
-    }
-    let task = current_task().unwrap();
-    let Some(mm) = task.inner_exclusive_access().mm.as_ref().cloned() else {
-        return false;
-    };
-    let sp = crate::task::current_trap_cx().get_sp();
-    let result = mm
-        .exclusive_access()
-        .ensure_writable_user_range(ptr, len, sp);
-    result
+pub fn prepare_user_read(mm: &MemorySet, ptr: usize, len: usize) -> bool {
+    pin_user_range(mm, ptr, len, false).is_some()
+}
+
+pub fn prepare_user_write(mm: &MemorySet, ptr: usize, len: usize) -> bool {
+    pin_user_range(mm, ptr, len, true).is_some()
 }
 
 pub fn translated_byte_buffer_mut(
-    token: usize,
+    mm: &MemorySet,
     ptr: *const u8,
     len: usize,
-) -> Vec<&'static mut [u8]> {
-    if !prepare_user_write(token, ptr as usize, len) {
-        return Vec::new();
-    }
-    translated_byte_buffer(token, ptr, len)
+) -> Vec<UserBufferSegment> {
+    pin_user_range(mm, ptr as usize, len, true).unwrap_or_default()
 }
 
 pub fn try_translated_byte_buffer_mut(
-    token: usize,
+    mm: &MemorySet,
     ptr: *mut u8,
     len: usize,
-) -> Option<Vec<&'static mut [u8]>> {
-    if !prepare_user_write(token, ptr as usize, len) {
-        return None;
-    }
-    let page_table = PageTable::from_token(token);
-    let mut start = ptr as usize;
-    let end = start + len;
-    let mut v = Vec::new();
-    while start < end {
-        let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.std_floor();
-        let (ppn, size) = match page_table.translate_and_get_size(vpn) {
-            Some((pte, size)) if pte.is_valid() => (pte.ppn(), size),
-            _ => return None,
-        };
-        vpn.step_by(size.num_pages());
-        let mut end_va: VirtAddr = vpn.into();
-        end_va = end_va.min(VirtAddr::from(end));
-        if end_va.actual_page_offset(size) == 0 {
-            v.push(&mut ppn.get_bytes_array_with_size(size)[start_va.actual_page_offset(size)..]);
-        } else {
-            v.push(
-                &mut ppn.get_bytes_array_with_size(size)
-                    [start_va.actual_page_offset(size)..end_va.actual_page_offset(size)],
-            );
-        }
-        start = end_va.into();
-    }
-    Some(v)
+) -> Option<Vec<UserBufferSegment>> {
+    pin_user_range(mm, ptr as usize, len, true)
+}
+
+/// Translate a writable user range and keep all backing frames pinned for the
+/// lifetime of the returned logical buffer.
+pub fn translated_user_buffer_mut(mm: &MemorySet, ptr: *mut u8, len: usize) -> Option<UserBuffer> {
+    pin_user_range(mm, ptr as usize, len, true).map(UserBuffer::new)
 }
 
 /// Translate&Copy a ptr[u8] array end with `\0` to a `String` Vec through page table
-pub fn translated_str(token: usize, ptr: *const u8) -> String {
-    assert!(
-        prepare_user_read(token, ptr as usize, 1),
-        "translated_str: user ptr is not readable"
-    );
-    let page_table = PageTable::from_token(token);
-    let mut string = String::new();
-    let mut va = ptr as usize;
-    loop {
-        assert!(
-            prepare_user_read(token, va, 1),
-            "translated_str: user ptr is not readable"
-        );
-        let ch: u8 = *(page_table
-            .translate_va(VirtAddr::from(va))
-            .unwrap()
-            .get_mut());
-        if ch == 0 {
-            break;
-        }
-        string.push(ch as char);
-        va += 1;
-    }
-    string
+/// Maximum length accepted by the generic C-string copy helper.  Pathname
+/// callers impose their own, smaller PATH_MAX limits after copying; argv and
+/// environment users still need a larger bound.
+const MAX_USER_CSTRING_LEN: usize = 128 * 1024;
+
+/// Why a C-string copy stopped before reaching a terminator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UserCStringError {
+    Invalid,
+    TooLong,
 }
 
-/// +错误处理
-pub fn try_translated_str(token: usize, ptr: *const u8) -> Option<String> {
+/// Copy a NUL-terminated userspace string a page at a time.
+///
+/// The former implementation called `try_translated_read::<u8>` once per
+/// byte.  Each call pinned a user range and allocated a segment Vec, making a
+/// short pathname perform dozens of VMA/page-table lookups.  Limiting every
+/// pin to the current base page preserves the important property that bytes
+/// after the terminating NUL need not be mapped.
+fn copy_user_cstring(
+    mm: &MemorySet,
+    ptr: *const u8,
+    max_len: usize,
+) -> Result<String, UserCStringError> {
     if ptr as isize <= 0 {
-        return None;
+        return Err(UserCStringError::Invalid);
     }
-    if !prepare_user_read(token, ptr as usize, 1) {
-        return None;
-    }
-    let page_table = PageTable::from_token(token);
-    let mut string = String::new();
+
+    let mut string = String::with_capacity(64);
     let mut va = ptr as usize;
-    loop {
-        if !prepare_user_read(token, va, 1) {
-            return None;
+    let mut copied = 0usize;
+    // Scan one extra byte so callers can accept an exactly `max_len` byte
+    // string while recognizing an unterminated or longer input.
+    let scan_limit = max_len.checked_add(1).ok_or(UserCStringError::TooLong)?;
+
+    while copied < scan_limit {
+        let page_remaining = PAGE_SIZE - (va & (PAGE_SIZE - 1));
+        let chunk_len = core::cmp::min(page_remaining, scan_limit - copied);
+        let (segment, segment_len) = pin_user_segment_with_retry(mm, va, chunk_len, false)
+            .ok_or(UserCStringError::Invalid)?;
+        let bytes = &segment[..];
+        let take = bytes
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(bytes.len());
+        if copied > max_len || take > max_len - copied {
+            return Err(UserCStringError::TooLong);
         }
-        let ch: u8 = *(page_table
-            .translate_va(VirtAddr::from(va))
-            .unwrap()
-            .get_mut());
-        if ch == 0 {
-            break;
+        let prefix = &bytes[..take];
+        if prefix.is_ascii() {
+            // ASCII is valid UTF-8, so the common pathname case can append a
+            // complete page fragment with one allocation-aware copy.
+            string.push_str(unsafe { core::str::from_utf8_unchecked(prefix) });
+        } else {
+            string.reserve(take);
+            for &byte in prefix {
+                // Keep the legacy byte-to-char conversion semantics.  VFS
+                // pathname validation remains responsible for rejecting names
+                // it cannot represent safely.
+                string.push(byte as char);
+            }
         }
-        string.push(ch as char);
-        va += 1;
+
+        if take != bytes.len() {
+            return Ok(string);
+        }
+
+        va = va
+            .checked_add(segment_len)
+            .ok_or(UserCStringError::Invalid)?;
+        copied = copied
+            .checked_add(segment_len)
+            .ok_or(UserCStringError::TooLong)?;
     }
-    Some(string)
+
+    Err(UserCStringError::TooLong)
 }
 
-/// Translate a ptr[u8] array through page table and return a reference of T
-/*pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
-    let len = core::mem::size_of::<T>();
-    assert!(prepare_user_read(token, ptr as usize, len), "translated_ref: user ptr is not readable");
-    let page_table = PageTable::from_token(token);
-    let pa = page_table
-        .translate_va(VirtAddr::from(ptr as usize))
-        .unwrap();
-    debug!("translated_ref: start_pa = 0x{:x}, end_pa = 0x{:x}, len = 0x{:x}", pa.0, pa.0 + len - 1, len);
-    if pa.std_floor() == PhysAddr(pa.0 + len - 1).std_floor() {
-        pa.get_ref()
-    } else {
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(translated_read(token, ptr)))
-    }
-}*/
+pub fn translated_str(mm: &MemorySet, ptr: *const u8) -> String {
+    copy_user_cstring(mm, ptr, MAX_USER_CSTRING_LEN).unwrap_or_else(|_| {
+        panic!("translated_str: user ptr is not readable or string is too long")
+    })
+}
+
+/// Translate a NUL-terminated string from userspace, returning None for an
+/// invalid pointer or an unterminated string over the generic safety limit.
+pub fn try_translated_str(mm: &MemorySet, ptr: *const u8) -> Option<String> {
+    copy_user_cstring(mm, ptr, MAX_USER_CSTRING_LEN).ok()
+}
+
+/// Translate a C string with a caller-specific byte limit.
+///
+/// Pathname syscalls use this to return `ENAMETOOLONG`, while exec can map an
+/// oversized argv/environment string to `E2BIG`, instead of conflating either
+/// case with an invalid userspace address.
+pub fn try_translated_str_with_limit(
+    mm: &MemorySet,
+    ptr: *const u8,
+    max_len: usize,
+) -> Result<String, UserCStringError> {
+    copy_user_cstring(mm, ptr, max_len)
+}
 
 /// 从给定地址读取数据并返回T
-pub fn translated_read<T>(token: usize, ptr: *const T) -> T {
-    try_translated_read(token, ptr)
+pub fn translated_read<T>(mm: &MemorySet, ptr: *const T) -> T {
+    try_translated_read(mm, ptr)
         .unwrap_or_else(|| panic!("translated_read: failed to read from user space"))
 }
 
-pub fn try_translated_read<T>(token: usize, ptr: *const T) -> Option<T> {
+pub fn try_translated_read<T>(mm: &MemorySet, ptr: *const T) -> Option<T> {
     let len = core::mem::size_of::<T>();
-    if !prepare_user_read(token, ptr as usize, len) {
-        return None;
-    }
-    let page_table = PageTable::from_token(token);
+    let buffers = pin_user_range(mm, ptr as usize, len, false)?;
     let mut data = vec![0u8; len];
-    let start_va = VirtAddr::from(ptr as usize);
-    let (pte, size) = page_table.find_pte(start_va.std_floor()).unwrap();
-    // 页内快路径：保持原有低开销行为
-    if start_va.std_page_offset() + len <= size.size() {
-        let pa = page_table.translate_va(start_va).unwrap();
-        // Physical RAM must be accessed through the LoongArch cached DMW window.
-        let start = pa.get_cached_addr();
-        let end = start + len;
-        for (idx, addr) in (start..end).enumerate() {
-            data[idx] = unsafe { *(addr as *const u8) };
-        }
-    } else {
-        // 跨页路径：按虚拟地址逐字节翻译，避免假设物理地址连续
-        for idx in 0..len {
-            let va = VirtAddr::from((ptr as usize) + idx);
-            let Some(pa) = page_table.translate_va(va) else {
-                return None;
-            };
-            data[idx] = unsafe { *(pa.get_cached_addr() as *const u8) };
-        }
+    let mut copied = 0;
+    for buffer in &buffers {
+        let count = core::cmp::min(buffer.len(), len - copied);
+        data[copied..copied + count].copy_from_slice(&buffer[..count]);
+        copied += count;
     }
     Some(unsafe { core::ptr::read_unaligned(data.as_ptr() as *const T) })
 }
 
 /// 将用户空间的T写入给定地址
-pub fn try_translated_write<T>(token: usize, ptr: *mut T, value: T) -> bool {
+pub fn try_translated_write<T>(mm: &MemorySet, ptr: *mut T, value: T) -> bool {
     let len = core::mem::size_of::<T>();
-    if !prepare_user_write(token, ptr as usize, len) {
+    let Some(mut buffers) = pin_user_range(mm, ptr as usize, len, true) else {
         return false;
-    }
-    let page_table = PageTable::from_token(token);
+    };
     let data = unsafe { core::slice::from_raw_parts((&value as *const T) as *const u8, len) };
-    let start_va = VirtAddr::from(ptr as usize);
-    let (pte, size) = page_table.find_pte(start_va.std_floor()).unwrap();
-    // 页内快路径：保持原有低开销行为
-    if start_va.std_page_offset() + len <= size.size() {
-        let pa = page_table.translate_va(start_va).unwrap();
-        // Physical RAM must be accessed through the LoongArch cached DMW window.
-        let start = pa.get_cached_addr();
-        let end = start + len;
-        for (idx, addr) in (start..end).enumerate() {
-            unsafe { *(addr as *mut u8) = data[idx] };
-        }
-    } else {
-        // 跨页路径：按虚拟地址逐字节翻译，避免假设物理地址连续
-        for idx in 0..len {
-            let va = VirtAddr::from((ptr as usize) + idx);
-            let Some(pa) = page_table.translate_va(va) else {
-                return false;
-            };
-            unsafe { *(pa.get_cached_addr() as *mut u8) = data[idx] };
-        }
+    let mut copied = 0;
+    for buffer in &mut buffers {
+        let count = core::cmp::min(buffer.len(), len - copied);
+        buffer[..count].copy_from_slice(&data[copied..copied + count]);
+        copied += count;
     }
-
     true
 }
 
-pub fn translated_write<T>(token: usize, ptr: *mut T, value: T) {
-    if !try_translated_write(token, ptr, value) {
+pub fn translated_write<T>(mm: &MemorySet, ptr: *mut T, value: T) {
+    if !try_translated_write(mm, ptr, value) {
         panic!("translated_write: failed to write to user space");
     };
 }

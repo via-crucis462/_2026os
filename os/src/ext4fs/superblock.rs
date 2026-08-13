@@ -3,6 +3,12 @@ use alloc::sync::Arc;
 
 pub const EXT4_MAGIC : usize = 0xEF53;
 pub const EXT4_SUPERBLOCK_OFFSET : usize = 1024;
+pub const EXT4_SUPERBLOCK_SIZE: usize = 1024;
+pub const EXT4_SUPERBLOCK_STATE_OFFSET: usize = 0x3a;
+pub const EXT4_SUPERBLOCK_FEATURE_INCOMPAT_OFFSET: usize = 0x60;
+pub const EXT4_FEATURE_INCOMPAT_RECOVER: u32 = 0x0004;
+pub const EXT4_FEATURE_RO_COMPAT_ORPHAN_PRESENT: u32 = 0x0001_0000;
+pub const EXT4_VALID_FS: u16 = 0x0001;
 pub struct Ext4SuperBlock {
     pub total_blocks: u32,
     pub total_inodes: u32,
@@ -12,9 +18,19 @@ pub struct Ext4SuperBlock {
     pub inodes_per_group: u32,
     pub first_data_block: u32,
     pub incompat_features: u32,
+    pub compat_features: u32,
     pub ro_compat_features: u32,
+    pub state: u16,
     pub uuid: [u8; 16],
+    pub journal_inum: u32,
+    pub journal_dev: u32,
+    pub last_orphan: u32,
     pub checksum_seed: u32,
+    pub checksum_type: u8,
+    pub want_extra_isize: u16,
+    pub reserved_gdt_blocks: u16,
+    pub first_ino: u32,
+    pub backup_bgs: [u32; 2],
     pub desc_size: u32, // 组描述符大小，可能是32或64
 }
 
@@ -26,6 +42,9 @@ impl Ext4SuperBlock {
         if magic != EXT4_MAGIC as u16 {
             panic!("Not a valid ext4 superblock: magic = 0x{:X}", magic);
         }
+        if ext4_superblock_disk.s_blocks_count_hi != 0 {
+            panic!("[ext4] filesystems larger than 2^32 blocks are unsupported");
+        }
         Self {
             total_blocks: ext4_superblock_disk.s_blocks_count_lo,
             total_inodes: ext4_superblock_disk.s_inodes_count,
@@ -35,9 +54,19 @@ impl Ext4SuperBlock {
             inodes_per_group: ext4_superblock_disk.s_inodes_per_group,
             first_data_block: ext4_superblock_disk.s_first_data_block,
             incompat_features: ext4_superblock_disk.s_feature_incompat,
+            compat_features: ext4_superblock_disk.s_feature_compat,
             ro_compat_features: ext4_superblock_disk.s_feature_ro_compat,
+            state: ext4_superblock_disk.s_state,
             uuid: ext4_superblock_disk.s_uuid,
+            journal_inum: ext4_superblock_disk.s_journal_inum,
+            journal_dev: ext4_superblock_disk.s_journal_dev,
+            last_orphan: ext4_superblock_disk.s_last_orphan,
             checksum_seed: ext4_superblock_disk.s_checksum_seed,
+            checksum_type: ext4_superblock_disk.s_checksum_type,
+            want_extra_isize: ext4_superblock_disk.s_want_extra_isize,
+            reserved_gdt_blocks: ext4_superblock_disk.s_reserved_gdt_blocks,
+            first_ino: ext4_superblock_disk.s_first_ino,
+            backup_bgs: ext4_superblock_disk.s_backup_bgs,
             // 暂未检查是否正确，但测试发现能跑
             desc_size: if (ext4_superblock_disk.s_feature_incompat & 0x0080) != 0 {
                 ext4_superblock_disk.s_desc_size as u32
@@ -47,8 +76,98 @@ impl Ext4SuperBlock {
         }
     }
     pub fn group_num(&self) -> u32 {
-        (self.total_blocks + self.blocks_per_group - 1) / self.blocks_per_group
+        self.total_blocks
+            .saturating_sub(self.first_data_block)
+            .saturating_add(self.blocks_per_group - 1)
+            / self.blocks_per_group
     }
+
+    pub fn has_metadata_csum(&self) -> bool {
+        (self.ro_compat_features & 0x0400) != 0 && self.checksum_type == 1
+    }
+
+    pub fn has_csum_seed(&self) -> bool {
+        (self.incompat_features & 0x2000) != 0
+    }
+
+    pub fn has_bigalloc(&self) -> bool {
+        (self.ro_compat_features & 0x0200) != 0
+    }
+
+    pub fn has_journal(&self) -> bool {
+        (self.compat_features & 0x0004) != 0
+    }
+
+    pub fn needs_recovery(&self) -> bool {
+        (self.incompat_features & EXT4_FEATURE_INCOMPAT_RECOVER) != 0
+    }
+
+    /// Forget a pending JBD2 replay after the caller has made the primary
+    /// metadata authoritative. This implementation writes ext4 metadata
+    /// directly and cannot replay journal transactions.
+    pub fn clear_needs_recovery(&mut self) {
+        self.incompat_features &= !EXT4_FEATURE_INCOMPAT_RECOVER;
+    }
+
+    pub fn has_pending_orphan_recovery(&self) -> bool {
+        self.last_orphan != 0
+            || (self.ro_compat_features & EXT4_FEATURE_RO_COMPAT_ORPHAN_PRESENT) != 0
+    }
+
+    /// Record that recovery was deliberately skipped. The mount remains
+    /// writable, but it must not be presented as a clean unmount.
+    pub fn mark_recovery_discarded(&mut self) {
+        self.state &= !EXT4_VALID_FS;
+    }
+
+    /// The filesystem-wide checksum seed used by metadata_csum objects.
+    /// Older ext4 filesystems derive it from the UUID; newer filesystems may
+    /// store a precomputed seed in s_checksum_seed.
+    pub fn metadata_checksum_seed(&self) -> u32 {
+        if self.has_csum_seed() {
+            self.checksum_seed
+        } else {
+            super::checksum::crc32c(!0u32, &self.uuid)
+        }
+    }
+}
+
+/// Clear the on-disk `RECOVER` flag in a raw ext4 superblock.
+///
+/// The caller must update the superblock checksum afterwards when
+/// `metadata_csum` is enabled. Returning `true` means the byte representation
+/// was changed.
+pub fn clear_needs_recovery_in_raw(superblock: &mut [u8]) -> bool {
+    if superblock.len() < EXT4_SUPERBLOCK_SIZE {
+        return false;
+    }
+    let range = EXT4_SUPERBLOCK_FEATURE_INCOMPAT_OFFSET
+        ..EXT4_SUPERBLOCK_FEATURE_INCOMPAT_OFFSET + core::mem::size_of::<u32>();
+    let incompat_features = u32::from_le_bytes(superblock[range.clone()].try_into().unwrap());
+    let updated = incompat_features & !EXT4_FEATURE_INCOMPAT_RECOVER;
+    if updated == incompat_features {
+        return false;
+    }
+    superblock[range].copy_from_slice(&updated.to_le_bytes());
+    true
+}
+
+/// Mark the raw superblock as having skipped recovery. This deliberately does
+/// not restore the clean-unmount bit or manufacture an `ERROR_FS` state:
+/// e2fsck's journal reset follows the same convention.
+pub fn mark_recovery_discarded_in_raw(superblock: &mut [u8]) -> bool {
+    if superblock.len() < EXT4_SUPERBLOCK_SIZE {
+        return false;
+    }
+    let range = EXT4_SUPERBLOCK_STATE_OFFSET
+        ..EXT4_SUPERBLOCK_STATE_OFFSET + core::mem::size_of::<u16>();
+    let state = u16::from_le_bytes(superblock[range.clone()].try_into().unwrap());
+    let updated = state & !EXT4_VALID_FS;
+    if state == updated {
+        return false;
+    }
+    superblock[range].copy_from_slice(&updated.to_le_bytes());
+    true
 }
 #[repr(C, packed)]
 pub struct Ext4SuperBlockDisk {
@@ -161,5 +280,45 @@ impl Ext4SuperBlockDisk {
         let mut buf = [0u8; BLOCK_SZ];
         block_device.read_block(0, &mut buf);
         unsafe { core::ptr::read(buf.as_ptr().add(EXT4_SUPERBLOCK_OFFSET % BLOCK_SZ) as *const Ext4SuperBlockDisk) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_recovery_flag_preserves_other_incompat_features() {
+        let mut raw = [0u8; EXT4_SUPERBLOCK_SIZE];
+        let original = 0x2084u32;
+        raw[EXT4_SUPERBLOCK_FEATURE_INCOMPAT_OFFSET
+            ..EXT4_SUPERBLOCK_FEATURE_INCOMPAT_OFFSET + 4]
+            .copy_from_slice(&original.to_le_bytes());
+
+        assert!(clear_needs_recovery_in_raw(&mut raw));
+        let updated = u32::from_le_bytes(
+            raw[EXT4_SUPERBLOCK_FEATURE_INCOMPAT_OFFSET
+                ..EXT4_SUPERBLOCK_FEATURE_INCOMPAT_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(updated, original & !EXT4_FEATURE_INCOMPAT_RECOVER);
+        assert!(!clear_needs_recovery_in_raw(&mut raw));
+    }
+
+    #[test]
+    fn forced_recovery_state_is_not_reported_as_a_clean_unmount() {
+        let mut raw = [0u8; EXT4_SUPERBLOCK_SIZE];
+        raw[EXT4_SUPERBLOCK_STATE_OFFSET..EXT4_SUPERBLOCK_STATE_OFFSET + 2]
+            .copy_from_slice(&EXT4_VALID_FS.to_le_bytes());
+
+        assert!(mark_recovery_discarded_in_raw(&mut raw));
+        let state = u16::from_le_bytes(
+            raw[EXT4_SUPERBLOCK_STATE_OFFSET..EXT4_SUPERBLOCK_STATE_OFFSET + 2]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(state, 0);
+        assert!(!mark_recovery_discarded_in_raw(&mut raw));
     }
 }

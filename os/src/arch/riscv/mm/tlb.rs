@@ -3,7 +3,7 @@
 use crate::arch::config::CPU_CORE_NUM;
 use crate::get_hart_id;
 use crate::sync::MPSafeCell;
-use super::FrameTracker;
+use crate::mm::FrameTracker;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::arch::asm;
@@ -78,12 +78,12 @@ pub fn active_tokens() -> Vec<(usize, usize)> {
 pub fn switch_mm(token: usize) {
     let hart_id = get_hart_id();
     let bit = hart_bit(hart_id);
+    if satp_csr::read().bits() == token {
+        return;
+    }
     let old_token = {
         let mut active = SATP_ACTIVE.exclusive_access();
         let old_token = satp_csr::read().bits();
-        if old_token == token {
-            return;
-        }
         *active.token_harts.entry(token).or_insert(0) |= bit;
         old_token
     };
@@ -95,33 +95,42 @@ pub fn switch_mm(token: usize) {
         asm!("sfence.vma x0, x0", options(nostack));
     }
 
-    let mut active = SATP_ACTIVE.exclusive_access();
     // boot 阶段直接用 csrw 不会插入到表中，忽略即可，后续不会有核使用内核页表的 token
-    if let Some(old_harts) = active.token_harts.get_mut(&old_token) {
-        *old_harts &= !bit;
-        if *old_harts == 0 {
-            active.token_harts.remove(&old_token);
-            // 如果最后一个切走的，把旧页表帧释放掉
-            if let Some(frames) = active.dying.remove(&old_token) {
-                drop(frames);
+    let freed_frames = {
+        let mut active = SATP_ACTIVE.exclusive_access();
+        if let Some(old_harts) = active.token_harts.get_mut(&old_token) {
+            *old_harts &= !bit;
+            if *old_harts == 0 {
+                active.token_harts.remove(&old_token);
+                // 如果最后一个切走的，把旧页表帧释放掉
+                active.dying.remove(&old_token)
+            } else {
+                None
             }
+        } else {
+            None
         }
-    }
+    };
+    // 帧在这里释放
 }
 
 /// 移除一个已经销毁的 token，并接管其页表帧的所有权
-///
-/// 若仍有核的 satp 指向该页表，延迟释放帧
 /// 
+/// 若仍有核的 satp 指向该页表，延迟释放帧
+///
 /// 调用者必须已对相关核完成 TLB 刷新
 pub fn remove_token(token: usize, frames: Vec<FrameTracker>) {
-    let mut active = SATP_ACTIVE.exclusive_access();
-    let harts = active.token_harts.get(&token).copied().unwrap_or(0);
-    if harts != 0 {
-        active.dying.insert(token, frames);
-    } else {
-        // 无核引用该页表，移除条目并直接释放帧
-        active.token_harts.remove(&token);
-        drop(frames);
-    }
+    let frames = {
+        let mut active = SATP_ACTIVE.exclusive_access();
+        let harts = active.token_harts.get(&token).copied().unwrap_or(0);
+        if harts != 0 {
+            active.dying.insert(token, frames);
+            None
+        } else {
+            // 无核引用该页表，移除条目并直接释放帧
+            active.token_harts.remove(&token);
+            Some(frames)
+        }
+    };
+    // 帧在这里释放
 }

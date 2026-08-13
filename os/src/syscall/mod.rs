@@ -17,7 +17,7 @@ const EPOLL_CTL_MOD: i32 = 3;
 const SYSCALL_EVENTFD2: usize = 19;
 const SYSCALL_EPOLL_CREATE1: usize = 20;
 const SYSCALL_EPOLL_CTL: usize = 21;
-const SYSCALL_EPOLL_WAIT: usize = 22;
+const SYSCALL_EPOLL_PWAIT: usize = 22;
 const SYSCALL_DUP: usize = 23;
 /// dup2 syscall
 const SYSCALL_DUP3: usize = 24;
@@ -38,6 +38,7 @@ const SYSCALL_CHROOT: usize = 51;
 const SYSCALL_FCHMOD: usize = 52;
 const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_FCHOWNAT: usize = 54;
+const SYSCALL_FCHOWN: usize = 55;
 /// openat syscall
 const SYSCALL_OPENAT: usize = 56;
 /// close syscall
@@ -179,6 +180,7 @@ const SYSCALL_KEYCTL: usize = 219;
 /// clone syscall
 const SYSCALL_CLONE: usize = 220;
 const SYSCALL_CLONE3: usize = 435;
+const SYSCALL_EPOLL_PWAIT2: usize = 441;
 const SYSCALL_FACCESSAT2: usize = 439;
 /// exec syscall
 const SYSCALL_EXEC: usize = 221;
@@ -192,12 +194,15 @@ const SYSCALL_GET_MEMPOLICY: usize = 236;
 /// madvise syscall
 const SYSCALL_MADVISE: usize = 233;
 const SYSCALL_FSYNC: usize = 82;
+const SYSCALL_FDATASYNC: usize = 83;
 /// waitpid syscall
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_CLOCK_ADJTIME: usize = 266;
 #[cfg(target_arch = "riscv64")]
 const SYSCALL_RISCV_HWPROBE: usize = 258;
+#[cfg(target_arch = "riscv64")]
+const SYSCALL_RISCV_FLUSH_ICACHE: usize = 259;
 const SYSCALL_USERFAULTFD: usize = 282;
 const SYSCALL_MEMBARRIER: usize = 283;
 /// statx syscall
@@ -249,7 +254,7 @@ use alloc::string::String;
 use crate::net::MsgHdr;
 
 use crate::get_hart_id;
-use crate::mm::try_translated_str;
+use crate::mm::{try_translated_str, MemorySet};
 use crate::syscall::net::*;
 
 use crate::{fs::Stat, task::{SignalAction, current_task}};
@@ -290,8 +295,8 @@ pub(crate) fn normalize_leading_dot_path(path: String) -> String {
 }
 
 
-pub fn translate_path(token: usize, path: *const u8) -> Result<String, Errno> {
-    let str = try_translated_str(token, path);
+pub fn translate_path(mm: &MemorySet, path: *const u8) -> Result<String, Errno> {
+    let str = try_translated_str(mm, path);
     if let Some(s) = str {
         if s.len() > PATH_MAX_LEN {
             return Err(Errno::ENAMETOOLONG);
@@ -337,7 +342,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         let inner = process.inner_exclusive_access();
         inner.info_map_areas();
     }*/
-    warn!("[K] hart[{}] PID{} , called syscall {}", get_hart_id(), current_task().unwrap().pid.0, syscall_id);
+    trace!("[K] hart[{}] PID{} , called syscall {}", get_hart_id(), current_task().unwrap().pid.0, syscall_id);
     //warn!("[K] syscall args: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}", args[0], args[1], args[2], args[3], args[4], args[5]);
     info!("[K] hart[{}] PID{} , TID{} called syscall {}", get_hart_id(), current_task().unwrap().getpid(), current_task().unwrap().gettid(), syscall_id);
     let ret =match syscall_id {
@@ -352,7 +357,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_PIPE => sys_pipe(args[0] as *mut usize, args[1]),
         SYSCALL_LINKAT => sys_linkat(args[1] as *const u8, args[3] as *const u8),
         SYSCALL_FCHMOD => sys_fchmod(args[0], args[1] as u32),
-        // SYSCALL_FCHOWN => sys_fchown(args[0], args[1] as u32, args[2] as u32),
+        SYSCALL_FCHOWN => sys_fchown(args[0], args[1] as u32, args[2] as u32),
         SYSCALL_UNLINKAT => sys_unlinkat(args[0] as isize, args[1] as *const u8, args[2] as usize),
         SYSCALL_READ => sys_read(args[0], args[1] as *const u8, args[2]),
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
@@ -428,7 +433,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_EVENTFD2 => sys_eventfd2(args[0] as u32, args[1] as i32),
         SYSCALL_EPOLL_CREATE1 => sys_epoll_create1(args[0] as i32),
         SYSCALL_EPOLL_CTL => sys_epoll_ctl(args[0], args[1] as i32, args[2], args[3]),
-        SYSCALL_EPOLL_WAIT => sys_epoll_wait(args[0], args[1], args[2] as i32, args[3] as i32),
+        SYSCALL_EPOLL_PWAIT => sys_epoll_pwait(
+            args[0],
+            args[1],
+            args[2] as i32,
+            args[3] as i32,
+            args[4],
+            args[5],
+        ),
         SYSCALL_BIND => sys_bind(args[0], args[1]as *const u8, args[2]),
         SYSCALL_LISTEN => sys_listen(args[0], args[1] as i32),
         SYSCALL_SOCKET => sys_socket(args[0], args[1], args[2]),
@@ -445,9 +457,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RENAMEAT2 => sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], args[4]),
         SYSCALL_UTIMENSAT => sys_utimensat(args[0] as i32, args[1], args[2], args[3]),
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
-        SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
+        SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_CLONE3 => sys_clone3(args[0] as *const CloneArgs, args[1]),
+        SYSCALL_EPOLL_PWAIT2 => sys_epoll_pwait2(
+            args[0],
+            args[1],
+            args[2] as i32,
+            args[3],
+            args[4],
+            args[5],
+        ),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize, args[2] as *const usize),
         SYSCALL_WAITID => sys_waitid(args[0] as i32, args[1] as i32, args[2] as *mut SigInfo, args[3] as i32),
         SYSCALL_WAIT4  => sys_wait4(args[0] as i32, args[1] as *mut i32, args[2]),//注意：为了跑通脚本，暂时将waitpid和wait4合并了
@@ -474,6 +494,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETPEERNAME => sys_getpeername(args[0], args[1] as *mut u8, args[2] as *mut u32),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2] as u32),
         SYSCALL_FSYNC => sys_fsync(args[0]),
+        SYSCALL_FDATASYNC => sys_fdatasync(args[0]),
         SYSCALL_SYNC => sys_sync(),
         SYSCALL_ADD_KEY => sys_add_key(args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3], args[4] as i32),
         SYSCALL_REQUEST_KEY => sys_request_key(args[0] as *const u8, args[1] as *const u8, args[2] as *const u8, args[3] as i32),
@@ -516,6 +537,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_CLOCK_ADJTIME => sys_clock_adjtime(args[0] as i32, args[1] as *mut Timex),
         #[cfg(target_arch = "riscv64")]
         SYSCALL_RISCV_HWPROBE => sys_riscv_hwprobe(args[0] as *mut RiscvHwprobe, args[1], args[2], args[3] as *const u8, args[4] as u32),
+        #[cfg(target_arch = "riscv64")]
+        SYSCALL_RISCV_FLUSH_ICACHE => {
+            sys_riscv_flush_icache(args[0], args[1], args[2])
+        }
         SYSCALL_CLOCK_SETTIME => sys_clock_settime(args[0] as i32, args[1] as *const TimeSpec),
         SYSCALL_FUTEX => sys_futex(args[0] as *mut i32, args[1] as i32, args[2] as i32, args[3] as *const TimeSpec, args[4] as *mut i32, args[5] as i32),
         SYSCALL_GETRESGID => sys_getresgid(args[0] as *mut u32, args[1] as *mut u32, args[2] as *mut u32),
@@ -544,10 +569,21 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SCHED_SETAFFINITY => sys_sched_setaffinity(args[0] as isize, args[1], args[2] as *const u8),
         SYSCALL_MLOCK => sys_mlock(args[0], args[1]),
         _ => {
-            println!(
-                "[UNIMPLEMENTED SYSCALL] ID: {:3}", 
-                syscall_id
-            );
+            if let Some(task) = current_task() {
+                let comm = task.inner_exclusive_access().comm;
+                let end = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
+                let comm = core::str::from_utf8(&comm[..end]).unwrap_or("?");
+                println!(
+                    "[UNIMPLEMENTED SYSCALL] ID: {:3} pid={} tid={} comm={} args=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
+                    syscall_id,
+                    task.getpid(),
+                    task.gettid(),
+                    comm,
+                    args[0], args[1], args[2], args[3], args[4], args[5]
+                );
+            } else {
+                println!("[UNIMPLEMENTED SYSCALL] ID: {:3} no-current-task", syscall_id);
+            }
             Errno::ENOSYS.as_isize()
         }
     };
@@ -582,7 +618,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             "[Syscall Trace] ID: {:3} | Args: [0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}] | Ret: {}", 
             syscall_id, args[0], args[1], args[2], args[3], args[4], ret
         );*/
-    warn!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
+    trace!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
     info!("[K] hart[{}] PID{} finished syscall {} with return value {:x}", get_hart_id(), current_task().unwrap().getpid(), syscall_id, ret);
+    if ret == Errno::EFAULT.as_isize() {
+        // println!("[K] hart[{}] PID{} syscall {} returned EFAULT", get_hart_id(), current_task().unwrap().getpid(), syscall_id);
+    }
     ret
 }

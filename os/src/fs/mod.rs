@@ -36,6 +36,7 @@ pub use epoll::{EpollFile, EpollEvent};
 use crate::syscall::fs::Statfs;
 use crate::auth::{FileMode, PermSet, PermStat};
 use crate::mm::PhysPageNum;
+use crate::sync::{MPSafeCell, WaitQueue};
 
 /// trait File for all file types
 pub trait File: Send + Sync {
@@ -61,6 +62,19 @@ pub trait File: Send + Sync {
     /// 带页缓存的读取。默认直接调用 raw_read_at。
     fn read_at(&self, offset: usize, buf: UserBuffer) -> usize {
         self.raw_read_at(offset, buf)
+    }
+    /// Read into a kernel-owned byte slice.  Executable loading only needs a
+    /// small ELF header/program-header buffer and must not allocate user pages
+    /// merely to inspect it.
+    fn read_kernel_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        // The default path deliberately bypasses the user-page translation
+        // layer.  Concrete regular files can still override this to use their
+        // page cache (OSInode does); devices and pipes retain their existing
+        // raw-read semantics.
+        if buf.is_empty() {
+            return 0;
+        }
+        self.raw_read_at(offset, unsafe { UserBuffer::from_kernel_slice(buf) })
     }
     /// 带页缓存的写入。默认直接调用 raw_write_at。
     fn write_at(&self, offset: usize, buf: UserBuffer) -> usize {
@@ -90,12 +104,32 @@ pub trait File: Send + Sync {
     fn set_flags(&self, _flags: OpenFlags) -> bool {
         false // 默认不支持修改
     }
+    /// 主要供管道使用，是否可以读取数据
     fn ready_to_read(&self) -> bool {
-        self.readable()
+        self.readable() // 默认实现为权限可读
     }
-    /// Is there space available to write right now?
+    /// 主要供管道使用，是否可以写入数据
     fn ready_to_write(&self) -> bool {
-        self.writable()
+        self.writable() // 默认实现为权限可写
+    }
+    /// Exceptional readiness reported by poll-family interfaces.  HUP/ERR
+    /// are delivered even when the caller did not include them in events.
+    fn poll_hangup(&self) -> bool {
+        false
+    }
+    fn poll_error(&self) -> bool {
+        false
+    }
+    /// Queue that poll/epoll waiters can sleep on until this file's readiness
+    /// may have changed.  Regular files are always ready in this kernel and
+    /// therefore do not need one.
+    fn poll_wait_queue(&self) -> Option<Arc<MPSafeCell<WaitQueue>>> {
+        None
+    }
+    /// Files with separate read/write state queues can override this to wait
+    /// on only the state transitions requested by the caller.
+    fn poll_wait_queues(&self, _interests: u32) -> alloc::vec::Vec<Arc<MPSafeCell<WaitQueue>>> {
+        self.poll_wait_queue().into_iter().collect()
     }
     /// 检查读错误
     /// 
@@ -127,8 +161,14 @@ pub trait File: Send + Sync {
         error!("File type does not support shared pages: page_offset={}", page_offset);
         None
     }
+    /// Look up a file page without allocating a block for a sparse hole.
+    /// This is used by executable MAP_PRIVATE mappings; ordinary MAP_SHARED
+    /// writes continue to use `get_shared_page`, which may allocate on write.
+    fn get_file_page(&self, _page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
+        None
+    }
     /// ioctl 设备控制，默认返回 ENOTTY（不支持的 ioctl 请求）
-    fn ioctl(&self, _request: u32, _argp: usize, _token: usize) -> isize {
+    fn ioctl(&self, _request: u32, _argp: usize, _mm: &crate::mm::MemorySet) -> isize {
         Errno::ENOTTY.as_isize()
     }
     fn is_socket(&self) -> bool {
@@ -212,6 +252,44 @@ pub struct StatxTimestamp {
     pub tv_nsec: u32,
     pub __reserved: i32,
 }
+
+/// POSIX 文件记录锁（fcntl F_SETLK/F_SETLKW/F_GETLK 使用）
+#[derive(Debug, Clone, Copy)]
+pub struct FileLock {
+    /// 锁持有者（POSIX 锁按进程归并）
+    pub owner_pid: usize,
+    /// 0 = F_RDLCK, 1 = F_WRLCK, 2 = F_UNLCK
+    pub lock_type: i16,
+    /// 锁区间起点（绝对偏移）
+    pub start: i64,
+    /// 锁区间长度；0 表示锁到文件末尾
+    pub len: i64,
+    /// true 表示来自 flock()（与 fd 绑定，仅整个文件锁）
+    pub is_flock: bool,
+}
+
+impl FileLock {
+    pub fn end(&self) -> i64 {
+        if self.len == 0 {
+            i64::MAX
+        } else {
+            self.start.saturating_add(self.len)
+        }
+    }
+}
+
+/// 判断两个区间是否重叠（len==0 表示延伸到 EOF）
+pub fn lock_ranges_overlap(a_start: i64, a_len: i64, b_start: i64, b_len: i64) -> bool {
+    let a_end = if a_len == 0 { i64::MAX } else { a_start.saturating_add(a_len) };
+    let b_end = if b_len == 0 { i64::MAX } else { b_start.saturating_add(b_len) };
+    a_start < b_end && b_start < a_end
+}
+
+/// 读锁与读锁不冲突，其余情况（含写锁）冲突
+pub fn file_locks_conflict(a: &FileLock, b_type: i16, b_start: i64, b_len: i64) -> bool {
+    (a.lock_type == 1 || b_type == 1) && lock_ranges_overlap(a.start, a.len, b_start, b_len)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RenameError {
     NotFound,
@@ -223,6 +301,18 @@ pub enum RenameError {
     Invalid,
     Io,
 }
+
+/// Result of resolving a single name in a filesystem directory.
+///
+/// `find` predates error reporting and therefore still exposes `Option` to
+/// existing callers.  Dentry caching needs the distinction, however: only a
+/// definitive `Missing` result is safe to retain as a negative dentry.
+pub enum LookupOutcome {
+    Found(Arc<dyn VfsInode>),
+    Missing,
+    Failed,
+}
+
 pub const UTIME_NOW: usize = 0x3fffffff;
 pub const UTIME_OMIT: usize = 0x3ffffffe;
 pub trait VfsInode: Send + Sync {
@@ -255,13 +345,42 @@ pub trait VfsInode: Send + Sync {
     fn get_stat(&self) -> Stat;
     fn get_statx(&self) -> Statx;
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>>;
+    /// Whether `Dentry` may cache positive and negative name lookup results
+    /// for this directory. Dynamic directories such as `/proc` must opt out.
+    fn cache_lookup_results(&self) -> bool {
+        true
+    }
+    /// A status-preserving form of `find` for Dentry lookup. Filesystems that
+    /// can distinguish an absent entry from an I/O or parsing failure should
+    /// override this; the default keeps legacy in-memory implementations
+    /// source-compatible.
+    fn find_with_outcome(&self, name: &str) -> LookupOutcome {
+        match self.find(name) {
+            Some(inode) => LookupOutcome::Found(inode),
+            None => LookupOutcome::Missing,
+        }
+    }
     fn create_file(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
     fn create_dir(&self, name: &str, mode: u32) -> Option<Arc<dyn VfsInode>>;
+    /// Remove `name` and return the inode number that was actually unlinked.
+    ///
+    /// Callers use this to verify that a lookup and deletion stayed bound to
+    /// the same object while holding the parent namespace lock.
     fn delete_dir_entry(&self, name: &str) -> Option<u32>;
     // 用于unlink时调整链接数
     fn dec_link_count(&self) -> bool {
         false
     }
+    /// Return whether a directory contains no entries other than `.` and
+    /// `..`. Filesystems which cannot provide a reliable answer retain the
+    /// legacy permissive behaviour; on-disk filesystems should override this
+    /// before accepting rmdir.
+    fn directory_is_empty(&self) -> bool {
+        true
+    }
+    /// Perform filesystem-specific accounting after a directory has been
+    /// unlinked. The VFS has already adjusted link counts at this point.
+    fn directory_unlinked(&self) {}
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize;
     fn rename_dir_entry(
         &self,
@@ -336,6 +455,11 @@ pub trait VfsInode: Send + Sync {
     }
     fn get_shared_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         error!("VFS inode does not provide a physical block for page {}", page_offset);
+        None
+    }
+    /// Read-only page-cache lookup.  Unlike `get_shared_page`, this must not
+    /// allocate a physical file block when the requested page is a hole.
+    fn get_file_page(&self, _page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         None
     }
     /// 返回该 inode 的唯一标识号（跨所有文件系统唯一）

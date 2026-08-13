@@ -53,6 +53,23 @@ fn parse_shebang(data: &[u8]) -> Result<Option<(String, Option<String>)>, isize>
 	)))
 }
 
+/// Only the first line is relevant for script dispatch.  Keep this separate
+/// from ELF loading so exec never needs a whole-file staging buffer.
+fn read_exec_prefix(file: &dyn File, limit: usize) -> Vec<u8> {
+    let size = usize::try_from(file.get_stat().size).unwrap_or(0);
+    let mut data = vec![0; size.min(limit)];
+    let mut offset = 0;
+    while offset < data.len() {
+        let read = file.read_kernel_at(offset, &mut data[offset..]);
+        if read == 0 || read > data.len() - offset {
+            break;
+        }
+        offset += read;
+    }
+    data.truncate(offset);
+    data
+}
+
 
 impl TaskStruct {
 	pub fn do_exec(
@@ -127,6 +144,7 @@ impl TaskStruct {
 			return Self::exec_open_error(cwd, path.as_str());
 		};
 		let mut executable_path = app_inode.get_dentry().get_full_path();
+		let mut executable_file: Arc<dyn File + Send + Sync> = app_inode.clone();
 		{
 				let stat = app_inode.inode().get_stat();
 			let is_dir = (stat.mode & 0o170000) == 0o040000;
@@ -139,8 +157,8 @@ impl TaskStruct {
 
 			debug!("[kernel] sys_exec: after open_file, size={}", app_inode.inode().get_size());
         let app_name = app_inode.get_dentry().name();
-		let mut elf_data = app_inode.read_all();
-		let shebang = match parse_shebang(&elf_data) {
+		let mut executable_prefix = read_exec_prefix(app_inode.as_ref(), 256);
+		let shebang = match parse_shebang(&executable_prefix) {
 			Ok(shebang) => shebang,
 			Err(error) => return error,
 		};
@@ -172,29 +190,33 @@ impl TaskStruct {
 			new_args.push(path.clone());
 			new_args.extend(args.into_iter().skip(1));
 			args = new_args;
-			elf_data = inode.read_all();
-			if elf_data.len() < 4 || &elf_data[0..4] != b"\x7fELF" {
+			let interpreter_prefix = read_exec_prefix(inode.as_ref(), 4);
+			if interpreter_prefix.len() < 4 || &interpreter_prefix[0..4] != b"\x7fELF" {
 				warn!("[kernel] sys_exec: script interpreter '{}' is not an ELF executable", interpreter);
 				return Errno::ENOEXEC.as_isize();
 			}
+			executable_file = inode;
+			executable_prefix = interpreter_prefix;
 			let inner = self.inner_exclusive_access();
 			info!("[kernel] sys_exec: interpreter detour success. Current process PID: {}, basic children count: {}", self.getpid(), inner.children.len());
 		}
 
-		if elf_data.len() < 4 || &elf_data[0..4] != b"\x7fELF" {
+		if executable_prefix.len() < 4 || &executable_prefix[0..4] != b"\x7fELF" {
 			return Errno::ENOEXEC.as_isize();
 		}
 		for (index, arg) in args.iter().enumerate() {
 			info!("[kernel] sys_exec: arg[{}] = '{}'", index, arg);
 		}
-		self.install_exec_image(
+		if let Err(error) = self.install_exec_image(
 			self.clone(),
-			elf_data.as_slice(),
+			executable_file,
 			args,
 			envs,
 			executable_path,
 			false,
-		);
+		) {
+			return error;
+		}
 		#[cfg(target_arch = "loongarch64")]
 		unsafe {
 			core::arch::asm!("ibar 0");
@@ -259,12 +281,12 @@ impl TaskStruct {
 	fn install_exec_image(
 		self: &Arc<Self>,
 		caller_task: Arc<TaskControlBlock>,
-		elf_data: &[u8],
+		elf_file: Arc<dyn File + Send + Sync>,
 		args: Vec<String>,
 		envs: Vec<String>,
 		executable_path: String,
 		on_main_hart: bool,
-	) {
+	) -> Result<(), isize> {
 
 		const AT_BASE: usize = 7;
 		const AT_PHDR: usize = 3;
@@ -277,7 +299,7 @@ impl TaskStruct {
 		fn prepare_stack_pages(memory_set: &mut MemorySet, start: usize, end: usize) {
 			let mut page = start / PAGE_SIZE * PAGE_SIZE;
 			while page < end {
-				memory_set.handle_page_fault(page, end);
+				memory_set.handle_page_fault(page);
 				page += PAGE_SIZE;
 			}
 		}
@@ -286,7 +308,7 @@ impl TaskStruct {
 		// guard 会在函数返回时自动释放
 		let exec_guard: ExecUpdateGuard = match caller_task.wait_exec_update_lock() {
 			Ok(guard) => guard,
-			Err(()) => return,
+			Err(()) => return Err(Errno::EINTR.as_isize()),
 		};
 
 		let cwd = self.inner_exclusive_access().fs.exclusive_access().get_pwd();
@@ -301,13 +323,14 @@ impl TaskStruct {
 			phnum,
 			phent,
 			interp_base,
-		)) = MemorySet::from_elf_with_interp_loader(elf_data, |interp_path| {
+		)) = MemorySet::from_elf_file_with_interp_loader(elf_file, |interp_path| {
 			open_file(cwd.clone(), interp_path, OpenFlags::RDONLY, 0).map(|inode| {
 				has_interp = true;
-				inode.read_all()
+				let file: Arc<dyn File + Send + Sync> = inode;
+				file
 			})
 		}) else {
-			return;
+			return Err(Errno::ENOEXEC.as_isize());
 		};
 
 		#[cfg(target_arch = "riscv64")]
@@ -322,7 +345,6 @@ impl TaskStruct {
 			(inner.thread.trap_ctx, inner.thread.trap_ctx)
 		};
 
-		let token = memory_set.token();
 		let mut argv_ptrs = Vec::with_capacity(args.len());
 		let arg_size = args.iter().map(|arg| arg.len() + 1).sum::<usize>();
 		if arg_size != 0 {
@@ -331,9 +353,9 @@ impl TaskStruct {
 		for arg in &args {
 			user_sp -= arg.len() + 1;
 			for (offset, byte) in arg.as_bytes().iter().enumerate() {
-				translated_write(token, (user_sp + offset) as *mut u8, *byte);
+				translated_write(&memory_set, (user_sp + offset) as *mut u8, *byte);
 			}
-			translated_write(token, (user_sp + arg.len()) as *mut u8, 0);
+			translated_write(&memory_set, (user_sp + arg.len()) as *mut u8, 0);
 			argv_ptrs.push(user_sp);
 		}
 
@@ -345,9 +367,9 @@ impl TaskStruct {
 		for env in &envs {
 			user_sp -= env.len() + 1;
 			for (offset, byte) in env.as_bytes().iter().enumerate() {
-				translated_write(token, (user_sp + offset) as *mut u8, *byte);
+				translated_write(&memory_set, (user_sp + offset) as *mut u8, *byte);
 			}
-			translated_write(token, (user_sp + env.len()) as *mut u8, 0);
+			translated_write(&memory_set, (user_sp + env.len()) as *mut u8, 0);
 			envp_ptrs.push(user_sp);
 		}
 
@@ -355,7 +377,7 @@ impl TaskStruct {
 		prepare_stack_pages(&mut memory_set, user_sp, user_sp + 16);
 		let random_at = user_sp;
 		for offset in 0..16 {
-			translated_write(token, (random_at + offset) as *mut u8, 0x23);
+			translated_write(&memory_set, (random_at + offset) as *mut u8, 0x23);
 		}
 		user_sp -= user_sp % core::mem::size_of::<usize>();
 
@@ -385,32 +407,32 @@ impl TaskStruct {
 
 		for (id, value) in auxv.iter().rev() {
 			user_sp -= word_size;
-			translated_write(token, user_sp as *mut usize, *value);
+			translated_write(&memory_set, user_sp as *mut usize, *value);
 			user_sp -= word_size;
-			translated_write(token, user_sp as *mut usize, *id);
+			translated_write(&memory_set, user_sp as *mut usize, *id);
 		}
 
 		user_sp -= word_size;
-		translated_write(token, user_sp as *mut usize, 0usize);
+		translated_write(&memory_set, user_sp as *mut usize, 0usize);
 		for env_ptr in envp_ptrs.iter().rev() {
 			user_sp -= word_size;
-			translated_write(token, user_sp as *mut usize, *env_ptr);
+			translated_write(&memory_set, user_sp as *mut usize, *env_ptr);
 		}
 
 		user_sp -= word_size;
-		translated_write(token, user_sp as *mut usize, 0usize);
+		translated_write(&memory_set, user_sp as *mut usize, 0usize);
 		for arg_ptr in argv_ptrs.iter().rev() {
 			user_sp -= word_size;
-			translated_write(token, user_sp as *mut usize, *arg_ptr);
+			translated_write(&memory_set, user_sp as *mut usize, *arg_ptr);
 		}
 		let argv_base = user_sp;
 		user_sp -= word_size;
-		translated_write(token, user_sp as *mut usize, args.len());
+		translated_write(&memory_set, user_sp as *mut usize, args.len());
 
 		let mut trap_cx = TrapContext::app_init_context(
 			final_entry_point,
 			user_sp,
-			KERNEL_SPACE.exclusive_access().token(),
+			KERNEL_SPACE.token(),
 			kernel_stack_top,
 			trap_handler as *const () as usize,
 		);
@@ -447,7 +469,7 @@ impl TaskStruct {
 		for sibling in siblings {
 			while tid2task(sibling.gettid()).is_some() {
 				if crate::process::signal::has_pending_sigkill(&caller_task) {
-					return;
+					return Err(Errno::EINTR.as_isize());
 				}
 				crate::process::suspend_current_and_run_next();
 			}
@@ -458,17 +480,17 @@ impl TaskStruct {
 			// 在一个临界区内清空 mm/signal 前再次检查 SIGKILL，
 			// 避免信号被吞掉。
 			if inner_has_pending_sigkill(&inner) {
-				return;
+				return Err(Errno::EINTR.as_isize());
 			}
 			#[cfg(target_arch = "riscv64")]
 			if let Some(old_mm) = inner.mm.as_ref() {
-				old_mm.exclusive_access().flush_tlb_targets();
+				old_mm.flush_tlb_targets();
 			}
 			#[cfg(target_arch = "riscv64")]
 			crate::mm::switch_mm(memory_set.token());
 			let old_signal = inner.signal.clone();
 			inner.thread.trap_ctx = trap_cx_addr;
-			inner.mm = Some(Arc::new(MPSafeCell::new(memory_set)));
+			inner.mm = Some(Arc::new(memory_set));
 			inner.on_main_hart = on_main_hart;
 			inner.exe_path = executable_path;
 			inner.signal = Arc::new(MPSafeCell::new(Signal::fork_from(
@@ -508,5 +530,6 @@ impl TaskStruct {
 		if let Some(completion) = vfork_completion {
 			completion.complete();
 		}
+		Ok(())
 	}
 }

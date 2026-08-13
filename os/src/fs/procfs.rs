@@ -7,9 +7,11 @@ use crate::mm::get_free_frames;
 use crate::syscall::fs::Statfs;
 use alloc::format;
 use crate::mm::MapPermission;
-use crate::fs::DirEntry;
 use crate::process::TaskStatus;
 use crate::fs::ino::get_next_ino;
+use crate::syscall::errno::Errno;
+
+const USIZE_DECIMAL_LEN: usize = core::mem::size_of::<usize>() * 3;
 
 fn get_task(pid: usize) -> Option<Arc<crate::task::TaskStruct>> {
     crate::process::registry::TID2TCB
@@ -34,7 +36,28 @@ fn list_process_ids() -> alloc::vec::Vec<usize> {
         .collect::<alloc::vec::Vec<_>>();
     pids.sort_unstable();
     pids.dedup();
+    // Directory names are sorted lexicographically, not numerically.  Keep
+    // only PID values in the snapshot and compare their decimal names using
+    // stack storage rather than allocating one String per PID.
+    pids.sort_unstable_by(|left, right| {
+        let mut left_buf = [0u8; USIZE_DECIMAL_LEN];
+        let mut right_buf = [0u8; USIZE_DECIMAL_LEN];
+        pid_name(*left, &mut left_buf).cmp(pid_name(*right, &mut right_buf))
+    });
     pids
+}
+
+fn pid_name(pid: usize, buf: &mut [u8; USIZE_DECIMAL_LEN]) -> &[u8] {
+    let mut value = pid;
+    let mut start = buf.len();
+    loop {
+        start -= 1;
+        buf[start] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            return &buf[start..];
+        }
+    }
 }
 
 fn dirent_type_from_mode(mode: u32) -> u8 {
@@ -46,30 +69,53 @@ fn dirent_type_from_mode(mode: u32) -> u8 {
     }
 }
 
-fn write_dirents(offset: &mut usize, buf: &mut [u8], entries: &[(String, u32, u8)]) -> isize {
+fn write_dirent(
+    buf: &mut [u8],
+    buf_offset: usize,
+    entry_offset: usize,
+    name: &[u8],
+    ino: u32,
+    d_type: u8,
+) -> Option<usize> {
+    let name_len = name.len().min(255);
+    let reclen = (8 + 8 + 2 + 1 + name_len + 1 + 7) & !7;
+    let end = buf_offset.checked_add(reclen)?;
+    if end > buf.len() {
+        return None;
+    }
+
+    buf[buf_offset..buf_offset + 8].copy_from_slice(&(ino as u64).to_ne_bytes());
+    buf[buf_offset + 8..buf_offset + 16]
+        .copy_from_slice(&((entry_offset + 1) as i64).to_ne_bytes());
+    buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(reclen as u16).to_ne_bytes());
+    buf[buf_offset + 18] = d_type;
+    buf[buf_offset + 19..buf_offset + 19 + name_len].copy_from_slice(&name[..name_len]);
+    buf[buf_offset + 19 + name_len..end].fill(0);
+    Some(end)
+}
+
+fn write_dirents(offset: &mut usize, buf: &mut [u8], entries: &[(&str, u32, u8)]) -> isize {
     let mut buf_offset = 0usize;
     while *offset < entries.len() {
         let (name, ino, d_type) = &entries[*offset];
-        let mut dirent = DirEntry::new(name.clone(), *ino, *d_type);
-        let reclen = dirent.d_reclen as usize;
-        if buf_offset + reclen > buf.len() {
+        let Some(next_buf_offset) = write_dirent(
+            buf,
+            buf_offset,
+            *offset,
+            name.as_bytes(),
+            *ino,
+            *d_type,
+        ) else {
             break;
-        }
-        dirent.d_off = (*offset + 1) as i64;
-        buf[buf_offset..buf_offset + 8].copy_from_slice(&dirent.d_ino.to_ne_bytes());
-        buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&dirent.d_off.to_ne_bytes());
-        buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&dirent.d_reclen.to_ne_bytes());
-        buf[buf_offset + 18] = dirent.d_type;
-        let name_len = name.len().min(255);
-        buf[buf_offset + 19..buf_offset + 19 + name_len]
-            .copy_from_slice(&dirent.d_name[..name_len]);
-        for byte in &mut buf[buf_offset + 19 + name_len..buf_offset + reclen] {
-            *byte = 0;
-        }
-        buf_offset += reclen;
+        };
+        buf_offset = next_buf_offset;
         *offset += 1;
     }
-    buf_offset as isize
+    if buf_offset == 0 && *offset < entries.len() {
+        Errno::EINVAL.as_isize()
+    } else {
+        buf_offset as isize
+    }
 }
 
 fn proc_state_char(pid: usize) -> char {
@@ -78,9 +124,10 @@ fn proc_state_char(pid: usize) -> char {
     };
     let status = task.inner_exclusive_access().state;
     match status {
-        TaskStatus::Running => 'R',
+        TaskStatus::Running | TaskStatus::Ready => 'R',
+        TaskStatus::Blocked | TaskStatus::BlockSaving => 'S',
         TaskStatus::Zombie => 'Z',
-        TaskStatus::Ready | TaskStatus::Blocked | TaskStatus::BlockSaving | TaskStatus::UnInit => 'S',
+        TaskStatus::UnInit => 'S',
     }
 }
 
@@ -192,12 +239,12 @@ impl VfsInode for ProcPidDirInode {
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
         let entries = [
-            (String::from("exe"), (12000 + self.pid) as u32, 10u8),
-            (String::from("maps"), 8888u32, 8u8),
-            (String::from("ns"), 2u32, 4u8),
-            (String::from("oom_score_adj"), 998u32, 8u8),
-            (String::from("stat"), (11000 + self.pid) as u32, 8u8),
-            (String::from("status"), 999u32, 8u8),
+            ("exe", (12000 + self.pid) as u32, 10u8),
+            ("maps", 8888u32, 8u8),
+            ("ns", 2u32, 4u8),
+            ("oom_score_adj", 998u32, 8u8),
+            ("stat", (11000 + self.pid) as u32, 8u8),
+            ("status", 999u32, 8u8),
         ];
         write_dirents(offset, buf, &entries)
     }
@@ -212,18 +259,15 @@ impl ProcExeSymlinkInode {
     pub fn new(pid: usize) -> Self {
         Self { pid, ino: get_next_ino() }
     }
-
-    fn target(&self) -> String {
-        get_task(self.pid)
-            .map(|task| task.inner_exclusive_access().exe_path.clone())
-            .unwrap_or_default()
-    }
 }
 
 impl VfsInode for ProcExeSymlinkInode {
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        let target = self.target();
-        let data = target.as_bytes();
+        let Some(task) = get_task(self.pid) else {
+            return 0;
+        };
+        let inner = task.inner_exclusive_access();
+        let data = inner.exe_path.as_bytes();
         if offset >= data.len() {
             return 0;
         }
@@ -233,10 +277,16 @@ impl VfsInode for ProcExeSymlinkInode {
     }
 
     fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
-    fn get_size(&self) -> usize { self.target().len() }
+    fn get_size(&self) -> usize {
+        get_task(self.pid)
+            .map(|task| task.inner_exclusive_access().exe_path.len())
+            .unwrap_or_default()
+    }
     fn ino(&self) -> u64 { self.ino }
     fn get_stat(&self) -> Stat {
-        let size = self.target().len() as i64;
+        let size = get_task(self.pid)
+            .map(|task| task.inner_exclusive_access().exe_path.len() as i64)
+            .unwrap_or_default();
         Stat {
             dev: 0,
             ino: self.ino,
@@ -434,22 +484,23 @@ impl VfsInode for ProcMapsInode {
         if let Some(task) = get_task(self.pid) {
             let mm = task.inner_exclusive_access().mm.clone();
             if let Some(mm) = mm {
-                let memory = mm.exclusive_access();
-                for area in memory.areas.iter() {
-                let start_va: usize = area.vpn_range.get_start().start_addr();
-                let end_va: usize = area.vpn_range.get_end().start_addr();
-                
-                let perm = area.get_map_permission();
+                let areas = mm.areas.read();
+                for area_arc in areas.values() {
+                    let area = area_arc.read();
+                    let start_va: usize = area.vpn_range.get_start().start_addr();
+                    let end_va: usize = area.vpn_range.get_end().start_addr();
 
-                let r = if perm.contains(MapPermission::R) { 'r' } else { '-' };
-                let w = if perm.contains(MapPermission::W) { 'w' } else { '-' };
-                let x = if perm.contains(MapPermission::X) { 'x' } else { '-' };
-                let p = 'p';
-                let _ = write!(
-                    maps_str,
-                    "{:08x}-{:08x} {}{}{}{} 00000000 00:00 0\n",
-                    start_va, end_va, r, w, x, p
-                );
+                    let perm = area.get_map_permission();
+
+                    let r = if perm.contains(MapPermission::R) { 'r' } else { '-' };
+                    let w = if perm.contains(MapPermission::W) { 'w' } else { '-' };
+                    let x = if perm.contains(MapPermission::X) { 'x' } else { '-' };
+                    let p = 'p';
+                    let _ = write!(
+                        maps_str,
+                        "{:08x}-{:08x} {}{}{}{} 00000000 00:00 0\n",
+                        start_va, end_va, r, w, x, p
+                    );
                 }
             }
         }
@@ -513,6 +564,12 @@ impl VfsInode for ProcRootInode {
         None
     }
 
+    fn cache_lookup_results(&self) -> bool {
+        // Process IDs can appear and disappear without a Dentry namespace
+        // mutation, so both positive and negative results would go stale.
+        false
+    }
+
     fn raw_read_at(&self, _offset: usize, _buf: &mut [u8]) -> usize { 0 }
     fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
     fn get_size(&self) -> usize { 0 }
@@ -533,20 +590,81 @@ impl VfsInode for ProcRootInode {
     fn create_dir(&self, _name: &str, _mode: u32) -> Option<Arc<dyn VfsInode>> { None }
     fn delete_dir_entry(&self, _name: &str) -> Option<u32> { None }
     fn getdents(&self, offset: &mut usize, buf: &mut [u8]) -> isize {
-        let mut entries: alloc::vec::Vec<(String, u32, u8)> = self
-            .static_entries
-            .entries_snapshot()
-            .into_iter()
-            .map(|(name, inode)| {
-                let stat = inode.get_stat();
-                (name, stat.ino as u32, dirent_type_from_mode(stat.mode))
-            })
-            .collect();
-        for pid in list_process_ids() {
-            entries.push((pid.to_string(), (10000 + pid) as u32, 4u8));
-        }
-        entries.sort_by(|left, right| left.0.cmp(&right.0));
-        write_dirents(offset, buf, &entries)
+        let pids = list_process_ids();
+        self.static_entries.with_entries(|static_entries| {
+            let mut static_iter = static_entries.iter();
+            let mut static_entry = static_iter.next();
+            let mut pid_index = 0usize;
+            let mut entry_index = 0usize;
+            let mut buf_offset = 0usize;
+
+            while static_entry.is_some() || pid_index < pids.len() {
+                let mut pid_buf = [0u8; USIZE_DECIMAL_LEN];
+                let next_pid_name = pids
+                    .get(pid_index)
+                    .map(|pid| pid_name(*pid, &mut pid_buf));
+                let use_static = match (&static_entry, next_pid_name) {
+                    (Some((name, _)), Some(pid_name)) => name.as_bytes() <= pid_name,
+                    (Some(_), None) => true,
+                    (None, Some(_)) => false,
+                    (None, None) => break,
+                };
+
+                if entry_index < *offset {
+                    if use_static {
+                        static_entry = static_iter.next();
+                    } else {
+                        pid_index += 1;
+                    }
+                    entry_index += 1;
+                    continue;
+                }
+
+                let next_buf_offset = if use_static {
+                    let (name, inode) = static_entry.expect("static entry must be present");
+                    let stat = inode.get_stat();
+                    write_dirent(
+                        buf,
+                        buf_offset,
+                        entry_index,
+                        name.as_bytes(),
+                        stat.ino as u32,
+                        dirent_type_from_mode(stat.mode),
+                    )
+                } else {
+                    let pid = pids[pid_index];
+                    write_dirent(
+                        buf,
+                        buf_offset,
+                        entry_index,
+                        next_pid_name.expect("PID entry must be present"),
+                        (10000 + pid) as u32,
+                        4,
+                    )
+                };
+                let Some(next_buf_offset) = next_buf_offset else {
+                    break;
+                };
+
+                buf_offset = next_buf_offset;
+                entry_index += 1;
+                *offset = entry_index;
+                if use_static {
+                    static_entry = static_iter.next();
+                } else {
+                    pid_index += 1;
+                }
+            }
+
+            if buf_offset == 0
+                && entry_index == *offset
+                && (static_entry.is_some() || pid_index < pids.len())
+            {
+                Errno::EINVAL.as_isize()
+            } else {
+                buf_offset as isize
+            }
+        })
     }
     
     fn statfs(&self) -> Statfs {
@@ -681,14 +799,9 @@ impl ProcSelfSymlinkInode {
 
 impl VfsInode for ProcSelfSymlinkInode {
     fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
- 
-        let current_task = crate::task::current_task().unwrap();
-        let pid = current_task.getpid();
-        
-
-        let target = pid.to_string();
-        let data = target.as_bytes();
-
+        let pid = crate::task::current_task().unwrap().getpid();
+        let mut target_buf = [0u8; USIZE_DECIMAL_LEN];
+        let data = pid_name(pid, &mut target_buf);
 
         if offset >= data.len() {
             return 0;
@@ -699,9 +812,9 @@ impl VfsInode for ProcSelfSymlinkInode {
     }
 
     fn get_stat(&self) -> Stat {
-
         let pid = crate::task::current_task().unwrap().getpid();
-        let target_len = pid.to_string().len();
+        let mut target_buf = [0u8; USIZE_DECIMAL_LEN];
+        let target_len = pid_name(pid, &mut target_buf).len();
 
         Stat {
             dev: 0,
@@ -727,7 +840,11 @@ impl VfsInode for ProcSelfSymlinkInode {
     }
 
     fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
-    fn get_size(&self) -> usize { 0 }
+    fn get_size(&self) -> usize {
+        let pid = crate::task::current_task().unwrap().getpid();
+        let mut target_buf = [0u8; USIZE_DECIMAL_LEN];
+        pid_name(pid, &mut target_buf).len()
+    }
     fn ino(&self) -> u64 { self.ino }
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
     impl_default_statx!();
@@ -915,6 +1032,68 @@ impl VfsInode for MemInfoInode {
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
 
+/// `/proc/uptime` exports time elapsed since boot from the monotonic clock.
+pub struct UptimeInode {
+    ino: u64,
+}
+
+impl UptimeInode {
+    pub fn new() -> Self {
+        Self { ino: get_next_ino() }
+    }
+}
+
+impl VfsInode for UptimeInode {
+    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        // Use the same clock as CLOCK_MONOTONIC, not the adjustable realtime clock.
+        let centiseconds = crate::timer::get_time_us() / 10_000;
+        let seconds = centiseconds / 100;
+        let fraction = centiseconds % 100;
+        let mut local_buf = [0u8; 32];
+        let mut writer = StackBuffer { buf: &mut local_buf, len: 0 };
+        let _ = write!(writer, "{}.{:02} 0.00\n", seconds, fraction);
+        let output = &writer.buf[..writer.len];
+
+        if offset >= output.len() {
+            return 0;
+        }
+
+        let read_len = core::cmp::min(buf.len(), output.len() - offset);
+        buf[..read_len].copy_from_slice(&output[offset..offset + read_len]);
+        read_len
+    }
+
+    fn raw_write_at(&self, _offset: usize, _buf: &[u8]) -> usize { 0 }
+    fn get_size(&self) -> usize { 0 }
+    fn ino(&self) -> u64 { self.ino }
+    fn get_stat(&self) -> Stat {
+        Stat {
+            dev: 0,
+            ino: self.ino,
+            mode: 0o100444,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            __pad: 0,
+            size: 0,
+            blksize: 512,
+            __pad2: 0,
+            blocks: 0,
+            atime_sec: 0,
+            atime_nsec: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            __unused: [0; 2],
+        }
+    }
+    impl_default_statx!();
+    impl_unsupported_ops!(-1);
+    fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> { None }
+}
+
 pub struct MountsInode {
     ino: u64,
 }
@@ -1041,6 +1220,7 @@ pub fn mount_procfs() {
     sys_dir.insert(String::from("kernel"), kernel_dir);
     proc_root.insert_static(String::from("sys"), sys_dir);
     proc_root.insert_static(String::from("meminfo"), Arc::new(MemInfoInode::new()));
+    proc_root.insert_static(String::from("uptime"), Arc::new(UptimeInode::new()));
     proc_root.insert_static(String::from("mounts"), Arc::new(MountsInode::new()));
     proc_root.insert_static(String::from("cgroups"), Arc::new(CgroupsInode::new()));
     let self_dentry = Arc::new(TmpfsDirInode::new(0o777));
@@ -1055,5 +1235,5 @@ pub fn mount_procfs() {
     ROOT_DENTRY.mount_child(String::from("proc"), proc_root);
    
     
-    info!("[VFS] /proc/meminfo, mounts, and /proc/self/maps mounted successfully!");
+    info!("[VFS] /proc/meminfo, uptime, mounts, and /proc/self/maps mounted successfully!");
 }

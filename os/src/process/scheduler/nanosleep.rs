@@ -7,7 +7,7 @@ use crate::process::{TaskContext, TaskControlBlock, TaskStatus};
 use crate::process::scheduler::processor::{current_task, schedule};
 use crate::process::scheduler::runqueue::wake_up_task;
 use crate::sync::MPSafeCell;
-use alloc::{collections::BinaryHeap, sync::Arc};
+use alloc::{collections::BinaryHeap, sync::Arc, vec::Vec};
 use lazy_static::*;
 
 struct SleepEntry {
@@ -67,12 +67,30 @@ impl SleepQueue {
 		self.inner.push(entry);
 	}
 
+	fn remove_task(&mut self, tid: usize) {
+		self.inner.retain(|entry| entry.task.gettid() != tid);
+	}
+
 	fn pop_expired(&mut self, now_ns: usize) -> Option<Arc<TaskControlBlock>> {
 		if self.inner.peek().map_or(false, |entry| entry.deadline_ns <= now_ns) {
 			self.inner.pop().map(|entry| entry.task)
 		} else {
 			None
 		}
+	}
+
+	fn pop_all_expired(&mut self, now_ns: usize) -> Vec<Arc<TaskControlBlock>> {
+		let mut tasks = Vec::new();
+		while self
+			.inner
+			.peek()
+			.map_or(false, |entry| entry.deadline_ns <= now_ns)
+		{
+			if let Some(entry) = self.inner.pop() {
+				tasks.push(entry.task);
+			}
+		}
+		tasks
 	}
 }
 
@@ -84,28 +102,34 @@ fn monotonic_now_ns() -> usize {
 	get_time_us().saturating_mul(1_000)
 }
 
+pub(crate) fn register_sleep_task(deadline_ns: usize, task: Arc<TaskControlBlock>) {
+	SLEEP_QUEUE.exclusive_access().push(deadline_ns, task);
+}
+
+pub(crate) fn cancel_sleep_task(tid: usize) {
+	SLEEP_QUEUE.exclusive_access().remove_task(tid);
+}
+
 pub fn sleep_current_until(deadline_ns: usize) {
 	let task = current_task().unwrap();
 	let task_cx_ptr = {
 		let mut inner = task.inner_exclusive_access();
 		let ptr = &mut inner.thread.task_ctx as *mut TaskContext;
+		inner.wake_pending = false;
+		inner.wake_source_cpu = None;
 		inner.state = TaskStatus::BlockSaving;
 		ptr
 	};
-	SLEEP_QUEUE.exclusive_access().push(deadline_ns, task);
+	register_sleep_task(deadline_ns, task);
 	schedule(task_cx_ptr);
 }
-// 处理到期任务
+// 处理到期任务：锁内一次性收集所有到期任务，锁外统一唤醒
 pub fn wake_expired_sleep_tasks() {
-	loop {
-		let task = {
-			let now_ns = monotonic_now_ns();
-			SLEEP_QUEUE.exclusive_access().pop_expired(now_ns)
-		};
-		let Some(task) = task else {
-			break;
-		};
-
+	let tasks = {
+		let now_ns = monotonic_now_ns();
+		SLEEP_QUEUE.exclusive_access().pop_all_expired(now_ns)
+	};
+	for task in tasks {
 		wake_up_task(task);
 	}
 }

@@ -1,17 +1,11 @@
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use spin::Mutex;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::mm::address::{PhysPageNum, VPNRange, VirtPageNum};
-use crate::mm::{frame_alloc, FrameTracker, UserBuffer, PageSize, translated_byte_buffer_mut, translated_write};
+use crate::mm::{frame_alloc, FrameTracker, PageSize};
 use crate::auth::{PermStat, FileMode};
-use crate::arch::config::PAGE_SIZE;
-use crate::task::current_user_token;
-use crate::syscall::errno::*;
-use super::{Dentry, File, VfsInode};
+use super::VfsInode;
 use super::ino::get_next_ino;
-use super::tmpfs::HUGEPAGES_DENTRY;
 
 // 内存文件，后续用户可以mmap到用户空间
 pub struct MemFdInode {
@@ -217,14 +211,17 @@ impl super::VfsInode for MemFdInode {
     fn getdents(&self, _offset: &mut usize, _buf: &mut [u8]) -> isize { -1 }
 }
 
-use super::OSInode;
+use super::{Dentry, OSInode};
 
-/// 创建一个 memfd 文件，并挂载，返回inode
+/// Create an anonymous memfd and return its file description.
+///
+/// A memfd name is descriptive only. Publishing it below a shared directory
+/// would turn equal names into the same file and incorrectly make anonymous
+/// files visible during directory enumeration.
 pub fn create_memfd(name: &str, page_size: PageSize) -> Arc<OSInode> {
     let readable = true;
     let writable = true;
     let vfs_inode: Arc<dyn VfsInode> = Arc::new(MemFdInode::new(page_size));
-    // 将 memfd 挂载到 hugepages dentry 下，给它一个目录树位置
-    let dentry = HUGEPAGES_DENTRY.insert(name.into(), vfs_inode.clone());
+    let dentry = Dentry::new(name.into(), vfs_inode, Weak::new());
     Arc::new(OSInode::new(readable, writable, false, dentry))
 }

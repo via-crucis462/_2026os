@@ -136,7 +136,8 @@ const MREMAP_FIXED: usize = 2;
 /// 目前实现：
 /// - 缩小：直接 munmap 尾部；
 /// - 扩大且尾部空闲：原地扩展（匿名映射）；
-/// - 否则若带 MREMAP_MAYMOVE：新映射 + 拷贝 + 解除旧映射；
+/// - 否则若带 MREMAP_MAYMOVE：私有匿名映射优先零拷贝移动 PTE/帧；
+///   其他映射暂时回退为新映射 + 拷贝 + 解除旧映射；
 /// - MREMAP_FIXED 暂未实现，返回 EINVAL。
 pub fn sys_mremap(
     old_addr: usize,
@@ -150,7 +151,6 @@ pub fn sys_mremap(
         || old_size == 0
         || new_size == 0
         || old_addr.checked_add(old_size).map_or(true, |e| e >= USER_APP_MAX_SIZE)
-        || old_addr.checked_add(new_size).map_or(true, |e| e >= USER_APP_MAX_SIZE)
         || (flags & !(MREMAP_MAYMOVE | MREMAP_FIXED)) != 0
     {
         return EINVAL.as_isize();
@@ -160,8 +160,12 @@ pub fn sys_mremap(
         return EINVAL.as_isize();
     }
 
-    let old_sz = (old_size + page - 1) & !(page - 1);
-    let new_sz = (new_size + page - 1) & !(page - 1);
+    let Some(old_sz) = old_size.checked_add(page - 1).map(|size| size & !(page - 1)) else {
+        return EINVAL.as_isize();
+    };
+    let Some(new_sz) = new_size.checked_add(page - 1).map(|size| size & !(page - 1)) else {
+        return EINVAL.as_isize();
+    };
     if old_sz == new_sz {
         return old_addr as isize;
     }
@@ -184,7 +188,7 @@ pub fn sys_mremap(
             .cloned()
             .ok_or(EINVAL.as_isize());
         if let Ok(mm) = mm {
-            let ret = mm.exclusive_access().mremap_inplace(old_addr, old_sz, new_sz);
+            let ret = mm.mremap_inplace(old_addr, old_sz, new_sz);
             if let Ok(addr) = ret {
                 return addr as isize;
             }
@@ -195,7 +199,19 @@ pub fn sys_mremap(
         return ENOMEM.as_isize();
     }
 
-    // 移动：新映射 + 拷贝 + 解除旧映射
+    // 移动私有匿名 VMA 时，PTE 和 FrameTracker 可以直接换到新地址，
+    // 不需要触及用户数据，也不会把懒分配页提前 fault-in。
+    let mm = current_user_mm();
+    match mm.mremap_move_private_anon(old_addr, old_sz, new_sz) {
+        Ok(addr) => return addr as isize,
+        Err(errno) if errno != EINVAL.as_isize() => return errno,
+        Err(_) => {
+            // 文件映射、共享匿名映射和非完整 VMA 尚未具备可移动的
+            // backing/共享身份协议，保留下面的兼容性回退。
+        }
+    }
+
+    // 兼容性回退：新映射 + 拷贝 + 解除旧映射。
     let new_addr = match mmap::do_mmap(
         0,
         new_sz,
@@ -209,21 +225,27 @@ pub fn sys_mremap(
     };
 
     let copy_len = old_sz;
-    let token = current_user_token();
-    let src = crate::mm::page_table::translated_byte_buffer(token, old_addr as *const u8, copy_len);
-    let dst = crate::mm::page_table::translated_byte_buffer_mut(
-        token,
+    let mm = current_user_mm();
+    let Some(src) = crate::mm::page_table::translated_user_buffer(
+        &mm,
+        old_addr as *const u8,
+        copy_len,
+    ) else {
+        let _ = mmap::do_munmap(new_addr, new_sz);
+        return EFAULT.as_isize();
+    };
+    let Some(dst) = crate::mm::page_table::translated_user_buffer_mut(
+        &mm,
         new_addr as *mut u8,
         copy_len,
-    );
-    let mut copied = 0usize;
-    for (s, d) in src.into_iter().zip(dst.into_iter()) {
-        let c = core::cmp::min(s.len(), d.len());
-        d[..c].copy_from_slice(&s[..c]);
-        copied += c;
-        if copied >= copy_len {
-            break;
-        }
+    ) else {
+        let _ = mmap::do_munmap(new_addr, new_sz);
+        return EFAULT.as_isize();
+    };
+    let copied = src.read_into_buffer(dst) as usize;
+    if copied != copy_len {
+        let _ = mmap::do_munmap(new_addr, new_sz);
+        return EFAULT.as_isize();
     }
 
     mmap::do_munmap(old_addr, old_sz).ok();
@@ -269,15 +291,18 @@ pub fn sys_mincore(addr: usize, len: usize, vec: *mut u8) -> isize {
         mm.clone()
     };
     let residency = {
-        let memory = mm.exclusive_access();
         let mut result = alloc::vec::Vec::with_capacity(page_count);
         for index in 0..page_count {
             let page_addr = addr + index * PAGE_SIZE;
             let vpn = crate::mm::VirtAddr::from(page_addr).std_floor();
-            if !memory.areas().iter().any(|area| area.contains(vpn)) {
+            let in_area = {
+                let areas = mm.areas.read();
+                areas.values().any(|a| a.read().contains(vpn))
+            };
+            if !in_area {
                 return ENOMEM.as_isize();
             }
-            let resident = memory
+            let resident = mm
                 .translate(vpn)
                 .map(|pte| pte.is_valid())
                 .unwrap_or(false);
@@ -286,9 +311,8 @@ pub fn sys_mincore(addr: usize, len: usize, vec: *mut u8) -> isize {
         result
     };
 
-    let token = current_user_token();
     for (index, resident) in residency.into_iter().enumerate() {
-        if !crate::mm::try_translated_write(token, unsafe { vec.add(index) }, resident) {
+        if !crate::mm::try_translated_write(&mm, unsafe { vec.add(index) }, resident) {
             return EFAULT.as_isize();
         }
     }
@@ -322,15 +346,18 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> isize {
 
     match advice {
         MADV_DONTNEED => {
-            // Discard physical pages without removing the virtual mapping.
+            // 内存够大，直接不释放
+            ENOSYS.as_isize()
+            /*
             match mmap::do_madvise_dontneed(addr, len) {
                 Ok(()) => 0,
                 Err(errno) => errno,
             }
+             */
         }
         MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_FREE => {
             // 使用建议（优化用），伪实现
-            0
+            ENOSYS.as_isize()
         }
         _ => {
             EINVAL.as_isize()

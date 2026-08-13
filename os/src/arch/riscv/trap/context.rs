@@ -92,10 +92,10 @@ impl TrapContext {
             let mut sstatus = sstatus::read();
  
             sstatus.set_spp(SPP::User); 
-            // VF2 bring-up keeps asynchronous S-mode interrupts disabled.
-            // sret copies SPIE into SIE, so the initial user context must not
-            // inherit a stale SPIE value left by firmware.
-            sstatus.set_spie(false);
+            // User-mode timer and scheduler IPIs must be enabled after sret.
+            // The kernel still runs with SIE cleared while handling a trap;
+            // SPIE only controls the restored user-mode interrupt enable bit.
+            sstatus.set_spie(true);
 
             let mut cx = Self {
                 x: [0; 32],

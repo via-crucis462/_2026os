@@ -72,11 +72,11 @@ use lazy_static::*;
 use spin::Mutex;
 
 #[cfg(all(target_arch = "riscv64", not(board = "visionfive2")))]
-global_asm!(include_str!("arch/riscv/entry.asm"));
+global_asm!(include_str!("arch/riscv/entry.asm"), boot_harts = const arch::config::CPU_CORE_NUM);
 #[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
 global_asm!(include_str!("arch/riscv/entry-visionfive2.asm"));
 #[cfg(target_arch = "loongarch64")]
-global_asm!(include_str!("arch/la/entry.asm"));
+global_asm!(include_str!("arch/la/entry.asm"), boot_harts = const arch::config::CPU_CORE_NUM);
 
 #[link_section = ".data"]
 pub static MAIN_HART_INITED: AtomicBool = AtomicBool::new(false);
@@ -186,7 +186,11 @@ fn main_init(hart_id: usize) {
     MAIN_HART_ID.store(hart_id, Ordering::Release);
     crate::process::init::add_initproc();
     crate::process::init::add_timer_worker();
+    #[cfg(not(initproc = "default"))]
     crate::process::init::add_net_worker();
+    #[cfg(not(initproc = "default"))]
+    crate::process::init::add_console_worker();
+    #[cfg(not(initproc = "default"))]
     crate::process::init::add_writeback_worker();
     arch::trap::enable_timer_interrupt();
     arch::timer::set_next_trigger(process::scheduler::runqueue::SCHED_OTHER);

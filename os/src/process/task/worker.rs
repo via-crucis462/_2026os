@@ -47,6 +47,8 @@ impl TaskStruct {
                 pgid: pid.0,
                 sid: pid.0,
                 state: TaskStatus::Ready,
+                wake_pending: false,
+                wake_source_cpu: None,
                 exit_state: 0,
                 exit_code: 0,
                 exit_signal: 0,
@@ -128,11 +130,20 @@ pub fn timer_kernel_worker() -> ! {
 }
 
 pub fn net_kernel_worker() -> ! {
-    const NET_POLL_INTERVAL_US: usize = 10_000;
+    const NET_POLL_INTERVAL_US: usize = 100_000;
 
     loop {
         crate::net::net_poll();
         sleep_current_for_us(NET_POLL_INTERVAL_US);
+    }
+}
+
+pub fn console_kernel_worker() -> ! {
+    const CONSOLE_POLL_INTERVAL_US: usize = 50_000;
+
+    loop {
+        crate::console::console_poll_input();
+        sleep_current_for_us(CONSOLE_POLL_INTERVAL_US);
     }
 }
 

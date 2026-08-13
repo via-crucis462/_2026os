@@ -8,17 +8,19 @@ use super::{StepByOne, VPNRange};
 use crate::arch::config::*;
 use crate::fs::File;
 use crate::mm::PageSize::Page4K;
-use crate::mm::{get_free_frames, mmap, UserBuffer};
+use crate::mm::{get_free_frames, mmap, UserBuffer, UserBufferSegment};
 use crate::process::signal::frame;
-use crate::sync::MPSafeCell;
 use crate::syscall::errno::Errno;
+use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::asm;
-use core::hint::spin_loop;
 use core::ptr::{read_volatile, write_volatile};
+use core::sync::atomic::{AtomicU64, Ordering};
+use spin::Mutex;
 
 use lazy_static::*;
 
@@ -42,13 +44,12 @@ lazy_static! {
     /// The kernel's initial memory mapping(kernel address space)
     ///
     /// 不含内核栈的映射，内核栈由栈分配器在每个线程创建时单独映射
-    pub static ref KERNEL_SPACE: Arc<MPSafeCell<MemorySet>> =
-        Arc::new(MPSafeCell::new(MemorySet::new_kernel()));
+    pub static ref KERNEL_SPACE: MemorySet = MemorySet::new_kernel();
 }
 
 /// the kernel token
 pub fn kernel_token() -> usize {
-    KERNEL_SPACE.exclusive_access().token()
+    KERNEL_SPACE.token()
 }
 
 /// ASID used by the kernel page table that owns all kernel-stack mappings.
@@ -56,7 +57,328 @@ pub fn kernel_token() -> usize {
 /// ASIDs identify address spaces rather than individual virtual ranges, so
 /// every kernel stack shares this dedicated kernel address-space ASID.
 pub fn kernel_asid() -> usize {
-    KERNEL_SPACE.exclusive_access().asid()
+    KERNEL_SPACE.asid()
+}
+
+static NEXT_MEMORY_SET_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_FUTEX_MAPPING_ID: AtomicU64 = AtomicU64::new(1);
+
+fn memory_set_id_alloc() -> u64 {
+    let id = NEXT_MEMORY_SET_ID.fetch_add(1, Ordering::Relaxed);
+    assert_ne!(id, 0, "MemorySet identity space exhausted");
+    id
+}
+
+fn futex_mapping_id_alloc() -> u64 {
+    let id = NEXT_FUTEX_MAPPING_ID.fetch_add(1, Ordering::Relaxed);
+    assert_ne!(id, 0, "futex mapping identity space exhausted");
+    id
+}
+
+const ELF64_EHDR_SIZE: usize = 64;
+const ELF64_PHDR_SIZE: usize = 56;
+const ELF_MAX_PROGRAM_HEADERS: usize = 1024;
+const ELF_MAX_INTERP_PATH: usize = 4096;
+
+const ELF_ET_EXEC: u16 = 2;
+const ELF_ET_DYN: u16 = 3;
+const ELF_PT_LOAD: u32 = 1;
+const ELF_PT_INTERP: u32 = 3;
+const ELF_PT_PHDR: u32 = 6;
+const ELF_PF_X: u32 = 1;
+const ELF_PF_W: u32 = 2;
+const ELF_PF_R: u32 = 4;
+
+#[derive(Clone)]
+struct ElfLoadSegment {
+    offset: usize,
+    vaddr: usize,
+    filesz: usize,
+    memsz: usize,
+    align: usize,
+    permission: MapPermission,
+}
+
+struct ParsedElf {
+    is_shared_object: bool,
+    entry: usize,
+    phnum: usize,
+    phent: usize,
+    loads: Vec<ElfLoadSegment>,
+    interp: Option<String>,
+    phdr_vaddr: Option<usize>,
+}
+
+fn elf_u16(input: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes([*input.get(offset)?, *input.get(offset + 1)?]))
+}
+
+fn elf_u32(input: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes([
+        *input.get(offset)?,
+        *input.get(offset + 1)?,
+        *input.get(offset + 2)?,
+        *input.get(offset + 3)?,
+    ]))
+}
+
+fn elf_u64(input: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_le_bytes([
+        *input.get(offset)?,
+        *input.get(offset + 1)?,
+        *input.get(offset + 2)?,
+        *input.get(offset + 3)?,
+        *input.get(offset + 4)?,
+        *input.get(offset + 5)?,
+        *input.get(offset + 6)?,
+        *input.get(offset + 7)?,
+    ]))
+}
+
+fn read_file_exact(file: &(dyn File + Send + Sync), mut offset: usize, mut buf: &mut [u8]) -> bool {
+    while !buf.is_empty() {
+        let read = file.read_kernel_at(offset, buf);
+        if read == 0 || read > buf.len() {
+            return false;
+        }
+        let Some(next_offset) = offset.checked_add(read) else {
+            return false;
+        };
+        offset = next_offset;
+        buf = &mut buf[read..];
+    }
+    true
+}
+
+fn elf_file_size(file: &(dyn File + Send + Sync)) -> Option<usize> {
+    usize::try_from(file.get_stat().size).ok()
+}
+
+fn elf_load_align(raw_align: usize) -> Option<usize> {
+    match raw_align {
+        0 | 1 => Some(PAGE_SIZE),
+        align if align.is_power_of_two() => Some(align.max(PAGE_SIZE)),
+        _ => None,
+    }
+}
+
+fn elf_align_up(value: usize, align: usize) -> Option<usize> {
+    value.checked_add(align - 1).map(|value| value & !(align - 1))
+}
+
+/// Parse only ELF64 metadata from a regular file.  Segment bytes remain in
+/// the inode/page cache and are never copied into a temporary ELF buffer.
+fn parse_elf64_file(file: &(dyn File + Send + Sync)) -> Option<ParsedElf> {
+    let file_size = elf_file_size(file)?;
+    if file_size < ELF64_EHDR_SIZE {
+        return None;
+    }
+
+    let mut ehdr = [0u8; ELF64_EHDR_SIZE];
+    if !read_file_exact(file, 0, &mut ehdr) {
+        return None;
+    }
+    if ehdr[..4] != [0x7f, b'E', b'L', b'F']
+        || ehdr[4] != 2
+        || ehdr[5] != 1
+        || ehdr[6] != 1
+        || elf_u32(&ehdr, 20)? != 1
+    {
+        return None;
+    }
+    let machine = elf_u16(&ehdr, 18)?;
+    #[cfg(target_arch = "riscv64")]
+    if machine != 0x00f3 {
+        return None;
+    }
+    #[cfg(target_arch = "loongarch64")]
+    if machine != 0x0102 {
+        return None;
+    }
+
+    let elf_type = elf_u16(&ehdr, 16)?;
+    if elf_type != ELF_ET_EXEC && elf_type != ELF_ET_DYN {
+        return None;
+    }
+    if elf_u16(&ehdr, 52)? as usize != ELF64_EHDR_SIZE {
+        return None;
+    }
+    let phent = elf_u16(&ehdr, 54)? as usize;
+    let phnum = elf_u16(&ehdr, 56)? as usize;
+    if phent != ELF64_PHDR_SIZE || phnum == 0 || phnum > ELF_MAX_PROGRAM_HEADERS {
+        return None;
+    }
+    let phoff = usize::try_from(elf_u64(&ehdr, 32)?).ok()?;
+    let phdr_bytes = phnum.checked_mul(ELF64_PHDR_SIZE)?;
+    let phend = phoff.checked_add(phdr_bytes)?;
+    if phoff < ELF64_EHDR_SIZE || phoff % 8 != 0 || phend > file_size {
+        return None;
+    }
+
+    let mut phdrs = vec![0u8; phdr_bytes];
+    if !read_file_exact(file, phoff, &mut phdrs) {
+        return None;
+    }
+
+    let mut loads = Vec::new();
+    let mut interp = None;
+    // Keep an explicitly declared PT_PHDR address until all PT_LOAD entries
+    // have been parsed. The table's runtime address is only trustworthy when
+    // its file bytes are covered by the same LOAD mapping.
+    let mut declared_phdr_vaddr = None;
+    for phdr in phdrs.chunks_exact(ELF64_PHDR_SIZE) {
+        let typ = elf_u32(phdr, 0)?;
+        let flags = elf_u32(phdr, 4)?;
+        let offset = usize::try_from(elf_u64(phdr, 8)?).ok()?;
+        let vaddr = usize::try_from(elf_u64(phdr, 16)?).ok()?;
+        let filesz = usize::try_from(elf_u64(phdr, 32)?).ok()?;
+        let memsz = usize::try_from(elf_u64(phdr, 40)?).ok()?;
+        let align = usize::try_from(elf_u64(phdr, 48)?).ok()?;
+
+        match typ {
+            ELF_PT_LOAD => {
+                // ELF requires p_vaddr and p_offset to have the same
+                // congruence modulo p_align (when p_align is meaningful).
+                // The loader additionally needs page congruence because its
+                // file backing is indexed by 4 KiB page offsets.
+                if align > 1 && vaddr % align != offset % align {
+                    return None;
+                }
+                if filesz > memsz
+                    || offset.checked_add(filesz).map_or(true, |end| end > file_size)
+                    || vaddr % PAGE_SIZE != offset % PAGE_SIZE
+                    || elf_load_align(align).is_none()
+                    || vaddr.checked_add(memsz).is_none()
+                {
+                    return None;
+                }
+                let mut permission = MapPermission::U;
+                if flags & ELF_PF_R != 0 {
+                    permission |= MapPermission::R;
+                }
+                if flags & ELF_PF_W != 0 {
+                    permission |= MapPermission::W;
+                }
+                if flags & ELF_PF_X != 0 {
+                    permission |= MapPermission::X;
+                }
+                loads.push(ElfLoadSegment {
+                    offset,
+                    vaddr,
+                    filesz,
+                    memsz,
+                    align: elf_load_align(align)?,
+                    permission,
+                });
+            }
+            ELF_PT_INTERP => {
+                if interp.is_some()
+                    || filesz == 0
+                    || filesz > memsz
+                    || filesz > ELF_MAX_INTERP_PATH
+                    || offset.checked_add(filesz).map_or(true, |end| end > file_size)
+                {
+                    return None;
+                }
+                let mut path = vec![0u8; filesz];
+                if !read_file_exact(file, offset, &mut path) {
+                    return None;
+                }
+                let nul = path.iter().position(|byte| *byte == 0)?;
+                if nul == 0 {
+                    return None;
+                }
+                interp = Some(String::from(core::str::from_utf8(&path[..nul]).ok()?));
+            }
+            ELF_PT_PHDR => {
+                let Some(file_end) = offset.checked_add(filesz) else {
+                    return None;
+                };
+                if declared_phdr_vaddr.is_some()
+                    || memsz < phdr_bytes
+                    || offset > phoff
+                    || phend > file_end
+                    || file_end > file_size
+                    || vaddr.checked_add(memsz).is_none()
+                {
+                    return None;
+                }
+                // p_vaddr names the beginning of the PT_PHDR segment. The
+                // table itself may begin later if the segment covers a wider
+                // file range.
+                declared_phdr_vaddr = Some(vaddr.checked_add(phoff - offset)?);
+            }
+            _ => {}
+        }
+    }
+
+    let entry = usize::try_from(elf_u64(&ehdr, 24)?).ok()?;
+    if loads.is_empty()
+        || !loads.iter().any(|segment| {
+            segment.permission.contains(MapPermission::X)
+                && segment.vaddr <= entry
+                && segment
+                    .vaddr
+                    .checked_add(segment.memsz)
+                    .is_some_and(|end| entry < end)
+        })
+    {
+        return None;
+    }
+
+    let mut mapped_ranges: Vec<(usize, usize)> = loads
+        .iter()
+        .filter(|segment| segment.memsz != 0)
+        .map(|segment| {
+            let start = segment.vaddr & !(PAGE_SIZE - 1);
+            let end = elf_align_up(segment.vaddr.checked_add(segment.memsz)?, PAGE_SIZE)?;
+            Some((start, end))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    mapped_ranges.sort_unstable();
+    if mapped_ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+        return None;
+    }
+
+    let file_mapped_phdr_vaddr = loads.iter().find_map(|segment| {
+        let segment_file_end = segment.offset.checked_add(segment.filesz)?;
+        if segment.offset <= phoff && phend <= segment_file_end {
+            segment.vaddr.checked_add(phoff - segment.offset)
+        } else {
+            None
+        }
+    });
+    // A PT_PHDR declaration must agree with the actual file-to-VA relation of
+    // a PT_LOAD. Otherwise AT_PHDR could point into BSS (or an unrelated
+    // page) even though the ELF metadata itself looks superficially valid.
+    if let Some(declared) = declared_phdr_vaddr {
+        if file_mapped_phdr_vaddr != Some(declared) {
+            return None;
+        }
+    }
+    let phdr_vaddr = declared_phdr_vaddr.or(file_mapped_phdr_vaddr);
+
+    if let Some(phdr_addr) = phdr_vaddr {
+        let phdr_end = phdr_addr.checked_add(phdr_bytes)?;
+        if !loads.iter().any(|segment| {
+            segment.vaddr <= phdr_addr
+                && phdr_end <= segment.vaddr.checked_add(segment.memsz).unwrap_or(0)
+                && segment.offset <= phoff
+                && phend <= segment.offset.checked_add(segment.filesz).unwrap_or(0)
+        }) {
+            return None;
+        }
+    }
+
+    Some(ParsedElf {
+        is_shared_object: elf_type == ELF_ET_DYN,
+        entry,
+        phnum,
+        phent,
+        loads,
+        interp,
+        phdr_vaddr,
+    })
 }
 
 /// Invalidate shared kernel mappings under every active user ASID.
@@ -78,46 +400,184 @@ pub fn flush_kernel_tlb_targets() {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum FutexKey {
+    /// A futex explicitly marked FUTEX_PRIVATE_FLAG.
+    Private { mm: u64, address: usize },
+    /// A futex operation without FUTEX_PRIVATE_FLAG. Its backing object
+    /// determines whether it is mm-local or truly cross-process shared.
+    Shared {
+        object: FutexSharedObject,
+        offset: usize,
+    },
+}
+
+/// Stable backing-object domains for shared futex operations.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum FutexSharedObject {
+    /// Linux's mm-shared domain for a non-private operation on a private VMA.
+    Mm(u64),
+    /// A MAP_SHARED anonymous mapping retained across fork and VMA splits.
+    AnonymousMapping(u64),
+    /// A shared file mapping, identified by its backing inode.
+    File(u64),
+}
+
+
 /// address space
-/// 注意维护brk_index
+///
+/// 在锁粒度细化后约定锁序：areas -> MapArea 元数据 -> PageTable。
+///
+/// `MapArea::data_frames` 是驻留页的所有权表。它有自己的短临界区，
+/// 并且在已经拿到页表锁后访问；这样普通缺页可以只持有 VMA 的读锁，
+/// 而布局修改仍由 VMA 写锁排他。
+///
+/// 如果有解除映射，在 PageTable 修改后调用 flush_tlb_targets() 刷新 tlb，再释放旧帧
 pub struct MemorySet {
-    page_table: PageTable,
+    /// 不可修改
     asid: ASIDHandle,
-    pub areas: Vec<MapArea>,
-    brk_index: usize, //新增，用于记录brk所在area（堆区）的索引，请注意维护，后续可能会删除
+    /// Monotonic address-space identity used by private/anonymous futex keys.
+    mm_id: u64,
+    /// 起始页号（含）-> 映射区域
+    pub areas: Arc<RwLock<BTreeMap<VirtPageNum, Arc<VersionedArea>>>>,
+    /// 页表，单独持有自身页帧
+    /// Address translation is always passed this `MemorySet` explicitly, so
+    /// a caller-held `Arc<MemorySet>` keeps the page table alive throughout
+    /// the pin/fault-in operation.
+    pub(crate) page_table: Arc<RwLock<PageTable>>,
+    /// 约定下面两个值只能持有 areas 的读锁时访问，避免在修改映射时被其他线程修改
+    /// 当前程序断点
+    brk: AtomicU64,
+    /// 堆区起点（创建地址空间时确定），brk 不允许低于该值
+    start_brk: AtomicU64,
+}
+
+/// 带版本号的映射区域结构体
+/// 
+/// 在原有实现基础上参考 linux 的实现套了层壳，
+/// 用于映射区域修改的 RCU 机制，
+/// 即：
+/// 写者先以读者身份获取副本，修改副本后标记写，校验后提交；
+/// 读者发现有写者在写则等待，没有写者直接读，如果版本号不一致则重新读。
+/// 
+/// 不过目前整个 mm 还没有实现完整的 RCU 语义，
+/// 更多依赖读写锁保证。
+/// 
+/// 感觉后续实现 RCU 可以用以下方式： 
+/// 在读 pte 前和读完（含获取 frame）都检查版本号，保证读到的 VMA 没有被修改，
+/// 规定所有修改都保证先修改 area，再修改页表（或在 area 锁内原子修改二者）
+/// 因此只要 area 没有被修改，读到的页表就也是有效的。
+pub struct VersionedArea {
+    state: RwLock<MapArea>,
+    sequence: AtomicU64,
+}
+
+impl VersionedArea {
+    pub fn new(area: MapArea) -> Self {
+        Self {
+            state: RwLock::new(area),
+            sequence: AtomicU64::new(0),
+        }
+    }
+
+    pub fn version(&self) -> u64 {
+        self.sequence.load(Ordering::Acquire)
+    }
+
+    pub fn read(&self) -> VersionedAreaReadGuard<'_> {
+        VersionedAreaReadGuard {
+            guard: self.state.read(),
+        }
+    }
+
+    /// 从虚拟页号获取对应的物理页帧，如果不存在则返回 None
+    pub fn frame_for_vpn(&self, vpn: VirtPageNum) -> Option<FrameTracker> {
+        self.state.read().frame_for_vpn(vpn)
+    }
+    /// 获取写锁
+    /// 
+    /// 在写锁内拿到版本号并 +1，然后才返回 Guard 允许调用者开始修改。
+    /// 
+    /// 读者在锁外获取版本号并检查是否有写者在写，
+    /// 读完后如果版本号一致，一定没有写者走到过比 +1 更远的位置（即没有写者开始写过）。
+    /// 
+    /// 即使读者先获取版本号后写者才开始写，读者也会阻塞在写锁释放前，等到读者读完后一定能检查到版本号不一致。
+    pub fn write(&self) -> VersionedAreaWriteGuard<'_> {
+        let guard = self.state.write();
+        let previous = self.sequence.fetch_add(1, Ordering::AcqRel);
+        // 在写锁保护下这里的断言不应该触发
+        assert_eq!(previous & 1, 0, "nested area write transaction");
+        VersionedAreaWriteGuard { area: self, guard }
+    }
+}
+
+pub struct VersionedAreaReadGuard<'a> {
+    guard: RwLockReadGuard<'a, MapArea>,
+}
+
+impl core::ops::Deref for VersionedAreaReadGuard<'_> {
+    type Target = MapArea;
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+pub struct VersionedAreaWriteGuard<'a> {
+    area: &'a VersionedArea,
+    guard: RwLockWriteGuard<'a, MapArea>,
+}
+
+impl core::ops::Deref for VersionedAreaWriteGuard<'_> {
+    type Target = MapArea;
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl core::ops::DerefMut for VersionedAreaWriteGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+/// 在写锁释放时（所有写操作完成后）版本号 +1，保证读者在检测到版本号为偶并记录后本写者已经完成所有修改。
+/// 见写锁 Guard 处的注释，后续修改者在修改前会把版本号 +1，保证写一定能被读者检测到。
+impl Drop for VersionedAreaWriteGuard<'_> {
+    fn drop(&mut self) {
+        let previous = self.area.sequence.fetch_add(1, Ordering::Release);
+        // 在写锁保护下这里的断言不应该触发
+        assert_eq!(previous & 1, 1, "area transaction ended outside a write");
+    }
 }
 
 impl MemorySet {
-    /// Share the kernel's Sv39 upper half with this user page table.
+    /// 将内核根页表的高半地址空间引用进页表
     ///
-    /// The copied root entries point at kernel-owned lower-level page tables;
-    /// this MemorySet owns only its lower-half page table frames and mappings.
+    /// 从第一次调用此函数开始，内核的根页表按约定不再变化
+    /// 直接复制根页表的高半部分
     #[cfg(target_arch = "riscv64")]
-    pub fn install_kernel_space(&mut self) {
-        let kernel_space = KERNEL_SPACE.exclusive_access();
-        self.page_table.share_kernel_half(&kernel_space.page_table);
-    }
-
-    #[cfg(target_arch = "loongarch64")]
-    pub fn flush_tlb_after_mapping_change() {
-        unsafe {
-            // 先保证页表写入对重填路径可见，再失效陈旧 TLB 项。
-            asm!("dbar 0");
-            asm!("invtlb 0, $r0, $r0");
-            asm!("dbar 0");
-        }
+    pub fn install_kernel_space(&self) {
+        let kernel_space = &KERNEL_SPACE;
+        let kernel_pt = kernel_space.page_table.read();
+        self.page_table.write().share_kernel_half(&kernel_pt);
     }
 
     /// Create a new empty `MemorySet`.
     pub fn new_bare() -> Self {
-        Self {
-            page_table: PageTable::new(),
-            asid: asid_alloc().into(),
-            areas: Vec::new(),
-            brk_index: 0, // 注意维护！！
-        }
+        let page_table = Arc::new(RwLock::new(PageTable::new()));
+        let asid: ASIDHandle = asid_alloc().into();
+        let memory_set = Self {
+            page_table,
+            asid,
+            mm_id: memory_set_id_alloc(),
+            areas: Arc::new(RwLock::new(BTreeMap::new())),
+            brk: AtomicU64::new(0),
+            start_brk: AtomicU64::new(0),
+        };
+        memory_set
     }
 
+    /* 弃用
     /// Create a MemorySet that shares the same page table with the parent.
     /// Used by fork() with CLONE_VM flag for true address space sharing.
     ///
@@ -126,30 +586,37 @@ impl MemorySet {
     /// - Copies area metadata but with empty data_frames (child doesn't own parent's frames)
     /// - Child's own trap_cx page (pushed later) gets its own FrameTracker
     pub fn share_from_parent(parent: &Self) -> Self {
-        let areas: Vec<MapArea> = parent
-            .areas
-            .iter()
-            .map(|a| MapArea::from_another(a))
-            .collect();
-        /*for area in &areas {
-            println!("shared area: [0x{:x}, 0x{:x}), {:?}", area.vpn_range.get_start().0 * PAGE_SIZE, area.vpn_range.get_end().0 * PAGE_SIZE, area.map_perm);
-        }*/
+        let parent_areas = parent.areas.read();
+        let parent_page_table = parent.page_table.read();
+        let areas = {
+            let mut areas = BTreeMap::new();
+            for area in parent_areas.values() {
+                let area = area.read();
+                let new_area = MapArea::from_another(&area);
+                areas.insert(new_area.vpn_range.get_start(), Arc::new(VersionedArea::new(new_area)));
+            }
+            areas
+        };
         Self {
-            page_table: PageTable::alias_of(&parent.page_table), // 共享根页表，但不拥有中间页帧
-            asid: asid_alloc(),                                  // New ASID for child
-            areas,
-            brk_index: parent.brk_index,
+            page_table: Arc::new(RwLock::new(PageTable::alias_of(&parent_page_table))),
+            asid: asid_alloc(),
+            areas: Arc::new(RwLock::new(areas)),
+            brk: AtomicU64::new(parent.brk.load(Ordering::Relaxed)),
+            start_brk: AtomicU64::new(parent.start_brk.load(Ordering::Relaxed)),
         }
     }
+    */
     /// Get the page table token
+    /// 不得再被用于构建页表进行用户空间地址翻译
     pub fn token(&self) -> usize {
+        let pt = self.page_table.read();
         #[cfg(target_arch = "riscv64")]
         {
-            return self.page_table.token(self.asid());
+            return pt.token(self.asid());
         }
         #[cfg(target_arch = "loongarch64")]
         {
-            self.page_table.token()
+            pt.token()
         }
     }
     pub fn asid(&self) -> usize {
@@ -181,50 +648,194 @@ impl MemorySet {
             crate::arch::sbi::remote_sfence_vma_asid(remote_targets, self.asid());
         }
     }
-    pub fn areas(&self) -> &Vec<MapArea> {
-        &self.areas
-    }
-    pub fn brk_index(&self) -> usize {
-        self.brk_index
+
+    #[cfg(target_arch = "loongarch64")]
+    pub fn flush_tlb_targets(&self) {
+        crate::arch::mm::tlb::flush_tlb_targets(self.token(), self.asid());
     }
 
-    /// 返回当前 program break，即 brk 区域的字节结束地址。
+    /// 只刷新本核 TLB
+    ///
+    /// 用于“无效 -> 有效”的新映射和置脏位：远程核从未缓存过有效翻译
+    pub fn flush_tlb_local(&self) {
+        crate::arch::mm::flush_tlb_for_asid(self.asid());
+    }
+    /// 快照所有区域（调试/只读遍历用），调用方自行 lock 每个区域。
+    pub fn area_snapshot(&self) -> Vec<Arc<VersionedArea>> {
+        self.areas.read().values().cloned().collect()
+    }
+
+    /// 堆区起点，program break 不允许低于该值。
+    pub fn start_brk(&self) -> usize {
+        let _guard = self.areas.read();
+        self.start_brk.load(Ordering::Relaxed) as usize
+    }
+
+    /// 返回当前 program break（字节粒度）。
     pub fn current_brk(&self) -> usize {
-        self.areas[self.brk_index].get_vpn_range().get_end().0 * PAGE_SIZE
+        let _guard = self.areas.read();
+        self.brk.load(Ordering::Relaxed) as usize
     }
 
-    /// 调整当前任务的 program break。
-    pub fn change_program_brk(&mut self, addr: usize) -> Result<usize, i32> {
-        let current_brk = self.current_brk();
+    /// 调整当前任务的 program break，并把堆区补充填满或收缩
+    pub fn change_program_brk(&self, addr: usize) -> Result<usize, i32> {
+        let mut areas = self.areas.write();
+        let old_brk = self.brk.load(Ordering::Relaxed) as usize;
         if addr == 0 {
-            return Ok(current_brk);
+            drop(areas);
+            return Ok(old_brk);
         }
-
-        let heap_bottom = self.areas[self.brk_index].get_vpn_range().get_start().0 * PAGE_SIZE;
-        if addr < heap_bottom {
+        let start_brk = self.start_brk.load(Ordering::Relaxed) as usize;
+        if addr < start_brk {
             return Err(Errno::ENOMEM.as_isize() as i32);
         }
 
-        let size = addr as isize - current_brk as isize;
-        if size > 0 && get_free_frames() < (size as usize + PAGE_SIZE - 1) / PAGE_SIZE {
-            return Err(Errno::ENOMEM.as_isize() as i32);
+        let old_top = VirtAddr::from(old_brk).std_ceil();
+        let new_top = VirtAddr::from(addr).std_ceil();
+        if old_top == new_top {
+            // 同一页内移动，无需改动映射
+            self.brk.store(addr as u64, Ordering::Relaxed);
+            drop(areas);
+            return Ok(addr);
         }
 
-        let changed = if size < 0 {
-            self.shrink_to(VirtAddr::from(heap_bottom), VirtAddr::from(addr))
+        if addr > old_brk {
+            let pages = (new_top.0 - old_top.0) / PAGE_SIZE;
+            if get_free_frames() < pages {
+                return Err(Errno::ENOMEM.as_isize() as i32);
+            }
+            self.grow_heap_locked(&mut areas, old_top.into(), new_top.into(), start_brk)?;
         } else {
-            self.append_to(VirtAddr::from(heap_bottom), VirtAddr::from(addr));
-            true
-        };
-        if changed {
-            Ok(addr)
-        } else {
-            Err(Errno::ENOMEM.as_isize() as i32)
+            // shrink_heap 的参数是 (旧堆顶, 新堆顶)：删除 [new_top, old_top) 区间。
+            self.shrink_heap_locked(&mut areas, old_top.into(), new_top.into(), start_brk)?;
         }
+        self.brk.store(addr as u64, Ordering::Relaxed);
+        drop(areas);
+        Ok(addr)
+    }
+
+    /// 扩展堆区到 [from, to)
+    ///
+    /// 优先扩展现有堆顶区域，否则新建
+    /// 
+    /// 目前还没实现完整 RCU 语义，在写锁内完整修改
+    fn grow_heap_locked(
+        &self,
+        areas: &mut crate::sync::RwLockWriteGuard<'_, BTreeMap<VirtPageNum, Arc<VersionedArea>>>,
+        from: VirtAddr,
+        to: VirtAddr,
+        start_brk: usize,
+    ) -> Result<(), i32> {
+        let from_vpn = from.std_ceil();
+        let to_vpn = to.std_ceil();
+        if to_vpn <= from_vpn {
+            return Ok(());
+        }
+        let heap_start_vpn = VirtAddr::from(start_brk).std_ceil();
+        let mut target: Option<Arc<VersionedArea>> = None;
+        let mut conflict = false;
+        for area_arc in areas.values() {
+            let area = area_arc.read();
+            if area.vpn_range.get_start() < heap_start_vpn {
+                continue;
+            }
+            let a_start = area.vpn_range.get_start();
+            let a_end = area.vpn_range.get_end();
+            let is_target = (a_start <= from_vpn && a_end > from_vpn)
+                || (a_end == from_vpn && a_start >= heap_start_vpn);
+            if is_target {
+                target = Some(area_arc.clone());
+            } else if a_start < to_vpn && a_end > from_vpn {
+                // 有其他区域横跨待扩展区间（例如 mmap 占位），按 Linux 语义返回 ENOMEM
+                conflict = true;
+            }
+        }
+        if conflict {
+            return Err(Errno::ENOMEM.as_isize() as i32);
+        }
+        if let Some(target) = target {
+            let mut area = target.write();
+            if area.vpn_range.get_end() >= to_vpn {
+                // 堆顶区域已经覆盖目标范围，无需改动映射
+                return Ok(());
+            }
+            let mut pt = self.page_table.write();
+            area.append_to(&mut pt, to_vpn);
+        } else {
+            let area = MapArea::new(
+                from,
+                to,
+                MapType::Framed,
+                MapPermission::R | MapPermission::W | MapPermission::U,
+                PageSize::Page4K,
+            );
+            let key = area.vpn_range.get_start();
+            let area_arc = Arc::new(VersionedArea::new(area));
+            // `areas` is already write-locked.  Insert the VMA first and
+            // retain its transaction while PTEs are made visible.
+            areas.insert(key, area_arc.clone());
+            let mut area = area_arc.write();
+            let mut pt = self.page_table.write();
+            area.map(&mut pt);
+        }
+        Ok(())
+    }
+
+    /// 收缩堆区
+    ///
+    /// 调用方持有 areas 写锁
+    fn shrink_heap_locked(
+        &self,
+        areas: &mut crate::sync::RwLockWriteGuard<'_, BTreeMap<VirtPageNum, Arc<VersionedArea>>>,
+        from: VirtAddr,
+        to: VirtAddr,
+        start_brk: usize,
+    ) -> Result<(), i32> {
+        let from_vpn = from.std_ceil();
+        let to_vpn = to.std_ceil();
+        if to_vpn >= from_vpn {
+            return Ok(());
+        }
+        let heap_start_vpn = VirtAddr::from(start_brk).std_ceil();
+        let mut frames = Vec::new();
+        let mut found = false;
+        let mut empty_keys: Vec<VirtPageNum> = Vec::new();
+        for (key, area_arc) in areas.iter() {
+            let mut area = area_arc.write();
+            let a_start = area.vpn_range.get_start();
+            let a_end = area.vpn_range.get_end();
+            if a_start >= from_vpn || a_end <= to_vpn || a_start < heap_start_vpn {
+                continue;
+            }
+            found = true;
+            if a_start < to_vpn {
+                // 区域跨越新的 brk 所在页：只删除 [to_vpn, a_end) 部分
+                let mut pt = self.page_table.write();
+                frames.extend(area.shrink_to(&mut pt, to_vpn));
+            } else {
+                // 整块位于待收缩范围内
+                let mut pt = self.page_table.write();
+                frames.extend(area.unmap(&mut pt));
+                area.resize(a_start, a_start);
+            }
+            if area.vpn_range.get_start() >= area.vpn_range.get_end() {
+                empty_keys.push(*key);
+            }
+        }
+        for key in empty_keys.iter() {
+            areas.remove(key);
+        }
+        if !found {
+            return Err(Errno::ENOMEM.as_isize() as i32);
+        }
+        // 先刷 TLB 保证旧帧不再能被硬件访问再释放
+        self.flush_tlb_targets();
+        drop(frames);
+        Ok(())
     }
     /// Assume that no conflicts.
     pub fn insert_framed_area(
-        &mut self,
+        &self,
         start_va: VirtAddr,
         end_va: VirtAddr,
         permission: MapPermission,
@@ -238,7 +849,7 @@ impl MemorySet {
     }
     /// 插入惰性文件映射，首次访问时由 handle_page_fault 填充物理页。
     pub fn insert_file_area(
-        &mut self,
+        &self,
         start_va: VirtAddr,
         end_va: VirtAddr,
         permission: MapPermission,
@@ -250,19 +861,21 @@ impl MemorySet {
         let mut area = MapArea::new(start_va, end_va, MapType::File, permission, page_size);
         area.backing_file = Some((file, page_offset));
         area.is_shared = is_shared;
-        self.areas.push(area);
+        let key = area.vpn_range.get_start();
+        self.areas
+            .write()
+            .insert(key, Arc::new(VersionedArea::new(area)));
     }
-    /// remove a area
-    pub fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) -> Vec<FrameTracker> {
-        if let Some(idx) = self
-            .areas
-            .iter()
-            .enumerate()
-            .find(|(_, area)| area.vpn_range.get_start() == start_vpn)
-            .map(|(idx, _)| idx)
-        {
-            let frames = self.areas[idx].unmap(&mut self.page_table);
-            self.areas.remove(idx);
+    /// 移除映射区域，返回被解除映射的页帧
+    pub fn remove_area_with_start_vpn(&self, start_vpn: VirtPageNum) -> Vec<FrameTracker> {
+        let mut areas = self.areas.write();
+        if let Some(area_arc) = areas.get(&start_vpn).cloned() {
+            let mut area = area_arc.write();
+            let mut pt = self.page_table.write();
+            let frames = area.unmap(&mut pt);
+            drop(pt);
+            drop(area);
+            areas.remove(&start_vpn);
             frames
         } else {
             Vec::new()
@@ -271,34 +884,48 @@ impl MemorySet {
     /// Add a new MapArea into this MemorySet.
     /// Assuming that there are no conflicts in the virtual address
     /// space.
-    pub fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>, start_va: usize) {
-        map_area.map(&mut self.page_table);
+    pub fn push(&self, map_area: MapArea, data: Option<&[u8]>, start_va: usize) {
+        let key = map_area.vpn_range.get_start();
+        let start = map_area.vpn_range.get_start().0 * PAGE_SIZE;
+        let end = map_area.vpn_range.get_end().0 * PAGE_SIZE;
+        let permission = map_area.map_perm;
+        let area_arc = Arc::new(VersionedArea::new(map_area));
+
+        // 按照约定先插入 areas 再映射页表
+        let mut areas = self.areas.write();
+        areas.insert(key, area_arc.clone());
+        let mut area = area_arc.write();
+        let mut pt = self.page_table.write();
+        area.map(&mut pt);
         if let Some(data) = data {
-            map_area.copy_data(&mut self.page_table, data, start_va);
+            area.copy_data(&mut pt, data, start_va);
         }
-        trace!(
-            "map area: [{:#x}, {:#x}), {:?}",
-            map_area.vpn_range.get_start().0 * PAGE_SIZE,
-            map_area.vpn_range.get_end().0 * PAGE_SIZE,
-            map_area.map_perm
-        );
-        self.areas.push(map_area);
+        drop(pt);
+        drop(area);
+        drop(areas);
+
+        trace!("map area: [{:#x}, {:#x}), {:?}", start, end, permission);
     }
-    fn push_guard_area(&mut self, guard_start: usize, guard_pages: usize) {
-        self.areas.push(MapArea::new(
+    /// 调用者应当保证保护区的起始页号和页数不会与现有映射冲突
+    fn push_guard_area(&self, guard_start: usize, guard_pages: usize) {
+        let area = MapArea::new(
             guard_start.into(),
             (guard_start + guard_pages * PAGE_SIZE).into(),
             MapType::Guard,
             MapPermission::empty(),
             PageSize::Page4K,
-        ));
+        );
+        let key = area.vpn_range.get_start();
+        self.areas
+            .write()
+            .insert(key, Arc::new(VersionedArea::new(area)));
     }
     /// Mention that trampoline is not collected by areas.
     #[allow(unused)]
     #[cfg(target_arch = "riscv64")]
-    fn map_trampoline(&mut self) {
+    fn map_trampoline(&self) {
         info!("mapping trampoline");
-        self.page_table.map(
+        self.page_table.write().map(
             VirtAddr::from(TRAMPOLINE).into(),
             PhysAddr::from(strampoline as *const () as usize & !crate::CACHED_KERNEL_BASE).into(),
             PTEFlags::R | PTEFlags::X,
@@ -307,9 +934,9 @@ impl MemorySet {
     }
 
     // 用户态使用的跳板页（主要用于信号处理后恢复）
-    fn map_user_trampoline(&mut self) {
+    fn map_user_trampoline(&self) {
         info!("mapping user trampoline");
-        self.page_table.map(
+        self.page_table.write().map(
             VirtAddr::from(USER_TRAMPOLINE).into(),
             PhysAddr::from(strampoline as *const () as usize & !crate::CACHED_KERNEL_BASE).into(),
             PTEFlags::R | PTEFlags::X | PTEFlags::U,
@@ -317,12 +944,12 @@ impl MemorySet {
         );
     }
     /// 创建并映射内核空间
-    /// 
+    ///
     /// 不含页帧，仅映射到页表(rv)，初始化时映射，后续不再修改。
     /// 主要针对 riscv，la 下内核使用 MMU 的映射窗口，
     /// 所以对于 la 这部分无意义，只 push 段。
     pub fn new_kernel() -> Self {
-        let mut memory_set = Self::new_bare();
+        let memory_set = Self::new_bare();
 
         info!(
             ".text [{:#x}, {:#x})",
@@ -491,6 +1118,326 @@ impl MemorySet {
         Self::from_elf_with_interp_loader(elf_data, |_| None)
     }
 
+    /// Build an ELF address space directly from regular files.  Only ELF
+    /// metadata is read into kernel memory; PT_LOAD pages are faulted from the
+    /// file page cache and private writable pages use COW.
+    pub fn from_elf_file_with_interp_loader<F>(
+        main_file: Arc<dyn File + Send + Sync>,
+        mut load_interp: F,
+    ) -> Option<(
+        Self,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        Option<usize>,
+    )>
+    where
+        F: FnMut(&str) -> Option<Arc<dyn File + Send + Sync>>,
+    {
+        let main_elf = parse_elf64_file(main_file.as_ref())?;
+        let main_load_align = main_elf
+            .loads
+            .iter()
+            .map(|segment| segment.align)
+            .max()
+            .unwrap_or(PAGE_SIZE);
+        let main_load_bias = if main_elf.is_shared_object {
+            elf_align_up(USER_APP_BASE, main_load_align)?
+        } else {
+            OFFSET_FOR_USER_APP
+        };
+
+        let memory_set = Self::new_bare();
+        memory_set.map_user_trampoline();
+
+        let mut max_end_vpn = VirtPageNum(0);
+        let mut main_max_end_vpn = VirtPageNum(0);
+        let phdr_addr = match main_elf.phdr_vaddr {
+            Some(address) => address.checked_add(main_load_bias)?,
+            None => 0,
+        };
+        let phnum = main_elf.phnum;
+        let phent = main_elf.phent;
+        let main_entry = main_elf.entry.checked_add(main_load_bias)?;
+        if main_entry >= USER_TRAMPOLINE {
+            return None;
+        }
+        let mut final_entry = main_entry;
+        let mut interp_base = None;
+
+        for segment in &main_elf.loads {
+            let start = segment.vaddr.checked_add(main_load_bias)?;
+            let area_end_vpn = memory_set.map_elf_file_segment(
+                main_file.clone(),
+                start,
+                segment.offset,
+                segment.filesz,
+                segment.memsz,
+                segment.permission,
+            )?;
+            max_end_vpn = max_end_vpn.max(area_end_vpn);
+            main_max_end_vpn = main_max_end_vpn.max(area_end_vpn);
+
+        }
+
+        if let Some(interp_path) = main_elf.interp.as_deref() {
+            let Some(interp_file) = load_interp(interp_path) else {
+                // A PT_INTERP image cannot be started without its dynamic
+                // linker. Falling back to the main entry would skip all
+                // relocations and produce an apparently successful but
+                // unusable execve.
+                warn!(
+                    "MemorySet::from_elf_file: PT_INTERP loader '{}' not found",
+                    interp_path
+                );
+                return None;
+            };
+            let interp_elf = parse_elf64_file(interp_file.as_ref())?;
+            // The interpreter is itself relocated at a runtime base. An
+            // ET_EXEC interpreter requires a fixed layout and cannot be
+            // treated as position-independent here.
+            if !interp_elf.is_shared_object || interp_elf.interp.is_some() {
+                warn!(
+                    "MemorySet::from_elf_file: invalid PT_INTERP image '{}'",
+                    interp_path
+                );
+                return None;
+            }
+            let interp_load_align = interp_elf
+                .loads
+                .iter()
+                .map(|segment| segment.align)
+                .max()
+                .unwrap_or(PAGE_SIZE);
+            const GUARD_PAGES: usize = 10;
+            let interp_runtime_base = main_max_end_vpn
+                .0
+                .checked_mul(PAGE_SIZE)?
+                .checked_add(GUARD_PAGES * PAGE_SIZE)?;
+            memory_set.push_guard_area(main_max_end_vpn.0 * PAGE_SIZE, GUARD_PAGES);
+            let interp_load_bias = elf_align_up(interp_runtime_base, interp_load_align)?;
+            let candidate_entry = interp_elf.entry.checked_add(interp_load_bias)?;
+            if candidate_entry >= USER_TRAMPOLINE {
+                return None;
+            }
+            interp_base = Some(interp_load_bias);
+            final_entry = candidate_entry;
+            for segment in &interp_elf.loads {
+                let start = segment.vaddr.checked_add(interp_load_bias)?;
+                let area_end_vpn = memory_set.map_elf_file_segment(
+                    interp_file.clone(),
+                    start,
+                    segment.offset,
+                    segment.filesz,
+                    segment.memsz,
+                    segment.permission,
+                )?;
+                max_end_vpn = max_end_vpn.max(area_end_vpn);
+            }
+            info!(
+                "MemorySet::from_elf_file: PT_INTERP loaded '{}', entry switched {:#x} -> {:#x}",
+                interp_path, main_entry, final_entry
+            );
+        }
+
+        // Main/interpreter segments -> guard -> stack -> guard -> heap.
+        const GUARD_PAGES: usize = 10;
+        let user_stack_bottom = max_end_vpn
+            .0
+            .checked_mul(PAGE_SIZE)?
+            .checked_add(GUARD_PAGES * PAGE_SIZE)?;
+        memory_set.push_guard_area(max_end_vpn.0 * PAGE_SIZE, GUARD_PAGES);
+        let user_stack_top = user_stack_bottom.checked_add(USER_STACK_SIZE)?;
+        if user_stack_top > USER_TRAMPOLINE {
+            return None;
+        }
+        let stack_area = MapArea::new(
+            user_stack_bottom.into(),
+            user_stack_top.into(),
+            MapType::Framed,
+            MapPermission::R | MapPermission::W | MapPermission::U,
+            PageSize::Page4K,
+        );
+        memory_set.areas.write().insert(
+            stack_area.vpn_range.get_start(),
+            Arc::new(VersionedArea::new(stack_area)),
+        );
+
+        let heap_bottom = user_stack_top.checked_add(GUARD_PAGES * PAGE_SIZE)?;
+        if heap_bottom >= USER_TRAMPOLINE {
+            return None;
+        }
+        memory_set.push_guard_area(user_stack_top, GUARD_PAGES);
+        let heap_bottom_vpn = VirtAddr::from(heap_bottom).std_ceil();
+        memory_set.push(
+            MapArea::new(
+                heap_bottom_vpn.into(),
+                heap_bottom_vpn.into(),
+                MapType::Framed,
+                MapPermission::R | MapPermission::W | MapPermission::U,
+                PageSize::Page4K,
+            ),
+            None,
+            heap_bottom,
+        );
+        memory_set
+            .start_brk
+            .store(heap_bottom as u64, Ordering::Relaxed);
+        memory_set.brk.store(heap_bottom as u64, Ordering::Relaxed);
+
+        #[cfg(target_arch = "riscv64")]
+        memory_set.install_kernel_space();
+
+        Some((
+            memory_set,
+            heap_bottom,
+            user_stack_top,
+            final_entry,
+            main_entry,
+            phdr_addr,
+            phnum,
+            phent,
+            interp_base,
+        ))
+    }
+
+    /// Insert the non-overlapping VMAs that implement a single PT_LOAD.
+    /// Full file pages can be shared through the page cache.  The final
+    /// partial page is private and explicitly zero-filled after p_filesz;
+    /// subsequent BSS pages are lazy anonymous frames.
+    fn map_elf_file_segment(
+        &self,
+        file: Arc<dyn File + Send + Sync>,
+        start: usize,
+        file_offset: usize,
+        file_size: usize,
+        mem_size: usize,
+        permission: MapPermission,
+    ) -> Option<VirtPageNum> {
+        if file_size > mem_size || start % PAGE_SIZE != file_offset % PAGE_SIZE {
+            return None;
+        }
+        if start >= USER_TRAMPOLINE || mem_size > USER_TRAMPOLINE - start {
+            return None;
+        }
+        if mem_size == 0 {
+            // There is no VMA to insert for a zero-sized PT_LOAD. Returning
+            // zero keeps it out of the image end calculation.
+            return Some(VirtPageNum(0));
+        }
+
+        let page_mask = PAGE_SIZE - 1;
+        let map_start = start & !page_mask;
+        let file_end = start.checked_add(file_size)?;
+        let mem_end = start.checked_add(mem_size)?;
+        let segment_end = elf_align_up(mem_end, PAGE_SIZE)?;
+        if segment_end > USER_TRAMPOLINE {
+            return None;
+        }
+        let base_file_page = file_offset / PAGE_SIZE;
+
+        if file_size != 0 {
+            let full_file_end = file_end & !page_mask;
+            if map_start < full_file_end {
+                self.insert_elf_file_area(
+                    map_start,
+                    full_file_end,
+                    permission,
+                    file.clone(),
+                    base_file_page,
+                    true,
+                    None,
+                )?;
+            }
+            if file_end & page_mask != 0 {
+                let tail_start = full_file_end;
+                let tail_file_page = base_file_page.checked_add((tail_start - map_start) / PAGE_SIZE)?;
+                self.insert_elf_file_area(
+                    tail_start,
+                    tail_start.checked_add(PAGE_SIZE)?,
+                    permission,
+                    file,
+                    tail_file_page,
+                    false,
+                    Some(file_end),
+                )?;
+            }
+        }
+
+        let bss_start = if file_size == 0 {
+            map_start
+        } else {
+            elf_align_up(file_end, PAGE_SIZE)?
+        };
+        if bss_start < segment_end {
+            self.insert_elf_anonymous_area(bss_start, segment_end, permission)?;
+        }
+        Some(VirtAddr::from(mem_end).std_ceil())
+    }
+
+    fn insert_elf_file_area(
+        &self,
+        start: usize,
+        end: usize,
+        permission: MapPermission,
+        file: Arc<dyn File + Send + Sync>,
+        page_offset: usize,
+        page_cache_cow: bool,
+        file_zero_from: Option<usize>,
+    ) -> Option<()> {
+        if start >= end || start % PAGE_SIZE != 0 || end % PAGE_SIZE != 0 {
+            return None;
+        }
+        let mut areas = self.areas.write();
+        if Self::has_conflict_locked(&areas, start, end - start) {
+            warn!("MemorySet::from_elf_file: overlapping PT_LOAD VMA");
+            return None;
+        }
+        let mut area = MapArea::new(
+            start.into(),
+            end.into(),
+            MapType::File,
+            permission,
+            PageSize::Page4K,
+        );
+        area.backing_file = Some((file, page_offset));
+        area.page_cache_cow = page_cache_cow;
+        area.file_zero_from = file_zero_from;
+        let key = area.vpn_range.get_start();
+        areas.insert(key, Arc::new(VersionedArea::new(area)));
+        Some(())
+    }
+
+    fn insert_elf_anonymous_area(
+        &self,
+        start: usize,
+        end: usize,
+        permission: MapPermission,
+    ) -> Option<()> {
+        if start >= end || start % PAGE_SIZE != 0 || end % PAGE_SIZE != 0 {
+            return None;
+        }
+        let mut areas = self.areas.write();
+        if Self::has_conflict_locked(&areas, start, end - start) {
+            warn!("MemorySet::from_elf_file: overlapping PT_LOAD BSS VMA");
+            return None;
+        }
+        let area = MapArea::new(
+            start.into(),
+            end.into(),
+            MapType::Framed,
+            permission,
+            PageSize::Page4K,
+        );
+        let key = area.vpn_range.get_start();
+        areas.insert(key, Arc::new(VersionedArea::new(area)));
+        Some(())
+    }
+
     /// Build address space from a main ELF and an optional interpreter loader.
     pub fn from_elf_with_interp_loader<F>(
         elf_data: &[u8],
@@ -525,7 +1472,7 @@ impl MemorySet {
                 .map(|value| value & !(align - 1))
         }
 
-        let mut memory_set = Self::new_bare();
+        let memory_set = Self::new_bare();
 
         // 用户态信号处理后恢复跳板
         memory_set.map_user_trampoline();
@@ -683,14 +1630,14 @@ impl MemorySet {
                 memory_set.push_guard_area(main_max_end_vpn.0 * PAGE_SIZE, GUARD_PAGES);
                 let Some(interp_load_align) =
                     interp_elf
-                    .program_iter()
+                        .program_iter()
                         .try_fold(PAGE_SIZE, |max_align, segment| {
                             if matches!(segment.get_type(), Ok(xmas_elf::program::Type::Load)) {
                                 Some(max_align.max(load_align(segment.align())?))
-                        } else {
+                            } else {
                                 Some(max_align)
-                        }
-                    })
+                            }
+                        })
                 else {
                     warn!("MemorySet::from_elf: invalid interpreter PT_LOAD alignment");
                     return None;
@@ -772,17 +1719,30 @@ impl MemorySet {
         debug!("MemorySet::from_elf: mapped common areas");
         // 按顺序布局：主程序/解释器段 -> guard -> 用户栈 -> guard -> 堆。
         const GUARD_PAGES: usize = 10;
-        let user_stack_bottom = max_end_vpn.0 * PAGE_SIZE + GUARD_PAGES * PAGE_SIZE;
+        let user_stack_bottom = max_end_vpn
+            .0
+            .checked_mul(PAGE_SIZE)?
+            .checked_add(GUARD_PAGES * PAGE_SIZE)?;
         memory_set.push_guard_area(max_end_vpn.0 * PAGE_SIZE, GUARD_PAGES);
-        let user_stack_top = user_stack_bottom + USER_STACK_SIZE;
-        memory_set.areas.push(MapArea::new(
+        let user_stack_top = user_stack_bottom.checked_add(USER_STACK_SIZE)?;
+        if user_stack_top > USER_TRAMPOLINE {
+            return None;
+        }
+        let stack_area = MapArea::new(
             user_stack_bottom.into(),
             user_stack_top.into(),
             MapType::Framed,
             MapPermission::R | MapPermission::W | MapPermission::U,
             PageSize::Page4K,
-        ));
-        let heap_bottom = user_stack_top + GUARD_PAGES * PAGE_SIZE;
+        );
+        memory_set.areas.write().insert(
+            stack_area.vpn_range.get_start(),
+            Arc::new(VersionedArea::new(stack_area)),
+        );
+        let heap_bottom = user_stack_top.checked_add(GUARD_PAGES * PAGE_SIZE)?;
+        if heap_bottom >= USER_TRAMPOLINE {
+            return None;
+        }
         memory_set.push_guard_area(user_stack_top, GUARD_PAGES);
         let heap_bottom_vpn = VirtAddr::from(heap_bottom).std_ceil();
         memory_set.push(
@@ -796,8 +1756,11 @@ impl MemorySet {
             None,
             heap_bottom,
         );
-         //初始化堆索引
-        memory_set.brk_index = memory_set.areas.len() - 1;
+        // 初始化堆起点与 program break（brk 从堆底开始，可随后用 brk/sbrk 增长）
+        memory_set
+            .start_brk
+            .store(heap_bottom as u64, Ordering::Relaxed);
+        memory_set.brk.store(heap_bottom as u64, Ordering::Relaxed);
         // map TrapContext
         // la64下不需要映射
         // 对于riscv，需要在创建进程时再映射
@@ -832,14 +1795,22 @@ impl MemorySet {
         ))
     }
     /// Create a new address space by copy code&data from a exited process's address space.
-    pub fn from_existed_user(user_space: &mut Self) -> Self {
-        let mut memory_set = Self::new_bare();
+    pub fn from_existed_user(user_space: &Self) -> Self {
+        let memory_set = Self::new_bare();
         // 用户态信号恢复跳板
         memory_set.map_user_trampoline();
 
+        // 快照父进程：只持有 areas 读锁；页表按“area -> PageTable”顺序逐段获取。
+        let parent_areas = user_space.areas.read();
+
+        let mut parent_permissions_tightened = false;
         // 复制用户拥有的段
-        for idx in 0..user_space.areas.len() {
-            let map_type = user_space.areas[idx].map_type;
+        for area_arc in parent_areas.values() {
+            // Fork may turn a private writable mapping into COW.  Hold the
+            // area's write transaction while copying its frame ownership and
+            // tightening parent PTEs so the version covers that commit.
+            let mut area = area_arc.write();
+            let map_type = area.map_type;
             // 采用共享内核页表之后实际上弃用，暂时保留接口
             if map_type == MapType::BorrowedKernel {
                 continue;
@@ -848,45 +1819,67 @@ impl MemorySet {
             // Copying one through push() would call map_one(), while a guard
             // mapping is supposed to be a no-op rather than an allocation.
             if map_type == MapType::Guard {
+                let new_area = MapArea::from_another(&area);
+                let key = new_area.vpn_range.get_start();
                 memory_set
                     .areas
-                    .push(MapArea::from_another(&user_space.areas[idx]));
+                    .write()
+                    .insert(key, Arc::new(VersionedArea::new(new_area)));
                 continue;
             }
-            let map_perm = user_space.areas[idx].map_perm;
-            let is_shared = user_space.areas[idx].is_shared;
-            let page_size = user_space.areas[idx].page_size;
-            let vpn_range = VPNRange::new(
-                user_space.areas[idx].vpn_range.get_start(),
-                user_space.areas[idx].vpn_range.get_end(),
-            );
+            let map_perm = area.map_perm;
+            let is_shared = area.is_shared;
+            let page_size = area.page_size;
+            let vpn_range = area.vpn_range;
             // 优化：空的 PROT_NONE 区域不需要复制页表，跳过页表访问
             if (!map_perm.contains(MapPermission::U)
-                || !map_perm.intersects(
-                    MapPermission::R | MapPermission::W | MapPermission::X,
-                ))
-                && user_space.areas[idx].data_frames.is_empty()
+                || !map_perm.intersects(MapPermission::R | MapPermission::W | MapPermission::X))
+                && area.data_frames.lock().is_empty()
             {
+                let new_area = MapArea::from_another(&area);
+                let key = new_area.vpn_range.get_start();
                 memory_set
                     .areas
-                    .push(MapArea::from_another(&user_space.areas[idx]));
+                    .write()
+                    .insert(key, Arc::new(VersionedArea::new(new_area)));
                 continue;
             }
             let share_user_pages = matches!(map_type, MapType::Framed | MapType::File);
             if share_user_pages {
-                let mut new_area = MapArea::from_another(&user_space.areas[idx]);
+                let new_area = MapArea::from_another(&area);
+                let key = new_area.vpn_range.get_start();
+                let child_area_arc = Arc::new(VersionedArea::new(new_area));
+                memory_set.areas.write().insert(key, child_area_arc.clone());
+                let mut child_area = child_area_arc.write();
                 // 只遍历父进程实际已分配的页
-                let mapped_vpns: Vec<VirtPageNum> = user_space.areas[idx]
+                let mapped_vpns: Vec<VirtPageNum> = area
                     .data_frames
+                    .lock()
                     .keys()
                     .copied()
                     .filter(|vpn| *vpn >= vpn_range.get_start() && *vpn < vpn_range.get_end())
                     .collect();
                 for vpn in mapped_vpns {
-                    let Some(src_pte) = user_space.page_table.translate(vpn) else {
+                    let Some(src_pte) = user_space.page_table.read().translate(vpn) else {
                         continue;
                     };
                     if !src_pte.is_valid() {
+                        continue;
+                    }
+                    let Some(frame_tracker) = area.data_frames.lock().get(&vpn).cloned() else {
+                        warn!(
+                            "fork: valid user PTE at vpn {:#x} has no owning frame",
+                            vpn.0
+                        );
+                        continue;
+                    };
+                    if src_pte.ppn() != frame_tracker.ppn {
+                        warn!(
+                            "fork: PTE/frame mismatch at vpn {:#x}: pte={:#x}, frame={:#x}",
+                            vpn.0,
+                            src_pte.ppn().0,
+                            frame_tracker.ppn.0
+                        );
                         continue;
                     }
                     let writable_cow = map_perm.contains(MapPermission::W) && !is_shared;
@@ -898,38 +1891,38 @@ impl MemorySet {
                     let child_flags = PTEFlags::from_bits(child_perm.bits).unwrap();
                     memory_set
                         .page_table
+                        .write()
                         .map(vpn, src_pte.ppn(), child_flags, page_size);
-                    let frame_tracker = user_space.areas[idx]
-                        .data_frames
-                        .get(&vpn)
-                        .cloned()
-                        .unwrap();
-                    new_area.data_frames.insert(vpn, frame_tracker);
+                    child_area.data_frames.lock().insert(vpn, frame_tracker);
                     if writable_cow {
+                        parent_permissions_tightened = true;
                         let parent_perm = map_perm & !MapPermission::W;
                         let parent_flags = PTEFlags::from_bits(parent_perm.bits).unwrap();
                         user_space
                             .page_table
+                            .write()
                             .set_flags(vpn, parent_flags, page_size);
                     }
                 }
-                memory_set.areas.push(new_area);
             } else {
-                let new_area: MapArea = MapArea::from_another(&user_space.areas[idx]);
+                let new_area: MapArea = MapArea::from_another(&area);
                 let start_va: VirtAddr = new_area.vpn_range.get_start().into();
                 memory_set.push(new_area, None, start_va.0);
                 let step = page_size.num_pages();
                 let mut vpn = vpn_range.get_start();
                 while vpn < vpn_range.get_end() {
-                    if let Some(src_pte) = user_space.translate(vpn) {
+                    if let Some(src_pte) = user_space.page_table.read().translate(vpn) {
                         if src_pte.is_valid() {
                             let src_ppn = src_pte.ppn();
-                            if memory_set.translate(vpn).is_none()
-                                || !memory_set.translate(vpn).unwrap().is_valid()
-                            {
-                                memory_set.page_table.translate_create(vpn, page_size);
-                            }
-                            let dst_ppn = memory_set.translate(vpn).unwrap().ppn();
+                            let dst_ppn = {
+                                let mut child_pt = memory_set.page_table.write();
+                                if child_pt.translate(vpn).is_none()
+                                    || !child_pt.translate(vpn).unwrap().is_valid()
+                                {
+                                    child_pt.translate_create(vpn, page_size);
+                                }
+                                child_pt.translate(vpn).unwrap().ppn()
+                            };
                             // 按实际页大小拷贝全部数据（大页需拷贝多个基本页）
                             let num_pages = page_size.num_pages();
                             for i in 0..num_pages {
@@ -943,93 +1936,162 @@ impl MemorySet {
                 }
             }
         }
-        // 复制brk_index
-        memory_set.brk_index = user_space.brk_index;
+        // 复制 brk 与堆起点
+        memory_set
+            .brk
+            .store(user_space.brk.load(Ordering::Relaxed), Ordering::Relaxed);
+        memory_set.start_brk.store(
+            user_space.start_brk.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        drop(parent_areas);
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
+        if parent_permissions_tightened {
+            user_space.flush_tlb_targets();
+        }
         #[cfg(target_arch = "riscv64")]
         memory_set.install_kernel_space();
         memory_set
     }
-    pub fn handle_cow_fault(&mut self, bad_addr: usize) -> bool {
+    pub fn handle_cow_fault(&self, bad_addr: usize) -> bool {
         let vpn = VirtAddr::from(bad_addr).std_floor();
-        let page_table = &mut self.page_table;
-        if let Some(area) = self
-            .areas
-            .iter_mut()
-            .find(|a| vpn >= a.vpn_range.get_start() && vpn < a.vpn_range.get_end())
-        {
-            if area.map_type == MapType::Guard
+        let old_frame = {
+            // Keep the tree lookup, VMA state and PTE replacement in one
+            // lock-order-consistent transaction. A removed VMA can therefore
+            // never be resurrected by a late COW fault.
+            let areas = self.areas.read();
+            let Some(area_arc) = areas
+                .range(..=vpn)
+                .next_back()
+                .map(|(_, area)| Arc::clone(area))
+            else {
+                return false;
+            };
+            let mut area = area_arc.write();
+            if !area.contains(vpn)
+                || area.map_type == MapType::Guard
                 || area.is_shared
                 || !area.map_perm.contains(MapPermission::W)
             {
                 return false;
             }
-            if let Some(pte) = page_table.translate(vpn) {
-                if pte.is_valid() && !pte.writable() {
-                    let old_ppn = pte.ppn();
-                    let new_frame = frame_alloc(area.page_size).unwrap();
-                    let new_ppn = new_frame.ppn;
-                    // 按实际页大小拷贝全部数据（大页需拷贝多个基本页）
-                    let num_pages = area.page_size.num_pages();
-                    for i in 0..num_pages {
-                        PhysPageNum(new_ppn.0 + i)
-                            .get_bytes_array()
-                            .copy_from_slice(PhysPageNum(old_ppn.0 + i).get_bytes_array());
-                    }
-                    let pte_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
-                    page_table.set_entry(vpn, new_ppn, pte_flags);
-                    let old_frame = area.data_frames.insert(vpn, new_frame);
-                    #[cfg(target_arch = "loongarch64")]
-                    Self::flush_tlb_after_mapping_change();
-                    #[cfg(target_arch = "riscv64")]
-                    self.flush_tlb_targets();
-                    drop(old_frame);
-                    return true;
-                }
+
+            let page_size = area.page_size;
+            let map_perm = area.map_perm;
+            let area_start = area.vpn_range.get_start().0;
+            let page_count = page_size.num_pages();
+            let base_vpn =
+                VirtPageNum(area_start + ((vpn.0 - area_start) / page_count) * page_count);
+            let mut pt = self.page_table.write();
+            let Some(pte) = pt.translate(vpn) else {
+                return false;
+            };
+            if !pte.is_valid() || pte.writable() {
+                return false;
             }
-        }
-        false
+
+            let Some(tracked_frame) = area.frame_for_vpn(vpn) else {
+                return false;
+            };
+            if tracked_frame.page_size != page_size || tracked_frame.ppn != pte.ppn() {
+                return false;
+            }
+
+            let old_ppn = pte.ppn();
+
+            let Some(new_frame) = frame_alloc(page_size) else {
+                return false;
+            };
+            let new_ppn = new_frame.ppn;
+            // 按实际页大小拷贝全部数据（大页需拷贝多个基本页）
+            for i in 0..page_count {
+                PhysPageNum(new_ppn.0 + i)
+                    .get_bytes_array()
+                    .copy_from_slice(PhysPageNum(old_ppn.0 + i).get_bytes_array());
+            }
+
+            // The VMA owns the replacement before its PTE is made visible.
+            let old_frame = area.data_frames.lock().insert(base_vpn, new_frame);
+            let pte_flags = PTEFlags::from_bits(map_perm.bits).unwrap();
+            pt.set_entry(vpn, new_ppn, pte_flags);
+            old_frame
+        };
+
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
+        self.flush_tlb_targets();
+        drop(old_frame);
+        true
     }
+    /// Resolve a COW transition, or observe that another writable pin resolved
+    /// it after this caller's first PTE check. The latter is a valid optimistic
+    /// retry outcome rather than an invalid user pointer.
+    fn resolve_cow_or_observe_writable(&self, bad_addr: usize) -> bool {
+        let vpn = VirtAddr::from(bad_addr).std_floor();
+        self.handle_cow_fault(bad_addr)
+            || self
+                .page_table
+                .read()
+                .translate(vpn)
+                .is_some_and(|pte| pte.is_valid() && pte.writable())
+    }
+
     //用于内核态给用户空间写入数据，判断是否是copy页时使用
-    pub fn ensure_writable_user_range(&mut self, start: usize, len: usize, sp: usize) -> bool {
+    pub fn ensure_writable_user_range(
+        &self,
+        start: usize,
+        len: usize,
+    ) -> bool {
         if len == 0 {
             return true;
         }
-        let page_size = if let Some(page_size) = self.areas.iter().find_map(|area| {
-            if VirtAddr::from(start) >= area.vpn_range.get_start().into()
-                && VirtAddr::from(start) < area.vpn_range.get_end().into()
-            {
-                Some(area.page_size)
-            } else {
-                None
+        let page_size = {
+            let areas = self.areas.read();
+            let mut found = None;
+            for area_arc in areas.values() {
+                let area = area_arc.read();
+                if VirtAddr::from(start) >= area.vpn_range.get_start().into()
+                    && VirtAddr::from(start) < area.vpn_range.get_end().into()
+                {
+                    found = Some(area.page_size);
+                    break;
+                }
             }
-        }) {
-            page_size
-        } else {
-            return false;
+            match found {
+                Some(ps) => ps,
+                None => return false,
+            }
         };
         let mut vpn = VirtAddr::from(start).std_floor();
         let end_vpn = VirtAddr::from(start + len - 1).std_floor();
         loop {
             let page_start = vpn.0 * PAGE_SIZE;
-            match self.page_table.translate(vpn) {
-                Some(pte) if pte.is_valid() && pte.writable() => {}
-                Some(pte) if pte.is_valid() => {
-                    if !self.handle_cow_fault(page_start) {
-                        return false;
-                    }
+            let ready = {
+                let pt = self.page_table.read();
+                match pt.translate(vpn) {
+                    Some(pte) if pte.is_valid() && pte.writable() => true,
+                    _ => false,
                 }
-                _ => {
-                    if !self.handle_page_fault(page_start, sp) {
+            };
+            if !ready {
+                let valid = {
+                    let pt = self.page_table.read();
+                    pt.translate(vpn).map_or(false, |pte| pte.is_valid())
+                };
+                if valid {
+                    if !self.resolve_cow_or_observe_writable(page_start) {
                         return false;
                     }
-                    match self.page_table.translate(vpn) {
-                        Some(pte) if pte.is_valid() && pte.writable() => {}
-                        Some(pte) if pte.is_valid() => {
-                            if !self.handle_cow_fault(page_start) {
-                                return false;
-                            }
-                        }
-                        _ => return false,
+                } else {
+                    if !self.handle_page_fault(page_start) {
+                        return false;
+                    }
+                    let writable = {
+                        let pt = self.page_table.read();
+                        pt.translate(vpn)
+                            .is_some_and(|pte| pte.is_valid() && pte.writable())
+                    };
+                    if !writable && !self.resolve_cow_or_observe_writable(page_start) {
+                        return false;
                     }
                 }
             }
@@ -1040,39 +2102,57 @@ impl MemorySet {
         }
         true
     }
-    pub fn ensure_readable_user_range(&mut self, start: usize, len: usize, sp: usize) -> bool {
+    pub fn ensure_readable_user_range(&self, start: usize, len: usize) -> bool {
         if len == 0 {
             return true;
         }
-        let page_size = if let Some(page_size) = self.areas.iter().find_map(|area| {
-            if VirtAddr::from(start) >= area.vpn_range.get_start().into()
-                && VirtAddr::from(start) < area.vpn_range.get_end().into()
-            {
-                Some(area.page_size)
-            } else {
-                None
+        let page_size = {
+            let areas = self.areas.read();
+            let mut found = None;
+            for area_arc in areas.values() {
+                let area = area_arc.read();
+                if VirtAddr::from(start) >= area.vpn_range.get_start().into()
+                    && VirtAddr::from(start) < area.vpn_range.get_end().into()
+                {
+                    found = Some(area.page_size);
+                    break;
+                }
             }
-        }) {
-            page_size
-        } else {
-            return false;
+            match found {
+                Some(ps) => ps,
+                None => return false,
+            }
         };
 
         let mut vpn = VirtAddr::from(start).std_floor();
         let end_vpn = VirtAddr::from(start + len - 1).std_floor();
         loop {
             let page_start = vpn.0 * PAGE_SIZE;
-            match self.page_table.translate(vpn) {
-                Some(pte) if pte.is_valid() && pte.readable() => {}
-                Some(pte) if pte.is_valid() => return false,
-                _ => {
-                    if !self.handle_page_fault(page_start, sp) {
-                        return false;
-                    }
-                    match self.page_table.translate(vpn) {
-                        Some(pte) if pte.is_valid() && pte.readable() => {}
-                        _ => return false,
-                    }
+            let ready = {
+                let pt = self.page_table.read();
+                match pt.translate(vpn) {
+                    Some(pte) if pte.is_valid() && pte.readable() => true,
+                    _ => false,
+                }
+            };
+            if !ready {
+                let valid = {
+                    let pt = self.page_table.read();
+                    pt.translate(vpn).map_or(false, |pte| pte.is_valid())
+                };
+                if valid {
+                    return false;
+                }
+                if !self.handle_page_fault(page_start) {
+                    return false;
+                }
+                let ok = {
+                    let pt = self.page_table.read();
+                    pt.translate(vpn)
+                        .map_or(false, |pte| pte.is_valid() && pte.readable())
+                };
+                if !ok {
+                    return false;
                 }
             }
             if vpn == end_vpn {
@@ -1102,7 +2182,7 @@ impl MemorySet {
     /// 用户处于低半地址空间
     #[cfg(target_arch = "loongarch64")]
     pub fn activate(&self) {
-        let pgdl = self.page_table.token();
+        let pgdl = self.page_table.read().token();
         unsafe {
             asm!("csrwr {pgdl}, 0x19", pgdl = inout(reg) pgdl => _);
             asm!("dbar 0");
@@ -1110,119 +2190,217 @@ impl MemorySet {
     }
 
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
-        let page_size = self.areas.iter().find_map(|area| {
-            if vpn >= area.vpn_range.get_start() && vpn < area.vpn_range.get_end() {
-                Some(area.page_size)
-            } else {
-                None
-            }
-        })?;
-        self.page_table.translate(vpn)
+        // Keep the tree and this VMA stable through the page-table lookup.
+        let areas = self.areas.read();
+        let area_arc = areas
+            .range(..=vpn)
+            .next_back()
+            .map(|(_, area)| Arc::clone(area))?;
+        let area = area_arc.read();
+        if !area.contains(vpn) {
+            return None;
+        }
+        self.page_table.read().translate(vpn)
+    }
+
+    /// 将虚拟地址翻译为物理地址
+    /// 
+    /// 仅允许用于**内核空间**地址翻译
+    /// （因为只有内核空间页表满足 'static，能保证映射不变）
+    pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
+        let vpn = va.std_floor();
+        let areas = self.areas.read();
+        let area_arc = areas
+            .range(..=vpn)
+            .next_back()
+            .map(|(_, area)| Arc::clone(area))?;
+        let area = area_arc.read();
+        if !area.contains(vpn) {
+            return None;
+        }
+        self.page_table.read().translate_va(va)
+    }
+
+    /// Resolve the identity used to look up a futex wait queue.
+    ///
+    /// For private and anonymous mappings the queue is keyed by `(mm, user
+    /// virtual address)`, rather than the current PTE's physical address. A
+    /// COW write can replace that PTE while a waiter is asleep, but it cannot
+    /// change this identity. `FUTEX_PRIVATE_FLAG` and the Linux-style
+    /// mm-shared anonymous domain remain distinct.
+    /// Shared mappings use stable backing-object identities, never the current
+    /// PTE or physical frame. This keeps waiters and wakers together across
+    /// lazy population, COW, page-cache replacement, and TLB invalidation.
+    pub fn futex_key(&self, va: VirtAddr, private_requested: bool) -> Option<FutexKey> {
+        let vpn = va.std_floor();
+        let areas = self.areas.read();
+        let area_arc = areas
+            .range(..=vpn)
+            .next_back()
+            .map(|(_, area)| Arc::clone(area))?;
+        let area = area_arc.read();
+        if !area.contains(vpn) || !area.map_perm.contains(MapPermission::U) {
+            return None;
+        }
+
+        let mm = self.mm_id;
+        if private_requested {
+            return Some(FutexKey::Private {
+                mm,
+                address: va.0,
+            });
+        }
+        if !area.is_shared {
+            return Some(FutexKey::Shared {
+                object: FutexSharedObject::Mm(mm),
+                offset: va.0,
+            });
+        }
+
+        if area.anonymous_shared_frames.is_some() {
+            let mapping_start = area.futex_mapping_start.0.checked_mul(PAGE_SIZE)?;
+            return Some(FutexKey::Shared {
+                object: FutexSharedObject::AnonymousMapping(area.futex_mapping_id),
+                offset: va.0.checked_sub(mapping_start)?,
+            });
+        }
+
+        let (file, page_offset) = area.backing_file.as_ref()?;
+        let area_start = area.vpn_range.get_start().0.checked_mul(PAGE_SIZE)?;
+        let mapping_offset = va.0.checked_sub(area_start)?;
+        Some(FutexKey::Shared {
+            object: FutexSharedObject::File(file.ino()),
+            offset: page_offset
+                .checked_mul(PAGE_SIZE)?
+                .checked_add(mapping_offset)?,
+        })
     }
     pub fn translate_create(
-        &mut self,
+        &self,
         vpn: VirtPageNum,
         page_size: PageSize,
     ) -> Option<PageTableEntry> {
-        self.page_table.translate_create(vpn, page_size)
+        self.page_table.write().translate_create(vpn, page_size)
     }
     #[cfg(target_arch = "loongarch64")]
-    pub fn set_pte_dirty(&mut self, vpn: VirtPageNum) -> bool {
-        if let Some((pte, _)) = self.page_table.find_pte(vpn) {
-            pte.set_dirty();
-            Self::flush_tlb_after_mapping_change();
-            true
-        } else {
-            false
+    pub fn set_pte_dirty(&self, vpn: VirtPageNum) -> bool {
+        let dirty = {
+            let areas = self.areas.read();
+            let Some((_, area_arc)) = areas.range(..=vpn).next_back() else {
+                return false;
+            };
+            let area = area_arc.write();
+            if !area.contains(vpn) {
+                return false;
+            }
+            let mut pt = self.page_table.write();
+            if let Some((pte, _)) = pt.find_pte_mut(vpn) {
+                pte.set_dirty();
+                true
+            } else {
+                false
+            }
+        };
+        if dirty {
+            self.flush_tlb_local();
         }
+        dirty
     }
     #[cfg(target_arch = "riscv64")]
-    pub fn set_pte_dirty(&mut self, vpn: VirtPageNum) -> bool {
-        if let Some((pte, _)) = self.page_table.find_pte(vpn) {
-            let flags = pte.flags();
-            if pte.is_valid() && pte.writable() && !flags.contains(PTEFlags::D) {
-                pte.set_dirty();
-                self.flush_tlb_targets();
-                return true;
+    pub fn set_pte_dirty(&self, vpn: VirtPageNum) -> bool {
+        let need_flush = {
+            let areas = self.areas.read();
+            let Some((_, area_arc)) = areas.range(..=vpn).next_back() else {
+                return false;
+            };
+            let area = area_arc.write();
+            if !area.contains(vpn) {
+                return false;
             }
+            let mut pt = self.page_table.write();
+            if let Some((pte, _)) = pt.find_pte_mut(vpn) {
+                let flags = pte.flags();
+                if pte.is_valid() && pte.writable() && !flags.contains(PTEFlags::D) {
+                    pte.set_dirty();
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if need_flush {
+            self.flush_tlb_local();
         }
-        false
+        need_flush
     }
     /// 写回共享映射页面内容
-    pub fn sync_shared_pages(&mut self) {
-        for area in self.areas.iter_mut() {
-            area.sync_back_to_file();
+    pub fn sync_shared_pages(&self) {
+        let areas = self.areas.read();
+        for area_arc in areas.values() {
+            area_arc.write().sync_back_to_file();
         }
     }
     /// Remove all `MapArea`
-    pub fn recycle_data_pages(&mut self) {
+    pub fn recycle_data_pages(&self) {
         let mut frames = Vec::new();
-        for area in self.areas.iter_mut() {
-            frames.extend(area.unmap(&mut self.page_table));
+        {
+            let mut areas = self.areas.write();
+            let mut guards: Vec<_> = areas.values().map(|a| a.write()).collect();
+            let mut pt = self.page_table.write();
+            for area in guards.iter_mut() {
+                frames.extend(area.unmap(&mut pt));
+            }
+            drop(guards);
+            areas.clear();
         }
-        #[cfg(target_arch = "riscv64")]
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
         self.flush_tlb_targets();
         drop(frames);
-        self.areas.clear();
     }
     /// shrink the area to new_end
     #[allow(unused)]
-    pub fn shrink_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
-        if let Some(area) = self
-            .areas
-            .iter_mut()
-            .find(|area| area.vpn_range.get_start() == start.std_floor())
-        {
-            let frames = area.shrink_to(&mut self.page_table, new_end.std_ceil());
-            #[cfg(target_arch = "loongarch64")]
-            Self::flush_tlb_after_mapping_change();
-            #[cfg(target_arch = "riscv64")]
-            self.flush_tlb_targets();
-            drop(frames);
-            true
-        } else {
-            false
-        }
+    pub fn shrink_to(&self, start: VirtAddr, new_end: VirtAddr) -> bool {
+        let start_vpn = start.std_floor();
+        let mut areas = self.areas.write();
+        let Some(area_arc) = areas.get(&start_vpn) else {
+            return false;
+        };
+        let mut area = area_arc.write();
+        let mut pt = self.page_table.write();
+        let frames = area.shrink_to(&mut pt, new_end.std_ceil());
+        drop(pt);
+        drop(area);
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
+        self.flush_tlb_targets();
+        drop(frames);
+        true
     }
 
     /// append the area to new_end
     #[allow(unused)]
-    pub fn append_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
-        //找到对应逻辑段
-        if let Some(area) = self
-            .areas
-            .iter_mut()
-            .find(|area| area.vpn_range.get_start() == start.std_floor())
-        {
-            area.append_to(&mut self.page_table, new_end.std_ceil());
-            #[cfg(target_arch = "loongarch64")]
-            Self::flush_tlb_after_mapping_change();
-            true
-        } else {
-            false
-        }
+    pub fn append_to(&self, start: VirtAddr, new_end: VirtAddr) -> bool {
+        let start_vpn = start.std_floor();
+        let mut areas = self.areas.write();
+        let Some(area_arc) = areas.get(&start_vpn) else {
+            return false;
+        };
+        let mut area = area_arc.write();
+        let mut pt = self.page_table.write();
+        area.append_to(&mut pt, new_end.std_ceil());
+        #[cfg(target_arch = "loongarch64")]
+        self.flush_tlb_local();
+        true
     }
 
-    /// 检查目标地址段是否与已有的映射冲突(存在交集)
-    fn has_conflict(&self, start: usize, len: usize) -> bool {
-        for area in self.areas.iter() {
-            let area_start = area.vpn_range.get_start();
-            let area_end = area.vpn_range.get_end();
-            let target_start = VirtAddr::from(start).std_floor();
-            let target_end = VirtAddr::from(start + len).std_ceil();
-            if target_end > area_start && target_start < area_end {
-                return true;
-            }
-        }
-        false
-    }
     /// mmap 实现
-    /// 
+    ///
     /// 当前实现下所有映射都为懒分配，
     /// 首次访问时由 handle_page_fault 分配物理页并映射。
     /// 目前暂时固定用 4KB 页。
     pub fn mmap(
-        &mut self,
+        &self,
         addr: usize,
         length: usize,
         prot: mmap::MMapProt,
@@ -1236,43 +2414,13 @@ impl MemorySet {
         let page_offset = offset / PAGE_SIZE;
 
         // 计算需要的物理页数
-        let needing_std_pages = VirtAddr::from(addr + length).std_ceil().0 - VirtAddr::from(addr).std_floor().0;
+        let needing_std_pages =
+            VirtAddr::from(addr + length).std_ceil().0 - VirtAddr::from(addr).std_floor().0;
         let is_anonymous = mmap_flags.contains(mmap::MMapFlags::MAP_ANONYMOUS);
         let is_shared = mmap_flags.contains(mmap::MMapFlags::MAP_SHARED);
         let free_std_pages = get_free_frames();
         info!("mapping memory: addr={:#x}, length={:#x}, prot={:?}, flags={:?}, free_std_pages={}, needing_std_pages={}", 
             addr, length, prot, mmap_flags, free_std_pages, needing_std_pages);
-
-        // 找合适起始地址
-        let mut start_va = addr;
-        if start_va == 0 {
-            if let Some(new_addr) = self.find_free_area(length) {
-                //println!("[kernel] mmap: found free area at 0x{:x} for length 0x{:x}", new_addr, length);
-                start_va = new_addr;
-            } else {
-                error!(
-                    "mmap failed: no suitable free area found for length {:#x}",
-                    length
-                );
-                return Err(Errno::EEXIST.as_isize());
-            }
-        } else {
-            // 检查冲突
-            if self.has_conflict(start_va, length) {
-                if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED) {
-                    if let Ok(_ret) = self.munmap(start_va, length) {
-                        // Handle the result if needed
-                        //println!("[kernel] mmap: MAP_FIXED flag set, unmapped conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
-                    } else {
-                        //println!("[kernel] mmap: MAP_FIXED flag set, but failed to unmap conflicting area at [{:#x}, {:#x})", start_va, start_va + length);
-                        return Err(Errno::EEXIST.as_isize());
-                    }
-                } else {
-                    //println!("[kernel] mmap failed: address range [0x{:x}, 0x{:x}) conflicts with existing mapping", start_va, start_va + length);
-                    return Err(Errno::EEXIST.as_isize());
-                }
-            }
-        }
 
         // 设置权限
         let mut permission = MapPermission::empty();
@@ -1289,6 +2437,43 @@ impl MemorySet {
             permission |= MapPermission::U;
         }
 
+        // 文件分支提前取出 file，避免循环内 move。
+        let file_opt = if is_anonymous {
+            None
+        } else {
+            Some(file_inner.ok_or_else(|| Errno::EBADF.as_isize())?)
+        };
+
+        // 地址选择与插入在同一次 areas 写锁内完成。
+        let mut areas = self.areas.write();
+        let mut released_frames = Vec::new();
+        let mut needs_tlb_flush = false;
+        let find_free_area = || -> Result<usize, isize> {
+            match Self::find_free_area_locked(length, &areas) {
+                Some(new_addr) => Ok(new_addr),
+                None => {
+                    error!(
+                        "mmap failed: no suitable free area found for length {:#x}",
+                        length
+                    );
+                    Err(Errno::EEXIST.as_isize())
+                }
+            }
+        };
+        let start_va = if addr == 0 {
+            find_free_area()?
+        } else {
+            if Self::has_conflict_locked(&areas, addr, length) {
+                if mmap_flags.contains(mmap::MMapFlags::MAP_FIXED) {
+                    released_frames = self.munmap_locked(&mut areas, addr, length);
+                    needs_tlb_flush = true;
+                } else {
+                    return Err(Errno::EEXIST.as_isize());
+                }
+            }
+            addr
+        };
+
         if is_anonymous {
             // 匿名 mmap 只创建区域元数据。首次访问由 handle_page_fault
             // 分配并清零一个物理页，不再在这里遍历整个线程栈。
@@ -1301,56 +2486,54 @@ impl MemorySet {
             );
             area.is_shared = is_shared;
             if is_shared {
-                area.anonymous_shared_frames = Some(Arc::new(MPSafeCell::new(BTreeMap::new())));
+                area.anonymous_shared_frames = Some(Arc::new(Mutex::new(BTreeMap::new())));
             }
-            self.areas.push(area);
+            let key = area.vpn_range.get_start();
+            areas.insert(key, Arc::new(VersionedArea::new(area)));
         } else {
-            let file = file_inner.ok_or_else(|| Errno::EBADF.as_isize())?;
-            self.insert_file_area(
+            let file = file_opt.clone().unwrap();
+            let mut area = MapArea::new(
                 VirtAddr::from(start_va),
                 VirtAddr::from(start_va + length),
+                MapType::File,
                 permission,
                 PageSize::Page4K,
-                file,
-                page_offset,
-                is_shared,
             );
+            area.backing_file = Some((file, page_offset));
+            area.is_shared = is_shared;
+            let key = area.vpn_range.get_start();
+            areas.insert(key, Arc::new(VersionedArea::new(area)));
         }
 
-        #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
-
+        if needs_tlb_flush {
+            // Keep the new fixed mapping private from layout writers until
+            // shootdown has invalidated the old translation.  The old frames
+            // are released only after this shared guard is gone.
+            let areas = areas.downgrade();
+            #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
+            self.flush_tlb_targets();
+            drop(areas);
+        } else {
+            drop(areas);
+        }
+        drop(released_frames);
         Ok(start_va)
     }
 
     /// 在当前地址空间中寻找一个长度为 length 的空闲连续区域
     /// 找的是逻辑区域，与实际物理页无关
-    pub fn find_free_area(&self, length: usize) -> Option<usize> {
-        //println!("[kernel] find_free_area: finding free area for length 0x{:x}", length);
-        // 将长度向上对齐到页，似乎没必要
-        // let length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-
+    fn find_free_area_locked(
+        length: usize,
+        areas: &BTreeMap<VirtPageNum, Arc<VersionedArea>>,
+    ) -> Option<usize> {
         let mut current_addr: usize = USER_APP_BASE + (USER_APP_MAX_SIZE - USER_APP_BASE) / 2;
-        // 为高地址用户栈预留顶部空间，避免 mmap 和初始栈冲突。
-        // loongarch的栈位置固定，所以上限可以直接计算
-        #[cfg(target_arch = "loongarch64")]
-        let limit_addr: usize = USER_STACK_TOP - USER_STACK_SIZE;
-        #[cfg(target_arch = "riscv64")]
+        // The stack reservation is an ordinary VMA in `areas`, so the range
+        // search itself excludes it. No separate high-address reservation is
+        // needed on either architecture.
         let limit_addr: usize = USER_APP_MAX_SIZE;
 
-        // 获取按起始虚拟页号排序后的区域列表
-        let mut sorted_areas: Vec<_> = self.areas.iter().collect();
-        sorted_areas.sort_by_key(|a| a.vpn_range.get_start());
-
-        /*for _area in sorted_areas.iter() {
-            println!(
-                "[kernel] find_free_area: existing area [0x{:x}, 0x{:x})",
-                area.vpn_range.get_start().0 * PAGE_SIZE,
-                area.vpn_range.get_end().0 * PAGE_SIZE
-            );
-        }*/
-
-        for area in sorted_areas {
+        for area_arc in areas.values() {
+            let area = area_arc.read();
             let area_start: usize = area.vpn_range.get_start().0 * PAGE_SIZE;
             if current_addr + length <= area_start {
                 return Some(current_addr);
@@ -1369,13 +2552,51 @@ impl MemorySet {
             None
         }
     }
-    /// munmap的实现
-    /// 注意：不允许取消映射brk之前的区域
-    pub fn munmap(&mut self, start: usize, length: usize) -> Result<(), isize> {
-        let brk_idx = self.brk_index;
-        let brk_area = &self.areas[brk_idx];
-        let brk_end = brk_area.vpn_range.get_end().0 * PAGE_SIZE;
 
+    /// 检查目标地址段是否与已有的映射冲突（调用方需持有 areas 写锁）
+    fn has_conflict_locked(
+        areas: &BTreeMap<VirtPageNum, Arc<VersionedArea>>,
+        start: usize,
+        len: usize,
+    ) -> bool {
+        let target_start = VirtAddr::from(start).std_floor();
+        let target_end = VirtAddr::from(start + len).std_ceil();
+        for area_arc in areas.values() {
+            let area = area_arc.read();
+            if target_end > area.vpn_range.get_start() && target_start < area.vpn_range.get_end() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// munmap 实现
+    /// 现在的实现允许取消映射包括堆区等，堆区现由单独字段维护
+    pub fn munmap(&self, start: usize, length: usize) -> Result<(), isize> {
+        let mut areas = self.areas.write();
+        let released_frames = self.munmap_locked(&mut areas, start, length);
+
+        // The VMA tree and PTEs are now committed.  Retain only a shared
+        // transaction while shootdown completes: readers can observe the new
+        // state, but another layout writer cannot interleave before the old
+        // translations have been invalidated.
+        let areas = areas.downgrade();
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
+        self.flush_tlb_targets();
+        drop(areas);
+        drop(released_frames);
+        Ok(())
+    }
+
+    /// 取消映射
+    ///
+    /// 调用方需要持有 areas 写锁，并在全核 TLB 刷新完成后释放返回的页帧
+    fn munmap_locked(
+        &self,
+        areas: &mut crate::sync::RwLockWriteGuard<'_, BTreeMap<VirtPageNum, Arc<VersionedArea>>>,
+        start: usize,
+        length: usize,
+    ) -> Vec<FrameTracker> {
         let end = start + length;
         let start_vpn = VirtAddr::from(start).std_floor();
         let end_vpn = VirtAddr::from(end).std_ceil();
@@ -1383,8 +2604,12 @@ impl MemorySet {
         // 收集因从中间截断而产生的新右半部分区域
         let mut new_areas: Vec<MapArea> = Vec::new();
         let mut released_frames = Vec::new();
+        let mut empty_keys: Vec<VirtPageNum> = Vec::new();
+        // 起始地址变化后需要重新插入表
+        let mut rekey: Vec<(VirtPageNum, VirtPageNum)> = Vec::new();
 
-        for area in self.areas.iter_mut() {
+        for (key, area_arc) in areas.iter() {
+            let mut area = area_arc.write();
             let a_start = area.vpn_range.get_start();
             let a_end = area.vpn_range.get_end();
 
@@ -1396,46 +2621,51 @@ impl MemorySet {
                 let step = area.page_size.num_pages();
                 if delete_left && delete_right {
                     // 情况1：All（当前块被目标区域完全包裹，全部删掉）
+                    let mut pt = self.page_table.write();
                     let mut vpn = a_start;
                     while vpn < a_end {
-                        if let Some(frame) = area.unmap_one(&mut self.page_table, vpn) {
+                        if let Some(frame) = area.unmap_one(&mut pt, vpn) {
                             released_frames.push(frame);
                         }
                         vpn.step_by(step);
                     }
-                    area.resize(a_start, a_start); // 长度设为0，稍后统一 retain 清理
+                    area.resize(a_start, a_start); // 长度设为0，稍后统一清理
+                    empty_keys.push(*key);
                 } else if !delete_left && !delete_right {
-                    // panic!("munmap: test : split area in the middle");
                     // 情况2：Split（目标区域在当前块中间，一分为二）
                     // 2.1 清理中间被 unmap 的页表和物理页
+                    let mut pt = self.page_table.write();
                     for vpn in VPNRange::new(start_vpn, end_vpn) {
-                        if let Some(frame) = area.unmap_one(&mut self.page_table, vpn) {
+                        if let Some(frame) = area.unmap_one(&mut pt, vpn) {
                             released_frames.push(frame);
                         }
                     }
                     // 2.2 切出右半部分保留的物理帧
-                    let right_frames = area.data_frames.split_off(&end_vpn);
+                    let right_frames = area.data_frames.lock().split_off(&end_vpn);
                     // 2.3 缩短当前块，作为左半部分
                     area.resize(a_start, start_vpn);
                     // 2.4 新建右半部分
                     let mut right_area = area.clone_meta_with_new_range(end_vpn, a_end);
-                    right_area.data_frames = right_frames;
+                    right_area.data_frames = Mutex::new(right_frames);
                     new_areas.push(right_area);
                 } else if delete_left {
                     // 情况3：Inc_Left（删掉左边部分）
+                    let mut pt = self.page_table.write();
                     let mut vpn = a_start;
                     while vpn < end_vpn {
-                        if let Some(frame) = area.unmap_one(&mut self.page_table, vpn) {
+                        if let Some(frame) = area.unmap_one(&mut pt, vpn) {
                             released_frames.push(frame);
                         }
                         vpn.step_by(step);
                     }
                     area.resize(end_vpn, a_end);
+                    rekey.push((*key, end_vpn));
                 } else if delete_right {
                     // 情况4：Inc_Right（删掉右边部分）
+                    let mut pt = self.page_table.write();
                     let mut vpn = start_vpn;
                     while vpn < a_end {
-                        if let Some(frame) = area.unmap_one(&mut self.page_table, vpn) {
+                        if let Some(frame) = area.unmap_one(&mut pt, vpn) {
                             released_frames.push(frame);
                         }
                         vpn.step_by(step);
@@ -1445,27 +2675,30 @@ impl MemorySet {
             }
         }
 
+        // 删除长度为0的区域
+        for key in empty_keys.iter() {
+            areas.remove(key);
+        }
+
+        // 起始地址前移的区域：按新起始地址重新入键
+        for (old_key, new_key) in rekey.iter() {
+            if let Some(area_arc) = areas.remove(old_key) {
+                areas.insert(*new_key, area_arc);
+            }
+        }
+
         // 插入劈开产生的新区域
-        self.areas.extend(new_areas);
+        for area in new_areas.drain(..) {
+            let key = area.vpn_range.get_start();
+            areas.insert(key, Arc::new(VersionedArea::new(area)));
+        }
 
-        // 删除长度为0的区域，但不删除brk及之前的区域
-        self.areas.retain(|area| {
-            area.vpn_range.get_start() < area.vpn_range.get_end()
-                || area.vpn_range.get_start() <= VirtAddr::from(brk_end).std_floor()
-        });
-
-        #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
-        #[cfg(target_arch = "riscv64")]
-        self.flush_tlb_targets();
-        drop(released_frames);
-
-        Ok(())
+        released_frames
     }
 
     /// 丢弃驻留页但保留虚拟映射。匿名页重新分配为零页，私有文件页重新
     /// 从文件读取，共享文件页则在下次访问时重新映射对应的 page cache。
-    pub fn madvise_dontneed(&mut self, start: usize, length: usize) -> Result<(), isize> {
+    pub fn madvise_dontneed(&self, start: usize, length: usize) -> Result<(), isize> {
         let end = start
             .checked_add(length)
             .ok_or_else(|| Errno::EINVAL.as_isize())?;
@@ -1473,28 +2706,31 @@ impl MemorySet {
         let end_vpn = VirtAddr::from(end).std_ceil();
 
         let mut released_frames = Vec::new();
-        for area in self.areas.iter_mut() {
-            let area_start = area.vpn_range.get_start();
-            let area_end = area.vpn_range.get_end();
-            let discard_start = core::cmp::max(start_vpn, area_start);
-            let discard_end = core::cmp::min(end_vpn, area_end);
-            if discard_start >= discard_end || area.map_type == MapType::Guard {
-                continue;
-            }
-
-            let step = area.page_size.num_pages();
-            let mut vpn = discard_start;
-            while vpn < discard_end {
-                if let Some(frame) = area.unmap_one(&mut self.page_table, vpn) {
-                    released_frames.push(frame);
+        {
+            let areas = self.areas.read();
+            for area_arc in areas.values() {
+                let mut area = area_arc.write();
+                let area_start = area.vpn_range.get_start();
+                let area_end = area.vpn_range.get_end();
+                let discard_start = core::cmp::max(start_vpn, area_start);
+                let discard_end = core::cmp::min(end_vpn, area_end);
+                if discard_start >= discard_end || area.map_type == MapType::Guard {
+                    continue;
                 }
-                vpn.step_by(step);
+
+                let step = area.page_size.num_pages();
+                let mut pt = self.page_table.write();
+                let mut vpn = discard_start;
+                while vpn < discard_end {
+                    if let Some(frame) = area.unmap_one(&mut pt, vpn) {
+                        released_frames.push(frame);
+                    }
+                    vpn.step_by(step);
+                }
             }
         }
 
-        #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
-        #[cfg(target_arch = "riscv64")]
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
         self.flush_tlb_targets();
         drop(released_frames);
 
@@ -1507,68 +2743,209 @@ impl MemorySet {
     /// 仅当 old 区域是匿名映射且扩展区间无冲突时才能原地扩大；
     /// 其余情况返回 ENOMEM，由 sys_mremap 回退到“新映射 + 拷贝 + 解除旧映射”。
     pub fn mremap_inplace(
-        &mut self,
+        &self,
         old_addr: usize,
         old_size: usize,
         new_size: usize,
     ) -> Result<usize, isize> {
         let old_start_vpn = VirtAddr::from(old_addr).std_floor();
-        let old_end_vpn = VirtAddr::from(old_addr + old_size).std_ceil();
-        let new_end_vpn = VirtAddr::from(old_addr + new_size).std_ceil();
-
-        let idx = self
-            .areas
-            .iter()
-            .position(|area| {
-                area.vpn_range.get_start().0 * PAGE_SIZE <= old_addr
-                    && old_addr + old_size <= area.vpn_range.get_end().0 * PAGE_SIZE
-                    && area.map_type == MapType::Framed
-                    && area.map_type != MapType::Guard
-            })
+        let old_end = old_addr
+            .checked_add(old_size)
+            .ok_or(Errno::EINVAL.as_isize())?;
+        let new_end = old_addr
+            .checked_add(new_size)
             .ok_or(Errno::ENOMEM.as_isize())?;
+        let old_end_vpn = VirtAddr::from(old_end).std_ceil();
+        let new_end_vpn = VirtAddr::from(new_end).std_ceil();
+
+        let mut areas = self.areas.write();
+        // This implementation changes a single VMA's end in place.  Accepting
+        // a subrange would silently discard its prefix by changing the tree
+        // key/range, so the requested old range must be the complete VMA.
+        let area_arc = areas
+            .get(&old_start_vpn)
+            .cloned()
+            .ok_or(Errno::ENOMEM.as_isize())?;
+        {
+            let area = area_arc.read();
+            if area.vpn_range.get_start() != old_start_vpn
+                || area.vpn_range.get_end() != old_end_vpn
+                || area.map_type != MapType::Framed
+            {
+                return Err(Errno::ENOMEM.as_isize());
+            }
+        }
 
         // 扩展区间必须空闲，否则无法原地扩大
-        if self.has_conflict(old_addr + old_size, new_size - old_size) {
+        if Self::has_conflict_locked(&areas, old_addr + old_size, new_size - old_size) {
             return Err(Errno::ENOMEM.as_isize());
         }
 
-        self.areas[idx].resize(old_start_vpn, new_end_vpn);
+        area_arc.write().resize(old_start_vpn, new_end_vpn);
         Ok(old_addr)
     }
 
-    fn split_area_at(
-        &mut self,
-        idx: usize,
-        split_vpn: VirtPageNum,
-    ) -> Result<Option<usize>, isize> {
-        let area_start = self.areas[idx].vpn_range.get_start();
-        let area_end = self.areas[idx].vpn_range.get_end();
-        if split_vpn <= area_start || split_vpn >= area_end {
-            return Ok(None);
-        }
-
-        let step = self.areas[idx].page_size.num_pages();
-        if split_vpn.0 % step != 0 {
+    /// Move one complete private anonymous VMA without copying its user pages.
+    ///
+    /// The current shared-anonymous frame registry is keyed by virtual page
+    /// number, so shared mappings cannot safely use this path yet.  File VMAs
+    /// similarly need separate backing-offset handling.  Restricting this
+    /// first path to private anonymous 4 KiB mappings keeps their existing
+    /// COW, frame ownership and lazy-allocation semantics intact.
+    pub fn mremap_move_private_anon(
+        &self,
+        old_addr: usize,
+        old_size: usize,
+        new_size: usize,
+    ) -> Result<usize, isize> {
+        if old_size == 0 || new_size < old_size {
             return Err(Errno::EINVAL.as_isize());
         }
 
-        let right_frames = self.areas[idx].data_frames.split_off(&split_vpn);
-        let mut right_area = self.areas[idx].clone_meta_with_new_range(split_vpn, area_end);
-        right_area.data_frames = right_frames;
-        self.areas[idx].resize(area_start, split_vpn);
-        self.areas.insert(idx + 1, right_area);
-        if idx < self.brk_index {
-            self.brk_index += 1;
+        let old_start_vpn = VirtAddr::from(old_addr).std_floor();
+        let old_end_vpn = VirtAddr::from(
+            old_addr
+                .checked_add(old_size)
+                .ok_or(Errno::EINVAL.as_isize())?,
+        )
+        .std_ceil();
+
+        let mut areas = self.areas.write();
+        let area_arc = areas
+            .get(&old_start_vpn)
+            .cloned()
+            .ok_or(Errno::EINVAL.as_isize())?;
+
+        let new_addr = Self::find_free_area_locked(new_size, &areas)
+            .ok_or(Errno::ENOMEM.as_isize())?;
+        let new_start_vpn = VirtAddr::from(new_addr).std_floor();
+        let new_end_vpn = VirtAddr::from(
+            new_addr
+                .checked_add(new_size)
+                .ok_or(Errno::ENOMEM.as_isize())?,
+        )
+        .std_ceil();
+
+        let mut area = area_arc.write();
+        if area.vpn_range.get_start() != old_start_vpn
+            || area.vpn_range.get_end() != old_end_vpn
+            || area.map_type != MapType::Framed
+            || area.page_size != Page4K
+            || area.is_shared
+            || area.backing_file.is_some()
+            || area.anonymous_shared_frames.is_some()
+        {
+            return Err(Errno::EINVAL.as_isize());
         }
-        Ok(Some(idx + 1))
+
+        // Validate the entire resident subset before changing any PTE.  A
+        // private anonymous VMA may have lazy holes; such pages move only as
+        // metadata and will fault in normally at their new virtual address.
+        let resident: Vec<(VirtPageNum, PhysPageNum)> = area
+            .data_frames
+            .lock()
+            .iter()
+            .map(|(vpn, frame)| (*vpn, frame.ppn))
+            .collect();
+        let translate_vpn = |vpn: VirtPageNum| -> Result<VirtPageNum, isize> {
+            let offset = vpn
+                .0
+                .checked_sub(old_start_vpn.0)
+                .ok_or(Errno::EINVAL.as_isize())?;
+            let moved = VirtPageNum(
+                new_start_vpn
+                    .0
+                    .checked_add(offset)
+                    .ok_or(Errno::ENOMEM.as_isize())?,
+            );
+            if vpn < old_start_vpn || vpn >= old_end_vpn || moved >= new_end_vpn {
+                return Err(Errno::EINVAL.as_isize());
+            }
+            Ok(moved)
+        };
+
+        let mut pt = self.page_table.write();
+        for (old_vpn, ppn) in &resident {
+            let new_vpn = translate_vpn(*old_vpn)?;
+            let Some((pte, page_size)) = pt.translate_and_get_size(*old_vpn) else {
+                return Err(Errno::EINVAL.as_isize());
+            };
+            if !pte.is_valid()
+                || page_size != Page4K
+                || pte.ppn() != *ppn
+                || pt.translate(new_vpn).is_some_and(|pte| pte.is_valid())
+            {
+                return Err(Errno::EINVAL.as_isize());
+            }
+        }
+        for (old_vpn, _) in &resident {
+            let new_vpn = translate_vpn(*old_vpn)?;
+            assert!(
+                pt.move_entry(*old_vpn, new_vpn, Page4K),
+                "mremap validated PTE changed while page table lock was held"
+            );
+        }
+
+        let old_frames = core::mem::take(&mut *area.data_frames.lock());
+        let mut moved_frames = BTreeMap::new();
+        for (old_vpn, frame) in old_frames {
+            let new_vpn = translate_vpn(old_vpn)?;
+            assert!(moved_frames.insert(new_vpn, frame).is_none());
+        }
+        *area.data_frames.lock() = moved_frames;
+        area.vpn_range = VPNRange::new(new_start_vpn, new_end_vpn);
+        drop(pt);
+        drop(area);
+
+        let removed = areas
+            .remove(&old_start_vpn)
+            .expect("mremap source VMA disappeared while areas write lock was held");
+        debug_assert!(Arc::ptr_eq(&removed, &area_arc));
+        assert!(areas.insert(new_start_vpn, area_arc).is_none());
+
+        // Both the old and new virtual addresses may have stale translations.
+        // Keep layout writers out until the shootdown completes; no moved frame
+        // is dropped, but the old address must be invalid before return.
+        let areas = areas.downgrade();
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
+        self.flush_tlb_targets();
+        drop(areas);
+
+        Ok(new_addr)
     }
 
-    pub fn mprotect(
-        &mut self,
-        start: usize,
-        length: usize,
-        prot: mmap::MMapProt,
-    ) -> Result<(), isize> {
+    fn split_area_at(
+        areas: &mut crate::sync::RwLockWriteGuard<'_, BTreeMap<VirtPageNum, Arc<VersionedArea>>>,
+        key: VirtPageNum,
+        split_vpn: VirtPageNum,
+    ) -> Result<Option<VirtPageNum>, isize> {
+        let Some(area_arc) = areas.get(&key).cloned() else {
+            return Ok(None);
+        };
+        let (area_start, area_end) = {
+            let area = area_arc.read();
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            if split_vpn <= area_start || split_vpn >= area_end {
+                return Ok(None);
+            }
+            if split_vpn.0 % area.page_size.num_pages() != 0 {
+                return Err(Errno::EINVAL.as_isize());
+            }
+            (area_start, area_end)
+        };
+        let mut area = area_arc.write();
+        let right_frames = area.data_frames.lock().split_off(&split_vpn);
+        let mut right_area = area.clone_meta_with_new_range(split_vpn, area_end);
+        right_area.data_frames = Mutex::new(right_frames);
+        area.resize(area_start, split_vpn);
+        areas.insert(split_vpn, Arc::new(VersionedArea::new(right_area)));
+        Ok(Some(split_vpn))
+    }
+    /// mprotect 调用实现
+    /// 
+    /// 当前实现仍在 areas 写锁下完成全部操作，有优化空间。
+    pub fn mprotect(&self, start: usize, length: usize, prot: mmap::MMapProt) -> Result<(), isize> {
         if length == 0 {
             return Ok(());
         }
@@ -1594,26 +2971,25 @@ impl MemorySet {
         }
 
         let mut covered_until = start_vpn;
-        let mut affected: Vec<usize> = self
-            .areas
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, area)| {
-                if area.vpn_range.get_start() < end_vpn && area.vpn_range.get_end() > start_vpn {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        affected.sort_by_key(|&idx| self.areas[idx].vpn_range.get_start().0);
-
-        if affected.is_empty() {
-            return Err(Errno::ENOMEM.as_isize());
+        let mut affected: Vec<(VirtPageNum, Arc<VersionedArea>)> = Vec::new();
+        let mut permissions_tightened = false;
+        // 整个操作在 areas 写锁下完成：校验、分裂、改权限、改 PTE 之间不会被
+        // 其他结构修改打断，同时避免“读锁校验 -> 再写锁修改”的多次全表扫描。
+        let mut areas = self.areas.write();
+        // 只扫描可能与 [start_vpn, end_vpn) 相交的区域：键 < end_vpn，
+        // 且区域结束 > start_vpn。区域按键有序且互不重叠，因此从高到低
+        // 找到第一个 end <= start_vpn 即可停止，避免给全部 area 上锁。
+        for (key, area_arc) in areas.range(..end_vpn).rev() {
+            let area = area_arc.read();
+            if area.vpn_range.get_end() <= start_vpn {
+                break;
+            }
+            affected.push((*key, area_arc.clone()));
         }
-
-        for &idx in affected.iter() {
-            let area = &self.areas[idx];
+        // 按升序做覆盖性/权限校验
+        affected.reverse();
+        for (_, area_arc) in &affected {
+            let area = area_arc.read();
             let area_start = area.vpn_range.get_start();
             let area_end = area.vpn_range.get_end();
             if area.map_type == MapType::Guard || area_start > covered_until {
@@ -1632,54 +3008,67 @@ impl MemorySet {
                     return Err(Errno::EINVAL.as_isize());
                 }
             }
+            if !(area.map_perm & !permission).is_empty() {
+                permissions_tightened = true;
+            }
             if area_end > covered_until {
                 covered_until = area_end;
             }
         }
-
+        if affected.is_empty() {
+            return Err(Errno::ENOMEM.as_isize());
+        }
         if covered_until < end_vpn {
             return Err(Errno::ENOMEM.as_isize());
         }
 
-        let permissions_tightened = affected.iter().any(|idx| {
-            !(self.areas[*idx].map_perm & !permission).is_empty()
-        });
+        // 只有首尾区域可能跨越请求边界。先分裂右边界，保证首尾为同一
+        // 区域时，原 key 对应的左半部分仍可继续按左边界分裂。
+        let first_key = affected.first().unwrap().0;
+        let last_key = affected.last().unwrap().0;
+        Self::split_area_at(&mut areas, last_key, end_vpn)?;
+        Self::split_area_at(&mut areas, first_key, start_vpn)?;
 
-        for &idx in affected.iter().rev() {
-            self.split_area_at(idx, end_vpn)?;
-            self.split_area_at(idx, start_vpn)?;
-        }
-
-        let pte_flags = PTEFlags::from_bits(permission.bits).unwrap();
-        for area in self.areas.iter_mut() {
+        // 分裂后，完整落在 [start_vpn, end_vpn) 内的区域其键必然在该区间内，
+        // 只锁这些区域，不再遍历/锁全部 area。
+        let target_arcs: Vec<Arc<VersionedArea>> = areas
+            .range(start_vpn..end_vpn)
+            .map(|(_, a)| a.clone())
+            .collect();
+        let mut guards: Vec<_> = target_arcs.iter().map(|a| a.write()).collect();
+        let mut pt = self.page_table.write();
+        for area in guards.iter_mut() {
             let area_start = area.vpn_range.get_start();
             let area_end = area.vpn_range.get_end();
             if area_start >= start_vpn && area_end <= end_vpn {
                 area.map_perm = permission;
+                let pte_flags = PTEFlags::from_bits(area.initial_pte_permission().bits).unwrap();
                 let step = area.page_size.num_pages();
                 let mut vpn = area_start;
                 while vpn < area_end {
-                    if let Some(pte) = self.page_table.translate(vpn) {
+                    if let Some(pte) = pt.translate(vpn) {
                         if pte.is_valid() {
-                            self.page_table.set_flags(vpn, pte_flags, area.page_size);
+                            pt.set_flags(vpn, pte_flags, area.page_size);
                         }
                     }
                     vpn.step_by(step);
                 }
             }
         }
+        drop(pt);
+        drop(guards);
+        drop(areas);
 
-        #[cfg(target_arch = "riscv64")]
+        #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
         if permissions_tightened {
             self.flush_tlb_targets();
         }
-        #[cfg(target_arch = "loongarch64")]
-        Self::flush_tlb_after_mapping_change();
 
         Ok(())
     }
 
-    pub fn disable_share_in_range(&mut self, start: usize, length: usize) -> Result<(), isize> {
+    /// 标志指定范围的虚拟页为锁定状态，旧实现修改 is_shared 状态，是错误实现
+    pub fn mlock_range(&self, start: usize, length: usize) -> Result<(), isize> {
         if length == 0 {
             return Ok(());
         }
@@ -1691,26 +3080,18 @@ impl MemorySet {
         let end_vpn = VirtAddr::from(end).std_ceil();
 
         let mut covered_until = start_vpn;
-        let mut affected: Vec<usize> = self
-            .areas
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, area)| {
-                if area.vpn_range.get_start() < end_vpn && area.vpn_range.get_end() > start_vpn {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        affected.sort_by_key(|&idx| self.areas[idx].vpn_range.get_start().0);
-
-        if affected.is_empty() {
-            return Err(Errno::ENOMEM.as_isize());
+        let mut affected: Vec<(VirtPageNum, Arc<VersionedArea>)> = Vec::new();
+        let mut areas = self.areas.write();
+        for (key, area_arc) in areas.range(..end_vpn).rev() {
+            let area = area_arc.read();
+            if area.vpn_range.get_end() <= start_vpn {
+                break;
+            }
+            affected.push((*key, area_arc.clone()));
         }
-
-        for &idx in affected.iter() {
-            let area = &self.areas[idx];
+        affected.reverse();
+        for (_, area_arc) in &affected {
+            let area = area_arc.read();
             let area_start = area.vpn_range.get_start();
             let area_end = area.vpn_range.get_end();
             if area.map_type == MapType::Guard || area_start > covered_until {
@@ -1726,46 +3107,60 @@ impl MemorySet {
                 covered_until = area_end;
             }
         }
-
+        if affected.is_empty() {
+            return Err(Errno::ENOMEM.as_isize());
+        }
         if covered_until < end_vpn {
             return Err(Errno::ENOMEM.as_isize());
         }
 
-        for &idx in affected.iter().rev() {
-            self.split_area_at(idx, end_vpn)?;
-            self.split_area_at(idx, start_vpn)?;
-        }
-
-        for area in self.areas.iter_mut() {
+        let first_key = affected.first().unwrap().0;
+        let last_key = affected.last().unwrap().0;
+        Self::split_area_at(&mut areas, last_key, end_vpn)?;
+        Self::split_area_at(&mut areas, first_key, start_vpn)?;
+        let target_arcs: Vec<Arc<VersionedArea>> = areas
+            .range(start_vpn..end_vpn)
+            .map(|(_, a)| a.clone())
+            .collect();
+        let mut guards: Vec<_> = target_arcs.iter().map(|a| a.write()).collect();
+        for area in guards.iter_mut() {
             let area_start = area.vpn_range.get_start();
             let area_end = area.vpn_range.get_end();
             if area_start >= start_vpn && area_end <= end_vpn {
-                area.is_shared = false;
+                area.is_locked = true;
             }
         }
+        drop(guards);
+        drop(areas);
 
         Ok(())
     }
 
-    /// 处理缺页异常。如果触发异常的地址在合法区域内，则为其分配物理页；否则返回 false。
-    /// 待进一步完善&测试
+    /// Resolve a lazy fault inside an existing user VMA.
+    ///
+    /// The stack is a fixed, sparse VMA, so a fault never changes a VMA range
+    /// or tree key.  Keep the VMA tree and metadata stable until the new PTE
+    /// is committed: `areas.read -> area.read -> page_table.write`.
     #[no_mangle]
     #[inline(never)]
-    pub fn handle_page_fault(&mut self, bad_addr: usize, sp: usize) -> bool {
+    pub fn handle_page_fault(&self, bad_addr: usize) -> bool {
         let vpn = VirtAddr::from(bad_addr).std_floor();
-        let page_table = &mut self.page_table;
 
-        let mut page_size_opt = None;
-
-        // 遍历寻找包含该虚拟页号的段
-        if let Some(area) = self.areas.iter_mut().find(|a| a.contains(vpn)) {
-            if area.map_type == MapType::Guard {
+        let mapped = {
+            let areas = self.areas.read();
+            let Some(area_arc) = areas
+                .range(..=vpn)
+                .next_back()
+                .map(|(_, area)| Arc::clone(area))
+            else {
+                return false;
+            };
+            let area = area_arc.read();
+            if !area.contains(vpn) {
                 return false;
             }
-
-            // PROT_NONE 区域只保留地址空间，任何访问都必须失败，不能
-            // 因缺页而无意义地消耗一个物理页。
-            if !area.map_perm.contains(MapPermission::U)
+            if area.map_type == MapType::Guard
+                || !area.map_perm.contains(MapPermission::U)
                 || !area
                     .map_perm
                     .intersects(MapPermission::R | MapPermission::W | MapPermission::X)
@@ -1773,96 +3168,59 @@ impl MemorySet {
                 return false;
             }
 
-            page_size_opt = Some(area.page_size);
-
-            // 检查该页是否已经在页表中映射
-            if let Some(pte) = page_table.translate(vpn) {
-                if pte.is_valid() {
-                    // 已经映射却还报 Fault，通常是非法写只读段
-                    return false;
-                }
+            let page_size = area.page_size;
+            let mut pt = self.page_table.write();
+            if pt.translate(vpn).is_some_and(|pte| pte.is_valid()) {
+                // A concurrent fault may have won the race.  The trap path
+                // rechecks the requested permission and refreshes its local
+                // TLB before retrying.
+                false
+            } else {
+                area.try_map_one(&mut pt, vpn, page_size)
             }
-
-            // 按映射类型惰性分配物理页或映射文件页缓存
-            if !area.try_map_one(page_table, vpn, page_size_opt.unwrap()) {
-                return false;
-            }
-            
-            #[cfg(target_arch = "loongarch64")]
-            {
-                Self::flush_tlb_after_mapping_change();
-                unsafe { asm!("ibar 0") };
-            }
-            return true; // 惰性分配修复成功
+        };
+        if !mapped {
+            return false;
         }
-
-        // 动态扩张用户栈
-        let sp_vpn = VirtAddr::from(sp).std_floor();
-
-        // 设定一个栈最大允许单次/总共扩张的大小，防止恶意程序耗尽内存
-        const MAX_EXPAND_PAGES: usize = 32;
-
-        let mut expand_idx = None;
-        for (idx, area) in self.areas.iter().enumerate() {
-            if area.map_type == MapType::Guard {
-                continue;
-            }
-            let start_vpn = area.vpn_range.get_start();
-
-            // 检查缺页地址(vpn)是否紧贴着该段的下方，且距离不超过限制
-            if vpn < start_vpn && (start_vpn.0 - vpn.0) <= MAX_EXPAND_PAGES {
-                // 进一步确认：缺页确实发生在栈指针(sp)附近，这证明是正常的压栈行为
-                if vpn.0 <= sp_vpn.0 && (sp_vpn.0 - vpn.0) <= MAX_EXPAND_PAGES {
-                    expand_idx = Some((idx, start_vpn));
-                    break;
-                }
-            }
+        #[cfg(target_arch = "riscv64")]
+        self.flush_tlb_local();
+        #[cfg(target_arch = "loongarch64")]
+        {
+            self.flush_tlb_local();
+            unsafe { asm!("ibar 0") };
         }
-
-        if let Some((idx, old_start_vpn)) = expand_idx {
-            // 从被扩张的 area 获取 page_size
-            page_size_opt = Some(self.areas[idx].page_size);
-            // 执行扩张：将该 Area 的起点向下延伸到 vpn (注意保留原来的终点)
-            self.areas[idx].vpn_range =
-                crate::mm::address::VPNRange::new(vpn, self.areas[idx].vpn_range.get_end());
-
-            // 为刚刚扩张出来的这些虚拟页（从 vpn 到 old_start_vpn）全部分配物理帧并映射
-            for v in vpn.0..old_start_vpn.0 {
-                // 假设你引入了 VirtPageNum
-                self.areas[idx].map_one(page_table, VirtPageNum::from(v), page_size_opt.unwrap());
-            }
-
-            #[cfg(target_arch = "loongarch64")]
-            Self::flush_tlb_after_mapping_change();
-            // trace!("[kernel] User stack dynamically expanded down to {:#x}", bad_addr);
-            return true; // 栈扩张修复成功！
-        }
-
-        // 既不在合法区域，也不符合栈扩张规则，野指针/溢出
-        false
+        true
     }
 
     pub fn debug_dump_areas(&self, badv: Option<usize>, era: Option<usize>) {
+        let areas = self.areas.read();
+        let heap_start_vpn =
+            VirtAddr::from(self.start_brk.load(Ordering::Relaxed) as usize).std_ceil();
+        let brk_end_vpn = VirtAddr::from(self.brk.load(Ordering::Relaxed) as usize).std_ceil();
         println!(
-            "[kernel] memory_set: asid={}, brk_index={}, area_count={}",
+            "[kernel] memory_set: asid={}, start_brk=0x{:x}, brk=0x{:x}, area_count={}",
             self.asid.0,
-            self.brk_index,
-            self.areas.len()
+            self.start_brk.load(Ordering::Relaxed),
+            self.brk.load(Ordering::Relaxed),
+            areas.len()
         );
-        for (idx, area) in self.areas.iter().enumerate() {
+        for (idx, area_arc) in areas.values().enumerate() {
+            let area = area_arc.read();
             let start = area.vpn_range.get_start().0 * PAGE_SIZE;
             let end = area.vpn_range.get_end().0 * PAGE_SIZE;
             let badv_hit = badv
                 .map(|addr| addr >= start && addr < end)
                 .unwrap_or(false);
             let era_hit = era.map(|addr| addr >= start && addr < end).unwrap_or(false);
+            let is_brk = area.vpn_range.get_start() >= heap_start_vpn
+                && area.vpn_range.get_start() < brk_end_vpn;
             println!(
                 "[kernel] area[{}] [0x{:x}, 0x{:x}) {:?}{}{}{}",
                 idx,
                 start,
                 end,
                 area.map_perm,
-                if idx == self.brk_index { " [brk]" } else { "" },
+                if is_brk { " [brk]" } else { "" },
                 if badv_hit { " [BADV]" } else { "" },
                 if era_hit { " [ERA]" } else { "" },
             );
@@ -1878,7 +3236,7 @@ impl MemorySet {
         need_write: bool,
         need_exec: bool,
     ) -> bool {
-        self.page_table.translate(vpn).map_or(false, |pte| {
+        self.translate(vpn).map_or(false, |pte| {
             pte.is_valid()
                 && pte.user_accessible()
                 && (!need_read || pte.readable())
@@ -1890,28 +3248,31 @@ impl MemorySet {
     /// 检查是否是超出文件大小导致的pagefault，如果是，返回后触发SIGBUS信号
     pub fn check_mmap_page_fault(&self, bad_addr: usize) -> bool {
         let vpn = VirtAddr::from(bad_addr).std_floor();
-        // 如果 PTE 已存在且有效，说明页已建立映射，缺页是权限冲突（如写只读页）
-        if let Some(pte) = self.page_table.translate(vpn) {
-            if pte.is_valid() {
-                return false;
-            }
+        let areas = self.areas.read();
+        let Some((_, area_arc)) = areas.range(..=vpn).next_back() else {
+            return false;
+        };
+        let area = area_arc.read();
+        if !area.contains(vpn)
+            || area.map_type != MapType::File
+            || !area.is_shared
+            || area.backing_file.is_none()
+        {
+            return false;
         }
-        for area in self.areas.iter() {
-            // 访问超出文件大小
-            if area.map_type == MapType::File
-                && area.is_shared
-                && area.backing_file.is_some()
-                && area.contains(vpn)
-            {
-                return true;
-            }
-        }
-        false
+        !self
+            .page_table
+            .read()
+            .translate(vpn)
+            .is_some_and(|pte| pte.is_valid())
     }
 }
 
 impl Drop for MemorySet {
     fn drop(&mut self) {
+        #[cfg(target_arch = "loongarch64")]
+        crate::arch::mm::tlb::retire_mm(self.token(), self.asid());
+
         #[cfg(target_arch = "riscv64")]
         {
             let token = self.token();
@@ -1919,29 +3280,48 @@ impl Drop for MemorySet {
             // 页表帧所有权移交 tlb 层：若仍有核的 satp 指向该页表
             // （空闲核有意保留 warm satp 不切换），帧会延迟到最后一个
             // 核切换离开后才释放，不会因立即回收而破坏其它核的 satp。
-            let frames = self.page_table.take_frames();
-            crate::mm::tlb::remove_token(token, frames);
+            let frames = self.page_table.write().take_frames();
+            crate::arch::mm::tlb::remove_token(token, frames);
         }
     }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
     pub vpn_range: VPNRange,
-    data_frames: BTreeMap<VirtPageNum, FrameTracker>,
+    /// Resident user frames are independent from VMA metadata.  A normal
+    /// lazy fault only changes this ownership table and its PTE, so it does
+    /// not need an exclusive VMA metadata transaction.
+    data_frames: Mutex<BTreeMap<VirtPageNum, FrameTracker>>,
     map_type: MapType,
     map_perm: MapPermission,
     pub is_shared: bool,
+    /// 阻止换出标志，目前的实现实际上无意义
+    pub is_locked: bool,
     // 记录文件信息和页偏移，其中页偏移的语义为映射起始页在文件中的页偏移量
     pub backing_file: Option<(Arc<dyn File + Send + Sync>, usize)>,
+    /// A private file mapping which initially maps clean page-cache frames.
+    /// Writable pages are deliberately installed read-only and become private
+    /// through the normal COW fault path on their first store.
+    page_cache_cow: bool,
+    /// ELF may end file data in the middle of a page and extend the segment
+    /// with BSS.  Such a tail is privately populated, then cleared starting
+    /// at this virtual byte address.
+    file_zero_from: Option<usize>,
     /// 匿名共享映射登记，懒分配，用于子进程继承父进程的共享匿名映射
-    /// 
+    ///
     /// 每次共享匿名映射缺页先查该表，如果存在则直接克隆 FrameTracker，
     /// 否则分配新的物理页并登记。
-    anonymous_shared_frames: Option<Arc<MPSafeCell<BTreeMap<VirtPageNum, FrameTracker>>>>,
+    anonymous_shared_frames: Option<Arc<Mutex<BTreeMap<VirtPageNum, FrameTracker>>>>,
+    /// Stable identity retained by VMA splits and fork copies. It is used only
+    /// for shared anonymous futex keys, whose wait queues can outlive a VMA.
+    futex_mapping_id: u64,
+    /// Original mapping base used to retain a stable offset after VMA splits.
+    futex_mapping_start: VirtPageNum,
     pub page_size: PageSize,
 }
 
 impl MapArea {
+    /// 默认为匿名非文件映射
     pub fn new(
         start_va: VirtAddr,
         end_va: VirtAddr,
@@ -1953,27 +3333,61 @@ impl MapArea {
         let end_vpn: VirtPageNum = end_va.std_ceil();
         Self {
             vpn_range: VPNRange::new(start_vpn, end_vpn),
-            data_frames: BTreeMap::new(),
+            data_frames: Mutex::new(BTreeMap::new()),
             map_type,
             map_perm,
             is_shared: false,
+            is_locked: false,
             page_size,
             backing_file: None,
+            page_cache_cow: false,
+            file_zero_from: None,
             anonymous_shared_frames: None,
+            futex_mapping_id: futex_mapping_id_alloc(),
+            futex_mapping_start: start_vpn,
         }
     }
     pub fn get_vpn_range(&self) -> &VPNRange {
         &self.vpn_range
     }
+
+    /// Return the frame backing a virtual page, including a page inside a
+    /// huge-page mapping whose frame is recorded at the mapping's base VPN.
+    pub fn frame_for_vpn(&self, vpn: VirtPageNum) -> Option<FrameTracker> {
+        let start = self.vpn_range.get_start().0;
+        if vpn.0 < start || vpn >= self.vpn_range.get_end() {
+            return None;
+        }
+        let step = self.page_size.num_pages().max(1);
+        let base = VirtPageNum(start + ((vpn.0 - start) / step) * step);
+        let data_frames = self.data_frames.lock();
+        data_frames
+            .get(&base)
+            .or_else(|| data_frames.get(&vpn))
+            .cloned()
+    }
+
+    /// Whether this VMA is expected to own ordinary page frames in
+    /// `data_frames`.  Generic user-buffer pins may fault only these mappings;
+    /// PFN-style and kernel mappings need an explicit lifetime protocol.
+    pub fn is_frame_backed_mapping(&self) -> bool {
+        matches!(self.map_type, MapType::Framed | MapType::File)
+    }
+
     pub fn from_another(another: &Self) -> Self {
         Self {
             vpn_range: VPNRange::new(another.vpn_range.get_start(), another.vpn_range.get_end()),
-            data_frames: BTreeMap::new(),
+            data_frames: Mutex::new(BTreeMap::new()),
             map_type: another.map_type,
             map_perm: another.map_perm,
             is_shared: another.is_shared,
+            is_locked: another.is_locked,
             backing_file: another.backing_file.clone(),
+            page_cache_cow: another.page_cache_cow,
+            file_zero_from: another.file_zero_from,
             anonymous_shared_frames: another.anonymous_shared_frames.clone(),
+            futex_mapping_id: another.futex_mapping_id,
+            futex_mapping_start: another.futex_mapping_start,
             page_size: another.page_size,
         }
     }
@@ -1987,6 +3401,11 @@ impl MapArea {
     ) -> Option<FrameTracker> {
         match self.map_type {
             MapType::Framed | MapType::File => {
+                // Keep the ownership record until its PTE is gone.  The
+                // resident-frame lock is never held while taking the page
+                // table lock, matching the fault-side lock order.
+                let frame = self.data_frames.lock().get(&vpn).cloned()?;
+
                 // 共享文件映射需要先写回内容
                 if self.is_shared {
                     if let Some((file, base_offset)) = &self.backing_file {
@@ -1997,11 +3416,10 @@ impl MapArea {
                     }
                 }
 
-                let frame = self.data_frames.remove(&vpn);
-                if frame.is_some() {
-                    page_table.unmap(vpn);
-                }
-                frame
+                page_table.unmap(vpn);
+                let removed = self.data_frames.lock().remove(&vpn);
+                debug_assert!(removed.is_some(), "resident frame disappeared during VMA write transaction");
+                Some(frame)
             }
             MapType::Identical | MapType::Windowed => {
                 page_table.unmap(vpn);
@@ -2028,27 +3446,31 @@ impl MapArea {
         });
         Self {
             vpn_range: VPNRange::new(start_vpn, end_vpn),
-            data_frames: BTreeMap::new(), // 初始为空，由外面填充
+            data_frames: Mutex::new(BTreeMap::new()), // 初始为空，由外面填充
             map_type: self.map_type,
             map_perm: self.map_perm,
             is_shared: self.is_shared,
+            is_locked: self.is_locked,
             backing_file,
+            page_cache_cow: self.page_cache_cow,
+            file_zero_from: self.file_zero_from,
             anonymous_shared_frames: self.anonymous_shared_frames.clone(),
+            futex_mapping_id: self.futex_mapping_id,
+            futex_mapping_start: self.futex_mapping_start,
             page_size: self.page_size,
         }
     }
     /// 尝试分配物理页并建立映射，失败返回 false
     /// 为共享文件映射分配页缓存，为匿名映射分配物理页，私有文件映射分配物理页并从文件读取内容
     pub fn try_map_one(
-        &mut self,
+        &self,
         page_table: &mut PageTable,
         vpn: VirtPageNum,
         page_size: PageSize,
     ) -> bool {
-        let ppn: PhysPageNum;
-        match self.map_type {
+        let (ppn, frame) = match self.map_type {
             MapType::Identical => {
-                ppn = PhysPageNum(vpn.0);
+                (PhysPageNum(vpn.0), None)
             }
             MapType::Windowed => {
                 // `VirtPageNum` is always expressed in 4 KiB pages, including
@@ -2057,33 +3479,30 @@ impl MapArea {
                 // shifting the window by `page_size` would clear the wrong VPN
                 // bit for huge pages and encode a high-half address as a PA.
                 let va = usize::from(VirtAddr::from(vpn));
-                ppn = PhysAddr::from(va & !CACHED_KERNEL_BASE).std_floor();
+                (PhysAddr::from(va & !CACHED_KERNEL_BASE).std_floor(), None)
             }
             MapType::Framed => {
-                if let Some(shared_frames) = &self.anonymous_shared_frames {
-                    let mut shared_frames = shared_frames.exclusive_access();
+                let frame = if let Some(shared_frames) = &self.anonymous_shared_frames {
+                    let mut shared_frames = shared_frames.lock();
                     if let Some(shared_frame) = shared_frames.get(&vpn) {
-                        let frame = shared_frame.clone();
-                        ppn = frame.ppn;
-                        self.data_frames.insert(vpn, frame);
+                        shared_frame.clone()
                     } else {
                         let Some(frame) = frame_alloc(page_size) else {
                             return false;
                         };
-                        ppn = frame.ppn;
                         shared_frames.insert(vpn, frame.clone());
-                        self.data_frames.insert(vpn, frame);
+                        frame
                     }
                 } else {
                     let Some(frame) = frame_alloc(page_size) else {
                         return false;
                     };
-                    ppn = frame.ppn;
-                    self.data_frames.insert(vpn, frame);
-                }
+                    frame
+                };
+                (frame.ppn, Some(frame))
             }
             MapType::File => {
-                return if self.is_shared {
+                return if self.is_shared || self.page_cache_cow {
                     self.try_map_shared_file_page(page_table, vpn, page_size)
                 } else {
                     self.try_map_private_file_pages(page_table, vpn, page_size)
@@ -2095,8 +3514,8 @@ impl MapArea {
             MapType::Guard => {
                 return false;
             }
-        }
-        let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+        };
+        let pte_flags = PTEFlags::from_bits(self.initial_pte_permission().bits).unwrap();
         #[cfg(target_arch = "loongarch64")]
         // la64在内核态不需要用页表
         if self.map_type != MapType::Identical && self.map_type != MapType::Windowed {
@@ -2104,17 +3523,24 @@ impl MapArea {
         }
         #[cfg(target_arch = "riscv64")]
         page_table.map(vpn, ppn, pte_flags, page_size);
+        if let Some(frame) = frame {
+            let previous = self.data_frames.lock().insert(vpn, frame);
+            debug_assert!(previous.is_none(), "mapped VPN already has a resident frame");
+        }
         true
     }
 
     fn try_map_shared_file_page(
-        &mut self,
+        &self,
         page_table: &mut PageTable,
         vpn: VirtPageNum,
         page_size: PageSize,
     ) -> bool {
         if page_size != PageSize::Page4K {
-            warn!("Shared file mapping only supports 4K pages, but got {:?}", page_size);
+            warn!(
+                "Shared file mapping only supports 4K pages, but got {:?}",
+                page_size
+            );
             return false;
         }
 
@@ -2128,27 +3554,48 @@ impl MapArea {
         let Some(file_page_offset) = base_page_offset.checked_add(relative_page) else {
             return false;
         };
-        let file_end_page_offset = VirtAddr::from(file.get_stat().size as usize).std_ceil().0;
+        let Some(file_size) = usize::try_from(file.get_stat().size).ok() else {
+            return false;
+        };
+        let file_end_page_offset = file_size
+            .checked_add(PAGE_SIZE - 1)
+            .map(|end| end / PAGE_SIZE)
+            .unwrap_or(usize::MAX);
         if file_page_offset >= file_end_page_offset {
             return false;
         }
 
-        let Some(cache) = file.get_shared_page(file_page_offset) else {
-            return false;
+        let frame = if self.page_cache_cow {
+            match file.get_file_page(file_page_offset) {
+                Some(cache) => cache.lock().frame.clone(),
+                None => {
+                    // A sparse hole is zero-filled but must not force ext4 to
+                    // allocate a block.  Keep this zero page private; a later
+                    // write will take the ordinary COW path.
+                    let Some(frame) = frame_alloc(PageSize::Page4K) else {
+                        return false;
+                    };
+                    frame
+                }
+            }
+        } else {
+            let Some(cache) = file.get_shared_page(file_page_offset) else {
+                return false;
+            };
+            let frame = cache.lock().frame.clone();
+            frame
         };
-        let page = cache.lock();
-        let frame = page.frame.clone();
         let ppn = frame.ppn;
-        drop(page);
 
-        let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+        let pte_flags = PTEFlags::from_bits(self.initial_pte_permission().bits).unwrap();
         page_table.map(vpn, ppn, pte_flags, page_size);
-        self.data_frames.insert(vpn, frame);
+        let previous = self.data_frames.lock().insert(vpn, frame);
+        debug_assert!(previous.is_none(), "mapped VPN already has a resident frame");
         true
     }
 
     fn try_map_private_file_pages(
-        &mut self,
+        &self,
         page_table: &mut PageTable,
         fault_vpn: VirtPageNum,
         page_size: PageSize,
@@ -2177,7 +3624,9 @@ impl MapArea {
             let Some(frame) = frame_alloc(page_size) else {
                 break;
             };
-            buffers.push(frame.get_bytes_array());
+            buffers.push(
+                UserBufferSegment::from_frame(frame.clone(), 0, frame.page_size.size()).unwrap(),
+            );
             frames.push((vpn, frame));
         }
         if frames.is_empty() {
@@ -2185,6 +3634,16 @@ impl MapArea {
         }
 
         file.read_at(file_offset, UserBuffer::new(buffers));
+        if let Some(zero_from) = self.file_zero_from {
+            for (vpn, frame) in &frames {
+                let page_start = vpn.0 * PAGE_SIZE;
+                let page_end = page_start + PAGE_SIZE;
+                if zero_from < page_end {
+                    let offset = zero_from.saturating_sub(page_start);
+                    frame.get_bytes_array()[offset..].fill(0);
+                }
+            }
+        }
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         for (vpn, frame) in frames {
             let ppn = frame.ppn;
@@ -2192,7 +3651,8 @@ impl MapArea {
             page_table.map(vpn, ppn, pte_flags, page_size);
             #[cfg(target_arch = "riscv64")]
             page_table.map(vpn, ppn, pte_flags, page_size);
-            self.data_frames.insert(vpn, frame);
+            let previous = self.data_frames.lock().insert(vpn, frame);
+            debug_assert!(previous.is_none(), "mapped VPN already has a resident frame");
         }
         true
     }
@@ -2217,8 +3677,26 @@ impl MapArea {
             vpn.step_by(step);
         }
     }
+    /// 解除映射时返回被解除映射的帧，用于调用者维护 tlb 刷新和页帧释放顺序
     pub fn unmap(&mut self, page_table: &mut PageTable) -> Vec<FrameTracker> {
         let mut frames = Vec::new();
+        if self.is_frame_backed_mapping() {
+            // Lazy VMAs may span gigabytes while owning only a few pages.
+            // Teardown therefore walks the resident set rather than every
+            // virtual page in the range.
+            let resident_vpns: Vec<_> = self
+                .data_frames
+                .lock()
+                .keys()
+                .copied()
+                .collect();
+            for vpn in resident_vpns {
+                if let Some(frame) = self.unmap_one(page_table, vpn) {
+                    frames.push(frame);
+                }
+            }
+            return frames;
+        }
         let step = self.page_size.num_pages();
         let mut vpn = self.vpn_range.get_start();
         while vpn < self.vpn_range.get_end() {
@@ -2321,6 +3799,13 @@ impl MapArea {
     pub fn get_map_permission(&self) -> MapPermission {
         self.map_perm
     }
+    fn initial_pte_permission(&self) -> MapPermission {
+        if self.page_cache_cow && self.map_perm.contains(MapPermission::W) {
+            self.map_perm & !MapPermission::W
+        } else {
+            self.map_perm
+        }
+    }
     pub fn contains(&self, vpn: VirtPageNum) -> bool {
         self.vpn_range.contains(vpn)
     }
@@ -2371,7 +3856,7 @@ bitflags! {
 /// test map function in page table
 #[allow(unused)]
 pub fn remap_test() {
-    let mut kernel_space = KERNEL_SPACE.exclusive_access();
+    let kernel_space = &KERNEL_SPACE;
     // 高半地址相加会溢出 usize，用 start + (end - start) / 2 求中点
     let mid_text: VirtAddr = (stext as *const () as usize
         + (etext as *const () as usize - stext as *const () as usize) / 2)
@@ -2382,20 +3867,9 @@ pub fn remap_test() {
     let mid_data: VirtAddr = (sdata as *const () as usize
         + (edata as *const () as usize - sdata as *const () as usize) / 2)
         .into();
-    assert!(!kernel_space
-        .page_table
-        .translate(mid_text.std_floor())
-        .unwrap()
-        .writable(),);
-    assert!(!kernel_space
-        .page_table
-        .translate(mid_rodata.std_floor())
-        .unwrap()
-        .writable(),);
-    assert!(!kernel_space
-        .page_table
-        .translate(mid_data.std_floor())
-        .unwrap()
-        .executable(),);
+    let pt = kernel_space.page_table.read();
+    assert!(!pt.translate(mid_text.std_floor()).unwrap().writable(),);
+    assert!(!pt.translate(mid_rodata.std_floor()).unwrap().writable(),);
+    assert!(!pt.translate(mid_data.std_floor()).unwrap().executable(),);
     println!("remap_test passed!");
 }

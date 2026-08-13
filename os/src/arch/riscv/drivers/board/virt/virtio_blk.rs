@@ -1,9 +1,7 @@
 use core::ptr::NonNull;
 
 use crate::{ MEMORY_END, MMIO_SLOT_SIZE, UNCACHED_KERNEL_BASE};
-use crate::mm::{
-    kernel_token, PageTable, PhysAddr, VirtAddr,
-};
+use crate::mm::{KERNEL_SPACE, PhysAddr, VirtAddr};
 use crate::drivers::dma::DMA_MEMORY;
 use crate::sync::MPSafeCell;
 use virtio_drivers::{Hal, transport::mmio::{MmioTransport, VirtIOHeader}, BufferDirection, PhysAddr as VirtioPhysAddr};
@@ -100,7 +98,7 @@ unsafe impl Hal for VirtioHal {
             return (vaddr & !UNCACHED_KERNEL_BASE) as VirtioPhysAddr;
         }
         
-        PageTable::from_token(kernel_token())
+        KERNEL_SPACE
             .translate_va(VirtAddr::from(vaddr))
             .expect("virtio buffer is not mapped")
             .0 as VirtioPhysAddr

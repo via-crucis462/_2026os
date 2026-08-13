@@ -31,6 +31,16 @@ pub const IOCSR_IPI_SEND_IP_SHIFT: usize = 0;
 pub const IOCSR_IPI_SEND_CPU_SHIFT: usize = 16;
 pub const IOCSR_IPI_SEND_BLOCKING: u32 = 1 << 31;
 
+/// Runtime IPI vector reserved for synchronous TLB shootdowns.
+pub const TLB_SHOOTDOWN_IPI: u32 = 1 << 1;
+/// Runtime IPI vector used only to wake a remote CPU from `idle 0`.
+///
+/// Bit 0 remains reserved for firmware's secondary-hart bring-up protocol and
+/// bit 1 is owned by the synchronous TLB shootdown path.
+pub const SCHED_RESCHEDULE_IPI: u32 = 1 << 2;
+/// The architectural IPI line is reported through `CSR.ESTAT.IS[12]`.
+pub const IPI_INTERRUPT_BIT: usize = 1 << 12;
+
 pub const LOONGARCH_IOCSR_MBUF_SEND: usize = 0x1048;
 pub const IOCSR_MBUF_SEND_BLOCKING: u64 = 1 << 31;
 pub const IOCSR_MBUF_SEND_BOX_SHIFT: usize = 2;
@@ -104,4 +114,59 @@ pub fn ipi_write_action(cpu: usize, action: u32) {
 
 pub fn send_ipi_single(cpu: usize, action: u32) {
     ipi_write_action(cpu, action);
+}
+
+/// Enable runtime TLB and scheduler IPIs on the current hart.
+pub fn init_runtime_ipi() {
+    // Firmware may have used a different IPI action while bringing this hart
+    // online. Clear every stale action before enabling the runtime vector so a
+    // level-triggered IPI line cannot immediately retrigger in user mode.
+    iocsr_write_u32(LOONGARCH_IOCSR_IPI_CLEAR, u32::MAX);
+    unsafe { asm!("dbar 0") };
+    let enabled = iocsr_read_u32(LOONGARCH_IOCSR_IPI_EN);
+    iocsr_write_u32(
+        LOONGARCH_IOCSR_IPI_EN,
+        enabled | TLB_SHOOTDOWN_IPI | SCHED_RESCHEDULE_IPI,
+    );
+    unsafe {
+        let mut ecfg: usize;
+        asm!("csrrd {}, 0x4", out(reg) ecfg);
+        asm!("csrwr {}, 0x4", inout(reg) (ecfg | IPI_INTERRUPT_BIT) => _);
+    }
+}
+
+/// Request that `cpu` leave `idle 0`.
+///
+/// The scheduler calls this only after publishing `IdleWfi` and serializes the
+/// final state check, this IOCSR write, and the receiver's acknowledgement with
+/// the target runqueue's idle IPI gate.
+#[inline]
+pub fn send_scheduler_ipi(cpu: usize) {
+    if cpu < crate::arch::config::CPU_CORE_NUM {
+        send_ipi_single(cpu, SCHED_RESCHEDULE_IPI);
+    }
+}
+
+/// Consume all IPI actions observed on the current hart.
+///
+/// The architectural IPI line is level triggered.  This kernel uses every IPI
+/// action only to force entry into the kernel and flushes the complete user TLB
+/// before returning to userspace, so acknowledging the whole snapshot is the
+/// intended behavior.
+pub fn take_ipi_actions() -> u32 {
+    let pending = iocsr_read_u32(LOONGARCH_IOCSR_IPI_STATUS);
+    if pending != 0 {
+        iocsr_write_u32(LOONGARCH_IOCSR_IPI_CLEAR, pending);
+        unsafe { asm!("dbar 0") };
+    }
+    pending
+}
+
+/// Raise the TLB IPI on every hart selected by `hart_mask`.
+pub fn send_tlb_shootdown(hart_mask: usize) {
+    for hart_id in 0..crate::arch::config::CPU_CORE_NUM {
+        if hart_mask & (1usize << hart_id) != 0 {
+            send_ipi_single(hart_id, TLB_SHOOTDOWN_IPI);
+        }
+    }
 }

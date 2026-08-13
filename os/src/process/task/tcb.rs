@@ -122,6 +122,10 @@ pub struct TaskStructInner {
 
     /* 3. 进程状态 */
     pub state: TaskStatus,        // 进程运行状态
+    /// 阻塞切换期间收到唤醒请求（由唤醒者置位，调度器完成切换后消费）
+    pub wake_pending: bool,
+    /// 在 BlockSaving 期间发起唤醒的 CPU；提交阻塞切换后据此重新选择目标 CPU。
+    pub wake_source_cpu: Option<usize>,
     pub exit_state: i64,            // 进程退出状态
     pub exit_code: i32,     // 进程退出码
     pub exit_signal: i32,   // 进程退出信号
@@ -147,7 +151,7 @@ pub struct TaskStructInner {
     pub dl: SchedDlEntity,
 
     /* 5. 内存管理相关 */
-    pub mm: Option<Arc<MPSafeCell<MemorySet>>>,       // 用户进程内存描述符
+    pub mm: Option<Arc<MemorySet>>,       // 用户进程内存描述符
     // pub active_mm: *mut mm_struct,// 上下文切换使用的活动 mm
 
     /* 6. 文件系统与文件描述符 */
@@ -207,7 +211,6 @@ impl TaskStructInner {
         self.mm
             .as_ref()
             .expect("user task has no mm")
-            .exclusive_access()
             .token()
     }
 
@@ -215,7 +218,6 @@ impl TaskStructInner {
         self.mm
             .as_ref()
             .expect("user task has no mm")
-            .exclusive_access()
             .asid()
     }
 }

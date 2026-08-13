@@ -6,10 +6,10 @@ use crate::process::scheduler::runqueue::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, S
 
 use riscv::register::time;
 
-const DEFAULT_TIME_SLICE_MS: usize = 10;
+const DEFAULT_TIME_SLICE_MS: usize = 200;
 const FIFO_TIME_SLICE_MS: usize = 50;
 const RR_TIME_SLICE_MS: usize = 1;
-const IDLE_TIME_SLICE_MS: usize = 20;
+const IDLE_TIME_SLICE_MS: usize = 3;
 /// The number of milliseconds per second
 const MSEC_PER_SEC: usize = 1000;
 /// The number of microseconds per second
@@ -129,7 +129,7 @@ pub fn get_real_time_sec() -> u64 {
     get_real_time_ns() / 1_000_000_000
 }
 pub fn get_timer_ticks() -> usize {
-    time::read()
+    get_time()
 }
 
 /// Get the current time in ticks
@@ -139,12 +139,12 @@ pub fn get_time() -> usize {
 
 /// get current time in milliseconds
 pub fn get_time_ms() -> usize {
-    time::read() * MSEC_PER_SEC / CLOCK_FREQ
+    get_time() * MSEC_PER_SEC / CLOCK_FREQ
 }
 
 /// get current time in microseconds
 pub fn get_time_us() -> usize {
-    time::read() * MICRO_PER_SEC / CLOCK_FREQ
+    get_time() * MICRO_PER_SEC / CLOCK_FREQ
 }
 
 fn time_slice_ms_for_policy(policy: isize) -> usize {
@@ -160,5 +160,10 @@ fn time_slice_ms_for_policy(policy: isize) -> usize {
 /// Set the next timer interrupt according to the task scheduling policy.
 pub fn set_next_trigger(policy: isize) {
     let time_slice_ms = time_slice_ms_for_policy(policy);
+	set_next_trigger_ms(time_slice_ms);
+}
+
+/// Set the next timer interrupt after an explicit number of milliseconds.
+pub fn set_next_trigger_ms(time_slice_ms: usize) {
     set_timer(get_time() + CLOCK_FREQ * time_slice_ms / MSEC_PER_SEC);
 }

@@ -31,6 +31,20 @@ use crate::process::check_pending_signal;
 use crate::process::signal::get_pending_signals;
 use crate::task::suspend_current_and_run_next;
 
+fn socket_poll_wait_queue(
+    handle: SocketHandle,
+    writable: bool,
+) -> Option<Arc<MPSafeCell<WaitQueue>>> {
+    let queues = SOCKET_WAIT_QUEUES.lock();
+    queues.get(&handle).map(|waiters| {
+        if writable {
+            waiters.tx_queue.clone()
+        } else {
+            waiters.rx_queue.clone()
+        }
+    })
+}
+
 pub struct TcpSocket {
     pub handle: SocketHandle,
     /// smoltcp 的单个 TCP socket 只能承接一条握手；监听 socket 使用
@@ -151,12 +165,16 @@ impl TcpSocket {
 }
 impl Drop for TcpSocket {
     fn drop(&mut self) {
+        let mut poll_waiters = Vec::new();
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let mut queues = crate::net::SOCKET_WAIT_QUEUES.lock();
         let mut orphaned_tcp = crate::net::ORPHANED_TCP_SOCKETS.lock();
         let mut handles = self.backlog_handles.lock();
         handles.push(self.handle);
         for handle in handles.drain(..) {
+            if let Some(waiters) = queues.get(&handle) {
+                poll_waiters.push((waiters.rx_queue.clone(), waiters.tx_queue.clone()));
+            }
             let exists = sockets.iter().any(|(h, _)| h == handle);
             if exists {
                 let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
@@ -178,6 +196,10 @@ impl Drop for TcpSocket {
         drop(orphaned_tcp);
         drop(queues);
         drop(sockets);
+        for (rx, tx) in poll_waiters {
+            crate::process::scheduler::wait::wake_up_all_mp(&rx);
+            crate::process::scheduler::wait::wake_up_all_mp(&tx);
+        }
         crate::net::net_poll();
     }
 }
@@ -190,6 +212,9 @@ impl File for TcpSocket {
     }
     fn readable(&self) -> bool {
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        if !sockets.iter().any(|(handle, _)| handle == self.handle) {
+            return true;
+        }
         let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
         let state = socket.state();
         if state == smoltcp::socket::tcp::State::Listen {
@@ -211,8 +236,50 @@ impl File for TcpSocket {
     }
     fn writable(&self) -> bool {
         let mut sockets = SOCKET_SET.exclusive_access();
+        if !sockets.iter().any(|(handle, _)| handle == self.handle) {
+            return false;
+        }
         let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
         socket.can_send() || !socket.may_send()
+    }
+
+    fn poll_hangup(&self) -> bool {
+        let mut sockets = SOCKET_SET.exclusive_access();
+        let Some((_, socket)) = sockets.iter_mut().find(|(handle, _)| *handle == self.handle)
+        else {
+            return true;
+        };
+        let socket = match socket {
+            smoltcp::socket::Socket::Tcp(socket) => socket,
+            _ => return true,
+        };
+        !socket.may_recv() && !socket.may_send()
+    }
+
+    fn poll_wait_queue(&self) -> Option<Arc<MPSafeCell<WaitQueue>>> {
+        socket_poll_wait_queue(self.handle, false)
+    }
+
+    fn poll_wait_queues(&self, interests: u32) -> Vec<Arc<MPSafeCell<WaitQueue>>> {
+        let mut queues = Vec::new();
+        if interests & 0x001 != 0 {
+            if let Some(queue) = socket_poll_wait_queue(self.handle, false) {
+                queues.push(queue);
+            }
+        }
+        if interests & 0x004 != 0 {
+            if let Some(queue) = socket_poll_wait_queue(self.handle, true) {
+                if !queues.iter().any(|existing| Arc::ptr_eq(existing, &queue)) {
+                    queues.push(queue);
+                }
+            }
+        }
+        if queues.is_empty() {
+            if let Some(queue) = socket_poll_wait_queue(self.handle, false) {
+                queues.push(queue);
+            }
+        }
+        queues
     }
     fn read(&self, mut buf: UserBuffer) -> usize {
         if buf.len() == 0 {
@@ -382,6 +449,8 @@ pub struct UdpSocket {
 }
 impl Drop for UdpSocket {
     fn drop(&mut self) {
+        crate::process::scheduler::wait::wake_up_all_mp(&self.read_waiters);
+        crate::process::scheduler::wait::wake_up_all_mp(&self.write_waiters);
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
         let mut queues = crate::net::SOCKET_WAIT_QUEUES.lock();
         sockets.remove(self.handle);
@@ -505,13 +574,45 @@ impl File for UdpSocket {
     }
     fn readable(&self) -> bool {
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        if !sockets.iter().any(|(handle, _)| handle == self.handle) {
+            return true;
+        }
         let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
         socket.can_recv()
     }
     fn writable(&self) -> bool {
         let mut sockets = crate::net::SOCKET_SET.exclusive_access();
+        if !sockets.iter().any(|(handle, _)| handle == self.handle) {
+            return false;
+        }
         let socket = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
         socket.can_send()
+    }
+    fn poll_hangup(&self) -> bool {
+        let sockets = crate::net::SOCKET_SET.exclusive_access();
+        let missing = !sockets.iter().any(|(handle, _)| handle == self.handle);
+        missing
+    }
+    fn poll_wait_queues(&self, interests: u32) -> Vec<Arc<MPSafeCell<WaitQueue>>> {
+        let mut queues = Vec::new();
+        if interests & 0x001 != 0 {
+            if let Some(queue) = socket_poll_wait_queue(self.handle, false) {
+                queues.push(queue);
+            }
+        }
+        if interests & 0x004 != 0 {
+            if let Some(queue) = socket_poll_wait_queue(self.handle, true) {
+                if !queues.iter().any(|existing| Arc::ptr_eq(existing, &queue)) {
+                    queues.push(queue);
+                }
+            }
+        }
+        if queues.is_empty() {
+            if let Some(queue) = socket_poll_wait_queue(self.handle, false) {
+                queues.push(queue);
+            }
+        }
+        queues
     }
     fn read(&self, mut buf: UserBuffer) -> usize {
         loop {
@@ -665,6 +766,7 @@ struct UnixSocketInner {
     peer: Option<Weak<Mutex<UnixSocketInner>>>,
     attached_prog: Option<usize>,
     socket_type: UnixSocketType,
+    poll_waiters: Arc<MPSafeCell<WaitQueue>>,
 }
 
 pub struct UnixSocket {
@@ -679,6 +781,7 @@ impl UnixSocket {
             peer: None,
             attached_prog: None,
             socket_type,
+            poll_waiters: Arc::new(MPSafeCell::new(WaitQueue::new())),
         }));
         let right = Arc::new(Mutex::new(UnixSocketInner {
             recv_queue: VecDeque::new(),
@@ -686,6 +789,7 @@ impl UnixSocket {
             peer: None,
             attached_prog: None,
             socket_type,
+            poll_waiters: Arc::new(MPSafeCell::new(WaitQueue::new())),
         }));
         left.lock().peer = Some(Arc::downgrade(&right));
         right.lock().peer = Some(Arc::downgrade(&left));
@@ -694,6 +798,26 @@ impl UnixSocket {
 
     pub fn attach_bpf(&self, prog_fd: usize) {
         self.inner.lock().attached_prog = Some(prog_fd);
+    }
+}
+
+fn wake_unix_socket_poll_waiters(inner: &Arc<Mutex<UnixSocketInner>>) {
+    let waiters = inner.lock().poll_waiters.clone();
+    crate::process::scheduler::wait::wake_up_all_mp(&waiters);
+}
+
+impl Drop for UnixSocket {
+    fn drop(&mut self) {
+        let peer = self
+            .inner
+            .lock()
+            .peer
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some(peer) = peer {
+            // The peer observes the dropped endpoint as EOF/HUP.
+            wake_unix_socket_poll_waiters(&peer);
+        }
     }
 }
 
@@ -710,11 +834,12 @@ impl File for UnixSocket {
             return 0;
         }
         //修改语义为轮询式读取：如果当前没有数据可读，就让出 CPU 给其他进程，等被唤醒后再来尝试读取。
-        let packet = loop {
+        let (packet, peer) = loop {
             let mut inner = self.inner.lock();
             if let Some(packet) = inner.recv_queue.pop_front() {
                 inner.recv_bytes = inner.recv_bytes.saturating_sub(packet.len());
-                break packet;
+                let peer = inner.peer.as_ref().and_then(Weak::upgrade);
+                break (packet, peer);
             }
             let peer_closed = inner.peer.as_ref().and_then(Weak::upgrade).is_none();
             drop(inner);
@@ -727,6 +852,11 @@ impl File for UnixSocket {
             }
             suspend_current_and_run_next();
         };
+
+        // Consuming receive-buffer space can make the peer writable.
+        if let Some(peer) = peer {
+            wake_unix_socket_poll_waiters(&peer);
+        }
 
         let mut copied = 0usize;
         for segment in buf.buffers.iter_mut() {
@@ -807,6 +937,10 @@ impl File for UnixSocket {
             prog_fd
         };
 
+        // New data makes the peer readable.  Do this after releasing the
+        // socket lock so a woken epoll waiter can recheck readiness directly.
+        wake_unix_socket_poll_waiters(&peer);
+
         if let Some(prog_fd) = attached_prog {
             let _ = crate::syscall::bpf::run_socket_filter_program(prog_fd);
         }
@@ -828,6 +962,14 @@ impl File for UnixSocket {
         };
         let peer_inner = peer.lock();
         peer_inner.recv_bytes < UNIX_SOCKET_RECV_LIMIT
+    }
+
+    fn poll_hangup(&self) -> bool {
+        self.inner.lock().peer.as_ref().and_then(Weak::upgrade).is_none()
+    }
+
+    fn poll_wait_queue(&self) -> Option<Arc<MPSafeCell<WaitQueue>>> {
+        Some(self.inner.lock().poll_waiters.clone())
     }
 
     fn get_stat(&self) -> Stat {
@@ -925,14 +1067,40 @@ impl File for RawSocket {
     }
     fn readable(&self) -> bool {
         let mut sockets = SOCKET_SET.exclusive_access();
+        if !sockets.iter().any(|(handle, _)| handle == self.handle) {
+            return true;
+        }
         let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
         socket.can_recv()
     }
 
     fn writable(&self) -> bool {
         let mut sockets = SOCKET_SET.exclusive_access();
+        if !sockets.iter().any(|(handle, _)| handle == self.handle) {
+            return false;
+        }
         let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
         socket.can_send()
+    }
+    fn poll_hangup(&self) -> bool {
+        let sockets = SOCKET_SET.exclusive_access();
+        let missing = !sockets.iter().any(|(handle, _)| handle == self.handle);
+        missing
+    }
+    fn poll_wait_queues(&self, interests: u32) -> Vec<Arc<MPSafeCell<WaitQueue>>> {
+        let mut queues = Vec::new();
+        if interests & 0x001 != 0 {
+            queues.push(self.read_waiters.clone());
+        }
+        if interests & 0x004 != 0
+            && !queues.iter().any(|existing| Arc::ptr_eq(existing, &self.write_waiters))
+        {
+            queues.push(self.write_waiters.clone());
+        }
+        if queues.is_empty() {
+            queues.push(self.read_waiters.clone());
+        }
+        queues
     }
 
     fn read(&self, mut buf: UserBuffer) -> usize {
@@ -1021,7 +1189,7 @@ impl File for RawSocket {
                             data[12 + i] = data[16 + i];
                             data[16 + i] = temp;
                         }
-                        // 将 ICMP Type 修改为 0 (Echo Reply)
+                // 将 ICMP Type 修改为 0 (Echo Reply)
                         data[ihl] = 0;
                         // 重算 ICMP Checksum (设为 0，然后计算 Payload 的 16 位累加反码)
                         data[ihl + 2] = 0;
@@ -1047,6 +1215,7 @@ impl File for RawSocket {
                 }
                 // 将回环的包塞入本地队列
                 self.local_rx_buffer.lock().push_back(data);
+                crate::process::scheduler::wait::wake_up_all_mp(&self.read_waiters);
                 // 唤醒可能正在阻塞的进程 (Ping 进程)
                 let has_waiting_task = {
                     let queue_guard = self.rx_wait_queue.lock();

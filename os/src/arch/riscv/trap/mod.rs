@@ -17,9 +17,9 @@ use crate::mm::VirtAddr;
 use crate::net::net_poll;
 use crate::syscall::syscall;
 use crate::task::{
-    add_task, current_add_signal, current_task, current_tid, current_trap_cx, current_user_token,
+    current_add_signal, current_task, current_tid, current_trap_cx, current_user_token,
     exit_current_and_run_next, handle_signals, suspend_current_and_run_next, KernelStack,
-    SignalFlags, TaskStatus,
+    SignalFlags,
 };
 use crate::{get_hart_id, get_time_ms, KERNEL_STACK_SIZE, PAGE_SIZE};
 use alloc::sync::Arc;
@@ -34,6 +34,7 @@ global_asm!(include_str!("trap.S"));
 /// Initialize trap handling
 pub fn init() {
     set_kernel_trap_entry();
+    crate::arch::ipi::init_runtime_ipi();
 }
 
 fn set_kernel_trap_entry() {
@@ -52,13 +53,18 @@ fn set_user_trap_entry() {
 pub fn enable_timer_interrupt() {
     unsafe {
         riscv::register::sie::set_stimer();
+        riscv::register::sie::set_ssoft();
     }
     println!("[timer] STIE enabled");
-    #[cfg(board = "visionfive2")]
+    // `trap_from_kernel()` has no save/restore frame and is deliberately
+    // non-returning.  Keep global supervisor interrupts masked while the
+    // scheduler executes in kernel context, including its idle WFI path.
+    // `TrapContext::app_init_context()` sets SPIE, so `sret` still restores
+    // SIE for user execution and both timer and scheduler SSIP interrupts
+    // remain deliverable there.
     unsafe {
-        riscv::register::sstatus::set_sie();
+        riscv::register::sstatus::clear_sie();
     }
-    println!("[timer] global SIE enabled");
 }
 
 /// trap handler
@@ -145,10 +151,16 @@ pub fn trap_handler() -> ! {
                     );
                 }
             }*/
-            crate::timer::check_timers();
-            net_poll();
-            crate::mm::mmap::tick_sync();
+            // crate::timer::check_timers();
+            // net_poll();
+            // crate::mm::mmap::tick_sync();
             suspend_current_and_run_next();
+        }
+        Trap::Interrupt(Interrupt::SupervisorSoft) => {
+            // Scheduler IPIs are sent only while the target is in idle WFI and
+            // are normally consumed by the idle loop. A late software
+            // interrupt therefore needs acknowledgement, not a forced switch.
+            crate::arch::ipi::acknowledge_scheduler_ipi();
         }
         Trap::Exception(Exception::StorePageFault)
         | Trap::Exception(Exception::LoadPageFault)
@@ -168,23 +180,21 @@ pub fn trap_handler() -> ! {
                     break 'fault;
                 };
                 let files = task.inner_exclusive_access().files.clone();
-                let mut memory = mm.exclusive_access();
-
-                // 【修改 1】：获取当前的栈指针 SP
+                // Fault resolution no longer uses SP; retain it only for a
+                // useful diagnostic if this address is ultimately invalid.
                 let sp = current_trap_cx().x[2];
                 let vpn = VirtAddr::from(stval).std_floor();
-                //
                 if scause.cause() == Trap::Exception(Exception::StorePageFault)
-                    && memory.set_pte_dirty(vpn)
+                    && mm.set_pte_dirty(vpn)
                 {
                     break 'fault;
-                } else if memory.handle_cow_fault(stval) {
+                } else if mm.handle_cow_fault(stval) {
                     info!("[WATCHDOG][COW] : {:#x}, PC: {:#x}", stval, sepc);
                     break 'fault;
-                } else if memory.handle_page_fault(stval, sp) {
+                } else if mm.handle_page_fault(stval) {
                     info!("[WATCHDOG] : {:#x}, PC: {:#x}", stval, sepc);
                     break 'fault;
-                } else if memory.check_mmap_page_fault(stval){
+                } else if mm.check_mmap_page_fault(stval){
                     error!("[WATCHDOG][BUS] : {:#x}, PC: {:#x}", stval, sepc);
                     error!(
                         "[kernel] user_fault: pid={}, cause={:?}, pc={:#x}, badaddr={:#x}",
@@ -217,22 +227,31 @@ pub fn trap_handler() -> ! {
                     let bad_vpn = VirtAddr::from(stval).std_floor();
                     let retry = match scause.cause() {
                         Trap::Exception(Exception::InstructionPageFault) => {
-                            memory.pte_satisfies(bad_vpn, false, false, true)
+                            mm.pte_satisfies(bad_vpn, false, false, true)
                         }
                         Trap::Exception(Exception::LoadPageFault) => {
-                            memory.pte_satisfies(bad_vpn, true, false, false)
+                            mm.pte_satisfies(bad_vpn, true, false, false)
                         }
                         Trap::Exception(Exception::StorePageFault) => {
-                            memory.pte_satisfies(bad_vpn, false, true, false)
+                            mm.pte_satisfies(bad_vpn, false, true, false)
                         }
                         _ => false,
                     };
                     if retry {
+                        // The PTE may have been installed by another hart, or
+                        // mprotect may have relaxed its permissions without a
+                        // remote shootdown. Drop this hart's stale negative or
+                        // permission entry before retrying the faulting access.
+                        mm.flush_tlb_local();
+                        if scause.cause()
+                            == Trap::Exception(Exception::InstructionPageFault)
+                        {
+                            unsafe { asm!("fence.i") };
+                        }
                         break 'fault;
                     }
 
                     // 【新增】检查 userfaultfd 注册范围
-                    drop(memory);
                 let files_guard = files.exclusive_access();
                 let fd_table = &files_guard.fds;
                 let mut uffd_handled = false;
@@ -278,10 +297,12 @@ pub fn trap_handler() -> ! {
                                 let mut guard = uffd.read_waiters.lock();
                                 if let Some(handler) = guard.pop_front() {
                                     drop(guard);
-                                    let mut h_inner = handler.inner_exclusive_access();
-                                    h_inner.state = TaskStatus::Ready;
-                                    drop(h_inner);
-                                    add_task(handler);
+                                    // The reader can still be in BlockSaving.
+                                    // Keep the transition through the normal
+                                    // wake path so the scheduler either records
+                                    // the early wake or performs placement and
+                                    // the remote reschedule notification.
+                                    crate::process::scheduler::runqueue::wake_up_task(handler);
                                 }
                                 uffd_handled = true;
                                 break;

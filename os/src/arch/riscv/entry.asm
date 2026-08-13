@@ -3,7 +3,7 @@
 //! 临时页表采用 1GB 大页映射 16G RAM 两次（分别为恒等和带窗口），32 个页表项
 
     .equ BOOT_STACK_SHIFT, 16
-    .equ BOOT_HARTS, 8
+    .equ BOOT_HARTS, {boot_harts}
     // 内核高半窗口基址，必须与 KERNEL_WINDOW_BASE 一致
     // 链接脚本 BASE_ADDRESS = BOOT_WINDOW + 0x80200000
     .equ BOOT_WINDOW, 0xffffffc000000000

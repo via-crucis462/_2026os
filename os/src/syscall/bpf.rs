@@ -14,8 +14,8 @@ use spin::Mutex;
 use crate::{
     auth::{FileMode, PermStat},
     fs::{File, Stat},
-    mm::{translated_read, translated_write},
-    process::FdFlags,
+    mm::{translated_read, translated_write, MemorySet},
+    process::{current_user_mm, FdFlags},
     task::current_task,
 };
 
@@ -414,22 +414,22 @@ impl File for BpfProgFile {
     fn as_any(&self) -> &dyn Any { self }
 }
 
-//读取指定长度的用户空间数据到内核空间，并返回一个Vec<u8>，其中token是页表标识符，ptr是用户
-fn read_user_bytes(token: usize, ptr: *const u8, len: usize) -> Vec<u8> {
+//读取指定长度的用户空间数据到内核空间，并返回一个Vec<u8>。
+fn read_user_bytes(mm: &MemorySet, ptr: *const u8, len: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(len);
     for offset in 0..len {
-        data.push(translated_read(token, ptr.wrapping_add(offset)));
+        data.push(translated_read(mm, ptr.wrapping_add(offset)));
     }
     data
 }
-// 读取用户空间数据并写回用户空间，token是页表标识符，ptr是用户空间地址，data是要写入的数据
-fn write_user_bytes(token: usize, ptr: *mut u8, data: &[u8]) {
+// 读取用户空间数据并写回用户空间。
+fn write_user_bytes(mm: &MemorySet, ptr: *mut u8, data: &[u8]) {
     for (offset, byte) in data.iter().copied().enumerate() {
-        translated_write(token, ptr.wrapping_add(offset), byte);
+        translated_write(mm, ptr.wrapping_add(offset), byte);
     }
 }
 
-fn set_log_buf(token: usize, ptr: u64, len: u32, message: &[u8]) {
+fn set_log_buf(mm: &MemorySet, ptr: u64, len: u32, message: &[u8]) {
     if ptr == 0 || len == 0 {
         return;
     }
@@ -443,9 +443,9 @@ fn set_log_buf(token: usize, ptr: u64, len: u32, message: &[u8]) {
     let message = message.strip_suffix(&[0]).unwrap_or(message);
     let copy_len = message.len().min(cap.saturating_sub(1));
     if copy_len > 0 {
-        write_user_bytes(token, ptr as *mut u8, &message[..copy_len]);
+        write_user_bytes(mm, ptr as *mut u8, &message[..copy_len]);
     }
-    translated_write(token, (ptr as *mut u8).wrapping_add(copy_len), 0u8);
+    translated_write(mm, (ptr as *mut u8).wrapping_add(copy_len), 0u8);
 }
 
 fn install_bpf_fd(file: Arc<dyn File + Send + Sync>) -> Result<isize, Errno> {
@@ -586,11 +586,11 @@ fn store_mem_value(
     Ok(())
 }
 
-fn bpf_map_create(token: usize, attr: *const u8, size: usize) -> isize {
+fn bpf_map_create(mm: &MemorySet, attr: *const u8, size: usize) -> isize {
     if size < size_of::<BpfMapCreateAttr>() {
         return Errno::EINVAL.as_isize();
     }
-    let attr = translated_read(token, attr as *const BpfMapCreateAttr);
+    let attr = translated_read(mm, attr as *const BpfMapCreateAttr);
     match BpfMapFile::new(
         attr.map_type,
         attr.key_size as usize,
@@ -602,18 +602,18 @@ fn bpf_map_create(token: usize, attr: *const u8, size: usize) -> isize {
     }
 }
 
-fn bpf_map_lookup(token: usize, attr: *const u8, size: usize) -> isize {
+fn bpf_map_lookup(mm: &MemorySet, attr: *const u8, size: usize) -> isize {
     if size < size_of::<BpfMapElemAttr>() {
         return Errno::EINVAL.as_isize();
     }
-    let attr = translated_read(token, attr as *const BpfMapElemAttr);
+    let attr = translated_read(mm, attr as *const BpfMapElemAttr);
     let Ok(map) = get_bpf_map(attr.map_fd as usize) else {
         return Errno::EBADF.as_isize();
     };
-    let key = read_user_bytes(token, attr.key as *const u8, map.key_size);
+    let key = read_user_bytes(mm, attr.key as *const u8, map.key_size);
     match map.lookup_value(&key) {
         Ok(Some(value)) => {
-            write_user_bytes(token, attr.value as *mut u8, &value);
+            write_user_bytes(mm, attr.value as *mut u8, &value);
             0
         }
         Ok(None) => Errno::ENOENT.as_isize(),
@@ -621,58 +621,57 @@ fn bpf_map_lookup(token: usize, attr: *const u8, size: usize) -> isize {
     }
 }
 
-fn bpf_map_update(token: usize, attr: *const u8, size: usize) -> isize {
+fn bpf_map_update(mm: &MemorySet, attr: *const u8, size: usize) -> isize {
     if size < size_of::<BpfMapElemAttr>() {
         return Errno::EINVAL.as_isize();
     }
-    let attr = translated_read(token, attr as *const BpfMapElemAttr);
+    let attr = translated_read(mm, attr as *const BpfMapElemAttr);
     let Ok(map) = get_bpf_map(attr.map_fd as usize) else {
         return Errno::EBADF.as_isize();
     };
-    let key = read_user_bytes(token, attr.key as *const u8, map.key_size);
-    let value = read_user_bytes(token, attr.value as *const u8, map.value_size);
+    let key = read_user_bytes(mm, attr.key as *const u8, map.key_size);
+    let value = read_user_bytes(mm, attr.value as *const u8, map.value_size);
     map.update_value(&key, &value, attr.flags)
         .map(|_| 0)
         .unwrap_or_else(|errno| errno.as_isize())
 }
 
-fn bpf_prog_load(token: usize, attr: *const u8, size: usize) -> isize {
+fn bpf_prog_load(mm: &MemorySet, attr: *const u8, size: usize) -> isize {
     //println!("bpf_prog_load called with attr=0x{:x}, size={}", attr as usize, size);
     if size < size_of::<BpfProgLoadAttr>() {
         return Errno::EINVAL.as_isize();
     }
     let attr_ptr = attr as usize;
-    let attr = translated_read(token, attr as *const BpfProgLoadAttr);
+    let attr = translated_read(mm, attr as *const BpfProgLoadAttr);
     if attr.license == 0 {
         //println!("bpf_prog_load failed: license is required");
-        set_log_buf(token, attr.log_buf, attr.log_size, b"missing license");
+        set_log_buf(mm, attr.log_buf, attr.log_size, b"missing license");
         return Errno::EINVAL.as_isize();
     }
     let mut insns = Vec::with_capacity(attr.insn_cnt as usize);
     for index in 0..attr.insn_cnt as usize {
         let insn_ptr = (attr.insns as *const BpfInsn).wrapping_add(index);
-        insns.push(translated_read(token, insn_ptr));
+        insns.push(translated_read(mm, insn_ptr));
     }
     match BpfProgFile::new(attr.prog_type, insns) {
         Ok(prog) => {
-            set_log_buf(token, attr.log_buf, attr.log_size, b"\0");
+            set_log_buf(mm, attr.log_buf, attr.log_size, b"\0");
             install_bpf_fd(Arc::new(prog)).unwrap_or_else(|errno| errno.as_isize())
         }
         Err(errno) => {
-            set_log_buf(token, attr.log_buf, attr.log_size, b"unsupported bpf program");
+            set_log_buf(mm, attr.log_buf, attr.log_size, b"unsupported bpf program");
             errno.as_isize()
         }
     }
 }
 
 pub fn sys_bpf(cmd: usize, attr: *const u8, size: usize) -> isize {
-    let task = current_task().unwrap();
-    let token = task.inner_exclusive_access().get_user_token();
+    let mm = current_user_mm();
     match cmd {
-        BPF_MAP_CREATE => bpf_map_create(token, attr, size),    //创建一个BPF map并返回文件描述符，BPF是供用户空间程序与内核空间程序交互的一种机制，BPF map是BPF程序用来存储数据结构的对象
-        BPF_MAP_LOOKUP_ELEM => bpf_map_lookup(token, attr, size),//在BPF map中查找元素
-        BPF_MAP_UPDATE_ELEM => bpf_map_update(token, attr, size),//在BPF map中更新元素
-        BPF_PROG_LOAD => bpf_prog_load(token, attr, size),//加载BPF程序
+        BPF_MAP_CREATE => bpf_map_create(&mm, attr, size),    //创建一个BPF map并返回文件描述符，BPF是用户空间程序与内核空间程序交互的一种机制，BPF map是BPF程序用来存储数据结构的对象
+        BPF_MAP_LOOKUP_ELEM => bpf_map_lookup(&mm, attr, size),//在BPF map中查找元素
+        BPF_MAP_UPDATE_ELEM => bpf_map_update(&mm, attr, size),//在BPF map中更新元素
+        BPF_PROG_LOAD => bpf_prog_load(&mm, attr, size),//加载BPF程序
         _ => Errno::EINVAL.as_isize(),
     }
 }

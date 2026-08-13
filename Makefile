@@ -3,11 +3,14 @@ export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
 
 MODE ?= release
 LOG ?= OFF
-RV_SMP ?= 8
+RV_SMP ?= 1
+RV_IMAGE ?= sdcard-rv.img
+RV_MEM ?= 16G
 LA_SMP ?= 1
+LA_MEM ?= 36G
 RV_GDB_PORT ?= 1234
 LA_GDB_PORT ?= 1235
-# default, sh, ltp
+# default, sh, ltp, uptime
 INIT ?= default
 # virt, visionfive2, 2k1000
 BOARD ?= virt
@@ -46,7 +49,7 @@ prev-la:
 
 build: build-rv build-la
 build-rv:
-	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD)
+	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD) CPU_NUM=$(RV_SMP)
 ifeq ($(BOARD),visionfive2)
 	@echo "  -> Packing uImage for VisionFive2..."
 	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv-$(BOARD)
@@ -59,7 +62,7 @@ ifeq ($(BOARD),visionfive2)
 	sudo ip addr replace 192.168.1.100/24 dev enp3s0
 endif
 build-la:
-	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD)
+	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD) CPU_NUM=$(LA_SMP)
 ifeq ($(BOARD),2k1000)
 	@echo "  -> Packing uImage for 2K1000..."
 	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la-$(BOARD)
@@ -108,7 +111,8 @@ test-rv: build-user-rv copy-user-rv build-rv copy-rv
 	@qemu-system-riscv64 -machine virt \
 	-kernel kernel-rv \
 	-m 16G -nographic -smp $(RV_SMP) \
-	-bios default -drive file=sdcard-rv.img,if=none,format=raw,id=x0 \
+	-snapshot \
+	-bios default -drive file=$(RV_IMAGE),if=none,format=raw,id=x0 \
 	-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 	-no-reboot \
 	-device virtio-net-device,netdev=net0 \
@@ -121,10 +125,11 @@ test-la: build-user-la copy-user-la build-la copy-la
 	@rm -f kernel_output.log
 	@qemu-system-loongarch64 \
 	-kernel kernel-la \
-	-m 16G -nographic \
+	-m $(LA_MEM) -nographic \
 	-smp $(LA_SMP) \
 	-drive file=sdcard-la.img,if=none,format=raw,id=x0 \
 	-device virtio-blk-pci,drive=x0 \
+	-snapshot \
 	-no-reboot \
 	-device virtio-net-pci,netdev=net0 \
 	-netdev user,id=net0 \
@@ -139,8 +144,9 @@ test-la-2k1000: build-user-la copy-user-la build-la copy-la
 	-machine virt \
 	-cpu la464 \
 	-kernel kernel-la-2k1000 \
-	-m 1G -nographic \
+	-m 16G -nographic \
 	-smp $(LA_SMP) \
+	-snapshot \
 	-drive file=sdcard-la.img,if=none,format=raw,id=x0 \
 	-device virtio-blk-pci,drive=x0 \
 	-no-reboot \
@@ -154,9 +160,10 @@ debug-rv: build-user-rv copy-user-rv build-rv copy-rv
 	@rm -f kernel_output.log
 	@qemu-system-riscv64 -machine virt \
 	-kernel kernel-rv \
-	-m 1G -nographic -smp $(RV_SMP) \
-	-bios default -drive file=sdcard-rv.img,if=none,format=raw,id=x0 \
+	-m $(RV_MEM) -nographic -smp $(RV_SMP) \
+	-bios default -drive file=$(RV_IMAGE),if=none,format=raw,id=x0 \
 	-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+	-snapshot \
 	-no-reboot \
 	-device virtio-net-device,netdev=net \
 	-netdev user,id=net \
@@ -172,7 +179,7 @@ debug-la: build-user-la copy-user-la build-la copy-la
 	@qemu-system-loongarch64 \
 	-machine virt \
 	-kernel kernel-la \
-	-m 16G -nographic \
+	-m $(LA_MEM) -nographic \
 	-smp $(LA_SMP) \
 	-drive file=sdcard-la.img,if=none,format=raw,id=x0 \
 	-device virtio-blk-pci,drive=x0 \

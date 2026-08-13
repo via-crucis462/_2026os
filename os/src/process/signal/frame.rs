@@ -221,15 +221,11 @@ pub(super) fn push_signal_frame(
 		),
 	};
 
-	let token = task_inner.get_user_token();
 	let mm = task_inner.mm.as_ref()?.clone();
-	if !mm
-		.exclusive_access()
-		.ensure_writable_user_range(frame_sp, frame_size, user_sp)
-	{
+	if !mm.ensure_writable_user_range(frame_sp, frame_size) {
 		return None;
 	}
-	if !try_translated_write(token, frame_sp as *mut SignalFrame, frame) {
+	if !try_translated_write(&mm, frame_sp as *mut SignalFrame, frame) {
 		return None;
 	}
 
@@ -248,8 +244,15 @@ pub(crate) fn restore_signal_context(task_inner: &mut TaskControlBlockInner) -> 
 	let ucontext_ptr = task_inner.signal_user_context_backup.pop()?;
 	let _saved_mask = task_inner.signal_mask_backup.pop()?;
 	let mut trap_ctx = task_inner.trap_ctx_backup.pop()?;
-	let token = task_inner.get_user_token();
-	let user_ctx: SignalUserContext = try_translated_read(token, ucontext_ptr as *const SignalUserContext)?;
+	let mm = task_inner.mm.as_ref()?.clone();
+	if !mm.ensure_readable_user_range(
+		ucontext_ptr,
+		core::mem::size_of::<SignalUserContext>(),
+	) {
+		return None;
+	}
+	let user_ctx: SignalUserContext =
+		try_translated_read(&mm, ucontext_ptr as *const SignalUserContext)?;
 	#[cfg(target_arch = "riscv64")]
 	warn!(
 		"[SIG_RESTORE TP] tid={} saved_pc={:#x} saved_sp={:#x} saved_ra={:#x} saved_tp={:#x} saved_a0={:#x} user_pc={:#x} user_sp={:#x} user_ra={:#x} user_tp={:#x} user_a0={:#x}",

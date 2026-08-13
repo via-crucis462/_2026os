@@ -1,12 +1,12 @@
-use super::{PhysAddr, PhysPageNum, PageSize};
+use super::{PageSize, PhysAddr, PhysPageNum};
 #[allow(unused)]
 use crate::arch::config::{CACHED_KERNEL_BASE, DMA_SIZE, MEMORY_END};
 use crate::{mm::mmap::free_up_mem_space, sync::MPSafeCell};
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
-use alloc::sync::Arc;
 
 /// 用 Arc 替代了原有的引用计数器
 pub type FrameTracker = Arc<Frame>;
@@ -277,8 +277,8 @@ pub fn frame_alloc(page_size: PageSize) -> Option<FrameTracker> {
     };
 
     // FRAME_REF_COUNTS.exclusive_access().insert(ppn.0, 1);
-    let frame = Frame::new(ppn, page_size);
-    Some(FrameTracker::new(frame))
+    let frame = FrameTracker::new(Frame::new(ppn, page_size));
+    Some(frame)
 }
 /// 连续分配物理页帧，返回起始物理地址, 只允许标准页
 /// 不过目前未实现连续分配

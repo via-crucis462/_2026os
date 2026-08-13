@@ -7,10 +7,10 @@ use crate::process::scheduler::runqueue::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, S
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-const DEFAULT_TIME_SLICE_MS: usize = 10;
+const DEFAULT_TIME_SLICE_MS: usize = 200;
 const FIFO_TIME_SLICE_MS: usize = 50;
 const RR_TIME_SLICE_MS: usize = 1;
-const IDLE_TIME_SLICE_MS: usize = 20;
+const IDLE_TIME_SLICE_MS: usize = 3;
 /// The number of milliseconds per second
 const MSEC_PER_SEC: usize = 1000;
 /// The number of microseconds per second
@@ -171,11 +171,17 @@ fn time_slice_ms_for_policy(policy: isize) -> usize {
 
 /// Set the next timer interrupt according to the task scheduling policy.
 pub fn set_next_trigger(policy: isize) {
+    set_next_trigger_ms(time_slice_ms_for_policy(policy));
+}
+
+/// Set the next timer interrupt after an explicit number of milliseconds.
+pub fn set_next_trigger_ms(time_slice_ms: usize) {
     let ticks = timer_frequency()
-        .saturating_mul(time_slice_ms_for_policy(policy))
+        .saturating_mul(time_slice_ms)
         / MSEC_PER_SEC;
-    let ticks = ticks.max(1);
-    let tcfg = (ticks << 2) | 0b01;
+    // TCFG stores the raw countdown value; its low two bits are control bits.
+    let ticks = ticks.max(4) & !0b11;
+    let tcfg = ticks | 0b01;
     unsafe {
         asm!("csrwr {}, 0x44", inout(reg) 1usize => _);
         asm!("csrwr {}, 0x41", inout(reg) tcfg => _);

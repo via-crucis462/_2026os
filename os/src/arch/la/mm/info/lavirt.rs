@@ -2,9 +2,9 @@
 //! 内存段无特殊说明则：起始包含，结束不包含（前闭后开区间）
 
 /*
-QEMU virt with 16 GiB RAM exposes two physical ranges:
+QEMU virt with 36 GiB RAM exposes two physical ranges:
     lowram  [0x0,         0x1000_0000)
-    highram [0x8000_0000, 0x4_7000_0000)
+    highram [0x8000_0000, 0x9_7000_0000)
 The firmware occupies the first 2 MiB of lowram. The kernel uses the rest of
 lowram for kernel stacks and highram for the frame allocator.
 */
@@ -22,11 +22,11 @@ pub const DRAM_BANK0_SIZE: usize = DRAM_BANK0_END - DRAM_BANK0_START;
 /// Bank1 起始物理地址（内核和帧分配器使用）
 pub const DRAM_BANK1_START: usize = 0x8000_0000;
 /// Bank1 大小
-pub const DRAM_BANK1_SIZE: usize = 0x3_F000_0000; // 15.75 GiB
+pub const DRAM_BANK1_SIZE: usize = 0x8_F000_0000; // 35.75 GiB
 /// Bank1 结束地址
-pub const DRAM_BANK1_END: usize = DRAM_BANK1_START + DRAM_BANK1_SIZE; // 0x4_7000_0000
+pub const DRAM_BANK1_END: usize = DRAM_BANK1_START + DRAM_BANK1_SIZE; // 0x9_7000_0000
 
-/// 总 DRAM 大小
+/// 总可用 DRAM 大小（不含固件保留区）
 pub const DRAM_TOTAL_SIZE: usize = DRAM_BANK0_SIZE + DRAM_BANK1_SIZE;
 
 

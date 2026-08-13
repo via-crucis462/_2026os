@@ -154,12 +154,15 @@ pub fn kstack_alloc() -> KernelStack {
     let kstack_id = KSTACK_ALLOCATOR.exclusive_access().alloc();
     let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
     warn!("kstack_alloc: allocated kernel stack {} with bottom {:#x} and top {:#x}", kstack_id, kstack_bottom, kstack_top);
-    KERNEL_SPACE.exclusive_access().insert_framed_area(
+    KERNEL_SPACE.insert_framed_area(
         kstack_bottom.into(),
         kstack_top.into(),
         MapPermission::R | MapPermission::W,
         PageSize::Page4K, // 内核栈用标准页
     );
+    #[cfg(target_arch = "riscv64")]
+    // rv 下内核栈在页表建立映射到新分配的物理页帧，应该刷新 TLB
+    flush_kernel_tlb_targets();
     KernelStack(kstack_id)
 }
 
@@ -174,9 +177,8 @@ impl Drop for KernelStack {
 
         let (kernel_stack_bottom, _) = kernel_stack_position(self.0);
         let kernel_stack_bottom_va: VirtAddr = kernel_stack_bottom.into();
-        let frames = KERNEL_SPACE
-            .exclusive_access()
-            .remove_area_with_start_vpn(kernel_stack_bottom_va.into());
+        let frames =
+            KERNEL_SPACE.remove_area_with_start_vpn(kernel_stack_bottom_va.into());
         #[cfg(target_arch = "riscv64")]
         flush_kernel_tlb_targets();
         drop(frames);

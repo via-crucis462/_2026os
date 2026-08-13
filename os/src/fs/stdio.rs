@@ -4,12 +4,12 @@ use crate::mm::UserBuffer;
 use crate::console::{console_peek_char, console_read_char, echo_if_enabled};
 use crate::task::suspend_current_and_run_next;
 use lazy_static::*;
-use crate::sync::MPSafeCell;
+use crate::sync::{MPSafeCell, WaitQueue};
+use alloc::sync::Arc;
 use crate::auth::{PermStat, FileMode};
 use core::any::Any;
 
 lazy_static! {
-    pub static ref STDOUT_LOCK: MPSafeCell<()> = MPSafeCell::new(());
     static ref STDIN_BUFFERED_CHAR: MPSafeCell<Option<u8>> = MPSafeCell::new(None);
 }
 
@@ -40,24 +40,27 @@ impl File for Stdin {
         false
     }
 
+    fn poll_wait_queue(&self) -> Option<Arc<MPSafeCell<WaitQueue>>> {
+        Some(crate::console::console_input_wait_queue())
+    }
+
     fn writable(&self) -> bool {
         false
     }
     fn read(&self, user_buf: UserBuffer) -> usize {
         let ch = loop {
-            let task = crate::task::current_task().unwrap();
-            let task_inner = task.inner_exclusive_access();
-            let pending_bits = task_inner.pending.bits();
-            let pending = pending_bits & !task_inner.blocked.bits();
-            let unmaskable = pending_bits & ((1 << 8) | (1 << 18));
-            drop(task_inner);
-
-            if pending != 0 || unmaskable != 0 {
-                return 0; 
+            crate::console::note_stdin_reader();
+            // Ctrl-C is process-directed and therefore lives in the shared
+            // pending set. Check both shared and thread-local pending signals.
+            if crate::process::check_pending_signal() {
+                return 0;
             }
 
             // 优先使用 ready_to_read() 时已缓冲的字符（此时需要补回显）
             if let Some(ch) = STDIN_BUFFERED_CHAR.exclusive_access().take() {
+                if crate::console::process_line_discipline(ch) {
+                    continue; // Ctrl-C 等控制字符已被消费并发信号，继续等待输入
+                }
                 echo_if_enabled(ch);
                 break ch;
             }
@@ -134,7 +137,12 @@ impl File for Stdout {
         0
     }
     fn write(&self, user_buf: UserBuffer) -> usize {
-        // 按字节直接转发，不解释为 UTF-8
+        // Keep one write(2) contiguous on the physical console.  The UART
+        // driver serializes individual characters, but that still lets output
+        // from concurrent processes interleave at character granularity.
+        // Use the same lock as kernel print!/println! so all console sources
+        // share one serialization boundary.
+        let _console_lock = crate::console::CONSOLE_LOCK.exclusive_access();
         for buffer in user_buf.buffers.iter() {
             for &b in buffer.iter() {
                 crate::arch::sbi::console_putchar(b as usize);
@@ -183,8 +191,13 @@ impl File for Stderr {
         0
     }
     fn write(&self, user_buf: UserBuffer) -> usize {
+        // stderr is the same physical console as stdout.  Lock the whole
+        // syscall, including all page-spanning UserBuffer segments.
+        let _console_lock = crate::console::CONSOLE_LOCK.exclusive_access();
         for buffer in user_buf.buffers.iter() {
-            print!("{}", core::str::from_utf8(*buffer).unwrap());
+            for &b in buffer.iter() {
+                crate::arch::sbi::console_putchar(b as usize);
+            }
         }
         user_buf.len()
     }

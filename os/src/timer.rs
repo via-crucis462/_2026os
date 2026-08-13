@@ -95,6 +95,17 @@ lazy_static! {
     pub static ref CLOCK_REALTIME_OFFSET_NS: Mutex<i64> = Mutex::new(0);
 }
 
+/// Read the user-visible realtime clock.
+///
+/// The platform RTC remains the source of truth on every read.  In particular,
+/// RISC-V `virt` must keep using the Goldfish RTC instead of taking one RTC
+/// snapshot and advancing it with the architectural timer counter.
+pub fn current_realtime_ns() -> i64 {
+    let ns = (get_real_time_ns() as i128)
+        .saturating_add(*CLOCK_REALTIME_OFFSET_NS.lock() as i128);
+    ns.clamp(0, i64::MAX as i128) as i64
+}
+
 /// Queue a timer-generated signal and wake a task when it is immediately deliverable.
 pub(crate) fn queue_timer_signal(task: Arc<TaskControlBlock>, signal: SignalFlags) {
     let should_wake = {
@@ -369,10 +380,5 @@ impl Default for ClockAdjState {
 
 /// 获取用户态可见的墙钟时间（秒），计入 CLOCK_REALTIME_OFFSET_NS 偏移
 pub fn current_wallclock_sec() -> usize {
-    let ns = crate::get_real_time_ns() as i128 + *CLOCK_REALTIME_OFFSET_NS.lock() as i128;
-    if ns <= 0 {
-        0
-    } else {
-        (ns / 1_000_000_000) as usize
-    }
+    (current_realtime_ns() as usize) / 1_000_000_000
 }

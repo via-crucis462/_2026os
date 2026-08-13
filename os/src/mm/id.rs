@@ -8,6 +8,11 @@ use crate::sync::MPSafeCell;
 #[allow(unused)]
 use core::arch::asm;
 
+#[cfg(target_arch = "riscv64")]
+const ASID_COUNT: usize = 1 << 16;
+#[cfg(target_arch = "loongarch64")]
+const ASID_COUNT: usize = 1 << 10;
+
 lazy_static! {
     pub static ref ASID_ALLOCATOR: MPSafeCell<RecycleAllocator> =
         MPSafeCell::new(RecycleAllocator::new());
@@ -16,7 +21,14 @@ lazy_static! {
 pub struct ASIDHandle(pub usize);
 
 pub fn asid_alloc() -> ASIDHandle {
-    ASIDHandle(ASID_ALLOCATOR.exclusive_access().alloc())
+    let asid = ASID_ALLOCATOR.exclusive_access().alloc();
+    assert!(
+        asid < ASID_COUNT,
+        "ASID exhausted: allocated {}, but only {} ASIDs are encodable",
+        asid,
+        ASID_COUNT
+    );
+    ASIDHandle(asid)
 }
 
 impl Drop for ASIDHandle {
@@ -28,14 +40,16 @@ impl Drop for ASIDHandle {
         #[cfg(target_arch = "riscv64")]
         return;
 
+        /* 改为 trap 返回前统一清空
         #[cfg(target_arch = "loongarch64")]
         unsafe{
             asm!(
                 // 回收时清空对应tlb表项
-                "invtlb 0x4, {}, $r0",
+                "invtlb 0, {}, $r0",
                 in(reg) self.0
             );
         }
+        */
 
         #[cfg(target_arch = "loongarch64")]
         ASID_ALLOCATOR.exclusive_access().dealloc(self.0);
