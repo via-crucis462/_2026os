@@ -49,7 +49,7 @@ prev-la:
 
 build: build-rv build-la
 build-rv:
-	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD)
+	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD) CPU_NUM=$(RV_SMP)
 ifeq ($(BOARD),visionfive2)
 	@echo "  -> Packing uImage for VisionFive2..."
 	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv-$(BOARD)
@@ -62,7 +62,7 @@ ifeq ($(BOARD),visionfive2)
 	sudo ip addr replace 192.168.1.100/24 dev enp3s0
 endif
 build-la:
-	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD)
+	cd os && $(MAKE) build-la MODE=$(MODE) LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD) CPU_NUM=$(LA_SMP)
 ifeq ($(BOARD),2k1000)
 	@echo "  -> Packing uImage for 2K1000..."
 	cd os && cp target/loongarch64-unknown-none/$(MODE)/os ../kernel-la-$(BOARD)

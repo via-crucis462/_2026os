@@ -160,5 +160,10 @@ fn time_slice_ms_for_policy(policy: isize) -> usize {
 /// Set the next timer interrupt according to the task scheduling policy.
 pub fn set_next_trigger(policy: isize) {
     let time_slice_ms = time_slice_ms_for_policy(policy);
+	set_next_trigger_ms(time_slice_ms);
+}
+
+/// Set the next timer interrupt after an explicit number of milliseconds.
+pub fn set_next_trigger_ms(time_slice_ms: usize) {
     set_timer(get_time() + CLOCK_FREQ * time_slice_ms / MSEC_PER_SEC);
 }

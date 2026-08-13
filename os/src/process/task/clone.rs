@@ -159,6 +159,7 @@ impl TaskStruct {
 		let static_prio = parent_inner.static_prio;
 		let normal_prio = parent_inner.normal_prio;
 		let mut se = parent_inner.se;
+		se.queue_level = 0;
 		se.exec_start = 0;
 		se.sum_exec_runtime = 0;
 		se.prev_sum_exec_runtime = 0;

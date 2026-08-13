@@ -6,6 +6,8 @@
 /// CFS 调度实体，对应 Linux `struct sched_entity` 的基础运行时字段。
 #[derive(Clone, Copy, Debug)]
 pub struct SchedEntity {
+    /// MLFQ 层级：0、1、2 分别对应时间片 1、2、5 ms。
+    pub queue_level: usize,
     /// 当前实体的归一化虚拟运行时间。
     pub vruntime: u64,
     /// 最近一次被调度到 CPU 时的调度时钟。
@@ -22,6 +24,7 @@ impl SchedEntity {
     /// 创建 nice=0、尚未运行的 CFS 调度实体。
     pub const fn new() -> Self {
         Self {
+            queue_level: 0,
             vruntime: 0,
             exec_start: 0,
             sum_exec_runtime: 0,

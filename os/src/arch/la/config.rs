@@ -31,10 +31,25 @@ pub const KERNEL_HEAP_SIZE: usize = 0x6000_0000; // 1.5GiB
 
 pub const CLOCK_FREQ: usize = 100000000;
 
-#[cfg(board = "virt")]
-pub const CPU_CORE_NUM: usize = 12;
-#[cfg(board = "2k1000")]
-pub const CPU_CORE_NUM: usize = 2;
+const fn parse_cpu_num(value: &str) -> usize {
+    let bytes = value.as_bytes();
+    assert!(!bytes.is_empty(), "CPU_NUM must not be empty");
+    let mut cpu_num = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        assert!(bytes[index].is_ascii_digit(), "CPU_NUM must be a decimal integer");
+        cpu_num = cpu_num * 10 + (bytes[index] - b'0') as usize;
+        index += 1;
+    }
+    assert!(cpu_num > 0, "CPU_NUM must be greater than zero");
+    assert!(cpu_num <= usize::BITS as usize, "CPU_NUM exceeds the CPU mask width");
+    cpu_num
+}
+
+pub const CPU_CORE_NUM: usize = match option_env!("CPU_NUM") {
+    Some(value) => parse_cpu_num(value),
+    None => 1,
+};
 
 /// 为 DMA 设备预留的内存空间大小
 pub const DMA_SIZE: usize = 0x100_0000; // 16MB

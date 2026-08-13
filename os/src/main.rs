@@ -72,11 +72,11 @@ use lazy_static::*;
 use spin::Mutex;
 
 #[cfg(all(target_arch = "riscv64", not(board = "visionfive2")))]
-global_asm!(include_str!("arch/riscv/entry.asm"));
+global_asm!(include_str!("arch/riscv/entry.asm"), boot_harts = const arch::config::CPU_CORE_NUM);
 #[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
 global_asm!(include_str!("arch/riscv/entry-visionfive2.asm"));
 #[cfg(target_arch = "loongarch64")]
-global_asm!(include_str!("arch/la/entry.asm"));
+global_asm!(include_str!("arch/la/entry.asm"), boot_harts = const arch::config::CPU_CORE_NUM);
 
 #[link_section = ".data"]
 pub static MAIN_HART_INITED: AtomicBool = AtomicBool::new(false);
@@ -282,7 +282,7 @@ fn init_other_hart(hart_id: usize) {
     }
     MAIN_HART_ID.store(current_hart, Ordering::Release);
     let start_addr = _start as *const () as usize;
-    for i in 0..8 {//CPU_CORE_NUM { // 8核就是比12核快，不知道为什么
+    for i in 0..CPU_CORE_NUM {
         if i == current_hart {
             continue;
         }

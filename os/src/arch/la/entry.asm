@@ -1,6 +1,6 @@
 # 相较于riscv版本，其实只有语法不同，逻辑是一致的
     .equ BOOT_STACK_SIZE, 4096 * 16
-    .equ BOOT_HARTS, 12
+    .equ BOOT_HARTS, {boot_harts}
     .section .text.entry
     .globl _start
     .align 8
