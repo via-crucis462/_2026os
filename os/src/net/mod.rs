@@ -190,7 +190,7 @@ lazy_static! {
 }
 
 pub fn net_poll() {
-    debug!("net_poll called");
+    trace!("net_poll called");
     let mut eth_iface = NET_IFACE.exclusive_access();
     let mut lo_iface = LO_IFACE.exclusive_access();
     let mut sockets = SOCKET_SET.exclusive_access();
@@ -270,7 +270,7 @@ pub fn net_poll() {
         sockets.remove(handle);
         orphaned_tcp.remove(&handle);
     }
-    debug!(
+    trace!(
         "net_poll finished, state_changed={}, loop_count={}, budget={}",
         state_changed,
         loop_count,

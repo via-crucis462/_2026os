@@ -46,6 +46,27 @@ pub mod ipi {
 	}
 }
 
+/// Architecture-neutral CPU feature detection facade.
+///
+/// Returns the Linux-style HWCAP bitset that should be advertised to userspace
+/// via `AT_HWCAP`.  Programs such as QEMU consult `AT_HWCAP` to decide whether
+/// the host CPU supports features like unaligned access (LoongArch UAL);
+/// QEMU's loongarch64 TCG backend refuses to start unless
+/// `HWCAP_LOONGARCH_UAL` is set.
+pub mod cpuinfo {
+	#[inline]
+	pub fn elf_hwcap() -> usize {
+		#[cfg(target_arch = "riscv64")]
+		{
+			crate::arch::riscv::cpuinfo::elf_hwcap()
+		}
+		#[cfg(target_arch = "loongarch64")]
+		{
+			crate::arch::la::cpuinfo::elf_hwcap()
+		}
+	}
+}
+
 // 其他架构
 #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
 compile_error!("Unsupported target arch");

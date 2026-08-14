@@ -616,8 +616,9 @@ pub fn trap_handler() -> ! {
                     }
                 }
             }
-            debug!("[trap] unhandled trap: hart_id={}, estat=0x{:x}, ecode={}(0x{:x}), esubcode=0x{:x}, era=0x{:x}, badv=0x{:x}, badi=0x{:x}",
+            debug!("[trap] other trap: hart[{}], tid[{}], estat=0x{:x}, ecode={}(0x{:x}), esubcode=0x{:x}, era=0x{:x}, badv=0x{:x}, badi=0x{:x}",
                 get_hart_id(),
+                current_tid(),
                 estat,
                 ecode_name,
                 ecode,

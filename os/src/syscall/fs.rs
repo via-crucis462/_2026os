@@ -2337,6 +2337,7 @@ bitflags::bitflags! {
 }
 
 /// 创建匿名内存文件
+#[cfg(target_arch = "riscv64")]
 pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
     let flags = match MemfdFlags::from_bits(flags) {
         Some(f) => f,
@@ -2387,6 +2388,10 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
     trace!("kernel:pid[{}] sys_memfd_create: name='{}', page_size={:?}, fd={}",
         task.getpid(), name_str, page_size, fd);
     fd as isize
+}
+#[cfg(not(target_arch = "riscv64"))]
+pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
+    ENOSYS.as_isize() // 龙芯暂时没做大页 TLB 重填
 }
 
 pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> isize {

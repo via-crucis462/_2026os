@@ -454,7 +454,7 @@ pub trait VfsInode: Send + Sync {
         }
     }
     fn get_shared_page(&self, page_offset: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
-        error!("VFS inode does not provide a physical block for page {}", page_offset);
+        error!("VFS inode ({}) does not provide a physical block for page {}", self.type_name(), page_offset);
         None
     }
     /// Read-only page-cache lookup.  Unlike `get_shared_page`, this must not

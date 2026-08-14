@@ -294,6 +294,7 @@ impl TaskStruct {
 		const AT_PHNUM: usize = 5;
 		const AT_PAGESZ: usize = 6;
 		const AT_ENTRY: usize = 9;
+		const AT_HWCAP: usize = 16;
 		const AT_RANDOM: usize = 25;
 
 		fn prepare_stack_pages(memory_set: &mut MemorySet, start: usize, end: usize) {
@@ -387,6 +388,7 @@ impl TaskStruct {
 			(AT_PHNUM, phnum),
 			(AT_PAGESZ, PAGE_SIZE),
 			(AT_ENTRY, main_entry_point),
+			(AT_HWCAP, crate::arch::cpuinfo::elf_hwcap()),
 			(AT_RANDOM, random_at),
 		];
 		if has_interp {
