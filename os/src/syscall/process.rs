@@ -4097,7 +4097,7 @@ pub fn sys_ftruncate(fd: usize, len: usize) -> isize {
         warn!("[kernel] sys_ftruncate: fd={}, file_type={}, mode=0o{:o}", fd, file_type_name, typ.mode);
         // 鉴权
         if !file.writable() {
-            return EACCES.as_isize();
+            return EBADF.as_isize();
         }
         // 调用文件系统的 truncate 方法
         if file.truncate(len) {

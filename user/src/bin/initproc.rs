@@ -59,6 +59,10 @@ fn run_bash(cmd: &str) -> i32 {
 fn main() -> i32 {
     // 直接运行 /glibc 下的测试脚本（不再注入自己的脚本）。
     // 依次运行两个脚本：即使第一个失败，第二个也必须执行。
+    println!("[init] dumping /glibc/buildstorm_testcode.sh ...");
+    let dump_status = run_bash("cat /glibc/buildstorm_testcode.sh");
+    println!("[init] script dump exited with status {}", dump_status);
+
     println!("[init] running cagent_testcode.sh ...");
     let status1 = run_bash("cd /glibc && ./cagent_testcode.sh");
     println!("[init] cagent_testcode.sh exited with status {}", status1);

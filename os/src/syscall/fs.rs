@@ -196,9 +196,9 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         let is_sock = file.is_socket();
         let nonblock = (status & (O_NONBLOCK | O_NDELAY)) != 0;
     if !is_sock && !file.writable() {
-        warn!("pid[{}] [sys_write] EACCES fd={} readable={} writable={}",
+        trace!("pid[{}] [sys_write] EBADF fd={} readable={} writable={}",
               task.getpid(), fd, file.readable(), file.writable());
-        return EACCES.as_isize(); 
+        return EBADF.as_isize();
     }
     if is_sock && !file.writable() {
         if nonblock {
@@ -252,8 +252,9 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
         drop(inner);
         let is_sock = file.is_socket();
         if !is_sock && !file.readable() {
-            println!("EACCES");
-            return EACCES.as_isize(); 
+            trace!("kernel:pid[{}] sys_read: EBADF fd={} readable={} writable={}",
+                current_task().unwrap().getpid(), fd, file.readable(), file.writable());
+            return EBADF.as_isize();
         }
         if is_sock && !file.readable() {
             if (status & (O_NONBLOCK | O_NDELAY)) != 0 {
@@ -304,6 +305,10 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     }
     let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner);
+
+    if !file.readable() {
+        return EBADF.as_isize();
+    }
 
     let mut total_read = 0;
     //遍历数组
@@ -851,7 +856,7 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     let status = inner.fds[fd].status;
     drop(inner);
     if !file.writable() {
-        return EACCES.as_isize();
+        return EBADF.as_isize();
     }
     if let Some(err) = file.check_write_error() {
         return err.as_isize();
@@ -1638,7 +1643,7 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
         let file = file.clone();
         drop(inner);
         if !file.readable() {
-            return EACCES.as_isize(); // 权限不足
+            return EBADF.as_isize();
         }
         let stat = file.get_stat();
         if (stat.mode & S_IFMT) != 0o040000 {
@@ -2027,7 +2032,7 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isiz
         let file = file.clone();
         drop(inner);
         if !file.readable() {
-            return EACCES.as_isize();
+            return EBADF.as_isize();
         }
         trace!("kernel:pid[{}] sys_pread64: fd={}, count={}, offset={}", task.getpid(), fd, count, offset);
         let Some(user_buffer) = crate::mm::translated_user_buffer_mut(&mm, buf, count) else {
@@ -2052,7 +2057,7 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, count: usize, offset: usize) -> i
         let file = file.clone();
         drop(inner);
         if !file.writable() {
-            return EACCES.as_isize();
+            return EBADF.as_isize();
         }
         trace!("kernel:pid[{}] sys_pwrite64: fd={}, count={}, offset={}", task.getpid(), fd, count, offset);
         let Some(user_buffer) = crate::mm::translated_user_buffer(&mm, buf, count) else {
