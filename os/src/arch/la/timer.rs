@@ -171,13 +171,8 @@ fn time_slice_ms_for_policy(policy: isize) -> usize {
 
 /// Set the next timer interrupt according to the task scheduling policy.
 pub fn set_next_trigger(policy: isize) {
-    set_next_trigger_ms(time_slice_ms_for_policy(policy));
-}
-
-/// Set the next timer interrupt after an explicit number of milliseconds.
-pub fn set_next_trigger_ms(time_slice_ms: usize) {
     let ticks = timer_frequency()
-        .saturating_mul(time_slice_ms)
+        .saturating_mul(time_slice_ms_for_policy(policy))
         / MSEC_PER_SEC;
     // TCFG stores the raw countdown value; its low two bits are control bits.
     let ticks = ticks.max(4) & !0b11;

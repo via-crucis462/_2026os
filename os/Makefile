@@ -12,7 +12,6 @@ INIT ?= default
 # BOARD
 BOARD ?= vf2
 SBI ?= rustsbi
-CPU_NUM ?= 1
 
 # 添加了新sbi启动选项, 以支持qemu8
 bl ?= dft
@@ -66,7 +65,7 @@ endif
 
 kernel:
 	@echo Platform: $(BOARD)
-	@RUSTFLAGS="-Clink-arg=-T$(RV_LINKER) -Cforce-frame-pointers=yes" LOG=$(LOG) INIT=$(INIT) CPU_NUM=$(CPU_NUM) cargo build --target riscv64gc-unknown-none-elf $(MODE_ARG) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=""
+	@RUSTFLAGS="-Clink-arg=-T$(RV_LINKER) -Cforce-frame-pointers=yes" LOG=$(LOG) INIT=$(INIT) cargo build --target riscv64gc-unknown-none-elf $(MODE_ARG) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=""
 
 clean:
 	@cargo clean
@@ -121,7 +120,7 @@ $(LA_KERNEL_BIN): kernel-la
 
 kernel-la:
 	@echo Building for loongarch64, BOARD=$(BOARD)...
-	@RUSTFLAGS="-Clink-arg=-T$(LA_LINKER) -Cforce-frame-pointers=yes -Ctarget-feature=-ual" LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD) CPU_NUM=$(CPU_NUM) cargo build --target loongarch64-unknown-none $(MODE_ARG) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=""
+	@RUSTFLAGS="-Clink-arg=-T$(LA_LINKER) -Cforce-frame-pointers=yes -Ctarget-feature=-ual" LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD) cargo build --target loongarch64-unknown-none $(MODE_ARG) -Z build-std=core,alloc,compiler_builtins -Z build-std-features=""
 
 build-la: env-la kernel-la
 
