@@ -635,6 +635,21 @@ fn setup_preliminary_compat_env(root: &Arc<Dentry>) {
         Arc::new(TmpfsFileInode::new_with_data(group_content.as_bytes())),
     );
 
+    let resolv_conf_content = "nameserver 10.0.2.3\noptions timeout:2 attempts:2\n";
+    mount_if_missing(
+        &etc_dentry,
+        "resolv.conf",
+        Arc::new(TmpfsFileInode::new_with_data(
+            resolv_conf_content.as_bytes(),
+        )),
+    );
+    let hosts_content = "127.0.0.1 localhost\n10.0.2.15 shellcore\n";
+    mount_if_missing(
+        &etc_dentry,
+        "hosts",
+        Arc::new(TmpfsFileInode::new_with_data(hosts_content.as_bytes())),
+    );
+
     let var_dentry = existing_or_mount_dir(root, "var", 0o755);
     existing_or_mount_dir(&var_dentry, "run", 0o755);
     let bin_dentry = existing_or_mount_dir(root, "bin", 0o755);

@@ -352,6 +352,9 @@ pub fn sys_setsockopt(
     if let Some(_udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         return 0;
     }
+    if file.as_any().downcast_ref::<crate::net::socket::RawSocket>().is_some() {
+        return 0;
+    }
     // 3. 检查这个文件到底是不是 Socket？
     if let Some(_socket) = file.as_any().downcast_ref::<crate::net::socket::TcpSocket>() {
         info!(
@@ -548,6 +551,41 @@ pub fn sys_sendto(
             return Errno::EDESTADDRREQ.as_isize(); // 需要目标地址
         }
     }
+
+    if let Some(raw_socket) = file.as_any().downcast_ref::<crate::net::socket::RawSocket>() {
+        let Some(user_buf) = crate::mm::translated_user_buffer(&mm, buf, len) else {
+            return Errno::EFAULT.as_isize();
+        };
+        let mut data = vec![0u8; len];
+        let mut copied = 0;
+        for buffer in user_buf.buffers.iter() {
+            data[copied..copied + buffer.len()].copy_from_slice(buffer);
+            copied += buffer.len();
+        }
+
+        if !(data.len() >= 20 && data[0] >> 4 == 4) {
+            if dest_addr.is_null() {
+                return Errno::EDESTADDRREQ.as_isize();
+            }
+            let Some(sockaddr) = try_translated_read(&mm, dest_addr as *const [u8; 16]) else {
+                return Errno::EFAULT.as_isize();
+            };
+            if u16::from_ne_bytes([sockaddr[0], sockaddr[1]]) != 2 {
+                return Errno::EAFNOSUPPORT.as_isize();
+            }
+            let destination = [sockaddr[4], sockaddr[5], sockaddr[6], sockaddr[7]];
+            let Some(packet) = wrap_raw_payload_in_ipv4(&data, raw_socket.protocol, destination) else {
+                return Errno::EMSGSIZE.as_isize();
+            };
+            data = packet;
+        }
+
+        if raw_socket.send_packet(data) == 0 {
+            return Errno::EAGAIN.as_isize();
+        }
+        net_poll();
+        return len as isize;
+    }
     loop {
         let Some(user_buf) = crate::mm::translated_user_buffer(&mm, buf, len) else {
             return Errno::EFAULT.as_isize();
@@ -664,6 +702,51 @@ pub fn sys_recvfrom(
             }
         }
     }
+    if let Some(raw_socket) = file.as_any().downcast_ref::<crate::net::socket::RawSocket>() {
+        let mut data = vec![0u8; len];
+        loop {
+            net_poll();
+            if let Some((read_len, source)) = raw_socket.try_recv_packet(&mut data) {
+                let Some(mut user_buf) = crate::mm::translated_user_buffer_mut(&mm, buf, len) else {
+                    return Errno::EFAULT.as_isize();
+                };
+                let mut copied = 0;
+                for buffer in user_buf.buffers.iter_mut() {
+                    let copy_len = buffer.len().min(read_len.saturating_sub(copied));
+                    if copy_len == 0 {
+                        break;
+                    }
+                    buffer[..copy_len].copy_from_slice(&data[copied..copied + copy_len]);
+                    copied += copy_len;
+                }
+                if !src_addr.is_null() && !addrlen.is_null() {
+                    let Some(user_len) = try_translated_read(&mm, addrlen) else {
+                        return Errno::EFAULT.as_isize();
+                    };
+                    let mut sockaddr = [0u8; 16];
+                    sockaddr[..2].copy_from_slice(&2u16.to_ne_bytes());
+                    sockaddr[4..8].copy_from_slice(&source);
+                    for (index, byte) in sockaddr[..(user_len as usize).min(16)].iter().enumerate() {
+                        if !try_translated_write(&mm, (src_addr as usize + index) as *mut u8, *byte) {
+                            return Errno::EFAULT.as_isize();
+                        }
+                    }
+                    if !try_translated_write(&mm, addrlen, 16u32) {
+                        return Errno::EFAULT.as_isize();
+                    }
+                }
+                return read_len as isize;
+            }
+            if is_nonblocking {
+                return Errno::EAGAIN.as_isize();
+            }
+            if !get_pending_signals().is_empty() {
+                return Errno::EINTR.as_isize();
+            }
+            crate::task::suspend_current_and_run_next();
+        }
+    }
+
     let Some(user_buf) = crate::mm::translated_user_buffer_mut(&mm, buf, len) else {
         return Errno::EFAULT.as_isize();
     };
@@ -824,6 +907,52 @@ pub fn sys_socketpair(domain: usize, socket_type: usize, protocol: usize, sv: *m
 }
 //端口分配器 POSIX 标准的临时端口范围通常是 49152 ~ 65535
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(49152);
+static NEXT_IPV4_ID: AtomicU16 = AtomicU16::new(1);
+
+fn ipv4_header_checksum(header: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    let mut chunks = header.chunks_exact(2);
+    for chunk in &mut chunks {
+        sum = sum.wrapping_add(u16::from_be_bytes([chunk[0], chunk[1]]) as u32);
+    }
+    if let Some(&byte) = chunks.remainder().first() {
+        sum = sum.wrapping_add((byte as u32) << 8);
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+fn wrap_raw_payload_in_ipv4(
+    payload: &[u8],
+    protocol: u8,
+    destination: [u8; 4],
+) -> Option<alloc::vec::Vec<u8>> {
+    let total_len = 20usize.checked_add(payload.len())?;
+    if total_len > u16::MAX as usize {
+        return None;
+    }
+    let source = {
+        let iface = crate::net::NET_IFACE.exclusive_access();
+        iface.ip_addrs().iter().find_map(|cidr| {
+            let smoltcp::wire::IpAddress::Ipv4(address) = cidr.address();
+            Some(address.0)
+        })?
+    };
+    let mut packet = vec![0u8; total_len];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+    packet[4..6].copy_from_slice(&NEXT_IPV4_ID.fetch_add(1, Ordering::Relaxed).to_be_bytes());
+    packet[8] = 64;
+    packet[9] = protocol;
+    packet[12..16].copy_from_slice(&source);
+    packet[16..20].copy_from_slice(&destination);
+    let checksum = ipv4_header_checksum(&packet[..20]);
+    packet[10..12].copy_from_slice(&checksum.to_be_bytes());
+    packet[20..].copy_from_slice(payload);
+    Some(packet)
+}
 
 fn alloc_ephemeral_port() -> u16 {
     let mut port = NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed);

@@ -692,11 +692,8 @@ impl Interface {
 
             match result {
                 Err(EgressError::Exhausted) => break, // Device buffer full.
-                Err(EgressError::Dispatch(_)) => {
-                    // `NeighborCache` already takes care of rate limiting the neighbor discovery
-                    // requests from the socket. However, without an additional rate limiting
-                    // mechanism, we would spin on every socket that has yet to discover its
-                    // neighbor.
+                Err(EgressError::Dispatch(DispatchError::NoRoute)) => {}
+                Err(EgressError::Dispatch(DispatchError::NeighborPending)) => {
                     item.meta.neighbor_missing(
                         self.inner.now,
                         neighbor_addr.expect("non-IP response packet"),
@@ -1256,14 +1253,19 @@ impl InterfaceInner {
     }
 
     fn route(&self, addr: &IpAddress, timestamp: Instant) -> Option<IpAddress> {
-        // Send directly.
-        // note: no need to use `self.is_broadcast()` to check for subnet-local broadcast addrs
-        //       here because `in_same_network` will already return true.
+        #[cfg(feature = "proto-ipv4")]
+        if matches!(addr, IpAddress::Ipv4(address) if address.is_loopback())
+            && !self.ip_addrs.iter().any(
+                |cidr| matches!(cidr.address(), IpAddress::Ipv4(address) if address.is_loopback()),
+            )
+        {
+            return None;
+        }
+
         if self.in_same_network(addr) || addr.is_broadcast() {
             return Some(*addr);
         }
 
-        // Route via a router.
         self.routes.lookup(addr, timestamp)
     }
 

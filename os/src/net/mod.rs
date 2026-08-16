@@ -1,14 +1,14 @@
 // os/src/net/mod.rs
 pub mod netlink;
 pub mod socket;
-use crate::drivers::net::NET_DEVICE;
 use crate::drivers::net::EthernetDevice;
+use crate::drivers::net::NET_DEVICE;
 use crate::process::wake_up_one;
 use crate::process::TaskStatus;
 use crate::sync::MPSafeCell;
 use crate::sync::WaitQueue;
-use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -190,23 +190,18 @@ lazy_static! {
 }
 
 pub fn net_poll() {
-    debug!("net_poll called");
     let mut eth_iface = NET_IFACE.exclusive_access();
     let mut lo_iface = LO_IFACE.exclusive_access();
     let mut sockets = SOCKET_SET.exclusive_access();
     let mut eth_device = SmoltcpDevice::new(NET_DEVICE.as_ref());
     let mut lo_device = LOOPBACK_DEVICE.exclusive_access();
-    let mut state_changed = false;
-    let mut loop_count = 0;
     let mut budget = 32;
     while budget > 0 {
         budget -= 1;
         let timestamp = Instant::from_millis(crate::arch::timer::get_time_ms() as i64);
         let lo_active = lo_iface.poll(timestamp, &mut *lo_device, &mut sockets);
         let eth_active = eth_iface.poll(timestamp, &mut eth_device, &mut sockets);
-        if lo_active || eth_active {
-            state_changed = true;
-        } else {
+        if !lo_active && !eth_active {
             break;
         }
     }
@@ -270,10 +265,4 @@ pub fn net_poll() {
         sockets.remove(handle);
         orphaned_tcp.remove(&handle);
     }
-    debug!(
-        "net_poll finished, state_changed={}, loop_count={}, budget={}",
-        state_changed,
-        loop_count,
-        budget
-    );
 }

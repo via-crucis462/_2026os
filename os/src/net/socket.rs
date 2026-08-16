@@ -253,7 +253,9 @@ impl File for TcpSocket {
 
     fn poll_hangup(&self) -> bool {
         let mut sockets = SOCKET_SET.exclusive_access();
-        let Some((_, socket)) = sockets.iter_mut().find(|(handle, _)| *handle == self.handle)
+        let Some((_, socket)) = sockets
+            .iter_mut()
+            .find(|(handle, _)| *handle == self.handle)
         else {
             return true;
         };
@@ -826,12 +828,7 @@ fn wake_unix_socket_poll_waiters(inner: &Arc<Mutex<UnixSocketInner>>) {
 
 impl Drop for UnixSocket {
     fn drop(&mut self) {
-        let peer = self
-            .inner
-            .lock()
-            .peer
-            .as_ref()
-            .and_then(Weak::upgrade);
+        let peer = self.inner.lock().peer.as_ref().and_then(Weak::upgrade);
         if let Some(peer) = peer {
             // The peer observes the dropped endpoint as EOF/HUP.
             wake_unix_socket_poll_waiters(&peer);
@@ -983,7 +980,12 @@ impl File for UnixSocket {
     }
 
     fn poll_hangup(&self) -> bool {
-        self.inner.lock().peer.as_ref().and_then(Weak::upgrade).is_none()
+        self.inner
+            .lock()
+            .peer
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_none()
     }
 
     fn poll_wait_queue(&self) -> Option<Arc<MPSafeCell<WaitQueue>>> {
@@ -1037,6 +1039,8 @@ impl File for UnixSocket {
 }
 pub struct RawSocket {
     pub handle: SocketHandle,
+    /// IP protocol bound to this raw socket
+    pub protocol: u8,
     pub rx_wait_queue: Arc<Mutex<WaitQueue>>,
     pub local_rx_buffer: Arc<Mutex<VecDeque<Vec<u8>>>>,
     pub read_waiters: Arc<crate::sync::MPSafeCell<crate::sync::WaitQueue>>,
@@ -1070,12 +1074,90 @@ impl RawSocket {
         drop(sockets);
         Self {
             handle,
+            protocol,
             rx_wait_queue,
             // 初始化环回队列
             local_rx_buffer: Arc::new(Mutex::new(VecDeque::new())),
             read_waiters: rx_waiters,
             write_waiters: tx_waiters,
         }
+    }
+
+    pub fn send_packet(&self, mut data: Vec<u8>) -> usize {
+        let total_len = data.len();
+        if data.len() >= 20 {
+            let dst_ip_bytes = [data[16], data[17], data[18], data[19]];
+            let is_local = {
+                let iface = crate::net::NET_IFACE.exclusive_access();
+                iface.ip_addrs().iter().any(|cidr| {
+                    let smoltcp::wire::IpAddress::Ipv4(ipv4) = cidr.address();
+                    ipv4.0 == dst_ip_bytes
+                })
+            };
+            if is_local {
+                if data[9] == 1 {
+                    let ihl = (data[0] & 0x0f) as usize * 4;
+                    if data.len() >= ihl + 8 && data[ihl] == 8 {
+                        for i in 0..4 {
+                            data.swap(12 + i, 16 + i);
+                        }
+                        data[ihl] = 0;
+                        data[ihl + 2] = 0;
+                        data[ihl + 3] = 0;
+                        let mut sum = 0u32;
+                        let mut offset = ihl;
+                        while offset < data.len() {
+                            let word = if offset + 1 < data.len() {
+                                ((data[offset] as u32) << 8) | data[offset + 1] as u32
+                            } else {
+                                (data[offset] as u32) << 8
+                            };
+                            sum = sum.wrapping_add(word);
+                            offset += 2;
+                        }
+                        while (sum >> 16) != 0 {
+                            sum = (sum & 0xffff) + (sum >> 16);
+                        }
+                        data[ihl + 2..ihl + 4].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+                    }
+                }
+                self.local_rx_buffer.lock().push_back(data);
+                crate::process::scheduler::wait::wake_up_all_mp(&self.read_waiters);
+                if !self.rx_wait_queue.lock().is_empty() {
+                    crate::process::wake_up_one(&self.rx_wait_queue);
+                }
+                return total_len;
+            }
+        }
+
+        let mut sockets = SOCKET_SET.exclusive_access();
+        let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
+        if socket.can_send() && socket.send_slice(&data).is_ok() {
+            total_len
+        } else {
+            0
+        }
+    }
+
+    pub fn try_recv_packet(&self, output: &mut [u8]) -> Option<(usize, [u8; 4])> {
+        let packet = if let Some(packet) = self.local_rx_buffer.lock().pop_front() {
+            packet
+        } else {
+            let mut sockets = SOCKET_SET.exclusive_access();
+            let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
+            if !socket.can_recv() {
+                return None;
+            }
+            socket.recv().ok()?.to_vec()
+        };
+        let source = if packet.len() >= 20 && packet[0] >> 4 == 4 {
+            [packet[12], packet[13], packet[14], packet[15]]
+        } else {
+            [0; 4]
+        };
+        let length = output.len().min(packet.len());
+        output[..length].copy_from_slice(&packet[..length]);
+        Some((length, source))
     }
 }
 
@@ -1111,7 +1193,9 @@ impl File for RawSocket {
             queues.push(self.read_waiters.clone());
         }
         if interests & 0x004 != 0
-            && !queues.iter().any(|existing| Arc::ptr_eq(existing, &self.write_waiters))
+            && !queues
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, &self.write_waiters))
         {
             queues.push(self.write_waiters.clone());
         }
@@ -1182,90 +1266,7 @@ impl File for RawSocket {
             current += copy_len;
         }
 
-        // FIB 路由短路与 ICMP 回环交付
-        if data.len() >= 20 {
-            // 确保至少有完整的 IP 头
-            // 提取目标 IP (IP 报文第 16-19 字节)
-            let dst_ip_bytes = [data[16], data[17], data[18], data[19]];
-            // 查表：判断目标 IP 是否属于网卡上的 IP 之一
-            let is_local = {
-                let iface = crate::net::NET_IFACE.exclusive_access();
-                iface.ip_addrs().iter().any(|cidr| {
-                    let smoltcp::wire::IpAddress::Ipv4(ipv4) = cidr.address();
-                    ipv4.0 == dst_ip_bytes
-                })
-            };
-            if is_local {
-                // 如果协议号是 1 (ICMP)
-                if data[9] == 1 {
-                    let ihl = (data[0] & 0x0F) as usize * 4;
-                    // 确保包长包含完整的 ICMP 头，且类型为 8 (Echo Request)
-                    if data.len() >= ihl + 8 && data[ihl] == 8 {
-                        // 交换 Src IP 和 Dst IP
-                        for i in 0..4 {
-                            let temp = data[12 + i];
-                            data[12 + i] = data[16 + i];
-                            data[16 + i] = temp;
-                        }
-                // 将 ICMP Type 修改为 0 (Echo Reply)
-                        data[ihl] = 0;
-                        // 重算 ICMP Checksum (设为 0，然后计算 Payload 的 16 位累加反码)
-                        data[ihl + 2] = 0;
-                        data[ihl + 3] = 0;
-                        let mut sum = 0u32;
-                        let mut i = ihl;
-                        while i < data.len() {
-                            let word = if i + 1 < data.len() {
-                                ((data[i] as u32) << 8) | (data[i + 1] as u32)
-                            } else {
-                                (data[i] as u32) << 8
-                            };
-                            sum = sum.wrapping_add(word);
-                            i += 2;
-                        }
-                        while (sum >> 16) > 0 {
-                            sum = (sum & 0xFFFF) + (sum >> 16);
-                        }
-                        let cksum = !sum as u16;
-                        data[ihl + 2] = (cksum >> 8) as u8;
-                        data[ihl + 3] = (cksum & 0xFF) as u8;
-                    }
-                }
-                // 将回环的包塞入本地队列
-                self.local_rx_buffer.lock().push_back(data);
-                crate::process::scheduler::wait::wake_up_all_mp(&self.read_waiters);
-                // 唤醒可能正在阻塞的进程 (Ping 进程)
-                let has_waiting_task = {
-                    let queue_guard = self.rx_wait_queue.lock();
-                    !queue_guard.is_empty()
-                };
-                if has_waiting_task {
-                    crate::process::wake_up_one(&self.rx_wait_queue);
-                }
-                // 直接返回成功，不再向外网卡发送
-                return total_len;
-            }
-        }
-        let mut sockets = SOCKET_SET.exclusive_access();
-        let socket = sockets.get_mut::<RawSocketSmol>(self.handle);
-
-        if socket.can_send() {
-            let total_len = buf.len();
-            // 聚集写：将用户态多段内存拼凑成一个完整的报文
-            let mut data = vec![0u8; total_len];
-            let mut current = 0;
-            for buffer in buf.buffers.iter() {
-                let copy_len = buffer.len();
-                data[current..current + copy_len].copy_from_slice(buffer);
-                current += copy_len;
-            }
-
-            // 发射原始数据包
-            if let Ok(_) = socket.send_slice(&data) {
-                return total_len;
-            }
-        }
-        0
+        self.send_packet(data)
     }
 
     fn get_stat(&self) -> Stat {
