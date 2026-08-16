@@ -1,15 +1,14 @@
-use super::{
-    block_modify_inode,
-    checksum,
-    ext4::Ext4FS,
-    ext4_dir_entry::Ext4DirEntry,
-    get_block_cache,
-};
+use super::{checksum, ext4::Ext4FS, ext4_dir_entry::Ext4DirEntry, get_block_cache};
+use crate::drivers::block::cache::PageCache;
 use crate::ext4fs::BLOCK_SZ;
 use crate::fs::VfsInode;
 use alloc::string::String;
 use alloc::vec;
-use alloc::{collections::{BTreeMap, BTreeSet}, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    vec::Vec,
+};
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use xmas_elf::header;
@@ -186,14 +185,24 @@ impl Ext4InodeDisk {
     pub fn size(&self) -> u64 {
         ((self.i_size_high as u64) << 32) | (self.i_size_lo as u64)
     }
+
+    fn uses_inline_symlink_storage(&self, size: u64) -> bool {
+        self.i_mode & 0xF000 == 0xA000 && size <= self.i_block.len() as u64 && self.i_blocks_lo == 0
+    }
 }
+
+/// 活跃 inode 持有其磁盘记录所在的 inode-table 页，阻止该页被淘汰。
+/// 只有持有页锁时，才能临时借用页内的磁盘 inode 记录。
+struct PinnedDiskInode {
+    page: Arc<PageCache>,
+    offset: usize,
+}
+
 pub struct Ext4Inode {
     /// Inode 编号
     pub inode_id: u32,
-    /// 文件类型（目录/普通文件）
-    pub mode: u16,
-    /// 文件大小（Atomic 以支持通过 &self 在 write 后更新缓存）
-    pub size: AtomicU64,
+    /// 文件大小快照；写者在更新磁盘 inode 后发布，读者无需获取 inode 页锁。
+    size: AtomicU64,
     /// 写入锁：原子化文件内容的写入操作，避免多个线程同时修改文件数据
     pub write_lock: Mutex<()>,
     /// 块映射锁：原子化逻辑块到物理块映射的查找、分配和删除操作
@@ -202,14 +211,8 @@ pub struct Ext4Inode {
     /// write lock alone only protects the final write, leaving two directory
     /// scanners able to commit stale snapshots over each other.
     dir_mutation_lock: Mutex<()>,
-    /// 标志位 (例如是否使用 Extents)
-    pub flags: u32,
-    /// 数据块指针（直接块、间接块等）
-    pub i_block: [u8; 60],
-    /// 磁盘 inode 所在块号（创建后不变，避免每次读取都抢块组锁）
-    pub inode_table_block: u32,
-    /// 磁盘 inode 在块内的字节偏移
-    pub inode_offset: usize,
+    /// 被固定的 inode-table 页及 inode 在页内的字节偏移。
+    disk_inode: PinnedDiskInode,
     /// inode 代数：记录创建时的磁盘代数，防止 ino 被释放并复用后，
     /// 失效的旧对象误释放新文件
     generation: u32,
@@ -267,35 +270,35 @@ impl Ext4Inode {
         // 清零 checksum 字段后重新计算，避免把旧值带入。
         block_buf[tail_off + 8..tail_off + 12].fill(0);
 
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        let generation = self.with_disk_inode(|disk_inode| disk_inode.i_generation);
         let mut crc = self.ext4_checksum_seed();
         crc = Self::crc32c_update(crc, &self.inode_id.to_le_bytes());
-        crc = Self::crc32c_update(crc, &disk_inode.i_generation.to_le_bytes());
+        crc = Self::crc32c_update(crc, &generation.to_le_bytes());
         // ext4 dir block checksum covers bytes before the 12-byte fake tail.
         crc = Self::crc32c_update(crc, &block_buf[..tail_off]);
 
         block_buf[tail_off + 8..tail_off + 12].copy_from_slice(&crc.to_le_bytes());
     }
 
-    pub fn new(
-        inode_id: u32,
-        disk_inode: &Ext4InodeDisk,
-        fs: Arc<Ext4FS>,
-        parent: Option<u32>,
-    ) -> Self {
+    pub fn new(inode_id: u32, fs: Arc<Ext4FS>, parent: Option<u32>) -> Self {
         let (inode_table_block, inode_offset) = fs.get_inode_pos(inode_id);
+        let inode_page = get_block_cache(inode_table_block as usize, fs.block_dev.clone());
+        let (size, generation) = {
+            let page = inode_page.lock();
+            let disk_inode = page.get_ref::<Ext4InodeDisk>(inode_offset);
+            (disk_inode.size(), disk_inode.i_generation)
+        };
         Self {
             inode_id,
-            mode: disk_inode.i_mode,
-            size: AtomicU64::new(disk_inode.size()), // 使用 DiskInode 已有的方法计算大小
+            size: AtomicU64::new(size),
             write_lock: Mutex::new(()),
             block_map_lock: Mutex::new(()),
             dir_mutation_lock: Mutex::new(()),
-            flags: disk_inode.i_flags,
-            i_block: disk_inode.i_block,
-            inode_table_block,
-            inode_offset,
-            generation: disk_inode.i_generation,
+            disk_inode: PinnedDiskInode {
+                page: inode_page,
+                offset: inode_offset,
+            },
+            generation,
             fs,
             parent,
             dir_lookup_cache: Mutex::new(DirLookupCache::new()),
@@ -348,12 +351,7 @@ impl Ext4Inode {
     }
 
     /// Commit a mutation and retain its newly valid positive entry.
-    pub(crate) fn commit_dir_lookup_cache_entry(
-        &self,
-        name: &[u8],
-        inode_id: u32,
-        file_type: u8,
-    ) {
+    pub(crate) fn commit_dir_lookup_cache_entry(&self, name: &[u8], inode_id: u32, file_type: u8) {
         if !self.is_dir() {
             return;
         }
@@ -365,64 +363,103 @@ impl Ext4Inode {
         }
     }
 
-    /// 使用缓存的位置直接读取磁盘 inode（不再每页抢块组锁）
-    fn read_disk_inode(&self) -> Ext4InodeDisk {
-        let cache = get_block_cache(self.inode_table_block as usize, self.fs.block_dev.clone());
-        let guard = cache.lock();
-        *guard.get_ref::<Ext4InodeDisk>(self.inode_offset)
+    /// 在固定的 inode-table 页锁保护下直接读取磁盘 inode。
+    pub(crate) fn with_disk_inode<R>(&self, f: impl FnOnce(&Ext4InodeDisk) -> R) -> R {
+        let page = self.disk_inode.page.lock();
+        f(page.get_ref::<Ext4InodeDisk>(self.disk_inode.offset))
+    }
+
+    /// 在固定页锁保护下，原子完成磁盘 inode、校验和、脏页状态及大小快照更新。
+    pub(crate) fn modify_disk_inode(&self, f: impl FnOnce(&mut Ext4InodeDisk)) {
+        let mut page = self.disk_inode.page.lock();
+        let inode_size = self.fs.superblock.inode_size as usize;
+        let offset = self.disk_inode.offset;
+        let raw_inode = &mut page.frame.get_bytes_array()[offset..offset + inode_size];
+        let (old_size, new_size) = {
+            let disk_inode = unsafe { &mut *(raw_inode.as_mut_ptr() as *mut Ext4InodeDisk) };
+            let old_size = disk_inode.size();
+            f(disk_inode);
+            (old_size, disk_inode.size())
+        };
+        if self.fs.superblock.has_metadata_csum() {
+            let _ =
+                checksum::set_inode_checksum(self.ext4_checksum_seed(), self.inode_id, raw_inode);
+        }
+        page.dirty = true;
+        page.state = crate::drivers::block::cache::CacheState::Dirty;
+        if new_size != old_size {
+            self.size.store(new_size, Ordering::Release);
+        }
+    }
+
+    /// 获取已发布的文件大小快照；与写者的 Release 发布配对。
+    pub(crate) fn size_snapshot(&self) -> u64 {
+        self.size.load(Ordering::Acquire)
     }
 
     /// 定义一个高层接口，专门用于解析目录项
     pub fn is_dir(&self) -> bool {
-        self.mode & 0xF000 == 0x4000
+        self.with_disk_inode(Ext4InodeDisk::is_dir)
     }
 
     pub fn is_file(&self) -> bool {
-        self.mode & 0xF000 == 0x8000
+        self.with_disk_inode(Ext4InodeDisk::is_file)
     }
 
     pub fn is_symlink(&self) -> bool {
-        self.mode & 0xF000 == 0xA000
+        self.with_disk_inode(|disk_inode| disk_inode.i_mode & 0xF000 == 0xA000)
     }
 
-    /// Fast symlinks store their target directly in `i_block`.  The size
-    /// alone is insufficient: a short link can still have a block-backed
-    /// target on an existing ext4 image.
-    pub(crate) fn is_fast_symlink(&self, disk_inode: &Ext4InodeDisk) -> bool {
-        self.is_symlink()
-            && disk_inode.size() <= disk_inode.i_block.len() as u64
-            && disk_inode.i_blocks_lo == 0
+    /// 内联符号链接直接将目标保存在 `i_block` 中；仅凭长度无法判断，
+    /// 因为已有 ext4 镜像中的短符号链接也可能使用数据块存储。
+    pub(crate) fn is_fast_symlink(&self) -> bool {
+        self.with_disk_inode(|disk_inode| {
+            disk_inode.uses_inline_symlink_storage(self.size_snapshot())
+        })
     }
 
-    pub(crate) fn read_fast_symlink_at(
-        disk_inode: &Ext4InodeDisk,
-        offset: usize,
-        buf: &mut [u8],
-    ) -> usize {
-        let link_len = disk_inode.size() as usize;
-        if offset >= link_len {
-            return 0;
-        }
-        let read_len = core::cmp::min(buf.len(), link_len - offset);
-        buf[..read_len].copy_from_slice(&disk_inode.i_block[offset..offset + read_len]);
-        read_len
+    pub(crate) fn can_write_fast_symlink(&self, end: usize) -> bool {
+        self.with_disk_inode(|disk_inode| {
+            disk_inode.uses_inline_symlink_storage(self.size_snapshot())
+                && end <= disk_inode.i_block.len()
+        })
+    }
+
+    pub(crate) fn read_fast_symlink_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        self.with_disk_inode(|disk_inode| {
+            let link_len = self.size_snapshot() as usize;
+            if offset >= link_len {
+                return 0;
+            }
+            let read_end = core::cmp::min(link_len, disk_inode.i_block.len());
+            if offset >= read_end {
+                return 0;
+            }
+            let read_len = core::cmp::min(buf.len(), read_end - offset);
+            buf[..read_len].copy_from_slice(&disk_inode.i_block[offset..offset + read_len]);
+            read_len
+        })
     }
 
     /// 根据逻辑块号寻找对应的物理块号 (支持 Extents 和直接块)
     pub fn find_physical_block(&self, logical_block_id: u32) -> u32 {
-        // 实时获取磁盘 Inode，避免 self.i_block 与磁盘不同步
-        let disk_inode = self.read_disk_inode();
-        if self.is_fast_symlink(&disk_inode) {
+        // extent 遍历可能读取索引块，因此只在锁内复制后续所需的最小字段。
+        let (flags, i_block, inline_symlink) = self.with_disk_inode(|disk_inode| {
+            (
+                disk_inode.i_flags,
+                disk_inode.i_block,
+                disk_inode.uses_inline_symlink_storage(self.size_snapshot()),
+            )
+        });
+        if inline_symlink {
             return 0;
         }
-        let flags = disk_inode.i_flags;
-        let i_block = &disk_inode.i_block;
 
         if flags & 0x80000 != 0 {
             // Extents 模式 (EXT4_EXTENTS_FL = 0x80000)
             // i_block 已经是 [u8; 60]，直接用作字节切片
             let mut current_block_data = alloc::boxed::Box::new([0u8; 4096]);
-            let mut data_ptr: &[u8] = i_block;
+            let mut data_ptr: &[u8] = &i_block;
 
             loop {
                 // Extent Header (12 bytes)
@@ -500,9 +537,8 @@ impl Ext4Inode {
             "add_extent_entry: ino={} logical={} physical={}",
             self.inode_id, logical_block_id, physical_block_id
         );
-        let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
-        let inode_table_cache = get_block_cache(block_id as usize, self.fs.block_dev.clone());
-        let mut inode_table = inode_table_cache.lock();
+        let inode_offset = self.disk_inode.offset;
+        let mut inode_table = self.disk_inode.page.lock();
         let disk_inode = inode_table.get_mut::<Ext4InodeDisk>(inode_offset);
         let inode_generation = disk_inode.i_generation;
         let fs_seed = self.ext4_checksum_seed();
@@ -595,7 +631,11 @@ impl Ext4Inode {
                     unsafe {
                         core::slice::from_raw_parts(
                             current_data_ptr,
-                            if current_block_phys == 0 { 60 } else { BLOCK_SZ },
+                            if current_block_phys == 0 {
+                                60
+                            } else {
+                                BLOCK_SZ
+                            },
                         )
                     },
                     header.eh_entries,
@@ -891,9 +931,7 @@ impl Ext4Inode {
 
             disk_inode.i_blocks_lo = disk_inode
                 .i_blocks_lo
-                .saturating_add(
-                    (1 + metadata_blocks_added) * (BLOCK_SZ / 512) as u32,
-                );
+                .saturating_add((1 + metadata_blocks_added) * (BLOCK_SZ / 512) as u32);
             if self.fs.superblock.has_metadata_csum() {
                 let inode_size = self.fs.superblock.inode_size as usize;
                 let raw = &mut inode_table.frame.get_bytes_array()
@@ -911,7 +949,7 @@ impl Ext4Inode {
             return;
         }
         let mut offset = 0;
-        let file_size = self.size.load(Ordering::Relaxed) as usize;
+        let file_size = self.size_snapshot() as usize;
 
         while offset < file_size {
             // 1. 先读 8 个字节拿到头部 (inode, rec_len, name_len, file_type)
@@ -946,15 +984,14 @@ impl Ext4Inode {
         let mut actual_read = 0;
         let mut curr_offset = offset;
 
-        // 实时获取磁盘 Inode 信息以获取准备的大小
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        let disk_size_bytes = disk_inode.size() as usize;
+        // 快照决定可读范围；内联符号链接直接从固定的 inode 页复制目标。
+        let file_size_bytes = self.size_snapshot() as usize;
 
-        if self.is_fast_symlink(&disk_inode) {
-            return Self::read_fast_symlink_at(&disk_inode, offset, buf);
+        if self.is_fast_symlink() {
+            return self.read_fast_symlink_at(offset, buf);
         }
 
-        let end = core::cmp::min(offset + buf.len(), disk_size_bytes);
+        let end = core::cmp::min(offset + buf.len(), file_size_bytes);
         if curr_offset >= end {
             return 0;
         }
@@ -992,8 +1029,7 @@ impl Ext4Inode {
         let mut actual_write = 0;
         let mut curr_offset = offset;
 
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        let old_size_bytes = disk_inode.size() as usize;
+        let old_size_bytes = self.size_snapshot() as usize;
         let end = offset + buf.len();
         info!(
             "raw_write_at: ino={} offset={} len={} old_size={}",
@@ -1002,8 +1038,8 @@ impl Ext4Inode {
             buf.len(),
             old_size_bytes
         );
-        if self.is_fast_symlink(&disk_inode) && end <= disk_inode.i_block.len() {
-            block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
+        if self.can_write_fast_symlink(end) {
+            self.modify_disk_inode(|disk_inode| {
                 disk_inode.i_block[offset..end].copy_from_slice(buf);
 
                 if end > old_size_bytes {
@@ -1011,9 +1047,6 @@ impl Ext4Inode {
                     disk_inode.i_size_high = 0;
                 }
             });
-            if !buf.is_empty() && end > old_size_bytes {
-                self.size.fetch_max(end as u64, Ordering::Release);
-            }
             return buf.len();
         }
         while curr_offset < end {
@@ -1028,11 +1061,12 @@ impl Ext4Inode {
                         "raw_write_at: alloc block {} for logical block {}",
                         new_block_id, inner_block_id
                     );
-                    let disk_inode = self.fs.get_disk_inode(self.inode_id);
-                    if disk_inode.i_flags & EXT4_EXTENTS_FL == 0 {
+                    let uses_extents = self
+                        .with_disk_inode(|disk_inode| disk_inode.i_flags & EXT4_EXTENTS_FL != 0);
+                    if !uses_extents {
                         // 传统的直接块模式
                         if inner_block_id < 12 {
-                            block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
+                            self.modify_disk_inode(|disk_inode| {
                                 let base = (inner_block_id as usize) * 4;
                                 disk_inode.i_block[base..base + 4]
                                     .copy_from_slice(&new_block_id.to_le_bytes());
@@ -1101,12 +1135,10 @@ impl Ext4Inode {
         );
 
         if actual_write > 0 && new_size_bytes > old_size_bytes {
-            block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
+            self.modify_disk_inode(|disk_inode| {
                 disk_inode.i_size_lo = new_size_bytes as u32;
                 disk_inode.i_size_high = (new_size_bytes >> 32) as u32;
             });
-            self.size
-                .fetch_max(new_size_bytes as u64, Ordering::Release);
         }
 
         actual_write
@@ -1122,11 +1154,13 @@ impl Ext4Inode {
     /// dx-node blocks which are not valid linear directory blocks, so treating
     /// it as linear would corrupt the namespace.
     fn prepare_directory_for_mutation(&self) -> bool {
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        if disk_inode.i_flags & EXT4_INDEX_FL == 0 {
+        let (indexed, is_dir) = self.with_disk_inode(|disk_inode| {
+            (disk_inode.i_flags & EXT4_INDEX_FL != 0, disk_inode.is_dir())
+        });
+        if !indexed {
             return true;
         }
-        if !disk_inode.is_dir() || disk_inode.size() < BLOCK_SZ as u64 {
+        if !is_dir || self.size_snapshot() < BLOCK_SZ as u64 {
             return false;
         }
 
@@ -1172,7 +1206,11 @@ impl Ext4Inode {
         // checksum at the very end instead.  The root will become an ordinary
         // directory block below, so replace that dx tail with the normal
         // twelve-byte directory tail instead of requiring one to exist.
-        let tail_size = if self.fs.superblock.has_metadata_csum() { 12 } else { 0 };
+        let tail_size = if self.fs.superblock.has_metadata_csum() {
+            12
+        } else {
+            0
+        };
         let tail_offset = BLOCK_SZ - tail_size;
         if dx_info_offset + 8 > tail_offset {
             return false;
@@ -1180,10 +1218,7 @@ impl Ext4Inode {
 
         let linear_dotdot_len = tail_offset - dotdot_offset;
         if linear_dotdot_len > u16::MAX as usize
-            || !Ext4DirEntry::set_rec_len(
-                &mut root[dotdot_offset..],
-                linear_dotdot_len as u16,
-            )
+            || !Ext4DirEntry::set_rec_len(&mut root[dotdot_offset..], linear_dotdot_len as u16)
         {
             return false;
         }
@@ -1200,7 +1235,7 @@ impl Ext4Inode {
             return false;
         }
 
-        block_modify_inode(&self.fs, self.inode_id, |inode| {
+        self.modify_disk_inode(|inode| {
             inode.i_flags &= !EXT4_INDEX_FL;
         });
         self.invalidate_dir_lookup_cache();
@@ -1212,8 +1247,7 @@ impl Ext4Inode {
         if !self.prepare_directory_for_mutation() {
             return false;
         }
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        let file_size_bytes = disk_inode.size() as usize;
+        let file_size_bytes = self.size_snapshot() as usize;
         let name_bytes = name.as_bytes();
         let Some(needed_len) = Ext4DirEntry::record_len(name_bytes.len()) else {
             return false;
@@ -1302,13 +1336,7 @@ impl Ext4Inode {
             0
         };
         let entry_rec_len = (BLOCK_SZ - tail_size) as u16;
-        if !Ext4DirEntry::write_to(
-            &mut new_buf,
-            inode_id,
-            entry_rec_len,
-            name_bytes,
-            file_type,
-        ) {
+        if !Ext4DirEntry::write_to(&mut new_buf, inode_id, entry_rec_len, name_bytes, file_type) {
             return false;
         }
         if tail_size != 0 {
@@ -1334,17 +1362,14 @@ impl Ext4Inode {
     /// The legacy `lookup_dir_entry` wrapper intentionally still returns an
     /// `Option` for old callers. Dentry lookup uses this checked form so it
     /// can cache only a definitive on-disk miss.
-    pub(crate) fn lookup_dir_entry_checked(
-        &self,
-        name: &str,
-    ) -> Result<Option<(u32, u8)>, ()> {
+    pub(crate) fn lookup_dir_entry_checked(&self, name: &str) -> Result<Option<(u32, u8)>, ()> {
         let name_bytes = name.as_bytes();
         if let Some(entry) = self.cached_dir_entry(name_bytes) {
             return Ok(Some(entry));
         }
 
         let cache_generation = self.dir_lookup_cache_generation();
-        let file_size_bytes = self.fs.get_disk_inode(self.inode_id).size() as usize;
+        let file_size_bytes = self.size_snapshot() as usize;
         let mut offset = 0;
         let mut buf = alloc::vec![0u8; BLOCK_SZ];
         while offset < file_size_bytes {
@@ -1358,8 +1383,7 @@ impl Ext4Inode {
                 if read_len - block_offset < 8 {
                     return Err(());
                 }
-                let dirent = Ext4DirEntry::from_bytes(&buf[block_offset..read_len])
-                    .ok_or(())?;
+                let dirent = Ext4DirEntry::from_bytes(&buf[block_offset..read_len]).ok_or(())?;
                 let rec_len = dirent.rec_len() as usize;
                 if dirent.inode() != 0 && dirent.name_bytes() == name_bytes {
                     let entry = (dirent.inode(), dirent.file_type());
@@ -1388,8 +1412,7 @@ impl Ext4Inode {
         if !self.prepare_directory_for_mutation() {
             return None;
         }
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        let file_size_bytes = disk_inode.size() as usize;
+        let file_size_bytes = self.size_snapshot() as usize;
         let name_bytes = name.as_bytes();
         let mut offset = 0;
         let mut buf = alloc::vec![0u8; BLOCK_SZ];
@@ -1459,8 +1482,7 @@ impl Ext4Inode {
         if !self.prepare_directory_for_mutation() {
             return None;
         }
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        let file_size_bytes = disk_inode.size() as usize;
+        let file_size_bytes = self.size_snapshot() as usize;
         let name_bytes = name.as_bytes();
         let mut offset = 0;
         let mut buf = alloc::vec![0u8; BLOCK_SZ];
@@ -1507,7 +1529,7 @@ impl Ext4Inode {
     }
 
     pub fn directory_is_empty(&self) -> bool {
-        let file_size_bytes = self.fs.get_disk_inode(self.inode_id).size() as usize;
+        let file_size_bytes = self.size_snapshot() as usize;
         let mut offset = 0;
         let mut buf = alloc::vec![0u8; BLOCK_SZ];
         while offset < file_size_bytes {
@@ -1568,10 +1590,12 @@ impl Ext4Inode {
         if node.len() < 12 {
             return false;
         }
-        let header = unsafe {
-            core::ptr::read_unaligned(node.as_ptr() as *const Ext4ExtentHeader)
+        let header = unsafe { core::ptr::read_unaligned(node.as_ptr() as *const Ext4ExtentHeader) };
+        let max_entries = if node.len() == 60 {
+            4
+        } else {
+            (BLOCK_SZ - 12) / 12
         };
-        let max_entries = if node.len() == 60 { 4 } else { (BLOCK_SZ - 12) / 12 };
         if header.eh_magic != 0xF30A
             || header.eh_depth != expected_depth
             || header.eh_max == 0
@@ -1669,13 +1693,10 @@ impl Ext4Inode {
     /// - len < 当前大小：释放超出部分的物理块，更新 extent 树
     /// - len > 当前大小：只更新 i_size（稀疏文件，空洞读为零）
     pub fn truncate(&self, len: usize) -> bool {
-        let (block_id, inode_offset) = self.fs.get_inode_pos(self.inode_id);
-        // An inode-table block contains multiple inodes. Modify it through the
-        // shared metadata cache so truncates of neighbouring inodes cannot
-        // overwrite each other with stale whole-block snapshots.
-        let inode_table_cache =
-            get_block_cache(block_id as usize, self.fs.block_dev.clone());
-        let mut inode_table = inode_table_cache.lock();
+        // 一个 inode-table 块包含多个 inode。必须通过固定的共享元数据页修改，
+        // 避免相邻 inode 的 truncate 用过期整页内容互相覆盖。
+        let inode_offset = self.disk_inode.offset;
+        let mut inode_table = self.disk_inode.page.lock();
         let disk_inode = inode_table.get_mut::<Ext4InodeDisk>(inode_offset);
 
         let old_size = disk_inode.size() as usize;
@@ -1687,14 +1708,10 @@ impl Ext4Inode {
                 let inode_size = self.fs.superblock.inode_size as usize;
                 let raw = &mut inode_table.frame.get_bytes_array()
                     [inode_offset..inode_offset + inode_size];
-                let _ = checksum::set_inode_checksum(
-                    self.ext4_checksum_seed(),
-                    self.inode_id,
-                    raw,
-                );
+                let _ = checksum::set_inode_checksum(self.ext4_checksum_seed(), self.inode_id, raw);
             }
-            drop(inode_table);
             self.size.store(len as u64, Ordering::Release);
+            drop(inode_table);
             return true;
         }
 
@@ -1719,7 +1736,10 @@ impl Ext4Inode {
             let mut header: Ext4ExtentHeader = unsafe { header_ptr.read_unaligned() };
 
             if header.eh_magic != 0xF30A {
-                warn!("[ext4 truncate] invalid extent header for inode {}", self.inode_id);
+                warn!(
+                    "[ext4 truncate] invalid extent header for inode {}",
+                    self.inode_id
+                );
                 return false;
             }
             if len == 0 {
@@ -1859,19 +1879,15 @@ impl Ext4Inode {
 
         if self.fs.superblock.has_metadata_csum() {
             let inode_size = self.fs.superblock.inode_size as usize;
-            let raw = &mut inode_table.frame.get_bytes_array()
-                [inode_offset..inode_offset + inode_size];
-            let _ = checksum::set_inode_checksum(
-                self.ext4_checksum_seed(),
-                self.inode_id,
-                raw,
-            );
+            let raw =
+                &mut inode_table.frame.get_bytes_array()[inode_offset..inode_offset + inode_size];
+            let _ = checksum::set_inode_checksum(self.ext4_checksum_seed(), self.inode_id, raw);
         }
 
-        // Do not hold an inode-table page while block-group metadata is
-        // updated by deallocation below.
-        drop(inode_table);
+        // 发布新大小后再解锁，读者一旦看到新快照，就不会再访问待释放块。
         self.size.store(len as u64, Ordering::Release);
+        // 释放数据块时不持有 inode-table 页锁，避免扩大元数据锁范围。
+        drop(inode_table);
 
         // 第二阶段：释放收集到的物理块
         for phys in blocks_to_free {
@@ -1890,14 +1906,19 @@ impl Drop for Ext4Inode {
         // - 链接数不为 0：文件仍被目录引用，不能释放；
         // - 代数不匹配：同一 ino 已经被释放并重新分配（或已被另一个对象回收），
         //   失效的旧对象不能释放新文件，也不能重复归还位图。
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        if disk_inode.i_links_count != 0 || disk_inode.i_generation != self.generation {
+        let (links, generation, inline_symlink) = self.with_disk_inode(|disk_inode| {
+            (
+                disk_inode.i_links_count,
+                disk_inode.i_generation,
+                disk_inode.uses_inline_symlink_storage(self.size_snapshot()),
+            )
+        });
+        if links != 0 || generation != self.generation {
             return;
         }
 
-        // Fast symlinks store their target in i_block and own no data blocks.
-        // Running truncate on one would interpret target text as block IDs.
-        let inline_symlink = self.is_fast_symlink(&disk_inode);
+        // 内联符号链接将目标保存在 i_block 中，不占用数据块；不能对它执行
+        // truncate，否则目标文本会被误当作块号解析。
         if !inline_symlink {
             // 释放全部数据块并清空 extent 树（i_size / i_blocks 一并归零）
             if !self.truncate(0) {
@@ -1921,7 +1942,7 @@ impl Drop for Ext4Inode {
         // i_dtime is overloaded by ext4 orphan handling; leaving a synthetic
         // value there makes e2fsck treat an already-freed inode as a corrupt
         // orphan-chain member.
-        block_modify_inode(&self.fs, self.inode_id, |d| {
+        self.modify_disk_inode(|d| {
             d.i_dtime = 0;
             d.i_generation = d.i_generation.wrapping_add(1);
             d.i_mode = 0;

@@ -778,9 +778,9 @@ impl Ext4FS {
         if let Some(arc) = inodes.get(&inode_id).and_then(|w| w.upgrade()) {
             return arc;
         }
-        // 缓存缺失或 Weak 已失效：在锁内读盘并重建，避免并发 miss 产生重复对象
-        let disk_inode = self.get_disk_inode(inode_id);
-        let arc = Arc::new(Ext4Inode::new(inode_id, &disk_inode, self.clone(), None));
+        // 缓存缺失或 Weak 已失效：在锁内固定 inode-table 页并重建，
+        // 避免并发 miss 产生重复对象。
+        let arc = Arc::new(Ext4Inode::new(inode_id, self.clone(), None));
         inodes.insert(inode_id, Arc::downgrade(&arc));
         arc
     }

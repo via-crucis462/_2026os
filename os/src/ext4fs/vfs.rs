@@ -1,7 +1,7 @@
-use super::{block_modify_inode, block_modify_inode_raw};
 use super::ext4_dir_entry::Ext4DirEntry;
 use super::ext4inode::{Ext4Inode, Ext4InodeDisk, EXT4_EXTENTS_FL};
 use super::Ext4FS;
+use super::{block_modify_inode, block_modify_inode_raw};
 use crate::ext4fs::BLOCK_SZ;
 use crate::fs::TimeSpec;
 use crate::fs::{LookupOutcome, RenameError, VfsInode};
@@ -9,13 +9,9 @@ use crate::syscall::errno::Errno;
 use crate::syscall::fs::Statfs;
 use alloc::sync::Arc;
 use alloc::vec;
-use core::sync::atomic::Ordering;
 
 fn initialize_new_inode(fs: &Arc<Ext4FS>, inode_id: u32, mode: u32, links: u16) {
-    let generation = fs
-        .get_disk_inode(inode_id)
-        .i_generation
-        .wrapping_add(1);
+    let generation = fs.get_disk_inode(inode_id).i_generation.wrapping_add(1);
     let want_extra_isize = fs.superblock.want_extra_isize;
     let use_extents = (fs.superblock.incompat_features & 0x40) != 0;
     block_modify_inode_raw(fs, inode_id, |raw| {
@@ -32,8 +28,7 @@ fn initialize_new_inode(fs: &Arc<Ext4FS>, inode_id: u32, mode: u32, links: u16) 
             raw[0x20..0x24].copy_from_slice(&EXT4_EXTENTS_FL.to_le_bytes());
             // struct ext4_extent_header { magic, entries, max, depth, gen }
             raw[0x28..0x34].copy_from_slice(&[
-                0x0a, 0xf3, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00,
+                0x0a, 0xf3, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ]);
         }
     });
@@ -74,7 +69,8 @@ impl VfsInode for Ext4Inode {
 
     fn get_shared_page(&self, logical_block: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         let _block_map_guard = self.block_map_lock.lock();
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
+        let uses_extents =
+            self.with_disk_inode(|disk_inode| disk_inode.i_flags & EXT4_EXTENTS_FL != 0);
 
         // Fast targets are written directly by `write_at`. A zero-sized new
         // symlink can still be growing into a block-backed target here, so do
@@ -87,7 +83,7 @@ impl VfsInode for Ext4Inode {
 
         let mut physical_block = self.find_physical_block(logical_block as u32);
         if physical_block == 0 {
-            if disk_inode.i_flags & EXT4_EXTENTS_FL == 0 {
+            if !uses_extents {
                 // Newly created inodes can use classic direct blocks.  Match
                 // raw_write_at here instead of unconditionally treating
                 // i_block as an extent tree.
@@ -95,7 +91,7 @@ impl VfsInode for Ext4Inode {
                     return None;
                 }
                 let new_block = self.fs.alloc_block()?;
-                block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
+                self.modify_disk_inode(|disk_inode| {
                     let base = logical_block * 4;
                     disk_inode.i_block[base..base + 4].copy_from_slice(&new_block.to_le_bytes());
                     disk_inode.i_blocks_lo += (BLOCK_SZ / 512) as u32;
@@ -134,10 +130,6 @@ impl VfsInode for Ext4Inode {
 
     fn get_file_page(&self, logical_block: usize) -> Option<Arc<crate::mm::mmap::PageCache>> {
         let _block_map_guard = self.block_map_lock.lock();
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        if self.is_fast_symlink(&disk_inode) {
-            return None;
-        }
         if let Some(cache) = crate::mm::mmap::SHARED_PAGE_CACHE_MANAGER
             .get_cached_file_page(self.inode_id as u64, logical_block)
         {
@@ -163,15 +155,12 @@ impl VfsInode for Ext4Inode {
 
     /// 带页缓存的读取
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
-        if self.is_symlink() {
-            let disk_inode = self.fs.get_disk_inode(self.inode_id);
-            if self.is_fast_symlink(&disk_inode) {
-                return Ext4Inode::read_fast_symlink_at(&disk_inode, offset, buf);
-            }
+        if self.is_fast_symlink() {
+            return self.read_fast_symlink_at(offset, buf);
         }
 
         let page_size = crate::PAGE_SIZE;
-        let file_size = self.size.load(Ordering::Relaxed) as usize;
+        let file_size = self.size_snapshot() as usize;
         if buf.is_empty() || offset >= file_size {
             return 0;
         }
@@ -231,15 +220,8 @@ impl VfsInode for Ext4Inode {
             return 0;
         }
 
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        let old_size = disk_inode.size() as usize;
-        if self.is_fast_symlink(&disk_inode) && offset + buf.len() <= disk_inode.i_block.len() {
-            let written = self.raw_write_at(offset, buf);
-            let new_end = offset + written;
-            if new_end > old_size {
-                self.size.fetch_max(new_end as u64, Ordering::Relaxed);
-            }
-            return written;
+        if self.can_write_fast_symlink(offset + buf.len()) {
+            return self.raw_write_at(offset, buf);
         }
 
         let page_size = crate::PAGE_SIZE;
@@ -279,8 +261,7 @@ impl VfsInode for Ext4Inode {
         let new_end = offset + buf_offset;
         let old_size = self.get_size();
         if new_end > old_size {
-            self.size.fetch_max(new_end as u64, Ordering::Relaxed);
-            block_modify_inode(&self.fs, self.inode_id, |disk_inode: &mut Ext4InodeDisk| {
+            self.modify_disk_inode(|disk_inode: &mut Ext4InodeDisk| {
                 disk_inode.i_size_lo = new_end as u32;
                 disk_inode.i_size_high = (new_end >> 32) as u32;
             });
@@ -290,22 +271,17 @@ impl VfsInode for Ext4Inode {
     }
 
     fn get_size(&self) -> usize {
-        self.size.load(Ordering::Acquire) as usize
+        self.size_snapshot() as usize
     }
 
     fn truncate(&self, len: usize) -> bool {
         let _write_guard = self.write_lock.lock();
         let _block_map_guard = self.block_map_lock.lock();
-        let truncated = Ext4Inode::truncate(self, len);
-        if truncated {
-            self.size.store(len as u64, Ordering::Relaxed);
-        }
-        truncated
+        Ext4Inode::truncate(self, len)
     }
 
     fn get_stat(&self) -> crate::fs::Stat {
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        crate::fs::Stat {
+        self.with_disk_inode(|disk_inode| crate::fs::Stat {
             dev: 0,
             ino: self.inode_id as u64,
             mode: disk_inode.i_mode as u32,
@@ -313,14 +289,14 @@ impl VfsInode for Ext4Inode {
             uid: disk_inode.i_uid as u32,
             gid: disk_inode.i_gid as u32,
             rdev: 0,
-            size: disk_inode.size() as i64,
+            size: self.size_snapshot() as i64,
             blksize: 512,
             blocks: disk_inode.i_blocks_lo as i64,
             atime_sec: disk_inode.i_atime as i64,
             mtime_sec: disk_inode.i_mtime as i64,
             ctime_sec: disk_inode.i_ctime as i64,
             ..Default::default()
-        }
+        })
     }
     fn ino(&self) -> u64 {
         self.inode_id as u64
@@ -350,7 +326,7 @@ impl VfsInode for Ext4Inode {
         }
 
         // 5. 更新父目录（当前 Inode）的元数据：确保 size 至少占用了1个块
-        block_modify_inode(&self.fs, self.inode_id, |p_disk_inode| {
+        self.modify_disk_inode(|p_disk_inode| {
             if p_disk_inode.i_size_lo < 4096 {
                 p_disk_inode.i_size_lo = 4096;
             }
@@ -411,16 +387,14 @@ impl VfsInode for Ext4Inode {
         };
         let new_inode = self.fs.get_inode(new_inode_id);
         let mut dir_buf = [0u8; BLOCK_SZ];
-        let tail_size = if self.fs.superblock.has_metadata_csum() { 12 } else { 0 };
+        let tail_size = if self.fs.superblock.has_metadata_csum() {
+            12
+        } else {
+            0
+        };
         let dotdot_len = (BLOCK_SZ - 12 - tail_size) as u16;
         if !Ext4DirEntry::write_to(&mut dir_buf, new_inode_id, 12, b".", 2)
-            || !Ext4DirEntry::write_to(
-                &mut dir_buf[12..],
-                self.inode_id,
-                dotdot_len,
-                b"..",
-                2,
-            )
+            || !Ext4DirEntry::write_to(&mut dir_buf[12..], self.inode_id, dotdot_len, b"..", 2)
         {
             self.fs.dealloc_block(dir_block);
             block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
@@ -440,10 +414,12 @@ impl VfsInode for Ext4Inode {
         self.fs
             .block_dev
             .write_data_block(dir_block as usize, &dir_buf);
-        let mapped = if self.fs.get_disk_inode(new_inode_id).i_flags & EXT4_EXTENTS_FL != 0 {
+        let uses_extents =
+            new_inode.with_disk_inode(|disk_inode| disk_inode.i_flags & EXT4_EXTENTS_FL != 0);
+        let mapped = if uses_extents {
             new_inode.add_extent_entry(0, dir_block).is_some()
         } else {
-            block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
+            new_inode.modify_disk_inode(|disk_inode| {
                 disk_inode.i_block[0..4].copy_from_slice(&dir_block.to_le_bytes());
                 disk_inode.i_blocks_lo = (BLOCK_SZ / 512) as u32;
             });
@@ -451,20 +427,17 @@ impl VfsInode for Ext4Inode {
         };
         if !mapped {
             self.fs.dealloc_block(dir_block);
-            block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
+            new_inode.modify_disk_inode(|disk_inode| {
                 disk_inode.i_mode = 0;
                 disk_inode.i_links_count = 0;
             });
             self.fs.dealloc_inode(new_inode_id);
             return None;
         }
-        block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
+        new_inode.modify_disk_inode(|disk_inode| {
             disk_inode.i_size_lo = BLOCK_SZ as u32;
+            disk_inode.i_size_high = 0;
         });
-        // `new_inode` is already present in the weak inode cache.  Keep its
-        // in-memory size in step with the initialized on-disk directory so a
-        // subsequent create inside this directory does not treat it as empty.
-        new_inode.size.store(BLOCK_SZ as u64, Ordering::Release);
 
         // 4. 在父目录的数据块中写入目录项 (文件类型 2)
         if !self.add_dir_entry(name, new_inode_id, 2) {
@@ -473,7 +446,7 @@ impl VfsInode for Ext4Inode {
                 self.inode_id, new_inode_id, name
             );
             new_inode.truncate(0);
-            block_modify_inode(&self.fs, new_inode_id, |disk_inode| {
+            new_inode.modify_disk_inode(|disk_inode| {
                 disk_inode.i_mode = 0;
                 disk_inode.i_links_count = 0;
             });
@@ -482,7 +455,7 @@ impl VfsInode for Ext4Inode {
         }
 
         // 5. 更新父目录（当前 Inode）的元数据：链接数 +1，且确保 size 至少占用了1个块
-        block_modify_inode(&self.fs, self.inode_id, |p_disk_inode| {
+        self.modify_disk_inode(|p_disk_inode| {
             p_disk_inode.i_links_count += 1;
             if p_disk_inode.i_size_lo < 4096 {
                 p_disk_inode.i_size_lo = 4096;
@@ -516,7 +489,7 @@ impl VfsInode for Ext4Inode {
         }
         let cache_generation = self.dir_lookup_cache_generation();
         let mut buf_offset = 0;
-        let file_size_bytes = self.size.load(Ordering::Acquire) as usize;
+        let file_size_bytes = self.size_snapshot() as usize;
         let buf_len = buf.len();
         let mut temp_buf = vec![0u8; BLOCK_SZ];
 
@@ -611,8 +584,7 @@ impl VfsInode for Ext4Inode {
         buf_offset as isize
     }
     fn get_statx(&self) -> crate::fs::Statx {
-        let disk_inode = self.fs.get_disk_inode(self.inode_id);
-        crate::fs::Statx {
+        self.with_disk_inode(|disk_inode| crate::fs::Statx {
             stx_mask: 0,
             stx_blksize: 512,
             stx_attributes: 0,
@@ -621,7 +593,7 @@ impl VfsInode for Ext4Inode {
             stx_gid: disk_inode.i_gid as u32,
             stx_mode: disk_inode.i_mode as u16,
             stx_ino: self.inode_id as u64,
-            stx_size: disk_inode.size() as u64,
+            stx_size: self.size_snapshot(),
             stx_blocks: disk_inode.i_blocks_lo as u64,
             stx_attributes_mask: 0,
             stx_atime: crate::fs::StatxTimestamp {
@@ -649,10 +621,10 @@ impl VfsInode for Ext4Inode {
             stx_dev_major: 0,
             stx_dev_minor: 0,
             ..Default::default()
-        }
+        })
     }
     fn set_perm(&self, perm: crate::auth::PermStat) -> bool {
-        block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
+        self.modify_disk_inode(|disk_inode| {
             disk_inode.i_mode = perm.mode.bits() as u16;
             disk_inode.i_uid = perm.uid as u16;
             disk_inode.i_gid = perm.gid as u16;
@@ -781,7 +753,7 @@ impl VfsInode for Ext4Inode {
         Ok(())
     }
     fn set_time(&self, atime: &TimeSpec, mtime: &TimeSpec) -> isize {
-        block_modify_inode(&self.fs, self.inode_id, |disk_inode| {
+        self.modify_disk_inode(|disk_inode| {
             let old_atime = { disk_inode.i_atime };
             let old_mtime = { disk_inode.i_mtime };
             debug!("Ext4Inode::set_time: ino={}, old_atime={}, old_mtime={}, new_atime={}, new_mtime={}", 

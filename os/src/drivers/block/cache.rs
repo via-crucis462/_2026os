@@ -299,9 +299,11 @@ impl PageCacheManager {
 
         if !is_data {
             self.meta_count.fetch_add(1, Ordering::Relaxed);
+            /*
             if self.meta_count.load(Ordering::Relaxed) > META_CACHE_SIZE {
                 self.trim_meta_cache();
             }
+            */
         } else {
             self.data_count.fetch_add(1, Ordering::Relaxed);
         }
