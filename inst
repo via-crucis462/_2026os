@@ -29,3 +29,7 @@ BOARD=visionfive2 INIT=sh make rv
 ./iperf_testcode.sh
 BOARD=virt INIT=sh make debug-rv
 BOARD=virt INIT=sh make gdb-rv
+/musl/busybox ping 1.1.1.1
+/musl/busybox ping -c 2 10.0.2.2
+/musl/busybox ping -c 2 1.1.1.1
+/musl/busybox nslookup example.com 10.0.2.3

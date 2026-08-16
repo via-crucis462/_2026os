@@ -1,18 +1,26 @@
 //! File and filesystem-related syscalls
-use crate::PAGE_SIZE;
-use crate::auth::FileMode;
-use crate::process::FdFlags;
-use crate::fs::{create_fifo_in_dentry, create_file_in_dentry, is_fifo_mode, make_pipe, open_fifo_file, Dentry, File, OpenFlags, ROOT_DENTRY, Stat, Statx, file_name, make_dir, open_file, parent_path, S_IFMT, UserPageFaultInfo};
-use crate::mm::{PageSize, UserBuffer, UserCStringError, prepare_user_read, prepare_user_write, translated_user_buffer, try_translated_read, try_translated_str, try_translated_str_with_limit, try_translated_write};
-use crate::process::current_user_mm;
-use crate::task::current_task;
-use alloc::{task, vec};
-use alloc::sync::Arc;
-use alloc::string::ToString;
-use crate::syscall::TIME_CACHE;
 use super::{errno::Errno::*, normalize_leading_dot_path, translate_path};
-use crate::syscall::TmpfsFileInode;
+use crate::auth::FileMode;
+use crate::fs::{
+    create_fifo_in_dentry, create_file_in_dentry, file_name, is_fifo_mode, make_dir, make_pipe,
+    open_fifo_file, open_file, parent_path, Dentry, File, OpenFlags, Stat, Statx,
+    UserPageFaultInfo, ROOT_DENTRY, S_IFMT,
+};
+use crate::mm::{
+    prepare_user_read, prepare_user_write, translated_user_buffer, try_translated_read,
+    try_translated_str, try_translated_str_with_limit, try_translated_write, PageSize, UserBuffer,
+    UserCStringError,
+};
+use crate::process::current_user_mm;
+use crate::process::FdFlags;
 use crate::syscall::OSInode;
+use crate::syscall::TmpfsFileInode;
+use crate::syscall::TIME_CACHE;
+use crate::task::current_task;
+use crate::PAGE_SIZE;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::{task, vec};
 
 use alloc::string::String;
 
@@ -43,7 +51,6 @@ const O_RDONLY: u32 = 0;
 const O_WRONLY: u32 = 0o1;
 const O_RDWR: u32 = 0o2;
 
-
 use super::errno::Errno::*;
 
 const AT_REMOVEDIR: usize = 0x200;
@@ -63,7 +70,11 @@ struct Flock {
 }
 
 fn current_files() -> Arc<crate::sync::MPSafeCell<crate::process::FileDescriptorTable>> {
-    current_task().unwrap().inner_exclusive_access().files.clone()
+    current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .files
+        .clone()
 }
 
 fn current_nofile_limit() -> usize {
@@ -83,24 +94,28 @@ fn current_umask() -> u32 {
 }
 
 fn current_euid() -> u32 {
-    let cred = current_task().unwrap().inner_exclusive_access().cred.clone();
+    let cred = current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .cred
+        .clone();
     let euid = cred.exclusive_access().euid();
     euid
 }
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Statfs {
-    pub f_type: u64,    // 文件系统类型
-    pub f_bsize: u64,   // 最佳传输块大小 (通常 4096)
-    pub f_blocks: u64,  // 磁盘总块数
-    pub f_bfree: u64,   // 剩余块数
-    pub f_bavail: u64,  // 普通用户可用的剩余块数
-    pub f_files: u64,   // 总 inode 节点数
-    pub f_ffree: u64,   // 剩余 inode 节点数
-    pub f_fsid: [u32; 2], // 文件系统 ID
-    pub f_namelen: u64, // 最大文件名长度
-    pub f_frsize: u64,  // 碎片大小
-    pub f_flags: u64,   // 挂载标志
+    pub f_type: u64,       // 文件系统类型
+    pub f_bsize: u64,      // 最佳传输块大小 (通常 4096)
+    pub f_blocks: u64,     // 磁盘总块数
+    pub f_bfree: u64,      // 剩余块数
+    pub f_bavail: u64,     // 普通用户可用的剩余块数
+    pub f_files: u64,      // 总 inode 节点数
+    pub f_ffree: u64,      // 剩余 inode 节点数
+    pub f_fsid: [u32; 2],  // 文件系统 ID
+    pub f_namelen: u64,    // 最大文件名长度
+    pub f_frsize: u64,     // 碎片大小
+    pub f_flags: u64,      // 挂载标志
     pub f_spare: [u64; 4], // 保留字段
 }
 pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
@@ -110,7 +125,11 @@ pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
         Err(UserCStringError::TooLong) => return ENAMETOOLONG.as_isize(),
         Err(UserCStringError::Invalid) => return EFAULT.as_isize(),
     };
-    trace!("kernel:pid[{}] sys_statfs path={}", current_task().unwrap().getpid(), path_str);
+    trace!(
+        "kernel:pid[{}] sys_statfs path={}",
+        current_task().unwrap().getpid(),
+        path_str
+    );
 
     if buf.is_null() {
         return EFAULT.as_isize();
@@ -130,14 +149,14 @@ pub fn sys_statfs(path: *const u8, buf: *mut Statfs) -> isize {
         return ENOENT.as_isize(); // 路径不存在，拒绝伪造！
     };
 
-    // 2. 多态调用 
+    // 2. 多态调用
     let stat = target_dentry.inode.statfs();
 
     // 3. 将真实数据写入用户空间
     if !try_translated_write(&mm, buf, stat) {
         return EFAULT.as_isize();
     }
-    
+
     0 // Success!
 }
 
@@ -184,7 +203,13 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let task = current_task().unwrap();
     let files = current_files();
     let inner = files.exclusive_access();
-    info!("pid[{}] [sys_write] ENTER fd={}, buf={:#x}, len={}", task.getpid(), fd, buf as usize, len);
+    info!(
+        "pid[{}] [sys_write] ENTER fd={}, buf={:#x}, len={}",
+        task.getpid(),
+        fd,
+        buf as usize,
+        len
+    );
     // 检查 FD 是否越界或未打开
     if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return EBADF.as_isize(); // 注意引入正确的 EBADF 路径
@@ -192,17 +217,22 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let file = inner.fds[fd].file.as_ref().unwrap().clone();
     //file.info_type();
     let status = inner.fds[fd].status;
-        drop(inner);
-        let is_sock = file.is_socket();
-        let nonblock = (status & (O_NONBLOCK | O_NDELAY)) != 0;
+    drop(inner);
+    let is_sock = file.is_socket();
+    let nonblock = (status & (O_NONBLOCK | O_NDELAY)) != 0;
     if !is_sock && !file.writable() {
-        warn!("pid[{}] [sys_write] EACCES fd={} readable={} writable={}",
-              task.getpid(), fd, file.readable(), file.writable());
-        return EACCES.as_isize(); 
+        warn!(
+            "pid[{}] [sys_write] EACCES fd={} readable={} writable={}",
+            task.getpid(),
+            fd,
+            file.readable(),
+            file.writable()
+        );
+        return EACCES.as_isize();
     }
     if is_sock && !file.writable() {
         if nonblock {
-            return EAGAIN.as_isize(); 
+            return EAGAIN.as_isize();
         }
     }
     if let Some(err) = file.check_write_error() {
@@ -230,16 +260,26 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         }
     }
     if ax == 0 && len > 0 {
-        warn!("pid[{}] [sys_write] FATAL: Underlying file returned 0 on write! fd={}", task.getpid(), fd);
+        warn!(
+            "pid[{}] [sys_write] FATAL: Underlying file returned 0 on write! fd={}",
+            task.getpid(),
+            fd
+        );
     } else {
         info!("pid[{}] [sys_write] LEAVE written={}", task.getpid(), ax);
     }
-  
+
     ax
 }
 
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
-    trace!("kernel:pid[{}] sys_read, aim fd = {}, buf = {:#x}, len = {}", current_task().unwrap().getpid(), fd, buf as usize, len);
+    trace!(
+        "kernel:pid[{}] sys_read, aim fd = {}, buf = {:#x}, len = {}",
+        current_task().unwrap().getpid(),
+        fd,
+        buf as usize,
+        len
+    );
     let mm = current_user_mm();
     let files = current_files();
     let inner = files.exclusive_access();
@@ -253,21 +293,18 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
         let is_sock = file.is_socket();
         if !is_sock && !file.readable() {
             println!("EACCES");
-            return EACCES.as_isize(); 
+            return EACCES.as_isize();
         }
         if is_sock && !file.readable() {
             if (status & (O_NONBLOCK | O_NDELAY)) != 0 {
-                return EAGAIN.as_isize(); 
+                return EAGAIN.as_isize();
             }
         }
         if (status & (O_NONBLOCK | O_NDELAY)) != 0 && !file.ready_to_read() {
             return EAGAIN.as_isize();
         }
-        let Some(user_buffer) = crate::mm::translated_user_buffer_mut(
-            &mm,
-            buf as *mut u8,
-            len,
-        ) else {
+        let Some(user_buffer) = crate::mm::translated_user_buffer_mut(&mm, buf as *mut u8, len)
+        else {
             return EFAULT.as_isize();
         };
         if let Some(pipe) = file.as_any().downcast_ref::<crate::fs::Pipe>() {
@@ -324,12 +361,14 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
         const IOV_BUF_MAX: usize = 1024 * 1024; // 1MB
         let iovec_len = iovec.len.min(IOV_BUF_MAX);
         // 写入缓冲区
-        let Some(user_buffer) = crate::mm::translated_user_buffer_mut(
-            &mm,
-            iovec.base as *mut u8,
-            iovec_len,
-        ) else {
-            return if total_read == 0 { EFAULT.as_isize() } else { total_read as isize };
+        let Some(user_buffer) =
+            crate::mm::translated_user_buffer_mut(&mm, iovec.base as *mut u8, iovec_len)
+        else {
+            return if total_read == 0 {
+                EFAULT.as_isize()
+            } else {
+                total_read as isize
+            };
         };
         let read_bytes = file.read(user_buffer);
         if read_bytes == 0 && iovec_len > 0 {
@@ -356,17 +395,19 @@ const AT_FDCWD: isize = -100;
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize {
     let task = current_task().unwrap();
     let mm = current_user_mm();
-    let path_str = normalize_leading_dot_path(
-        if let Some(s) = try_translated_str(&mm, path) { s } else { return EFAULT.as_isize(); }
-    );
+    let path_str = normalize_leading_dot_path(if let Some(s) = try_translated_str(&mm, path) {
+        s
+    } else {
+        return EFAULT.as_isize();
+    });
     //println!("kernel:pid[{}] tid[{}] sys_openat, dirfd={}, path={}", task.process().pid.0, task.gettid(), dirfd, path_str);
     //debug!("[kernel] sys_openat: dirfd={}, path={}, flags={}", dirfd, path_str, flags);
     const O_TMPFILE: u32 = 0x400000;
     let (readable, writable) = match flags & 0x3 {
-    0x0 => (true, false), // O_RDONLY
-    0x1 => (false, true), // O_WRONLY
-    0x2 => (true, true),  // O_RDWR
-    _ => (true, true),
+        0x0 => (true, false), // O_RDONLY
+        0x1 => (false, true), // O_WRONLY
+        0x2 => (true, true),  // O_RDWR
+        _ => (true, true),
     };
 
     // 解析起始目录
@@ -393,28 +434,23 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
 
     if (flags & O_TMPFILE) != 0 {
         let target_dentry = if let Ok(dentry) = start_dentry.find_tree(&path_str, true) {
-        dentry
+            dentry
         } else {
             return ENOENT.as_isize(); // 路径不存在
         };
-        
+
         let stat = target_dentry.inode.get_stat();
-        if (stat.mode & 0o170000) != 0o040000 { 
+        if (stat.mode & 0o170000) != 0o040000 {
             return ENOTDIR.as_isize(); // 不是目录，报错
         }
         // 3. 将 VfsInode 包装成你的 OSInode / File 结构
         let anon_vfs_inode = Arc::new(TmpfsFileInode::new(0o777));
-        let anon_dentry =Dentry::new(
-        String::from(""), 
-        anon_vfs_inode.clone(), 
-        Arc::downgrade(&target_dentry), // 不挂载到全局树
+        let anon_dentry = Dentry::new(
+            String::from(""),
+            anon_vfs_inode.clone(),
+            Arc::downgrade(&target_dentry), // 不挂载到全局树
         );
-        let anon_file = Arc::new(OSInode::new(
-        readable,
-        writable,
-        false,
-        anon_dentry,
-        ));
+        let anon_file = Arc::new(OSInode::new(readable, writable, false, anon_dentry));
 
         let files = current_files();
         let mut inner = files.exclusive_access();
@@ -424,19 +460,32 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
         };
 
         // 4. 塞入进程的文件描述符表
-        inner.set_fd(fd, anon_file, FdFlags::from_bits_truncate(flags as usize), flags as usize);
-        debug!("kernel:pid[{}] sys_openat: O_TMPFILE success fd={}", task.getpid(), fd);
-        
+        inner.set_fd(
+            fd,
+            anon_file,
+            FdFlags::from_bits_truncate(flags as usize),
+            flags as usize,
+        );
+        debug!(
+            "kernel:pid[{}] sys_openat: O_TMPFILE success fd={}",
+            task.getpid(),
+            fd
+        );
+
         return fd as isize;
     }
-    
+
     let open_flags = OpenFlags::from_bits_truncate(flags);
     let mask = mode & !current_umask();
     if let Some(inode) = open_file(start_dentry, path_str.as_str(), open_flags, mask) {
         let inode_mode = inode.inode().get_stat().mode;
         let inode_type = inode_mode & S_IFMT;
         if open_flags.should_be_directory() && inode_type != 0o040000 {
-            trace!("kernel:pid[{}] VFS: sys_openat failed - '{}' is not a directory", task.getpid(), path_str);
+            trace!(
+                "kernel:pid[{}] VFS: sys_openat failed - '{}' is not a directory",
+                task.getpid(),
+                path_str
+            );
             return ENOTDIR.as_isize(); // 目标文件不是目录
         }
 
@@ -460,23 +509,38 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
         let files = current_files();
         let mut inner = files.exclusive_access();
         let fd = match inner.alloc_fd(current_nofile_limit()) {
-        Some(fd) => fd,
-        None => return EMFILE.as_isize(), //   
-    };
-        inner.set_fd(fd, file, FdFlags::from_bits_truncate(flags as usize), flags as usize);
+            Some(fd) => fd,
+            None => return EMFILE.as_isize(), //
+        };
+        inner.set_fd(
+            fd,
+            file,
+            FdFlags::from_bits_truncate(flags as usize),
+            flags as usize,
+        );
         fd as isize
     } else {
-        trace!("kernel:pid[{}] VFS: File '{}' not found", task.getpid(), path_str);
-        debug!("kernel:pid[{}] sys_openat: failed path={}", task.getpid(), path_str);
-            ENOENT.as_isize()
+        trace!(
+            "kernel:pid[{}] VFS: File '{}' not found",
+            task.getpid(),
+            path_str
+        );
+        debug!(
+            "kernel:pid[{}] sys_openat: failed path={}",
+            task.getpid(),
+            path_str
+        );
+        ENOENT.as_isize()
     }
 }
 
 pub fn sys_mknod(dirfd: isize, path: *const u8, mode: u32, _dev: u64) -> isize {
     let mm = current_user_mm();
-    let path_str = normalize_leading_dot_path(
-        if let Some(s) = try_translated_str(&mm, path) { s } else { return EFAULT.as_isize(); }
-    );
+    let path_str = normalize_leading_dot_path(if let Some(s) = try_translated_str(&mm, path) {
+        s
+    } else {
+        return EFAULT.as_isize();
+    });
 
     if path_str.is_empty() {
         return EINVAL.as_isize();
@@ -511,7 +575,7 @@ pub fn sys_mknod(dirfd: isize, path: *const u8, mode: u32, _dev: u64) -> isize {
     }
 
     let parent = parent_path(&path_str);
-    let         Ok(parent_dentry) = start_dentry.find_tree(&parent, true) else {
+    let Ok(parent_dentry) = start_dentry.find_tree(&parent, true) else {
         return ENOENT.as_isize();
     };
     if (parent_dentry.inode.get_stat().mode & S_IFMT) != 0o040000 {
@@ -546,6 +610,7 @@ pub fn sys_close(fd: usize) -> isize {
     }
     let file_to_close = inner.fds[fd].file.take();
     inner.clear_fd(fd);
+    drop(inner);
     drop(file_to_close);
     0
 }
@@ -577,7 +642,11 @@ pub fn sys_flock(fd: usize, operation: usize) -> isize {
     };
     let pid = current_task().unwrap().getpid();
     let owner_key = (pid, fd);
-    let want_type: i16 = if operation & LOCK_SH != 0 { F_RDLCK } else { F_WRLCK };
+    let want_type: i16 = if operation & LOCK_SH != 0 {
+        F_RDLCK
+    } else {
+        F_WRLCK
+    };
 
     if operation & LOCK_UN != 0 {
         let mut locks = dentry.file_locks.lock();
@@ -621,10 +690,18 @@ pub fn sys_flock(fd: usize, operation: usize) -> isize {
 pub fn sys_accessat(dirfd: isize, path: *const u8, mode: u32, _flags: u32) -> isize {
     let task = current_task().unwrap();
     let mm = current_user_mm();
-    let path_str = normalize_leading_dot_path(
-        if let Some(s) = try_translated_str(&mm, path) { s } else { return EFAULT.as_isize(); }
+    let path_str = normalize_leading_dot_path(if let Some(s) = try_translated_str(&mm, path) {
+        s
+    } else {
+        return EFAULT.as_isize();
+    });
+    info!(
+        "kernel:pid[{}] sys_accessat: dirfd={}, path={}, mode={}",
+        task.getpid(),
+        dirfd,
+        path_str,
+        mode
     );
-    info!("kernel:pid[{}] sys_accessat: dirfd={}, path={}, mode={}", task.getpid(), dirfd, path_str, mode);
 
     let start_dentry = if path_str.starts_with('/') {
         crate::fs::ROOT_DENTRY.clone()
@@ -656,19 +733,19 @@ pub fn sys_accessat(dirfd: isize, path: *const u8, mode: u32, _flags: u32) -> is
             return 0;
         }
         let stat = os_inode.inode().get_stat();
-        let file_mode = stat.mode & 0o777; 
+        let file_mode = stat.mode & 0o777;
         if (mode & 4) != 0 && (file_mode & 0o444) == 0 {
-            return EACCES.as_isize(); 
+            return EACCES.as_isize();
         }
 
         if (mode & 2) != 0 && (file_mode & 0o222) == 0 {
-            return EACCES.as_isize(); 
+            return EACCES.as_isize();
         }
         if (mode & 1) != 0 && (file_mode & 0o111) == 0 {
-            return EACCES.as_isize(); 
+            return EACCES.as_isize();
         }
-        0 
-    }else {
+        0
+    } else {
         ENOENT.as_isize() // 文件不存在
     }
 }
@@ -682,7 +759,11 @@ pub fn sys_pipe(pipe: *mut usize, flags: usize) -> isize {
     let task = current_task().unwrap();
     let mm = current_user_mm();
     if !prepare_user_write(&mm, pipe as usize, core::mem::size_of::<[u32; 2]>()) {
-        trace!("kernel:pid[{}] sys_pipe error point: {:#x}", task.getpid(), pipe as usize);
+        trace!(
+            "kernel:pid[{}] sys_pipe error point: {:#x}",
+            task.getpid(),
+            pipe as usize
+        );
         return EFAULT.as_isize();
     }
     let files = current_files();
@@ -690,9 +771,13 @@ pub fn sys_pipe(pipe: *mut usize, flags: usize) -> isize {
     let (pipe_read, pipe_write) = make_pipe();
     let read_fd = match inner.alloc_fd(current_nofile_limit()) {
         Some(fd) => fd,
-        None => return EMFILE.as_isize(), //   
+        None => return EMFILE.as_isize(), //
     };
-    trace!("kernel:pid[{}] sys_pipe: allocated read_fd={}", task.getpid(), read_fd);
+    trace!(
+        "kernel:pid[{}] sys_pipe: allocated read_fd={}",
+        task.getpid(),
+        read_fd
+    );
     let fd_flags = if flags & O_CLOEXEC as usize != 0 {
         FdFlags::CLOEXEC
     } else {
@@ -707,9 +792,18 @@ pub fn sys_pipe(pipe: *mut usize, flags: usize) -> isize {
             return EMFILE.as_isize();
         }
     };
-    inner.set_fd(write_fd, pipe_write, fd_flags, O_WRONLY as usize | status_flags);
+    inner.set_fd(
+        write_fd,
+        pipe_write,
+        fd_flags,
+        O_WRONLY as usize | status_flags,
+    );
     // 诊断：打印管道 fd 分配
-    trace!("kernel:pid[{}] sys_pipe: allocated write_fd={}", task.getpid(), write_fd);
+    trace!(
+        "kernel:pid[{}] sys_pipe: allocated write_fd={}",
+        task.getpid(),
+        write_fd
+    );
     // 释放锁，因为下面的write会访问用户锁
     drop(inner);
     // User ABI for pipe is int pipefd[2], i.e. two 32-bit entries.
@@ -731,7 +825,11 @@ pub fn sys_pipe(pipe: *mut usize, flags: usize) -> isize {
 }
 
 pub fn sys_dup(fd: usize) -> isize {
-    trace!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().getpid(), fd);
+    trace!(
+        "kernel:pid[{}] sys_dup fd = {}",
+        current_task().unwrap().getpid(),
+        fd
+    );
     // warn!("kernel:pid[{}] sys_dup fd = {}", current_task().unwrap().process().pid.0, fd);
     let files = current_files();
     let mut inner = files.exclusive_access();
@@ -742,9 +840,9 @@ pub fn sys_dup(fd: usize) -> isize {
     if inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
-    let new_fd =match inner.alloc_fd(current_nofile_limit()) {
+    let new_fd = match inner.alloc_fd(current_nofile_limit()) {
         Some(fd) => fd,
-        None => return EMFILE.as_isize(), //   
+        None => return EMFILE.as_isize(), //
     };
     // warn!("[kernel] sys_dup: new fd allocated: {}", new_fd);
     let file = Arc::clone(inner.fds[fd].file.as_ref().unwrap());
@@ -760,7 +858,7 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> isize {
     if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
-    
+
     let file = inner.fds[fd].file.as_ref().unwrap().clone();
     file.lseek(offset, whence)
 }
@@ -780,7 +878,7 @@ pub fn sys_dup3(fd: usize, new_fd: usize, flags: usize) -> isize {
     if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
-    
+
     // 不能超过限制
     if new_fd >= current_nofile_limit().min(crate::process::FileDescriptorTable::DEFAULT_LIMIT) {
         return EBADF.as_isize();
@@ -811,7 +909,9 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
         let file = file.clone();
         drop(inner);
         let mut stat = file.get_stat();
-        if let Some(&(asec, ansec, msec, mnsec)) = crate::syscall::fs::TIME_CACHE.lock().get(&stat.ino) {
+        if let Some(&(asec, ansec, msec, mnsec)) =
+            crate::syscall::fs::TIME_CACHE.lock().get(&stat.ino)
+        {
             stat.atime_sec = asec;
             stat.atime_nsec = ansec;
             stat.mtime_sec = msec;
@@ -828,7 +928,7 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
 #[repr(C)]
 pub struct IoVec {
     pub base: usize, // 指针
-    pub len: usize, // 区域长度
+    pub len: usize,  // 区域长度
 }
 
 pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
@@ -842,7 +942,13 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     let mm = current_user_mm();
     let files = current_files();
     let inner = files.exclusive_access();
-    info!("pid[{}] [sys_writev] ENTER fd={}, iov_ptr={:#x}, iovcnt={}", task.getpid(), fd, iov_ptr, iovcnt);
+    info!(
+        "pid[{}] [sys_writev] ENTER fd={}, iov_ptr={:#x}, iovcnt={}",
+        task.getpid(),
+        fd,
+        iov_ptr,
+        iovcnt
+    );
     if fd >= inner.fds.len() || inner.fds[fd].file.is_none() {
         return EBADF.as_isize();
     }
@@ -860,23 +966,39 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     let mut total_written = 0;
     for i in 0..iovcnt {
         let Some(iov_offset) = i.checked_mul(core::mem::size_of::<IoVec>()) else {
-            return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
+            return if total_written == 0 {
+                EFAULT.as_isize()
+            } else {
+                total_written as isize
+            };
         };
         let Some(iov_addr) = iov_ptr.checked_add(iov_offset) else {
-            return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
+            return if total_written == 0 {
+                EFAULT.as_isize()
+            } else {
+                total_written as isize
+            };
         };
         let iovec: IoVec = {
             if let Some(io) = try_translated_read(&mm, iov_addr as *const IoVec) {
                 io
             } else {
-                return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
+                return if total_written == 0 {
+                    EFAULT.as_isize()
+                } else {
+                    total_written as isize
+                };
             }
         };
         if iovec.len == 0 {
-            continue; 
+            continue;
         }
         if !prepare_user_read(&mm, iovec.base, iovec.len) {
-            return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
+            return if total_written == 0 {
+                EFAULT.as_isize()
+            } else {
+                total_written as isize
+            };
         }
         let mut written_in_iov = 0usize;
         while written_in_iov < iovec.len {
@@ -889,13 +1011,15 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
             }
             let chunk_len = (iovec.len - written_in_iov).min(WRITEV_CHUNK_MAX);
             let Some(chunk_base) = iovec.base.checked_add(written_in_iov) else {
-                return if total_written == 0 { EFAULT.as_isize() } else { total_written as isize };
+                return if total_written == 0 {
+                    EFAULT.as_isize()
+                } else {
+                    total_written as isize
+                };
             };
-            let Some(user_buffer) = crate::mm::translated_user_buffer(
-                &mm,
-                chunk_base as *const u8,
-                chunk_len,
-            ) else {
+            let Some(user_buffer) =
+                crate::mm::translated_user_buffer(&mm, chunk_base as *const u8, chunk_len)
+            else {
                 return if total_written == 0 {
                     EFAULT.as_isize()
                 } else {
@@ -910,7 +1034,7 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
                         print!("{}", s);
                     } else {
                         // 如果有无法解析的字符，打印提示
-                        print!("<Non-UTF8-Data>"); 
+                        print!("<Non-UTF8-Data>");
                     }
                 }
                 println!(" "); // 换行，方便查看
@@ -937,7 +1061,11 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
                         total_written as isize
                     };
                 }
-                warn!("pid[{}] [sys_writev] FATAL: Underlying file returned 0 on write! fd={}", task.getpid(), fd);
+                warn!(
+                    "pid[{}] [sys_writev] FATAL: Underlying file returned 0 on write! fd={}",
+                    task.getpid(),
+                    fd
+                );
                 return total_written as isize;
             }
             total_written += written;
@@ -947,7 +1075,11 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
             }
         }
     }
-    info!("pid[{}] [sys_writev] LEAVE total_written={}", task.getpid(), total_written);
+    info!(
+        "pid[{}] [sys_writev] LEAVE total_written={}",
+        task.getpid(),
+        total_written
+    );
     total_written as isize
 }
 pub fn sys_statx(dirfd: isize, path: *const u8, flags: u32, mask: u32, st: *mut Statx) -> isize {
@@ -1099,8 +1231,12 @@ pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
         return path.err().unwrap().as_isize();
     };
 
-    debug!("kernel:pid[{}] sys_mkdir: path={}", current_task().unwrap().getpid(), path);
-    
+    debug!(
+        "kernel:pid[{}] sys_mkdir: path={}",
+        current_task().unwrap().getpid(),
+        path
+    );
+
     let start = if path.starts_with('/') {
         ROOT_DENTRY.clone()
     } else {
@@ -1126,7 +1262,10 @@ pub fn sys_mkdir(path: *const u8, _mode: u32) -> isize {
 }
 
 pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_linkat NOT IMPLEMENTED", current_task().unwrap().getpid());
+    trace!(
+        "kernel:pid[{}] sys_linkat NOT IMPLEMENTED",
+        current_task().unwrap().getpid()
+    );
     ENOSYS.as_isize()
 }
 
@@ -1239,8 +1378,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
                 return EBADF.as_isize();
             }
             // 防溢出
-            let nofile_limit = current_nofile_limit()
-                .min(crate::process::FileDescriptorTable::DEFAULT_LIMIT);
+            let nofile_limit =
+                current_nofile_limit().min(crate::process::FileDescriptorTable::DEFAULT_LIMIT);
             if arg >= nofile_limit {
                 return EBADF.as_isize();
             }
@@ -1263,13 +1402,21 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             inner.set_fd(
                 new_fd,
                 file,
-                if cmd == F_DUPFD_CLOEXEC { FdFlags::CLOEXEC } else { FdFlags::empty() },
+                if cmd == F_DUPFD_CLOEXEC {
+                    FdFlags::CLOEXEC
+                } else {
+                    FdFlags::empty()
+                },
                 old_status,
             );
             new_fd as isize
         }
         F_GETFD => {
-            if inner.fds[fd].flags.contains(FdFlags::CLOEXEC) { FD_CLOEXEC as isize } else { 0 }
+            if inner.fds[fd].flags.contains(FdFlags::CLOEXEC) {
+                FD_CLOEXEC as isize
+            } else {
+                0
+            }
         }
         F_SETFD => {
             if (arg & FD_CLOEXEC) != 0 {
@@ -1289,7 +1436,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             if inner.fds[fd].file.as_ref().unwrap().get_stat().mode & S_IFMT != crate::fs::S_IFIFO {
                 return EBADF.as_isize();
             }
-            16*4096 as isize
+            16 * 4096 as isize
         }
         _ => EINVAL.as_isize(),
     }
@@ -1339,9 +1486,7 @@ fn posix_file_lock(file: &Arc<dyn File + Send + Sync>, cmd: usize, arg: usize) -
         F_GETLK => {
             let mut locks = dentry.file_locks.lock();
             let conflict = locks.iter().find(|l| {
-                !l.is_flock
-                    && l.owner_pid != pid
-                    && file_locks_conflict(l, req.l_type, start, len)
+                !l.is_flock && l.owner_pid != pid && file_locks_conflict(l, req.l_type, start, len)
             });
             if let Some(l) = conflict {
                 req.l_type = l.lock_type;
@@ -1406,8 +1551,6 @@ fn posix_file_lock(file: &Arc<dyn File + Send + Sync>, cmd: usize, arg: usize) -
     }
 }
 
-
-
 /// YOUR JOB: Implement unlinkat.
 pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
     // 校验 flags：只允许 0 或 AT_REMOVEDIR
@@ -1428,7 +1571,13 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
     if path_str.len() > 255 {
         return ENAMETOOLONG.as_isize();
     }
-    trace!("kernel:pid[{}] sys_unlinkat dirfd={} path={} flags={:#x}", current_task().unwrap().getpid(), dirfd, path_str, flags);
+    trace!(
+        "kernel:pid[{}] sys_unlinkat dirfd={} path={} flags={:#x}",
+        current_task().unwrap().getpid(),
+        dirfd,
+        path_str,
+        flags
+    );
 
     let task = current_task().unwrap();
     let base_dir = if path_str.starts_with('/') {
@@ -1438,7 +1587,10 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
     } else {
         let files = current_files();
         let inner = files.exclusive_access();
-        if dirfd < 0 || (dirfd as usize) >= inner.fds.len() || inner.fds[dirfd as usize].file.is_none() {
+        if dirfd < 0
+            || (dirfd as usize) >= inner.fds.len()
+            || inner.fds[dirfd as usize].file.is_none()
+        {
             return EBADF.as_isize();
         }
         // 确保 dirfd 指向的是一个目录，否则返回 ENOTDIR
@@ -1529,7 +1681,11 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> isize {
         return 0;
     } else {
         // 驱动引起的删除不成功
-        error!("kernel:pid[{}] VFS failed to delete '{}'. Underlay FS returned None.", task.getpid(), name);
+        error!(
+            "kernel:pid[{}] VFS failed to delete '{}'. Underlay FS returned None.",
+            task.getpid(),
+            name
+        );
         return EACCES.as_isize();
     }
 }
@@ -1566,7 +1722,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usiz
     if out_mode == 0o010000 || in_mode == 0o010000 {
         return ENOSYS.as_isize();
     }
-    
+
     drop(inner);
 
     // 缓冲区
@@ -1576,9 +1732,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usiz
     while total_transferred < count {
         let remain = count - total_transferred;
         let read_len = remain.min(buffer.len());
-        let read_slice = unsafe {
-            core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), read_len)
-        };
+        let read_slice = unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), read_len) };
         let user_buf = unsafe { UserBuffer::from_kernel_slice(read_slice) };
         let read_bytes = in_file.read(user_buf);
         if read_bytes == 0 {
@@ -1590,16 +1744,17 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usiz
             let write_len = read_bytes - written_so_far;
 
             let write_slice = unsafe {
-                core::slice::from_raw_parts_mut(
-                    buffer.as_mut_ptr().add(written_so_far), 
-                    write_len
-                )
+                core::slice::from_raw_parts_mut(buffer.as_mut_ptr().add(written_so_far), write_len)
             };
             let w_user_buf = unsafe { UserBuffer::from_kernel_slice(write_slice) };
 
             let write_bytes = out_file.write(w_user_buf);
             if write_bytes == 0 {
-                if total_transferred == 0 { return EBADF.as_isize(); } else { break; }
+                if total_transferred == 0 {
+                    return EBADF.as_isize();
+                } else {
+                    break;
+                }
             }
             written_so_far += write_bytes;
         }
@@ -1607,7 +1762,11 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, _offset_ptr: usize, count: usiz
         total_transferred += written_so_far;
     }
 
-    trace!("kernel:pid[{}] sys_sendfile: transferred={}", task.getpid(), total_transferred);
+    trace!(
+        "kernel:pid[{}] sys_sendfile: transferred={}",
+        task.getpid(),
+        total_transferred
+    );
     total_transferred as isize
 }
 
@@ -1653,7 +1812,12 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
         if stat.nlink == 0 {
             return ENOENT.as_isize();
         }
-        trace!("kernel:pid[{}] sys_getdents: fd={}, count={}", task.getpid(), fd, count);
+        trace!(
+            "kernel:pid[{}] sys_getdents: fd={}, count={}",
+            task.getpid(),
+            fd,
+            count
+        );
         if count == 0 {
             return EINVAL.as_isize();
         }
@@ -1669,7 +1833,11 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
         'enumerate: while total < count {
             let max_request_len = core::cmp::min(chunk.len(), count - total);
             let Some(user_ptr) = (dirp as usize).checked_add(total) else {
-                return if total == 0 { EFAULT.as_isize() } else { total as isize };
+                return if total == 0 {
+                    EFAULT.as_isize()
+                } else {
+                    total as isize
+                };
             };
             let page_remaining = PAGE_SIZE - (user_ptr & (PAGE_SIZE - 1));
             let mut request_len = if first_window {
@@ -1684,7 +1852,11 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
                     user_ptr as *mut u8,
                     request_len,
                 ) else {
-                    return if total == 0 { EFAULT.as_isize() } else { total as isize };
+                    return if total == 0 {
+                        EFAULT.as_isize()
+                    } else {
+                        total as isize
+                    };
                 };
 
                 let n = file.getdents(&mut chunk[..request_len]);
@@ -1692,14 +1864,9 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
                 // directory VFS implementations leave their cursor unchanged
                 // when returning EINVAL for an empty output buffer, so grow
                 // just enough to include the next page and retry.
-                if n == EINVAL.as_isize()
-                    && first_window
-                    && request_len < max_request_len
-                {
-                    let next_request_len = core::cmp::min(
-                        max_request_len,
-                        request_len.saturating_add(PAGE_SIZE),
-                    );
+                if n == EINVAL.as_isize() && first_window && request_len < max_request_len {
+                    let next_request_len =
+                        core::cmp::min(max_request_len, request_len.saturating_add(PAGE_SIZE));
                     if next_request_len > request_len {
                         request_len = next_request_len;
                         continue;
@@ -1770,7 +1937,7 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
 pub fn sys_chdir(path: *const u8) -> isize {
     let mm = current_user_mm();
     let path_str = try_translated_str(&mm, path);
-    
+
     let path_str = if let Some(path_str) = path_str {
         if path_str.len() > 255 {
             return ENAMETOOLONG.as_isize();
@@ -1780,8 +1947,12 @@ pub fn sys_chdir(path: *const u8) -> isize {
         return EFAULT.as_isize();
     };
 
-    debug!("kernel:pid[{}] sys_chdir: path={}", current_task().unwrap().getpid(), path_str);
-    
+    debug!(
+        "kernel:pid[{}] sys_chdir: path={}",
+        current_task().unwrap().getpid(),
+        path_str
+    );
+
     let task = current_task().unwrap();
     let fs = task.inner_exclusive_access().fs.clone();
     let cwd = fs.exclusive_access().get_pwd();
@@ -1799,7 +1970,7 @@ pub fn sys_chdir(path: *const u8) -> isize {
         p
     };
 
-    if let Some(inode) = open_file(cwd, full_path.as_str(), OpenFlags::DIRECTORY,0) {
+    if let Some(inode) = open_file(cwd, full_path.as_str(), OpenFlags::DIRECTORY, 0) {
         fs.exclusive_access().set_pwd(inode.get_dentry());
         0
     } else {
@@ -1874,14 +2045,23 @@ pub fn sys_fadvise64(fd: usize, _offset: usize, _len: usize, advice: i32) -> isi
 }
 
 /// 挂载，目前是伪实现
-pub fn sys_mount(source: *const u8, target: *const u8, filesystemtype: *const u8, mountflags: u32) -> isize {
+pub fn sys_mount(
+    source: *const u8,
+    target: *const u8,
+    filesystemtype: *const u8,
+    mountflags: u32,
+) -> isize {
     let mm = current_user_mm();
-    let source_str = normalize_leading_dot_path(
-        if let Some(s) = try_translated_str(&mm, source) { s } else { return EFAULT.as_isize(); }
-    );
-    let target_str = normalize_leading_dot_path(
-        if let Some(s) = try_translated_str(&mm, target) { s } else { return EFAULT.as_isize(); }
-    );
+    let source_str = normalize_leading_dot_path(if let Some(s) = try_translated_str(&mm, source) {
+        s
+    } else {
+        return EFAULT.as_isize();
+    });
+    let target_str = normalize_leading_dot_path(if let Some(s) = try_translated_str(&mm, target) {
+        s
+    } else {
+        return EFAULT.as_isize();
+    });
     let filesystemtype_str = {
         if let Some(s) = try_translated_str(&mm, filesystemtype) {
             s
@@ -1895,9 +2075,11 @@ pub fn sys_mount(source: *const u8, target: *const u8, filesystemtype: *const u8
 /// 取消挂载，目前是伪实现
 pub fn sys_umount(target: *const u8) -> isize {
     let mm = current_user_mm();
-    let target_str = normalize_leading_dot_path(
-        if let Some(s) = try_translated_str(&mm, target) { s } else { return EFAULT.as_isize(); }
-    );
+    let target_str = normalize_leading_dot_path(if let Some(s) = try_translated_str(&mm, target) {
+        s
+    } else {
+        return EFAULT.as_isize();
+    });
     return ENOSYS.as_isize();
 }
 
@@ -1957,7 +2139,7 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usiz
         }
         return 0;
     }
-    
+
     if path_str.contains("Zone.Identifier") {
         let mut stat: Stat = unsafe { core::mem::zeroed() };
         stat.mode = 0o100755; // 假装它是个普通空文件，让 du 闭嘴
@@ -1973,7 +2155,10 @@ pub fn sys_fstatat(dirfd: isize, path_ptr: *const u8, st: *mut Stat, flags: usiz
         // 相对路径 + 指定的目录 fd
         let files = current_files();
         let inner = files.exclusive_access();
-        if dirfd < 0 || (dirfd as usize) >= inner.fds.len() || inner.fds[dirfd as usize].file.is_none() {
+        if dirfd < 0
+            || (dirfd as usize) >= inner.fds.len()
+            || inner.fds[dirfd as usize].file.is_none()
+        {
             return EBADF.as_isize();
         }
         let file = inner.fds[dirfd as usize].file.as_ref().unwrap().clone();
@@ -2029,7 +2214,13 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isiz
         if !file.readable() {
             return EACCES.as_isize();
         }
-        trace!("kernel:pid[{}] sys_pread64: fd={}, count={}, offset={}", task.getpid(), fd, count, offset);
+        trace!(
+            "kernel:pid[{}] sys_pread64: fd={}, count={}, offset={}",
+            task.getpid(),
+            fd,
+            count,
+            offset
+        );
         let Some(user_buffer) = crate::mm::translated_user_buffer_mut(&mm, buf, count) else {
             return EFAULT.as_isize();
         };
@@ -2054,7 +2245,13 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, count: usize, offset: usize) -> i
         if !file.writable() {
             return EACCES.as_isize();
         }
-        trace!("kernel:pid[{}] sys_pwrite64: fd={}, count={}, offset={}", task.getpid(), fd, count, offset);
+        trace!(
+            "kernel:pid[{}] sys_pwrite64: fd={}, count={}, offset={}",
+            task.getpid(),
+            fd,
+            count,
+            offset
+        );
         let Some(user_buffer) = crate::mm::translated_user_buffer(&mm, buf, count) else {
             return EFAULT.as_isize();
         };
@@ -2068,7 +2265,7 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, count: usize, offset: usize) -> i
 pub fn sys_fchmodat(dirfd: isize, path_ptr: *const u8, mode: u32) -> isize {
     let mm = current_user_mm();
     let euid = current_euid();
-    
+
     let path = {
         if let Some(s) = try_translated_str(&mm, path_ptr) {
             s
@@ -2084,11 +2281,18 @@ pub fn sys_fchmodat(dirfd: isize, path_ptr: *const u8, mode: u32) -> isize {
     } else {
         let files = current_files();
         let inner = files.exclusive_access();
-        if dirfd < 0 || (dirfd as usize) >= inner.fds.len() || inner.fds[dirfd as usize].file.is_none() {
+        if dirfd < 0
+            || (dirfd as usize) >= inner.fds.len()
+            || inner.fds[dirfd as usize].file.is_none()
+        {
             return EBADF.as_isize();
         }
         // 从 dirfd 对应的目录开始查找
-        if let Some(dentry) = inner.fds[dirfd as usize].file.as_ref().and_then(|f| f.get_dentry()) {
+        if let Some(dentry) = inner.fds[dirfd as usize]
+            .file
+            .as_ref()
+            .and_then(|f| f.get_dentry())
+        {
             dentry
         } else {
             return EBADF.as_isize();
@@ -2101,23 +2305,19 @@ pub fn sys_fchmodat(dirfd: isize, path_ptr: *const u8, mode: u32) -> isize {
             if euid != 0 && perm.uid != euid {
                 return EPERM.as_isize();
             }
-            
+
             // 仅修改(特殊)权限位
             let new_mode = (perm.mode.bits() & !0o7777) | (mode as u16 & 0o7777);
             perm.set_mode(crate::auth::FileMode::from_bits_truncate(new_mode));
-            
+
             if dentry.inode.set_perm(perm) {
                 0
             } else {
-                EACCES.as_isize() 
+                EACCES.as_isize()
             }
         }
-        Err(1) => {
-            ENOTDIR.as_isize()
-        }
-        Err(_) => {
-            ENOENT.as_isize()
-        }
+        Err(1) => ENOTDIR.as_isize(),
+        Err(_) => ENOENT.as_isize(),
     }
 }
 
@@ -2205,7 +2405,13 @@ pub fn sys_fchownat(dirfd: isize, path_ptr: *const u8, owner: u32, group: u32) -
     let task = current_task().unwrap();
     let mm = current_user_mm();
     let euid = current_euid();
-    info!("pid[{}] sys_fchownat: dirfd={}, owner={}, group={}", task.getpid(), dirfd, owner, group);
+    info!(
+        "pid[{}] sys_fchownat: dirfd={}, owner={}, group={}",
+        task.getpid(),
+        dirfd,
+        owner,
+        group
+    );
     let path = {
         if let Some(s) = try_translated_str(&mm, path_ptr) {
             s
@@ -2222,10 +2428,17 @@ pub fn sys_fchownat(dirfd: isize, path_ptr: *const u8, owner: u32, group: u32) -
     } else {
         let files = current_files();
         let inner = files.exclusive_access();
-        if dirfd < 0 || (dirfd as usize) >= inner.fds.len() || inner.fds[dirfd as usize].file.is_none() {
+        if dirfd < 0
+            || (dirfd as usize) >= inner.fds.len()
+            || inner.fds[dirfd as usize].file.is_none()
+        {
             return EBADF.as_isize();
         }
-        if let Some(dentry) = inner.fds[dirfd as usize].file.as_ref().and_then(|f| f.get_dentry()) {
+        if let Some(dentry) = inner.fds[dirfd as usize]
+            .file
+            .as_ref()
+            .and_then(|f| f.get_dentry())
+        {
             dentry
         } else {
             return EBADF.as_isize();
@@ -2235,22 +2448,37 @@ pub fn sys_fchownat(dirfd: isize, path_ptr: *const u8, owner: u32, group: u32) -
         Ok(dentry) => {
             let mut perm = dentry.inode.get_perm();
             // owner/group 参数为 0xffffffff 表示不修改对应项
-            let req_owner = if owner == 0xffffffff { None } else { Some(owner) };
-            let req_group = if group == 0xffffffff { None } else { Some(group) };
-            
+            let req_owner = if owner == 0xffffffff {
+                None
+            } else {
+                Some(owner)
+            };
+            let req_group = if group == 0xffffffff {
+                None
+            } else {
+                Some(group)
+            };
+
             // 鉴权
-            if euid != 0 { // root跳过鉴权
+            if euid != 0 {
+                // root跳过鉴权
                 // 检查是否是所有者
                 if let Some(o) = req_owner {
-                    if o != perm.uid { return super::errno::Errno::EPERM.as_isize(); }
+                    if o != perm.uid {
+                        return super::errno::Errno::EPERM.as_isize();
+                    }
                 }
                 if req_group.is_some() && perm.uid != euid {
                     return EPERM.as_isize();
                 }
             }
 
-            if let Some(o) = req_owner { perm.set_uid(o); }
-            if let Some(g) = req_group { perm.set_gid(g); }
+            if let Some(o) = req_owner {
+                perm.set_uid(o);
+            }
+            if let Some(g) = req_group {
+                perm.set_gid(g);
+            }
 
             if dentry.inode.set_perm(perm) {
                 0
@@ -2258,12 +2486,8 @@ pub fn sys_fchownat(dirfd: isize, path_ptr: *const u8, owner: u32, group: u32) -
                 EACCES.as_isize()
             }
         }
-        Err(1) => {
-            ENOTDIR.as_isize()
-        }
-        Err(_) => {
-            ENOENT.as_isize()
-        }
+        Err(1) => ENOTDIR.as_isize(),
+        Err(_) => ENOENT.as_isize(),
     }
 }
 
@@ -2316,10 +2540,10 @@ bitflags::bitflags! {
         const MFD_HUGETLB       = 0x0004;
         const MFD_NOEXEC_SEAL   = 0x0008;
         const MFD_EXEC          = 0x0010;
-        
+
         // 巨页大页掩码
         const MFD_HUGE_MASK     = 0x3f << 26;
-        
+
         // 常见的巨页大小
         const MFD_HUGE_64KB     = 16 << 26;
         const MFD_HUGE_512KB    = 19 << 26;
@@ -2348,12 +2572,18 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
         if flags.contains(MemfdFlags::MFD_HUGETLB) {
             match flags.intersection(MemfdFlags::MFD_HUGE_MASK) {
                 // 不支持的巨页大小
-                MemfdFlags::MFD_HUGE_64KB | MemfdFlags::MFD_HUGE_512KB | MemfdFlags::MFD_HUGE_1MB | 
-                MemfdFlags::MFD_HUGE_8MB | MemfdFlags::MFD_HUGE_16MB |
-                MemfdFlags::MFD_HUGE_32MB | MemfdFlags::MFD_HUGE_256MB | MemfdFlags::MFD_HUGE_512MB |
-                MemfdFlags::MFD_HUGE_2GB | MemfdFlags::MFD_HUGE_16GB => {
+                MemfdFlags::MFD_HUGE_64KB
+                | MemfdFlags::MFD_HUGE_512KB
+                | MemfdFlags::MFD_HUGE_1MB
+                | MemfdFlags::MFD_HUGE_8MB
+                | MemfdFlags::MFD_HUGE_16MB
+                | MemfdFlags::MFD_HUGE_32MB
+                | MemfdFlags::MFD_HUGE_256MB
+                | MemfdFlags::MFD_HUGE_512MB
+                | MemfdFlags::MFD_HUGE_2GB
+                | MemfdFlags::MFD_HUGE_16GB => {
                     return ENODEV.as_isize(); // 不支持的巨页大小返回没有设备
-                },
+                }
                 MemfdFlags::MFD_HUGE_2MB => PageSize::Page2M,
                 MemfdFlags::MFD_HUGE_1GB => PageSize::Page1G,
                 _ => return EINVAL.as_isize(),
@@ -2382,10 +2612,24 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(),
     };
-    inner.set_fd(fd, file, if flags.contains(MemfdFlags::MFD_CLOEXEC) { FdFlags::CLOEXEC } else { FdFlags::empty() }, 0);
+    inner.set_fd(
+        fd,
+        file,
+        if flags.contains(MemfdFlags::MFD_CLOEXEC) {
+            FdFlags::CLOEXEC
+        } else {
+            FdFlags::empty()
+        },
+        0,
+    );
 
-    trace!("kernel:pid[{}] sys_memfd_create: name='{}', page_size={:?}, fd={}",
-        task.getpid(), name_str, page_size, fd);
+    trace!(
+        "kernel:pid[{}] sys_memfd_create: name='{}', page_size={:?}, fd={}",
+        task.getpid(),
+        name_str,
+        page_size,
+        fd
+    );
     fd as isize
 }
 
@@ -2397,7 +2641,8 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
     const SPLICE_F_NONBLOCK: u32 = 0x02;
     const SPLICE_F_MORE: u32 = 0x04;
     const SPLICE_F_GIFT: u32 = 0x08;
-    const SPLICE_FLAGS_MASK: u32 = SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
+    const SPLICE_FLAGS_MASK: u32 =
+        SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
 
     if (flags & !SPLICE_FLAGS_MASK) != 0 {
         return EINVAL.as_isize();
@@ -2441,8 +2686,9 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
         warn!("vmsplice target fd {} is not a pipe", fd);
         return EBADF.as_isize();
     }
-    if file.writable(){
-        let nonblock = (flags & SPLICE_F_NONBLOCK) != 0 || (fd_status & (O_NONBLOCK | O_NDELAY)) != 0;
+    if file.writable() {
+        let nonblock =
+            (flags & SPLICE_F_NONBLOCK) != 0 || (fd_status & (O_NONBLOCK | O_NDELAY)) != 0;
         let mut total_written = 0usize;
 
         for i in 0..iovcnt {
@@ -2483,7 +2729,8 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
                     total_written as isize
                 };
             }
-            let Some(user_buffer) = translated_user_buffer(&mm, iovec.base as *const u8, iovec.len) else {
+            let Some(user_buffer) = translated_user_buffer(&mm, iovec.base as *const u8, iovec.len)
+            else {
                 return if total_written == 0 {
                     EFAULT.as_isize()
                 } else {
@@ -2531,15 +2778,12 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
             }
         }
         total_written as isize
-    }
-    else{
+    } else {
         if let Some(iov) = try_translated_read(&mm, iov as *const IoVec) {
             let len = iov.len;
-            let Some(user_buffer) = crate::mm::translated_user_buffer_mut(
-                &mm,
-                iov.base as *mut u8,
-                len,
-            ) else {
+            let Some(user_buffer) =
+                crate::mm::translated_user_buffer_mut(&mm, iov.base as *mut u8, len)
+            else {
                 return EFAULT.as_isize();
             };
             file.read(user_buffer) as isize
@@ -2549,13 +2793,24 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> 
     }
 }
 
-pub fn sys_splice(fd_in: usize, off_in: *mut i64, fd_out: usize, off_out: *mut i64, len: usize, flags: u32) -> isize {
-    warn!("fd_in , off_in , fd_out , off_out , len , flags : {} {} {} {} {} {}", fd_in, off_in as usize, fd_out, off_out as usize, len, flags);
+pub fn sys_splice(
+    fd_in: usize,
+    off_in: *mut i64,
+    fd_out: usize,
+    off_out: *mut i64,
+    len: usize,
+    flags: u32,
+) -> isize {
+    warn!(
+        "fd_in , off_in , fd_out , off_out , len , flags : {} {} {} {} {} {}",
+        fd_in, off_in as usize, fd_out, off_out as usize, len, flags
+    );
     const SPLICE_F_MOVE: u32 = 0x01;
     const SPLICE_F_NONBLOCK: u32 = 0x02;
     const SPLICE_F_MORE: u32 = 0x04;
     const SPLICE_F_GIFT: u32 = 0x08;
-    const SPLICE_FLAGS_MASK: u32 = SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
+    const SPLICE_FLAGS_MASK: u32 =
+        SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
     const SPLICE_CHUNK: usize = 64 * 1024;
     //无效的flag
     if (flags & !SPLICE_FLAGS_MASK) != 0 {
@@ -2742,8 +2997,13 @@ pub fn sys_userfaultfd(_flags: i32) -> isize {
         Some(fd) => fd,
         None => return EMFILE.as_isize(),
     };
-        inner.set_fd(fd, Arc::new(UserPageFaultInfo::new((_flags as usize & O_NONBLOCK) != 0)), FdFlags::from_bits_truncate(_flags as usize), 0);
-        fd as isize
+    inner.set_fd(
+        fd,
+        Arc::new(UserPageFaultInfo::new((_flags as usize & O_NONBLOCK) != 0)),
+        FdFlags::from_bits_truncate(_flags as usize),
+        0,
+    );
+    fd as isize
 }
 pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) -> isize {
     let mm = current_user_mm();
@@ -2756,17 +3016,21 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
             return EFAULT.as_isize();
         }
     };
-    let linkpath_str = normalize_leading_dot_path(
-        if let Some(s) = try_translated_str(&mm, linkpath) {
+    let linkpath_str =
+        normalize_leading_dot_path(if let Some(s) = try_translated_str(&mm, linkpath) {
             s
         } else {
             return EFAULT.as_isize();
-        }
-    );
+        });
     if linkpath_str.is_empty() || target_str.is_empty() {
         return ENOENT.as_isize();
     }
-    debug!("kernel:pid[{}] sys_symlinkat: target={}, linkpath={}", task.getpid(), target_str, linkpath_str);
+    debug!(
+        "kernel:pid[{}] sys_symlinkat: target={}, linkpath={}",
+        task.getpid(),
+        target_str,
+        linkpath_str
+    );
 
     // 解析起始目录
     let start_dentry = if linkpath_str.starts_with('/') {
@@ -2818,11 +3082,7 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
         parent_dentry.invalidate_negative_child_locked(&name);
         // 将新创建的 Inode 挂到 VFS 树
         let mut children = parent_dentry.children.lock();
-        let new_dentry = Dentry::new(
-            name.clone(),
-            symlink_inode,
-            Arc::downgrade(&parent_dentry),
-        );
+        let new_dentry = Dentry::new(name.clone(), symlink_inode, Arc::downgrade(&parent_dentry));
         children.insert(name, new_dentry);
         0
     } else {

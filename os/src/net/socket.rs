@@ -215,13 +215,21 @@ impl File for TcpSocket {
         if !sockets.iter().any(|(handle, _)| handle == self.handle) {
             return true;
         }
+        if self.is_listener.load(core::sync::atomic::Ordering::SeqCst) {
+            let mut handles = vec![self.handle];
+            handles.extend(self.backlog_handles.lock().iter().copied());
+            return handles.into_iter().any(|handle| {
+                let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+                matches!(
+                    socket.state(),
+                    State::Established | State::SynReceived | State::CloseWait
+                )
+            });
+        }
         let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
         let state = socket.state();
         if state == smoltcp::socket::tcp::State::Listen {
             return false;
-        }
-        if self.is_listener.load(core::sync::atomic::Ordering::SeqCst) {
-            return true;
         }
         let is_eof = !socket.may_recv()
             || matches!(
@@ -262,15 +270,25 @@ impl File for TcpSocket {
 
     fn poll_wait_queues(&self, interests: u32) -> Vec<Arc<MPSafeCell<WaitQueue>>> {
         let mut queues = Vec::new();
+        let mut handles = vec![self.handle];
+        if self.is_listener.load(core::sync::atomic::Ordering::SeqCst) {
+            handles.extend(self.backlog_handles.lock().iter().copied());
+        }
         if interests & 0x001 != 0 {
-            if let Some(queue) = socket_poll_wait_queue(self.handle, false) {
-                queues.push(queue);
+            for handle in handles.iter().copied() {
+                if let Some(queue) = socket_poll_wait_queue(handle, false) {
+                    if !queues.iter().any(|existing| Arc::ptr_eq(existing, &queue)) {
+                        queues.push(queue);
+                    }
+                }
             }
         }
         if interests & 0x004 != 0 {
-            if let Some(queue) = socket_poll_wait_queue(self.handle, true) {
-                if !queues.iter().any(|existing| Arc::ptr_eq(existing, &queue)) {
-                    queues.push(queue);
+            for handle in handles.iter().copied() {
+                if let Some(queue) = socket_poll_wait_queue(handle, true) {
+                    if !queues.iter().any(|existing| Arc::ptr_eq(existing, &queue)) {
+                        queues.push(queue);
+                    }
                 }
             }
         }
