@@ -5,6 +5,7 @@ pub mod trap;
 pub mod mm;
 pub mod drivers;
 pub mod ipi;
+pub mod cpuinfo;
 
 /// DMA/MMIO 访问的完全内存屏障
 /// 

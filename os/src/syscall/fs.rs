@@ -221,14 +221,9 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let is_sock = file.is_socket();
     let nonblock = (status & (O_NONBLOCK | O_NDELAY)) != 0;
     if !is_sock && !file.writable() {
-        warn!(
-            "pid[{}] [sys_write] EACCES fd={} readable={} writable={}",
-            task.getpid(),
-            fd,
-            file.readable(),
-            file.writable()
-        );
-        return EACCES.as_isize();
+        trace!("pid[{}] [sys_write] EBADF fd={} readable={} writable={}",
+              task.getpid(), fd, file.readable(), file.writable());
+        return EBADF.as_isize();
     }
     if is_sock && !file.writable() {
         if nonblock {
@@ -292,8 +287,9 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
         drop(inner);
         let is_sock = file.is_socket();
         if !is_sock && !file.readable() {
-            println!("EACCES");
-            return EACCES.as_isize();
+            trace!("kernel:pid[{}] sys_read: EBADF fd={} readable={} writable={}",
+                current_task().unwrap().getpid(), fd, file.readable(), file.writable());
+            return EBADF.as_isize();
         }
         if is_sock && !file.readable() {
             if (status & (O_NONBLOCK | O_NDELAY)) != 0 {
@@ -341,6 +337,10 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     }
     let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner);
+
+    if !file.readable() {
+        return EBADF.as_isize();
+    }
 
     let mut total_read = 0;
     //遍历数组
@@ -957,7 +957,7 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     let status = inner.fds[fd].status;
     drop(inner);
     if !file.writable() {
-        return EACCES.as_isize();
+        return EBADF.as_isize();
     }
     if let Some(err) = file.check_write_error() {
         return err.as_isize();
@@ -1797,7 +1797,7 @@ pub fn sys_getdents(fd: usize, dirp: *mut u8, count: usize) -> isize {
         let file = file.clone();
         drop(inner);
         if !file.readable() {
-            return EACCES.as_isize(); // 权限不足
+            return EBADF.as_isize();
         }
         let stat = file.get_stat();
         if (stat.mode & S_IFMT) != 0o040000 {
@@ -2212,7 +2212,7 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, offset: usize) -> isiz
         let file = file.clone();
         drop(inner);
         if !file.readable() {
-            return EACCES.as_isize();
+            return EBADF.as_isize();
         }
         trace!(
             "kernel:pid[{}] sys_pread64: fd={}, count={}, offset={}",
@@ -2243,7 +2243,7 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, count: usize, offset: usize) -> i
         let file = file.clone();
         drop(inner);
         if !file.writable() {
-            return EACCES.as_isize();
+            return EBADF.as_isize();
         }
         trace!(
             "kernel:pid[{}] sys_pwrite64: fd={}, count={}, offset={}",
@@ -2561,6 +2561,7 @@ bitflags::bitflags! {
 }
 
 /// 创建匿名内存文件
+#[cfg(target_arch = "riscv64")]
 pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
     let flags = match MemfdFlags::from_bits(flags) {
         Some(f) => f,
@@ -2631,6 +2632,10 @@ pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
         fd
     );
     fd as isize
+}
+#[cfg(not(target_arch = "riscv64"))]
+pub fn sys_memfd_create(name: *const u8, flags: u32) -> isize {
+    ENOSYS.as_isize() // 龙芯暂时没做大页 TLB 重填
 }
 
 pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: u32) -> isize {

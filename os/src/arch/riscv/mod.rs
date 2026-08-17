@@ -5,3 +5,4 @@ pub mod trap;
 pub mod mm;
 pub mod drivers;
 pub mod ipi;
+pub mod cpuinfo;

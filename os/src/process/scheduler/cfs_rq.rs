@@ -1,12 +1,34 @@
-//! 三级多级反馈队列调度器。
+//! Linux CFS runqueue：按 vruntime 排序的 cached rbtree。
 
+use super::rbtree::RbRootCached;
 use crate::process::TaskControlBlock;
-use alloc::collections::VecDeque;
 use alloc::sync::Arc;
+use core::cmp::Ordering;
 
-const QUEUE_COUNT: usize = 3;
-const BOOST_INTERVAL: usize = 20;
-const TIME_SLICES_MS: [usize; QUEUE_COUNT] = [1, 2, 5];
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CfsKey {
+	/// 实体累计的归一化虚拟运行时间，数值越小越应优先运行。
+	vruntime: u64,
+	/// 入队位次。vruntime 相同时，先入队的实体优先运行。
+	enqueue_order: u64,
+	/// 保证键在 enqueue_order 回绕时仍然唯一。
+	tid: usize,
+}
+
+impl Ord for CfsKey {
+	fn cmp(&self, other: &Self) -> Ordering {
+		self.vruntime
+			.cmp(&other.vruntime)
+			.then_with(|| self.enqueue_order.cmp(&other.enqueue_order))
+			.then_with(|| self.tid.cmp(&other.tid))
+	}
+}
+
+impl PartialOrd for CfsKey {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
+	}
+}
 
 /// 对应 Linux `struct load_weight`。
 pub struct LoadWeight {
@@ -24,14 +46,14 @@ pub struct CfsRq {
 	pub nr_queued: usize,
 	/// 包含调度组层次后的可运行实体数量。
 	pub h_nr_queued: usize,
-	/// 保留的兼容统计字段；MLFQ 不再按虚拟运行时间排序。
+	/// 队列当前最小虚拟运行时间，防止新实体获得不公平优势。
 	pub min_vruntime: u64,
-	/// 三个优先级依次降低的 FIFO 队列。
-	tasks: [VecDeque<Arc<TaskControlBlock>>; QUEUE_COUNT],
+	/// 按 `vruntime`、入队顺序升序排列并缓存最左节点的时间线红黑树。
+	tasks_timeline: RbRootCached<CfsKey, Arc<TaskControlBlock>>,
 	/// 本 CFS 队列累计消耗的实际执行时间。
 	pub exec_clock: u64,
-	/// 距离上一次优先级提升已经取出的任务数。
-	dispatches_since_boost: usize,
+	/// vruntime 相同时保持 FIFO 次序的入队序号。
+	enqueue_order: u64,
 }
 
 impl CfsRq {
@@ -42,89 +64,86 @@ impl CfsRq {
 			nr_queued: 0,
 			h_nr_queued: 0,
 			min_vruntime: 0,
-			tasks: core::array::from_fn(|_| VecDeque::new()),
+			tasks_timeline: RbRootCached::new(),
 			exec_clock: 0,
-			dispatches_since_boost: 0,
+			enqueue_order: 0,
 		}
 	}
 
-	/// 返回指定层级的时间片，越低优先级获得越长时间片。
-	pub fn time_slice_ms(level: usize) -> usize {
-		TIME_SLICES_MS[level.min(QUEUE_COUNT - 1)]
-	}
-
-	/// 按任务当前层级加入对应 FIFO 队尾。
-	pub fn enqueue(&mut self, task: Arc<TaskControlBlock>, _vruntime: u64, weight: u64) {
-		let level = {
-			let mut inner = task.inner_exclusive_access();
-			let level = inner.se.queue_level.min(QUEUE_COUNT - 1);
-			inner.se.queue_level = level;
-			level
+	/// 将任务按虚拟运行时间加入 CFS 时间线，并更新数量和负载统计。
+	pub fn enqueue(&mut self, task: Arc<TaskControlBlock>, vruntime: u64, weight: u64) {
+		// min_vruntime 保持单调不减，以保证任务睡眠唤醒后不会因 vruntime 过小而被长期单独执行
+		let vruntime = vruntime.max(self.min_vruntime);
+		task.inner_exclusive_access().se.vruntime = vruntime;
+		let key = CfsKey {
+			vruntime,
+			enqueue_order: self.enqueue_order,
+			tid: task.gettid(),
 		};
-		self.tasks[level].push_back(task);
+		self.enqueue_order = self.enqueue_order.wrapping_add(1);
+		self.tasks_timeline.insert(key, task);
 		self.nr_queued += 1;
 		self.h_nr_queued += 1;
 		self.load.weight = self.load.weight.saturating_add(weight);
+		let leftmost_vruntime = self.tasks_timeline
+			.first_key()
+			.map(|key| key.vruntime)
+			.unwrap_or(vruntime);
+		self.min_vruntime = self.min_vruntime.max(leftmost_vruntime);
 	}
 
-	/// 从任意层移除指定任务。
-	pub fn dequeue(&mut self, tid: usize, _vruntime: u64, weight: u64) -> Option<Arc<TaskControlBlock>> {
-		let task = self.remove_matching(|task| task.gettid() == tid)?;
-		self.account_dequeue(weight);
-		Some(task)
+	/// 从 CFS 时间线移除指定任务，并回退对应的数量和负载统计。
+	///
+	/// 返回 `None` 表示给定 `(tid, vruntime)` 不在队列中。
+	pub fn dequeue(&mut self, tid: usize, vruntime: u64, weight: u64) -> Option<Arc<TaskControlBlock>> {
+		let task = self.tasks_timeline.remove_where(|task| {
+			let inner = task.inner_exclusive_access();
+			task.gettid() == tid && inner.se.vruntime == vruntime
+		});
+		if task.is_some() {
+			self.nr_queued -= 1;
+			self.h_nr_queued -= 1;
+			self.load.weight = self.load.weight.saturating_sub(weight);
+		}
+		task
 	}
 
-	/// 返回最高优先级非空队列的队首任务，但不执行出队。
+	/// 返回 vruntime 最小的任务，但不将其从红黑树中移除。
 	pub fn pick_next(&self) -> Option<Arc<TaskControlBlock>> {
-		self.tasks.iter().find_map(|queue| queue.front().map(Arc::clone))
+		self.tasks_timeline.first().map(Arc::clone)
 	}
 
-	/// 从最高优先级非空队列取出任务，并记录一次调度。
+	/// 移除并返回 vruntime 最小的任务，供调度和空闲核负载均衡使用。
 	pub fn pop_next(&mut self) -> Option<Arc<TaskControlBlock>> {
-		if self.dispatches_since_boost >= BOOST_INTERVAL {
-			self.boost_bottom_queue();
-			self.dispatches_since_boost = 0;
-		}
-		let task = self.tasks.iter_mut().find_map(VecDeque::pop_front)?;
-		let load_weight = task.inner_exclusive_access().se.load_weight;
-		self.account_dequeue(load_weight);
-		self.dispatches_since_boost += 1;
-		Some(task)
-	}
-
-	/// 按线程 ID 从任意层移除任务。
-	pub fn remove_task(&mut self, tid: usize) -> Option<Arc<TaskControlBlock>> {
-		let task = self.remove_matching(|task| task.gettid() == tid)?;
-		let load_weight = task.inner_exclusive_access().se.load_weight;
-		self.account_dequeue(load_weight);
-		Some(task)
-	}
-
-	/// MLFQ 不依赖虚拟运行时间，保留为空操作以兼容阻塞路径。
-	pub fn advance_min_vruntime(&mut self) {}
-
-	fn boost_bottom_queue(&mut self) {
-		while let Some(task) = self.tasks[QUEUE_COUNT - 1].pop_front() {
-			task.inner_exclusive_access().se.queue_level = 0;
-			self.tasks[0].push_back(task);
-		}
-	}
-
-	fn remove_matching(
-		&mut self,
-		mut predicate: impl FnMut(&Arc<TaskControlBlock>) -> bool,
-	) -> Option<Arc<TaskControlBlock>> {
-		for queue in &mut self.tasks {
-			if let Some(index) = queue.iter().position(&mut predicate) {
-				return queue.remove(index);
-			}
-		}
-		None
-	}
-
-	fn account_dequeue(&mut self, weight: u64) {
+		let task = self.tasks_timeline.pop_first()?;
+		let (load_weight, current_vruntime) = {
+			let inner = task.inner_exclusive_access();
+			(inner.se.load_weight, inner.se.vruntime)
+		};
 		self.nr_queued = self.nr_queued.saturating_sub(1);
 		self.h_nr_queued = self.h_nr_queued.saturating_sub(1);
-		self.load.weight = self.load.weight.saturating_sub(weight);
+		self.load.weight = self.load.weight.saturating_sub(load_weight);
+		let candidate = self.tasks_timeline
+			.first_key()
+			.map(|key| key.vruntime.min(current_vruntime))
+			.unwrap_or(current_vruntime);
+		self.min_vruntime = self.min_vruntime.max(candidate);
+		Some(task)
+	}
+
+	/// 按线程 ID 从 CFS 队列中移除任务。
+	pub fn remove_task(&mut self, tid: usize) -> Option<Arc<TaskControlBlock>> {
+		let task = self.tasks_timeline.remove_where(|task| task.gettid() == tid)?;
+		self.nr_queued = self.nr_queued.saturating_sub(1);
+		self.h_nr_queued = self.h_nr_queued.saturating_sub(1);
+		self.load.weight = self.load.weight.saturating_sub(task.inner_exclusive_access().se.load_weight);
+		Some(task)
+	}
+
+	/// 当前实体阻塞或退出后，以剩余最左实体推进运行队列时钟。
+	pub fn advance_min_vruntime(&mut self) {
+		if let Some(key) = self.tasks_timeline.first_key() {
+			self.min_vruntime = self.min_vruntime.max(key.vruntime);
+		}
 	}
 }

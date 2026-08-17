@@ -4298,7 +4298,7 @@ pub fn sys_ftruncate(fd: usize, len: usize) -> isize {
         );
         // 鉴权
         if !file.writable() {
-            return EACCES.as_isize();
+            return EBADF.as_isize();
         }
         // 调用文件系统的 truncate 方法
         if file.truncate(len) {

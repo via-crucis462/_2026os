@@ -160,24 +160,10 @@ pub fn run_tasks() {
             drop(task_inner);
             processor.current = Some(task);
             drop(processor);
-            let (sched_policy, time_slice_ms) = current_task()
-                .map(|task| {
-                    let mut inner = task.inner_exclusive_access();
-                    let time_slice_ms = if matches!(inner.sched_policy, SCHED_OTHER | SCHED_BATCH | SCHED_IDLE) {
-                        let time_slice_ms = crate::process::scheduler::CfsRq::time_slice_ms(inner.se.queue_level);
-                        inner.se.queue_level = (inner.se.queue_level + 1).min(2);
-                        time_slice_ms
-                    } else {
-                        0
-                    };
-                    (inner.sched_policy, time_slice_ms)
-                })
-                .unwrap_or((SCHED_OTHER, 1));
-            if time_slice_ms == 0 {
-                crate::arch::timer::set_next_trigger(sched_policy);
-            } else {
-                crate::arch::timer::set_next_trigger_ms(time_slice_ms);
-            }
+            let sched_policy = current_task()
+                .map(|task| task.inner_exclusive_access().sched_policy)
+                .unwrap_or(SCHED_OTHER);
+            crate::arch::timer::set_next_trigger(sched_policy);
             #[cfg(target_arch = "riscv64")]
             switch_mm(next_token);
             unsafe {

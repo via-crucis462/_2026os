@@ -1248,7 +1248,7 @@ pub fn sys_sendmsg(fd: usize, msg_ptr: *const MsgHdr, _flags: i32) -> isize {
     let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner);
     if !file.writable() {
-        return crate::syscall::errno::Errno::EACCES.as_isize();
+        return crate::syscall::errno::Errno::EBADF.as_isize();
     }
     let msg = crate::mm::translated_read(&mm, msg_ptr);
     let mut buffers = alloc::vec::Vec::new();
@@ -1281,6 +1281,10 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: *mut MsgHdr, _flags: i32) -> isize {
     }
     let file = inner.fds[fd].file.as_ref().unwrap().clone();
     drop(inner);
+
+    if !file.readable() {
+        return crate::syscall::errno::Errno::EBADF.as_isize();
+    }
 
 
 

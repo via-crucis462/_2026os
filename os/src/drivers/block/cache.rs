@@ -226,6 +226,9 @@ pub struct PageCacheManager {
     meta_count: AtomicUsize,
     /// 数据缓存条目数
     data_count: AtomicUsize,
+    /// 元数据和数据缓存的轮转扫描起点，避免候选长期偏向低物理块号
+    meta_scan_cursor: AtomicU64,
+    data_scan_cursor: AtomicU64,
 }
 
 impl PageCacheManager {
@@ -235,6 +238,8 @@ impl PageCacheManager {
             page_cache_map: RwLock::new(BTreeMap::new()),
             meta_count: AtomicUsize::new(0),
             data_count: AtomicUsize::new(0),
+            meta_scan_cursor: AtomicU64::new(0),//游标，环形替换
+            data_scan_cursor: AtomicU64::new(0),
         }
     }
     /// 获取指定物理块的缓存，如果不存在则创建新的缓存
@@ -294,9 +299,11 @@ impl PageCacheManager {
 
         if !is_data {
             self.meta_count.fetch_add(1, Ordering::Relaxed);
+            /*
             if self.meta_count.load(Ordering::Relaxed) > META_CACHE_SIZE {
                 self.trim_meta_cache();
             }
+            */
         } else {
             self.data_count.fetch_add(1, Ordering::Relaxed);
         }
@@ -310,49 +317,51 @@ impl PageCacheManager {
     fn trim_data_cache(&self) {
         self.trim_cache(DATA_CACHE_SIZE, true);
     }
-    /// 按 last_used 有界扫描淘汰最旧缓存（读锁扫描，逐块写锁淘汰）。
-    /// 只在对应类别超过 limit 时回收到 limit。每次最多淘汰
-    /// TRIM_BATCH 个、扫描 SCAN_LIMIT 项，避免退化成 O(n²)。
+    /// 按 last_used 轮转扫描淘汰最旧缓存。
+    /// 对应类别超过 limit 时最多淘汰一个块，每次扫描 SCAN_LIMIT 项；
+    /// 后续扫描起点固定向前推进 SCAN_LIMIT 个物理块号。
     fn trim_cache(&self, limit: usize, is_data: bool) {
-        const TRIM_BATCH: usize = 64;
-        const SCAN_LIMIT: usize = 4096;
-        for _ in 0..TRIM_BATCH {
-            let count = if is_data {
-                self.data_count.load(Ordering::Relaxed)
-            } else {
-                self.meta_count.load(Ordering::Relaxed)
-            };
-            if count <= limit {
-                return;
-            }
+        const SCAN_LIMIT: usize = 64;
+        let count = if is_data {
+            self.data_count.load(Ordering::Relaxed)
+        } else {
+            self.meta_count.load(Ordering::Relaxed)
+        };
+        if count <= limit {
+            return;
+        }
 
-            let victim = {
-                let map = self.page_cache_map.read();
-                let mut scanned = 0usize;
-                let mut oldest: Option<(u64, u64)> = None;
-                for (&bid, c) in map.iter() {
-                    if c.is_data != is_data {
-                        continue;
-                    }
-                    scanned += 1;
-                    let lu = c.last_used.load(Ordering::Relaxed);
-                    if oldest.map_or(true, |(olu, _)| lu < olu) {
-                        oldest = Some((lu, bid));
-                    }
-                    if scanned >= SCAN_LIMIT {
-                        break;
-                    }
-                }
-                if scanned == 0 {
-                    return;
-                }
-                oldest.map(|(_, bid)| bid)
-            };
-            let Some(block_id) = victim else {
-                return;
-            };
-            if !self.try_evict(block_id) {
-                return;
+        use core::ops::Bound;
+
+        let scan_cursor = if is_data {
+            &self.data_scan_cursor
+        } else {
+            &self.meta_scan_cursor
+        };
+        let scan_start = scan_cursor.load(Ordering::Relaxed);
+        let mut candidates: Vec<(u64, u64)> = {
+            let map = self.page_cache_map.read();
+            map.range((Bound::Included(scan_start), Bound::Unbounded))
+                .chain(map.range((Bound::Unbounded, Bound::Excluded(scan_start))))
+                .filter(|(_, cache)| cache.is_data == is_data)
+                .take(SCAN_LIMIT)
+                .map(|(&block_id, cache)| {
+                    (
+                        cache.last_used.load(Ordering::Relaxed),
+                        block_id,
+                    )
+                })
+                .collect()
+        };
+        scan_cursor.store(
+            scan_start.wrapping_add(SCAN_LIMIT as u64),
+            Ordering::Relaxed,
+        );
+        candidates.sort_unstable();
+
+        for (_, block_id) in candidates {
+            if self.try_evict(block_id) {
+                break;
             }
         }
     }
