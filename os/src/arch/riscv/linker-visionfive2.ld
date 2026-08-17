@@ -1,6 +1,7 @@
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
-BASE_ADDRESS = 0x40200000;
+KERNEL_PHYS_LOAD = 0x40200000;
+BASE_ADDRESS = 0xffffffc040200000;
 
 SECTIONS
 {
@@ -8,7 +9,7 @@ SECTIONS
     skernel = .;
 
     stext = .;
-    .text : {
+    .text : AT(KERNEL_PHYS_LOAD) {
         *(.text.entry)
         . = ALIGN(4K);
         strampoline = .;

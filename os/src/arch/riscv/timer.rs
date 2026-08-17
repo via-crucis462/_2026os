@@ -52,7 +52,11 @@ pub fn get_real_time_ns() -> u64 {
 
     #[inline]
     fn read_reg(offset: usize) -> u32 {
-        unsafe { read_volatile((crate::arch::config::RTC_BASE + offset) as *const u32) }
+        unsafe {
+            read_volatile(
+                ((crate::arch::config::RTC_BASE + offset) | UNCACHED_KERNEL_BASE) as *const u32,
+            )
+        }
     }
 
     #[inline]

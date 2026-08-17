@@ -254,22 +254,29 @@ impl Jh7110DwMac {
 
     #[inline]
     fn read_reg(&self, offset: usize) -> u32 {
-        unsafe { read_volatile((self.base + offset) as *const u32) }
+        Self::read_mmio(self.base + offset)
     }
 
     #[inline]
     fn write_reg(&self, offset: usize, value: u32) {
-        unsafe { write_volatile((self.base + offset) as *mut u32, value) }
+        Self::write_mmio(self.base + offset, value)
     }
 
     #[inline]
     fn read_mmio(address: usize) -> u32 {
-        unsafe { read_volatile(address as *const u32) }
+        unsafe {
+            read_volatile((address | crate::arch::config::UNCACHED_KERNEL_BASE) as *const u32)
+        }
     }
 
     #[inline]
     fn write_mmio(address: usize, value: u32) {
-        unsafe { write_volatile(address as *mut u32, value) }
+        unsafe {
+            write_volatile(
+                (address | crate::arch::config::UNCACHED_KERNEL_BASE) as *mut u32,
+                value,
+            )
+        }
     }
 
     #[inline]
@@ -319,7 +326,8 @@ impl Jh7110DwMac {
 
         for index in 0..RING_SIZE {
             (*tx_ring)[index] = DmaDesc::ZERO;
-            let buffer_address = core::ptr::addr_of_mut!((*rx_buffers)[index]) as usize as u64;
+            let buffer_address =
+                dma_physical(core::ptr::addr_of_mut!((*rx_buffers)[index]) as usize) as u64;
             (*rx_ring)[index] = DmaDesc {
                 des0: buffer_address as u32,
                 des1: (buffer_address >> 32) as u32,
@@ -329,8 +337,8 @@ impl Jh7110DwMac {
         }
         Self::dma_sync();
 
-        let tx_address = tx_ring as usize as u64;
-        let rx_address = rx_ring as usize as u64;
+        let tx_address = dma_physical(tx_ring as usize) as u64;
+        let rx_address = dma_physical(rx_ring as usize) as u64;
         self.write_reg(DMA_CH0_TXDESC_LIST_HI, (tx_address >> 32) as u32);
         self.write_reg(DMA_CH0_TXDESC_LIST, tx_address as u32);
         self.write_reg(DMA_CH0_RXDESC_LIST_HI, (rx_address >> 32) as u32);
@@ -417,7 +425,7 @@ impl Jh7110DwMac {
         let marker = b"SHELLCORE-DWMAC-TEST";
         buffer[14..14 + marker.len()].copy_from_slice(marker);
         let length = 64usize;
-        let buffer_address = buffer.as_mut_ptr() as usize as u64;
+        let buffer_address = dma_physical(buffer.as_mut_ptr() as usize) as u64;
         let tx_ring = core::ptr::addr_of_mut!(TX_RING.0);
         (*tx_ring)[0] = DmaDesc {
             des0: buffer_address as u32,
@@ -720,7 +728,7 @@ impl DwMacDevice {
             let buffers = core::ptr::addr_of_mut!(TX_BUFFERS.0);
             let buffer = &mut (*buffers)[index];
             buffer[..frame.len()].copy_from_slice(frame);
-            let address = buffer.as_mut_ptr() as usize as u64;
+            let address = dma_physical(buffer.as_mut_ptr() as usize) as u64;
             let ring = core::ptr::addr_of_mut!(TX_RING.0);
             (*ring)[index] = DmaDesc {
                 des0: address as u32,
@@ -786,7 +794,8 @@ impl DwMacDevice {
     unsafe fn recycle_rx(&mut self, index: usize) {
         let ring = core::ptr::addr_of_mut!(RX_RING.0);
         let buffers = core::ptr::addr_of_mut!(RX_BUFFERS.0);
-        let address = core::ptr::addr_of_mut!((*buffers)[index]) as usize as u64;
+        let address =
+            dma_physical(core::ptr::addr_of_mut!((*buffers)[index]) as usize) as u64;
         (*ring)[index] = DmaDesc {
             des0: address as u32,
             des1: (address >> 32) as u32,
@@ -801,9 +810,14 @@ impl DwMacDevice {
 }
 
 fn tx_ring_address() -> usize {
-    unsafe { core::ptr::addr_of!(TX_RING.0) as usize }
+    unsafe { dma_physical(core::ptr::addr_of!(TX_RING.0) as usize) }
 }
 
 fn rx_ring_address() -> usize {
-    unsafe { core::ptr::addr_of!(RX_RING.0) as usize }
+    unsafe { dma_physical(core::ptr::addr_of!(RX_RING.0) as usize) }
+}
+
+#[inline]
+fn dma_physical(address: usize) -> usize {
+    address & !crate::arch::config::CACHED_KERNEL_BASE
 }

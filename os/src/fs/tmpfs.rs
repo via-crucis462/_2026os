@@ -635,6 +635,9 @@ fn setup_preliminary_compat_env(root: &Arc<Dentry>) {
         Arc::new(TmpfsFileInode::new_with_data(group_content.as_bytes())),
     );
 
+    #[cfg(board = "visionfive2")]
+    let resolv_conf_content = "nameserver 1.1.1.1\noptions timeout:2 attempts:2\n";
+    #[cfg(not(board = "visionfive2"))]
     let resolv_conf_content = "nameserver 10.0.2.3\noptions timeout:2 attempts:2\n";
     mount_if_missing(
         &etc_dentry,
@@ -643,6 +646,9 @@ fn setup_preliminary_compat_env(root: &Arc<Dentry>) {
             resolv_conf_content.as_bytes(),
         )),
     );
+    #[cfg(board = "visionfive2")]
+    let hosts_content = "127.0.0.1 localhost\n192.168.1.101 shellcore\n";
+    #[cfg(not(board = "visionfive2"))]
     let hosts_content = "127.0.0.1 localhost\n10.0.2.15 shellcore\n";
     mount_if_missing(
         &etc_dentry,

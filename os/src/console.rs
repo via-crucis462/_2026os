@@ -3,8 +3,8 @@ use crate::arch::sbi::{console_getchar, console_putchar};
 use crate::sync::{MPSafeCell, WaitQueue};
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use lazy_static::*;
 
@@ -26,10 +26,10 @@ pub fn console_input_wait_queue() -> Arc<MPSafeCell<WaitQueue>> {
 
 // ---------- 终端行规程（tty line discipline）----------
 // 标志位与 Linux asm-generic/termbits.h 保持一致
-pub const ICRNL: u32 = 0o000400;  // c_iflag：把回车(CR)转换为换行(NL)
-pub const ISIG: u32 = 0o000001;   // c_lflag：允许终端产生信号(如 Ctrl-C)
+pub const ICRNL: u32 = 0o000400; // c_iflag：把回车(CR)转换为换行(NL)
+pub const ISIG: u32 = 0o000001; // c_lflag：允许终端产生信号(如 Ctrl-C)
 pub const ICANON: u32 = 0o000002; // c_lflag：规范模式（行缓冲）
-pub const ECHO: u32 = 0o000010;   // c_lflag：回显输入字符
+pub const ECHO: u32 = 0o000010; // c_lflag：回显输入字符
 
 #[derive(Clone, Copy)]
 pub struct ConsoleTermios {
@@ -47,7 +47,10 @@ lazy_static! {
         c_iflag: 0o012402,
         c_oflag: 0o000005,
         c_cflag: 0o002277,
-        c_lflag: 0o0105011, // 默认包含 ISIG|ICANON|ECHO 等
+        //c_lflag: 0o0105011, // 默认包含 ISIG|ICANON|ECHO 等
+        // 默认保留 ISIG/ICANON，但关闭 ECHO，避免 BusyBox ash 的行编辑
+        // 输出与内核回显叠加。用户态仍可通过 TCSETS 重新开启 ECHO。
+        c_lflag: 0o0105001,
         c_line: 0,
         c_cc: {
             let mut cc = [0u8; 19];
@@ -83,15 +86,14 @@ pub fn tty_send_sigint() {
         return;
     }
 
-    let tasks: alloc::vec::Vec<Arc<TaskControlBlock>> = TID2TCB
-        .exclusive_access()
-        .values()
-        .cloned()
-        .collect();
+    let tasks: alloc::vec::Vec<Arc<TaskControlBlock>> =
+        TID2TCB.exclusive_access().values().cloned().collect();
     let mut targets = BTreeMap::<usize, Arc<TaskControlBlock>>::new();
     for task in &tasks {
         if task.inner_exclusive_access().pgid == target_pgid {
-            targets.entry(task.gettgid()).or_insert_with(|| task.clone());
+            targets
+                .entry(task.gettgid())
+                .or_insert_with(|| task.clone());
         }
     }
 

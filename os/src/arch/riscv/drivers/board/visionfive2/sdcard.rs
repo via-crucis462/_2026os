@@ -1,7 +1,7 @@
 use crate::ext4fs::*;
 use core::hint::spin_loop;
 use core::ptr::{read_volatile, write_volatile};
-const SDIO1_BASE: usize = 0x1602_0000;
+const SDIO1_BASE: usize = 0x1602_0000 | crate::arch::config::UNCACHED_KERNEL_BASE;
 
 const CTRL: usize = 0x000;
 const PWREN: usize = 0x004;

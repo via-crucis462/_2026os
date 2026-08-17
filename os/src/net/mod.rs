@@ -180,11 +180,24 @@ lazy_static! {
         let mut device = SmoltcpDevice::new(NET_DEVICE.as_ref());
         let mut iface = Interface::new(config, &mut device, Instant::from_millis(0));
 
-        let ip_addr = IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24);
+
+        #[cfg(board = "visionfive2")]
+        let (ip_addr, gateway) = (
+            IpCidr::new(IpAddress::v4(192, 168, 1, 101), 24),
+            Ipv4Address::new(192, 168, 1, 100),
+        );
+        #[cfg(not(board = "visionfive2"))]
+        let (ip_addr, gateway) = (
+            IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24),
+            Ipv4Address::new(10, 0, 2, 2),
+        );
         iface.update_ip_addrs(|ip_addrs| {
             ip_addrs.push(ip_addr).unwrap();
         });
-        iface.routes_mut().add_default_ipv4_route(Ipv4Address::new(10, 0, 2, 2)).unwrap();
+        iface
+            .routes_mut()
+            .add_default_ipv4_route(gateway)
+            .unwrap();
         MPSafeCell::new(iface)
     };
 }
