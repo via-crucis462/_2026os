@@ -34,3 +34,13 @@ BOARD=virt INIT=sh make gdb-rv
 /musl/busybox ping -c 2 1.1.1.1
 /musl/busybox nslookup example.com 10.0.2.3
 make -n test-rv RV_IMAGE=alpine-linux-riscv64-ext4fs.img INIT=sh
+
+
+
+// 
+sudo dd if=alpine-linux-riscv64-ext4fs.img of=/dev/sdb bs=4M status=progress conv=fsync
+pv alpine-linux-riscv64-ext4fs.img | sudo dd of=/dev/sdb bs=4M conv=fsync
+sync
+pv sdcard.img.xz | xz -d > sdcard.img
+pv final.tar.gz | tar -xz --overwrite
+

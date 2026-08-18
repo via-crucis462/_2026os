@@ -51,13 +51,10 @@ build: build-rv build-la
 build-rv:
 	cd os && $(MAKE) build MODE=$(MODE) LOG=$(LOG) INIT=$(INIT) BOARD=$(BOARD)
 ifeq ($(BOARD),visionfive2)
-	@echo "  -> Packing uImage for VisionFive2..."
 	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv-$(BOARD)
-	python3 boot/build_uimage_rv.py kernel-rv-$(BOARD) kernel-rv-$(BOARD).uImage
 	@echo "  -> Making binary for VisionFive2..."
 	rust-objcopy -O binary kernel-rv-$(BOARD) kernel-rv-$(BOARD).bin
 	mkdir -p $(TFTP_ROOT) && cp -f kernel-rv-$(BOARD).bin $(TFTP_ROOT)
-	mkdir -p $(TFTP_ROOT) && cp -f kernel-rv-$(BOARD).uImage $(TFTP_ROOT)
 	sudo ip link set enp3s0 up
 	sudo ip addr replace 192.168.1.100/24 dev enp3s0
 endif
@@ -84,8 +81,6 @@ copy-rv:
 	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv
 ifeq ($(BOARD),visionfive2)
 	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv-$(BOARD)
-	@echo "  -> Packing uImage for VisionFive2..."
-	python3 boot/build_uimage_rv.py kernel-rv-$(BOARD) kernel-rv-$(BOARD).uImage
 	@echo "  -> Making binary for VisionFive2..."
 	rust-objcopy -O binary kernel-rv-$(BOARD) kernel-rv-$(BOARD).bin
 endif
