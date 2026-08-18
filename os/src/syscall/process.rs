@@ -5063,9 +5063,14 @@ pub fn sys_clock_settime(which_clock: i32, tp: *const TimeSpec) -> isize {
     let requested_ns = (timespec.tv_sec as i128)
         .saturating_mul(1_000_000_000)
         .saturating_add(timespec.tv_nsec as i128);
+
+    #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+    if !crate::arch::timer::set_real_time_ns(requested_ns as u64) {
+        warn!("2K1000 RTC write timed out; keeping the new time in software");
+    }
+
     let base_ns = get_real_time_ns() as i128;
     let offset_ns = requested_ns.saturating_sub(base_ns);
-    let offset_ns = offset_ns.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
 
     *CLOCK_REALTIME_OFFSET_NS.lock() = offset_ns;
 

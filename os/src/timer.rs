@@ -92,7 +92,9 @@ lazy_static! {
     /// 软件时钟校准层共享使用的 `clock_adjtime` 状态。
     pub static ref CLOCK_ADJ_STATE: Mutex<ClockAdjState> = Mutex::new(ClockAdjState::default());
     /// 叠加在平台 realtime 时钟之上的软件偏移量，单位为纳秒。
-    pub static ref CLOCK_REALTIME_OFFSET_NS: Mutex<i64> = Mutex::new(0);
+    // Keep the offset wider than the userspace timespec range. A corrupt RTC
+    // can be more than i64::MAX nanoseconds away from the requested time.
+    pub static ref CLOCK_REALTIME_OFFSET_NS: Mutex<i128> = Mutex::new(0);
 }
 
 /// Read the user-visible realtime clock.
@@ -101,8 +103,7 @@ lazy_static! {
 /// RISC-V `virt` must keep using the Goldfish RTC instead of taking one RTC
 /// snapshot and advancing it with the architectural timer counter.
 pub fn current_realtime_ns() -> i64 {
-    let ns = (get_real_time_ns() as i128)
-        .saturating_add(*CLOCK_REALTIME_OFFSET_NS.lock() as i128);
+    let ns = (get_real_time_ns() as i128).saturating_add(*CLOCK_REALTIME_OFFSET_NS.lock());
     ns.clamp(0, i64::MAX as i128) as i64
 }
 

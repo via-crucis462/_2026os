@@ -5,6 +5,8 @@ pub use crate::timer::*;
 use crate::arch::config::UNCACHED_KERNEL_BASE;
 use crate::process::scheduler::runqueue::{SCHED_BATCH, SCHED_FIFO, SCHED_IDLE, SCHED_RR};
 use core::arch::asm;
+#[cfg(board = "2k1000")]
+use core::hint::spin_loop;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const DEFAULT_TIME_SLICE_MS: usize = 200;
@@ -19,16 +21,27 @@ const NSEC_PER_SEC: u64 = 1_000_000_000;
 const DEFAULT_TIMER_FREQUENCY: usize = crate::arch::config::CLOCK_FREQ;
 
 /// QEMU loongarch virt 平台上的 LS7A RTC 物理基地址。
-const LS7A_RTC_REG_BASE_PHYS: usize = 0x100D_0100;
+#[cfg(board = "virt")]
+const RTC_REG_BASE_PHYS: usize = 0x100D_0100;
+/// 2K1000 APB Device 2 BAR0 (0x1fe2_0000) 内的 RTC 子块。
+#[cfg(board = "2k1000")]
+const RTC_REG_BASE_PHYS: usize = 0x1FE2_7800;
 /// LoongArch 内核通过 uncached 直映窗口访问 MMIO。
-const LS7A_RTC_REG_BASE: usize = UNCACHED_KERNEL_BASE | LS7A_RTC_REG_BASE_PHYS;
+const RTC_REG_BASE: usize = UNCACHED_KERNEL_BASE | RTC_REG_BASE_PHYS;
 
 const SYS_TOYREAD0: usize = 0x2C;
 const SYS_TOYREAD1: usize = 0x30;
 const SYS_RTCCTRL: usize = 0x40;
 
+#[cfg(board = "2k1000")]
+const SYS_TOYWRITE0: usize = 0x24;
+#[cfg(board = "2k1000")]
+const SYS_TOYWRITE1: usize = 0x28;
+
 const RTC_CTRL_EO: u32 = 1 << 8;
 const RTC_CTRL_TOYEN: u32 = 1 << 11;
+#[cfg(board = "2k1000")]
+const RTC_CTRL_TOY_WRITE_BUSY: u32 = 1;
 static TIMER_FREQUENCY: AtomicUsize = AtomicUsize::new(0);
 
 fn timer_frequency() -> usize {
@@ -116,11 +129,11 @@ pub fn get_time_us() -> usize {
 }
 
 fn rtc_read_u32(offset: usize) -> u32 {
-    unsafe { core::ptr::read_volatile((LS7A_RTC_REG_BASE + offset) as *const u32) }
+    unsafe { core::ptr::read_volatile((RTC_REG_BASE + offset) as *const u32) }
 }
 
 fn rtc_write_u32(offset: usize, value: u32) {
-    unsafe { core::ptr::write_volatile((LS7A_RTC_REG_BASE + offset) as *mut u32, value) }
+    unsafe { core::ptr::write_volatile((RTC_REG_BASE + offset) as *mut u32, value) }
 }
 
 fn ensure_toy_enabled() {
@@ -140,6 +153,68 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
+}
+
+#[cfg(board = "2k1000")]
+fn civil_from_days(days: u64) -> (i64, u32, u32) {
+    let days = days as i64 + 719_468;
+    let era = days / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096)
+            / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += if month <= 2 { 1 } else { 0 };
+    (year, month as u32, day as u32)
+}
+
+#[cfg(board = "2k1000")]
+fn wait_toy_write_idle() -> bool {
+    let start = get_time_ms();
+    while rtc_read_u32(SYS_RTCCTRL) & RTC_CTRL_TOY_WRITE_BUSY != 0 {
+        if get_time_ms().saturating_sub(start) >= 100 {
+            return false;
+        }
+        spin_loop();
+    }
+    true
+}
+
+/// Set the battery-backed 2K1000 TOY clock from a Unix timestamp.
+#[cfg(board = "2k1000")]
+pub fn set_real_time_ns(unix_ns: u64) -> bool {
+    let unix_seconds = unix_ns / NSEC_PER_SEC;
+    let (year, month, day) = civil_from_days(unix_seconds / 86_400);
+    if !(1900..=18_283).contains(&year) {
+        return false;
+    }
+
+    let seconds_of_day = unix_seconds % 86_400;
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    let decisecond = (unix_ns % NSEC_PER_SEC) / 100_000_000;
+    let toy0 = (month << 26)
+        | (day << 21)
+        | ((hour as u32) << 16)
+        | ((minute as u32) << 10)
+        | ((second as u32) << 4)
+        | decisecond as u32;
+
+    ensure_toy_enabled();
+    if !wait_toy_write_idle() {
+        return false;
+    }
+    rtc_write_u32(SYS_TOYWRITE1, (year - 1900) as u32);
+    if !wait_toy_write_idle() {
+        return false;
+    }
+    rtc_write_u32(SYS_TOYWRITE0, toy0);
+    wait_toy_write_idle()
 }
 
 pub fn get_real_time_ns() -> u64 {
