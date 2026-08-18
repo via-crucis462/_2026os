@@ -1,6 +1,6 @@
 //! 参考 linux 的实现，将内核链接到高半地址空间，在启动阶段构造临时页表
 //! 
-//! 临时页表采用 1GB 大页映射 16G RAM 两次（分别为恒等和带窗口），32 个页表项
+//! 临时页表采用 1GB 大页映射物理地址 [2GiB, 256GiB)，分别建立恒等和带窗口映射
 
     .equ BOOT_STACK_SHIFT, 16
     .equ BOOT_HARTS, 8
@@ -10,8 +10,8 @@
 
     // RAM 物理起点
     .equ EARLY_PHYS_BASE, 0x80000000
-    // RAM 大小
-    .equ EARLY_NUM_GIB, 16 // 16 个 1GB 页表项
+    // Sv39 的低半和高半窗口各有 256 个根页表项；前两个低半项位于 RAM 起点之前。
+    .equ EARLY_NUM_GIB, 254
     // 早期 1GB 叶 PTE 标志：V|R|W|X|A|D
     .equ EARLY_PTE_FLAGS, 0xcf
 
@@ -34,7 +34,7 @@ _start:
     li   t6, EARLY_PTE_FLAGS
 1:
     // 0x8000_0000 = [2] * 2^30
-    // 16G RAM 对应索引范围 [2,17)，即循环 16 次
+    // RAM 对应索引范围 [2,256)，高半窗口对应 [258,512)。
     // 高半地址空间需要加上 KERNEL_WINDOW_BASE = [256] * 2^30
 
     // 构造 PTE
@@ -52,7 +52,7 @@ _start:
     li   t2, 0x40000000
     add  t3, t3, t2
     addi t5, t5, -1
-    bnez t5, 1b // 执行 16 次后 16 被减为0
+    bnez t5, 1b
                 // b 表示向后搜索最近的标签
 
     li   t2, BOOT_WINDOW

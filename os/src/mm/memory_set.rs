@@ -8,7 +8,7 @@ use super::{StepByOne, VPNRange};
 use crate::arch::config::*;
 use crate::fs::File;
 use crate::mm::PageSize::Page4K;
-use crate::mm::{get_free_frames, mmap, UserBuffer, UserBufferSegment};
+use crate::mm::{boot_memory, get_free_frames, mmap, UserBuffer, UserBufferSegment};
 use crate::process::signal::frame;
 use crate::syscall::errno::Errno;
 use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -1030,18 +1030,21 @@ impl MemorySet {
         {
             info!("mapping memory for devices");
 
-            let ekernel_addr = ekernel as *const () as usize;
+            let memory = boot_memory();
+            // DMA 区间在布局中保存为物理地址，加入内核空间前抬入缓存窗口。
+            let dma_start = memory.dma_start | CACHED_KERNEL_BASE;
+            let dma_end = memory.dma_end | CACHED_KERNEL_BASE;
 
             memory_set.push(
                 MapArea::new(
-                    ekernel_addr.into(),
-                    (ekernel_addr + DMA_SIZE).into(),
+                    dma_start.into(),
+                    dma_end.into(),
                     MapType::Identical,
                     MapPermission::R | MapPermission::W,
                     PageSize::Page4K,
                 ),
                 None,
-                ekernel_addr,
+                dma_start,
             );
 
             info!("mapping physical memory");
@@ -1063,14 +1066,15 @@ impl MemorySet {
         {
             info!("mapping physical memory");
 
-            // Windowed 的 VA = CACHED_KERNEL_BASE + PA：起点直接是 ekernel（已在窗口内），
-            // 终点需要把物理 MEMORY_END 抬进窗口，否则 VPNRange 起点大于终点会 panic。
+            // Windowed VA = CACHED_KERNEL_BASE + PA。映射上界来自启动内存布局
+            //（virt 上由 DTB 决定），不再使用编译期常量。
             let start = ekernel as *const () as usize;
+            let end = boot_memory().memory_end | CACHED_KERNEL_BASE;
 
             memory_set.push(
                 MapArea::new(
                     start.into(),
-                    (MEMORY_END | CACHED_KERNEL_BASE).into(),
+                    end.into(),
                     MapType::Windowed,
                     MapPermission::R | MapPermission::W,
                     PageSize::Page2M,

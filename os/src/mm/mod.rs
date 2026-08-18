@@ -8,6 +8,8 @@
 
 mod frame_allocator;
 pub use frame_allocator::get_free_frames;
+mod boot_memory;
+pub use boot_memory::{boot_memory, memory_size};
 mod heap_allocator;
 mod id;
 mod memory_set;
@@ -42,8 +44,9 @@ pub use memory_set::{MapArea, MapType, VersionedArea};
 pub use page_table::*;
 pub use user_buffer::{UserBuffer, UserBufferSegment};
 
-/// initiate heap allocator, frame allocator and kernel space
-pub fn init() {
+/// 依次确定启动内存布局，并初始化堆、页帧分配器和内核地址空间。
+pub fn init(boot_info: usize) {
+    boot_memory::init(boot_info);
     heap_allocator::init_heap();
     frame_allocator::init_frame_allocator();
     #[cfg(target_arch = "riscv64")]

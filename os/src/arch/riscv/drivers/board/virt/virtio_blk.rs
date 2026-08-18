@@ -1,6 +1,6 @@
 use core::ptr::NonNull;
 
-use crate::{ MEMORY_END, MMIO_SLOT_SIZE, UNCACHED_KERNEL_BASE};
+use crate::{MMIO_SLOT_SIZE, UNCACHED_KERNEL_BASE};
 use crate::mm::{KERNEL_SPACE, PhysAddr, VirtAddr};
 use crate::drivers::dma::DMA_MEMORY;
 use crate::sync::MPSafeCell;
@@ -86,11 +86,13 @@ unsafe impl Hal for VirtioHal {
 
     unsafe fn share(buffer: NonNull<[u8]>, _direction: BufferDirection) -> VirtioPhysAddr {
         let vaddr = buffer.as_ptr() as *mut u8 as usize;
+        // 直接映射区间的上界来自 DTB；不能再假设 QEMU 固定提供 16 GiB。
+        let memory = crate::mm::boot_memory();
 
-        if vaddr >= 0x8000_0000 | UNCACHED_KERNEL_BASE
+        if vaddr >= (memory.memory_start | UNCACHED_KERNEL_BASE)
             && vaddr
                 .checked_add(buffer.len())
-                .is_some_and(|end| end <= MEMORY_END | UNCACHED_KERNEL_BASE)
+                .is_some_and(|end| end <= (memory.memory_end | UNCACHED_KERNEL_BASE))
         {
             // VirtIO queue addresses are physical.  The buffer is directly
             // mapped in the high-half kernel window, so do not give the device

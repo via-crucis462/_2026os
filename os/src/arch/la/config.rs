@@ -20,9 +20,6 @@ pub const PAGE_SIZE_BITS: usize = 12;
 pub const USER_STACK_SIZE: usize = 0x8000_0000; // 2 GiB
 /// kernel stack size
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 32;
-/// kernel heap size
-pub const KERNEL_HEAP_SIZE: usize = 0x6000_0000; // 1.5GiB
-
 /// the virtual addr of trampoline
 /// 由于映射窗口的存在，trampoline的地址不需要设置在高位了，直接放在内核空间的末尾就行
 /// pub const TRAMPOLINE: usize = (1 << 39) - PAGE_SIZE;
@@ -50,12 +47,11 @@ pub const UART_PHYS: usize = 0x1fe20000;
 pub const LOWRAM_BASE: usize = BANK0_START_EFFECTIVE;
 pub const LOWRAM_END: usize = BANK0_END_EFFECTIVE;
 /// 内核和用户帧分配使用
-/// 主要内存起始地址, 注意linker.ld需要与此同步
+/// 物理板仍使用板级内存表；QEMU virt 的主内存区间在启动时从设备树发现。
+#[cfg(not(board = "virt"))]
 pub const MEMORY_BASE: usize = BANK1_START_EFFECTIVE;
-/// the physical memory end
+#[cfg(not(board = "virt"))]
 pub const MEMORY_END: usize = BANK1_END_EFFECTIVE;
-/// 可用主内存大小
-pub const MEMORY_SIZE: usize = BANK1_END_EFFECTIVE - BANK1_START_EFFECTIVE;
 
 /// PCI 配置空间 / MMIO 相关常量已移至 arch/la/mm/info/{lavirt,la2k1000}.rs
 /// 经由 pub use super::mm::info::* 按板级条件编译引入

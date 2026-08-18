@@ -941,7 +941,8 @@ impl VfsInode for MemInfoInode {
    fn raw_read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
         let free_frames = get_free_frames(); 
         let free_kb = free_frames * 4;
-        let total_kb = crate::arch::config::MEMORY_SIZE / 1024;
+        // 总内存使用设备树发现的运行期值，而不是构建时的 QEMU 参数假设。
+        let total_kb = crate::mm::memory_size() / 1024;
         let mut local_buf = [0u8; 128];
         let mut writer = StackBuffer { buf: &mut local_buf, len: 0 };
         let _ = write!(

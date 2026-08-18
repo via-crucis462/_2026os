@@ -1,7 +1,9 @@
 use super::{PageSize, PhysAddr, PhysPageNum};
 #[allow(unused)]
-use crate::arch::config::{CACHED_KERNEL_BASE, DMA_SIZE, MEMORY_END};
-use crate::{mm::mmap::free_up_mem_space, sync::MPSafeCell};
+use crate::{
+    mm::{boot_memory, mmap::free_up_mem_space},
+    sync::MPSafeCell,
+};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -222,23 +224,12 @@ lazy_static! {
         MPSafeCell::new(BTreeMap::new());
     */
 }
-/// initiate the frame allocator using `ekernel` and `MEMORY_END`
+/// 使用运行期堆之后剩余的物理区间初始化页帧分配器。
 pub fn init_frame_allocator() {
-    extern "C" {
-        fn ekernel();
-    }
-    // 为DMA预留空间
-    // ekernel 是链接出的高半窗口 VA，帧分配器需要物理地址
-    let frame_start = (ekernel as *const () as usize & !CACHED_KERNEL_BASE) + DMA_SIZE;
-
-    #[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
-    let frame_end = crate::arch::config::FRAME_ALLOC_END;
-    #[cfg(not(all(target_arch = "riscv64", board = "visionfive2")))]
-    let frame_end = MEMORY_END;
-    
+    let memory = boot_memory();
     FRAME_ALLOCATOR.exclusive_access().init(
-        PhysAddr::from(frame_start).std_ceil(),
-        PhysAddr::from(frame_end).std_floor(),
+        PhysAddr::from(memory.frame_start).std_ceil(),
+        PhysAddr::from(memory.frame_end).std_floor(),
     );
 }
 

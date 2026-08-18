@@ -104,8 +104,8 @@ extern "C" {
 }
 
 #[no_mangle]
-/// the rust entry-point of os
-pub fn rust_main(hart_id: usize) -> ! {
+/// 内核 Rust 入口。boot_info 在 RISC-V 上是 DTB 地址，在 LoongArch 上是 EFI 表地址。
+pub fn rust_main(hart_id: usize, boot_info: usize) -> ! {
     let is_main_hart = MAIN_HART_INITED.compare_exchange(
         false,
         true,
@@ -119,7 +119,7 @@ pub fn rust_main(hart_id: usize) -> ! {
         clear_bss();
         logging::init();
         info!("[kernel] Hello, world!");
-        main_init(hart_id);
+        main_init(hart_id, boot_info);
         panic!("Unreachable in rust_main!");
     } else {
         println!("[kernel] Hello from hart {}!", hart_id);
@@ -152,10 +152,10 @@ pub fn rust_main() -> ! {
 }
 */
 
-fn main_init(hart_id: usize) {
+fn main_init(hart_id: usize, boot_info: usize) {
     println!("[kernel] main_init hart_id={}", hart_id);
 
-    mm::init();
+    mm::init(boot_info);
     #[cfg(target_arch = "riscv64")]
     mm::remap_test();
     arch::trap::init();

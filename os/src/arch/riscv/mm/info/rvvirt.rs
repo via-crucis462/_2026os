@@ -1,11 +1,7 @@
 //! qemu virt 内存空间布局信息
 
-/// 主要内存起始地址, 注意linker.ld需要与此同步
-pub const MEMORY_BASE: usize = 0x8000_0000;
-/// qemu memory size（启动参数 -m 16G）
-pub const MEMORY_SIZE: usize = 16 << 30; // 0x4_0000_0000
-/// the physical memory end
-pub const MEMORY_END: usize = MEMORY_BASE + MEMORY_SIZE; // 0x4_8000_0000
+// RAM 区间在启动时从设备树发现。内核装载地址仍由 linker-virt.ld 固定，
+// 但该地址不再用于推导 RAM 边界。
 /// virtio 设备单个槽位长度
 pub const MMIO_SLOT_SIZE: usize = 0x1000;
 /// virtio 设备 mmio 区域长度

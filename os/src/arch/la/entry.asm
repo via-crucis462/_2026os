@@ -13,6 +13,9 @@ _start:
     mul.d $t0, $t0, $tp
     sub.d $sp, $sp, $t0
     move $a0, $tp
+    # QEMU virt 通过 a2 传入 EFI system table。将其转发为 rust_main 的
+    # 第二个参数；非 virt 板卡不会使用这个值。
+    move $a1, $a2
     bl rust_main
 
     .section .bss.stack

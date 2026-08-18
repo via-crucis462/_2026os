@@ -1,20 +1,36 @@
 //! The global allocator
-use crate::arch::config::{CPU_CORE_NUM, KERNEL_HEAP_SIZE};
+use crate::arch::config::{CACHED_KERNEL_BASE, CPU_CORE_NUM, PAGE_SIZE};
+use crate::mm::boot_memory;
 use buddy_system_allocator::LockedHeap;
 use core::alloc::{GlobalAlloc, Layout};
 
-#[cfg(target_arch = "riscv64")]
-const LARGE_HEAP_RESERVE_SIZE: usize = 1 << 30;
-#[cfg(target_arch = "loongarch64")]
-const LARGE_HEAP_RESERVE_SIZE: usize = 1 << 28;
-#[cfg(target_arch = "riscv64")]
-const LARGE_ALLOCATION_BLOCK_SIZE: usize = 1 << 29;
-#[cfg(target_arch = "loongarch64")]
-const LARGE_ALLOCATION_BLOCK_SIZE: usize = 1 << 27;
 const LARGE_ALLOCATION_THRESHOLD: usize = 1 << 20;
-const LOCAL_HEAP_SIZE: usize = KERNEL_HEAP_SIZE - LARGE_HEAP_RESERVE_SIZE;
-const LOCAL_ARENA_SIZE: usize = LOCAL_HEAP_SIZE / CPU_CORE_NUM;
-const LOCAL_TOTAL_SIZE: usize = LOCAL_ARENA_SIZE * CPU_CORE_NUM;
+
+struct ArenaLayout {
+    heap_start: usize,
+    heap_end: usize,
+    local_arena_size: usize,
+    local_total_size: usize,
+}
+
+/// 把启动阶段确定的物理堆区间转换为内核窗口地址，并划分各分配域。
+fn arena_layout() -> ArenaLayout {
+    let memory = boot_memory();
+    let heap_start = memory.heap_start | CACHED_KERNEL_BASE;
+    let heap_end = memory.heap_end | CACHED_KERNEL_BASE;
+    let heap_size = heap_end - heap_start;
+    // 三分之一平均分给各 hart 的本地堆，三分之二留给大块分配。
+    let local_arena_size = (heap_size / 3 / CPU_CORE_NUM) & !(PAGE_SIZE - 1);
+    let local_total_size = local_arena_size * CPU_CORE_NUM;
+    assert!(local_arena_size >= PAGE_SIZE);
+    assert!(heap_size - local_total_size >= PAGE_SIZE);
+    ArenaLayout {
+        heap_start,
+        heap_end,
+        local_arena_size,
+        local_total_size,
+    }
+}
 
 struct PerHartHeap {
     local_arenas: [LockedHeap; CPU_CORE_NUM],
@@ -35,11 +51,12 @@ impl PerHartHeap {
     }
 
     fn owner(&self, ptr: *mut u8) -> Option<HeapOwner> {
-        let heap_start = core::ptr::addr_of!(HEAP_SPACE) as *const u64 as usize;
-        let offset = (ptr as usize).checked_sub(heap_start)?;
-        if offset < LOCAL_TOTAL_SIZE {
-            Some(HeapOwner::Local(offset / LOCAL_ARENA_SIZE))
-        } else if offset < KERNEL_HEAP_SIZE {
+        // 释放可能发生在不同 hart 上，必须按指针所在区间找到原分配器。
+        let layout = arena_layout();
+        let offset = (ptr as usize).checked_sub(layout.heap_start)?;
+        if offset < layout.local_total_size {
+            Some(HeapOwner::Local(offset / layout.local_arena_size))
+        } else if (ptr as usize) < layout.heap_end {
             Some(HeapOwner::Large)
         } else {
             None
@@ -103,32 +120,22 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
         layout, local_used, local_total, large_used, large_total, cache_pages, idmap, lru
     );
 }
-/// heap space ([u8; KERNEL_HEAP_SIZE])
-/// 会被放到.bss段中
-/// MUST be 8-byte aligned: LA264 enforces alignment, and buddy allocator
-/// requires the base to be properly aligned to return valid pointers.
-static mut HEAP_SPACE: [u64; KERNEL_HEAP_SIZE / 8] = [0; KERNEL_HEAP_SIZE / 8];
-/// initiate heap allocator
+/// 使用启动阶段划出的运行期堆区间初始化各伙伴分配器。
 #[allow(warnings)]
 pub fn init_heap() {
-    assert!(KERNEL_HEAP_SIZE > LARGE_HEAP_RESERVE_SIZE);
-    assert!(LOCAL_ARENA_SIZE > 0);
-    let heap_start = core::ptr::addr_of!(HEAP_SPACE) as *const u64 as usize;
-    let large_start = heap_start + LOCAL_TOTAL_SIZE;
-    let large_end = heap_start + KERNEL_HEAP_SIZE;
-    let aligned_large_start = (large_start + LARGE_ALLOCATION_BLOCK_SIZE - 1)
-        & !(LARGE_ALLOCATION_BLOCK_SIZE - 1);
-    assert!(large_end - aligned_large_start >= LARGE_ALLOCATION_BLOCK_SIZE);
+    let layout = arena_layout();
+    let large_start = layout.heap_start + layout.local_total_size;
     unsafe {
         for (hart_id, arena) in HEAP_ALLOCATOR.local_arenas.iter().enumerate() {
-            arena
-                .lock()
-                .init(heap_start + hart_id * LOCAL_ARENA_SIZE, LOCAL_ARENA_SIZE);
+            arena.lock().init(
+                layout.heap_start + hart_id * layout.local_arena_size,
+                layout.local_arena_size,
+            );
         }
         HEAP_ALLOCATOR
             .large_arena
             .lock()
-            .init(aligned_large_start, large_end - aligned_large_start);
+            .init(large_start, layout.heap_end - large_start);
     }
 }
 
@@ -136,14 +143,11 @@ pub fn init_heap() {
 pub fn heap_test() {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
-    extern "C" {
-        fn sbss();
-        fn ebss();
-    }
-    let bss_range = sbss as *const () as usize..ebss as *const () as usize;
+    let layout = arena_layout();
+    let heap_range = layout.heap_start..layout.heap_end;
     let a = Box::new(5);
     assert_eq!(*a, 5);
-    assert!(bss_range.contains(&(a.as_ref() as *const _ as usize)));
+    assert!(heap_range.contains(&(a.as_ref() as *const _ as usize)));
     drop(a);
     let mut v: Vec<usize> = Vec::new();
     for i in 0..500 {
@@ -152,7 +156,7 @@ pub fn heap_test() {
     for (i, val) in v.iter().take(500).enumerate() {
         assert_eq!(*val, i);
     }
-    assert!(bss_range.contains(&(v.as_ptr() as usize)));
+    assert!(heap_range.contains(&(v.as_ptr() as usize)));
     drop(v);
     println!("heap_test passed!");
 }

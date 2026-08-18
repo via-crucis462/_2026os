@@ -4,12 +4,10 @@ use alloc::vec::Vec;
 use lazy_static::lazy_static;
 
 use crate::{
-    CACHED_KERNEL_BASE, arch::config::{DMA_SIZE, MEMORY_END, PAGE_SIZE}, mm::{PhysAddr, PhysPageNum, address::SimpleRange}, sync::MPSafeCell
+    arch::config::PAGE_SIZE,
+    mm::{address::SimpleRange, boot_memory, PhysAddr, PhysPageNum},
+    sync::MPSafeCell,
 };
-
-extern "C" {
-    fn ekernel();
-}
 
 /// 维护DMA区域的内存的管理器
 /// 可保证分配的连续性
@@ -124,9 +122,10 @@ impl DmaBuffer {
 lazy_static! {
     /// 固定的DMA区域物理页管理器
     pub static ref DMA_MEMORY: MPSafeCell<DmaMemManager> = {
-        let start = PhysAddr::from(ekernel as *const () as usize & ! CACHED_KERNEL_BASE);
-        let end = PhysAddr::from(start.0 + DMA_SIZE);
-        assert!(end.0 <= MEMORY_END, "DMA region exceeds physical memory");
+        // DMA 管理器与堆、页帧分配器共享同一份启动布局，避免区间重叠。
+        let memory = boot_memory();
+        let start = PhysAddr::from(memory.dma_start);
+        let end = PhysAddr::from(memory.dma_end);
         MPSafeCell::new(DmaMemManager::new(start, end))
     };
 }

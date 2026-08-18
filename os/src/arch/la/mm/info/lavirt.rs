@@ -1,12 +1,12 @@
-//! qemu-virt (la64) 内存空间布局信息
-//! 内存段无特殊说明则：起始包含，结束不包含（前闭后开区间）
+//! qemu-virt (la64) 的固定低端内存与 MMIO 布局
+//! 主内存区间在启动时从设备树发现。
 
 /*
-QEMU virt with 36 GiB RAM exposes two physical ranges:
+QEMU virt 使用常见的 36 GiB 配置时会暴露两个物理内存区：
     lowram  [0x0,         0x1000_0000)
     highram [0x8000_0000, 0x9_7000_0000)
-The firmware occupies the first 2 MiB of lowram. The kernel uses the rest of
-lowram for kernel stacks and highram for the frame allocator.
+固件占用 lowram 的前 2 MiB，内核使用其余 lowram 放置内核栈。
+highram 区间会随 QEMU 的 `-m` 参数变化。
 */
 
 
@@ -18,17 +18,6 @@ pub const DRAM_BANK0_START: usize = 0x20_0000;
 pub const DRAM_BANK0_END: usize = 0x1000_0000;
 /// Bank0 大小
 pub const DRAM_BANK0_SIZE: usize = DRAM_BANK0_END - DRAM_BANK0_START;
-
-/// Bank1 起始物理地址（内核和帧分配器使用）
-pub const DRAM_BANK1_START: usize = 0x8000_0000;
-/// Bank1 大小
-pub const DRAM_BANK1_SIZE: usize = 0x8_F000_0000; // 35.75 GiB
-/// Bank1 结束地址
-pub const DRAM_BANK1_END: usize = DRAM_BANK1_START + DRAM_BANK1_SIZE; // 0x9_7000_0000
-
-/// 总可用 DRAM 大小（不含固件保留区）
-pub const DRAM_TOTAL_SIZE: usize = DRAM_BANK0_SIZE + DRAM_BANK1_SIZE;
-
 
 /// 固件保留区
 /// 
@@ -61,6 +50,3 @@ pub const MMIO: &[(usize, usize)] = &[
 /// 实际可用的 Bank0
 pub const BANK0_START_EFFECTIVE: usize = DRAM_BANK0_START;
 pub const BANK0_END_EFFECTIVE: usize = DRAM_BANK0_END;
-/// Bank1
-pub const BANK1_START_EFFECTIVE: usize = DRAM_BANK1_START;
-pub const BANK1_END_EFFECTIVE: usize = DRAM_BANK1_END;
