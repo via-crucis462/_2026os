@@ -347,6 +347,9 @@ impl LA2k1000NetDevice {
     }
     /// 启动与初始化网卡设备
     fn init(&mut self) -> Result<(), EthernetError> {
+        // DMA software reset clears the MAC address registers on this core.
+        // Preserve a valid firmware/runtime address before issuing the reset.
+        let preserved_mac = self.read_mac_address();
         // 关中断
         self.dma_write(LA2k1000DmaReg::Interrupt, 0);
         // 停止收发
@@ -363,8 +366,10 @@ impl LA2k1000NetDevice {
             DMA_REG_OFFSET + LA2k1000DmaReg::BusMode.offset(),
             DMA_BUS_MODE_SWR,
         )?;
-        // 读取 MAC 地址，若无效则使用一个硬编码的地址
-        self.mac_addr = self.read_mac_address();
+        // 恢复复位前的 MAC 地址，若无效则沿用已有地址或使用本地地址。
+        if valid_unicast_mac(preserved_mac) {
+            self.mac_addr = preserved_mac;
+        }
         if !valid_unicast_mac(self.mac_addr) {
             self.mac_addr = [0x02, 0x00, 0x00, 0x2b, 0x10, 0x00];
             warn!("2K1000 GMAC0: firmware MAC invalid, using a local address");
@@ -372,6 +377,8 @@ impl LA2k1000NetDevice {
         // 写入 MAC 地址到寄存器
         self.write_mac_address(self.mac_addr);
 
+        self.tx_index = 0;
+        self.rx_index = 0;
         self.init_descriptor_rings();
 
         /* 配置 DMA */
@@ -482,11 +489,11 @@ impl LA2k1000NetDevice {
     }
     pub fn can_recv(&self) -> bool {
         dma_barriar();
-        self.read_desc(self.rx_desc_ptr(self.rx_index)).status & DESC_OWN == 0
+        self.read_desc_status(self.rx_desc_ptr(self.rx_index)) & DESC_OWN == 0
     }
     pub fn can_send(&self) -> bool {
         dma_barriar();
-        self.read_desc(self.tx_desc_ptr(self.tx_index)).status & DESC_OWN == 0
+        self.read_desc_status(self.tx_desc_ptr(self.tx_index)) & DESC_OWN == 0
     }
     /// 发送一帧
     pub fn send_frame(&mut self, frame: &[u8]) -> Result<(), EthernetError> {
@@ -513,24 +520,32 @@ impl LA2k1000NetDevice {
         } else {
             0
         };
-        self.write_desc(
+        self.publish_desc(
             self.tx_desc_ptr(index),
             DmaDesc {
-                status: DESC_OWN | DESC_TX_INTERRUPT | DESC_TX_FIRST | DESC_TX_LAST | end_of_ring,
+                status: DESC_TX_INTERRUPT | DESC_TX_FIRST | DESC_TX_LAST | end_of_ring,
                 length: frame.len() as u32 & DESC_BUFFER1_SIZE_MASK,
                 buffer1: self.tx_buffer_phys(index) as u32,
                 buffer2: 0,
             },
         );
-        dma_barriar();
         self.dma_write(LA2k1000DmaReg::TxPollDemand, 0);
 
         let start = get_time_ms();
         loop {
             dma_barriar();
-            let descriptor = self.read_desc(self.tx_desc_ptr(index));
-            if descriptor.status & DESC_OWN == 0 {
-                if descriptor.status & DESC_ERROR != 0 {
+            let status = self.read_desc_status(self.tx_desc_ptr(index));
+            if status & DESC_OWN == 0 {
+                if status & DESC_ERROR != 0 {
+                    error!(
+                        "2K1000 GMAC0 TX error: desc={} len={} status=0x{:08x} dma=0x{:08x} curr_desc=0x{:08x} curr_addr=0x{:08x}",
+                        index,
+                        frame.len(),
+                        status,
+                        self.dma_read(LA2k1000DmaReg::Status),
+                        self.dma_read(LA2k1000DmaReg::TxCurrDesc),
+                        self.dma_read(LA2k1000DmaReg::TxCurrAddr),
+                    );
                     self.finish_tx(index);
                     return Err(EthernetError::Driver);
                 }
@@ -541,9 +556,12 @@ impl LA2k1000NetDevice {
                 error!(
                     "2K1000 GMAC0 TX timeout: desc={} status=0x{:08x} dma=0x{:08x}",
                     index,
-                    descriptor.status,
+                    status,
                     self.dma_read(LA2k1000DmaReg::Status)
                 );
+                if let Err(error) = self.init() {
+                    error!("2K1000 GMAC0 recovery after TX timeout failed: {:?}", error);
+                }
                 return Err(EthernetError::Driver);
             }
             spin_loop();
@@ -557,12 +575,12 @@ impl LA2k1000NetDevice {
         }
 
         let index = self.rx_index;
-        let descriptor = self.read_desc(self.rx_desc_ptr(index));
-        let raw_length = ((descriptor.status & DESC_RX_FRAME_LENGTH_MASK)
+        let status = self.read_desc_status(self.rx_desc_ptr(index));
+        let raw_length = ((status & DESC_RX_FRAME_LENGTH_MASK)
             >> DESC_RX_FRAME_LENGTH_SHIFT) as usize;
-        let valid = descriptor.status & DESC_ERROR == 0
-            && descriptor.status & DESC_RX_FIRST != 0
-            && descriptor.status & DESC_RX_LAST != 0
+        let valid = status & DESC_ERROR == 0
+            && status & DESC_RX_FIRST != 0
+            && status & DESC_RX_LAST != 0
             && raw_length >= 4
             && raw_length <= PACKET_BUFFER_SIZE;
         if !valid {
@@ -618,10 +636,10 @@ impl LA2k1000NetDevice {
     }
     /// 回收 RX 描述符，将其状态设置为 DESC_OWN 并重新放入环中
     fn recycle_rx_desc(&self, index: usize) {
-        self.write_desc(
+        self.publish_desc(
             self.rx_desc_ptr(index),
             DmaDesc {
-                status: DESC_OWN,
+                status: 0,
                 length: (PACKET_BUFFER_SIZE as u32 & DESC_BUFFER1_SIZE_MASK)
                     | if index + 1 == RING_SIZE {
                         RX_DESC_END_OF_RING
@@ -739,11 +757,22 @@ impl LA2k1000NetDevice {
         self.dma_region_window_addr(region, offset) as *mut T
     }
     /* 读写描述符 */
-    fn read_desc(&self, descriptor: *mut DmaDesc) -> DmaDesc {
-        unsafe { read_volatile(descriptor) }
+    fn read_desc_status(&self, descriptor: *mut DmaDesc) -> u32 {
+        unsafe { read_volatile(core::ptr::addr_of!((*descriptor).status)) }
     }
     fn write_desc(&self, descriptor: *mut DmaDesc, value: DmaDesc) {
         unsafe { write_volatile(descriptor, value) }
+    }
+    fn write_desc_status(&self, descriptor: *mut DmaDesc, status: u32) {
+        unsafe { write_volatile(core::ptr::addr_of_mut!((*descriptor).status), status) }
+    }
+    /// Publish a fully initialized descriptor to DMA, with OWN written last.
+    fn publish_desc(&self, descriptor: *mut DmaDesc, mut value: DmaDesc) {
+        value.status &= !DESC_OWN;
+        self.write_desc(descriptor, value);
+        dma_barriar();
+        self.write_desc_status(descriptor, value.status | DESC_OWN);
+        dma_barriar();
     }
     /* 读写寄存器 */
     fn gmac_read(&self, reg: LA2k1000GmacReg) -> u32 {

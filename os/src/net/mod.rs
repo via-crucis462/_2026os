@@ -56,9 +56,12 @@ impl<'a, D: EthernetDevice> phy::TxToken for TxToken<'a, D> {
     {
         let mut buffer = vec![0u8; len];
         let result = f(&mut buffer);
-        self.device
-            .transmit_frame(&buffer)
-            .expect("Failed to send network packet");
+        match self.device.transmit_frame(&buffer) {
+            Ok(()) => {}
+            Err(e) => {
+                error!("Failed to transmit frame: {:?}", e);
+            }
+        }
         result
     }
 }
