@@ -181,12 +181,12 @@ lazy_static! {
         let mut iface = Interface::new(config, &mut device, Instant::from_millis(0));
 
 
-        #[cfg(board = "visionfive2")]
+        #[cfg(any(board = "visionfive2", board = "2k1000"))]
         let (ip_addr, gateway) = (
             IpCidr::new(IpAddress::v4(192, 168, 1, 101), 24),
             Ipv4Address::new(192, 168, 1, 100),
         );
-        #[cfg(not(board = "visionfive2"))]
+        #[cfg(not(any(board = "visionfive2", board = "2k1000")))]
         let (ip_addr, gateway) = (
             IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24),
             Ipv4Address::new(10, 0, 2, 2),

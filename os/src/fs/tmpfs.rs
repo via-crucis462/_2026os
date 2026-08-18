@@ -562,9 +562,9 @@ fn mount_if_missing_or_empty(
 fn setup_network_config(root: &Arc<Dentry>) {
     let etc_dentry = existing_or_mount_dir(root, "etc", 0o755);
 
-    #[cfg(board = "visionfive2")]
+    #[cfg(any(board = "visionfive2", board = "2k1000"))]
     let resolv_conf_content = "nameserver 1.1.1.1\noptions timeout:2 attempts:2\n";
-    #[cfg(not(board = "visionfive2"))]
+    #[cfg(not(any(board = "visionfive2", board = "2k1000")))]
     let resolv_conf_content = "nameserver 10.0.2.3\noptions timeout:2 attempts:2\n";
     mount_if_missing_or_empty(
         &etc_dentry,
@@ -573,9 +573,9 @@ fn setup_network_config(root: &Arc<Dentry>) {
             resolv_conf_content.as_bytes(),
         )),
     );
-    #[cfg(board = "visionfive2")]
+    #[cfg(any(board = "visionfive2", board = "2k1000"))]
     let hosts_content = "127.0.0.1 localhost\n192.168.1.101 shellcore\n";
-    #[cfg(not(board = "visionfive2"))]
+    #[cfg(not(any(board = "visionfive2", board = "2k1000")))]
     let hosts_content = "127.0.0.1 localhost\n10.0.2.15 shellcore\n";
     mount_if_missing_or_empty(
         &etc_dentry,
