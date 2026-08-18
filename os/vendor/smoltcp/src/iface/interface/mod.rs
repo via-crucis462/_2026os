@@ -603,7 +603,21 @@ impl Interface {
         }
 
         let mut emitted_any = false;
+        let iface_is_loopback = self
+            .inner
+            .ip_addrs
+            .iter()
+            .any(|cidr| matches!(cidr.address(), IpAddress::Ipv4(addr) if addr.is_loopback()));
         for item in sockets.items_mut() {
+            if let Socket::Tcp(socket) = &item.socket {
+                if let Some(remote) = socket.remote_endpoint() {
+                    let remote_is_loopback =
+                        matches!(remote.addr, IpAddress::Ipv4(addr) if addr.is_loopback());
+                    if remote_is_loopback != iface_is_loopback {
+                        continue;
+                    }
+                }
+            }
             if !item
                 .meta
                 .egress_permitted(self.inner.now, |ip_addr| self.inner.has_neighbor(&ip_addr))

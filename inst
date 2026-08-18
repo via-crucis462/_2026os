@@ -33,3 +33,4 @@ BOARD=virt INIT=sh make gdb-rv
 /musl/busybox ping -c 2 10.0.2.2
 /musl/busybox ping -c 2 1.1.1.1
 /musl/busybox nslookup example.com 10.0.2.3
+make -n test-rv RV_IMAGE=alpine-linux-riscv64-ext4fs.img INIT=sh

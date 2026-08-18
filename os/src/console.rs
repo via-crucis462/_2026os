@@ -47,10 +47,7 @@ lazy_static! {
         c_iflag: 0o012402,
         c_oflag: 0o000005,
         c_cflag: 0o002277,
-        //c_lflag: 0o0105011, // 默认包含 ISIG|ICANON|ECHO 等
-        // 默认保留 ISIG/ICANON，但关闭 ECHO，避免 BusyBox ash 的行编辑
-        // 输出与内核回显叠加。用户态仍可通过 TCSETS 重新开启 ECHO。
-        c_lflag: 0o0105001,
+        c_lflag: 0o0105011, // 默认包含 ISIG|ICANON|ECHO 等
         c_line: 0,
         c_cc: {
             let mut cc = [0u8; 19];

@@ -3436,7 +3436,8 @@ fn ppoll_collect_ready(
             if file.poll_hangup() {
                 pollfd.revents |= POLLHUP;
             }
-            if pollfd.events & POLLIN != 0 && file.ready_to_read() {
+            let read_ready = pollfd.events & POLLIN != 0 && file.ready_to_read();
+            if read_ready {
                 pollfd.revents |= POLLIN;
             }
             if pollfd.events & POLLOUT != 0 && file.ready_to_write() {

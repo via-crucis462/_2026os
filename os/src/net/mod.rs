@@ -203,7 +203,7 @@ lazy_static! {
 }
 
 pub fn net_poll() {
-    trace!("net_poll called");
+    //trace!("net_poll called");
     let mut eth_iface = NET_IFACE.exclusive_access();
     let mut lo_iface = LO_IFACE.exclusive_access();
     let mut sockets = SOCKET_SET.exclusive_access();

@@ -517,7 +517,7 @@ pub fn sys_sendto(
             data[current..current + copy_len].copy_from_slice(buffer);
             current += copy_len;
         }
-        if dest_addr as usize != 0 {
+        let remote_ep = if dest_addr as usize != 0 {
             let sockaddr_bytes = {
                 if let Some(s) = try_translated_read(&mm, dest_addr as *const [u8; 16]) {
                     s
@@ -529,8 +529,17 @@ pub fn sys_sendto(
             let ip = smoltcp::wire::IpAddress::v4(
                 sockaddr_bytes[4], sockaddr_bytes[5], sockaddr_bytes[6], sockaddr_bytes[7]
             );
-            let remote_ep = smoltcp::wire::IpEndpoint::new(ip, port);
-           loop {
+            smoltcp::wire::IpEndpoint::new(ip, port)
+        } else {
+            // sendto(fd, ..., NULL, 0) on a connected datagram socket sends
+            // to the peer selected by connect(2). c-ares uses exactly this
+            // form for DNS queries.
+            let Some(remote_ep) = *udp_socket.remote_ep.lock() else {
+                return Errno::EDESTADDRREQ.as_isize();
+            };
+            remote_ep
+        };
+        loop {
             let ret = udp_socket.sendto(&data, remote_ep);
             // 如果底层的 smoltcp 缓冲区满了，
             if ret == EAGAIN.as_isize() {
@@ -546,9 +555,6 @@ pub fn sys_sendto(
                 net_poll();
             }
             return ret;
-        }
-        } else {
-            return Errno::EDESTADDRREQ.as_isize(); // 需要目标地址
         }
     }
 
@@ -624,10 +630,10 @@ pub fn sys_recvfrom(
         return Errno::EBADF.as_isize();
     }
     let file = inner.fds[fd].file.as_ref().unwrap().clone();
+    let fd_status = inner.fds[fd].status;
     drop(inner);
     let is_nonblocking = (_flags & MSG_DONTWAIT != 0) 
-        || file.get_flags().contains(crate::fs::OpenFlags::NONBLOCK);
-    let file_flags = file.get_flags();
+        || (fd_status & 0o4000) != 0;
     if let Some(udp_socket) = file.as_any().downcast_ref::<crate::net::socket::UdpSocket>() {
         let mut data = vec![0u8; len];
         let timeout_opt = *udp_socket.recv_timeout.lock();
@@ -1280,7 +1286,88 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: *mut MsgHdr, _flags: i32) -> isize {
         return crate::syscall::errno::Errno::EBADF.as_isize();
     }
     let file = inner.fds[fd].file.as_ref().unwrap().clone();
+    let fd_status = inner.fds[fd].status;
     drop(inner);
+
+    if let Some(udp_socket) = file
+        .as_any()
+        .downcast_ref::<crate::net::socket::UdpSocket>()
+    {
+        let mut msg: MsgHdr = crate::mm::translated_read(&mm, msg_ptr);
+        let mut iovecs = alloc::vec::Vec::new();
+        let mut capacity = 0usize;
+        for index in 0..msg.msg_iovlen.min(1024) {
+            let iov_ptr =
+                (msg.msg_iov + index * core::mem::size_of::<IoVec>()) as *const IoVec;
+            let iov: IoVec = crate::mm::translated_read(&mm, iov_ptr);
+            capacity = capacity.saturating_add(iov.iov_len).min(65_535);
+            iovecs.push(iov);
+        }
+
+        let nonblocking = (_flags & 0x40) != 0 || (fd_status & 0o4000) != 0;
+        let mut packet = vec![0u8; capacity];
+        loop {
+            net_poll();
+            let Some((read_len, src_ep)) = udp_socket.recvfrom(&mut packet) else {
+                if nonblocking {
+                    return EAGAIN.as_isize();
+                }
+                if get_pending_signals().contains(crate::task::SignalFlags::SIGALRM) {
+                    return EINTR.as_isize();
+                }
+                crate::task::suspend_current_and_run_next();
+                continue;
+            };
+
+            let mut copied = 0usize;
+            for iov in &iovecs {
+                if copied == read_len {
+                    break;
+                }
+                let mut user_bufs = crate::mm::translated_byte_buffer_mut(
+                    &mm,
+                    iov.iov_base as *mut u8,
+                    iov.iov_len,
+                );
+                for user_buf in user_bufs.iter_mut() {
+                    let copy_len = user_buf.len().min(read_len - copied);
+                    user_buf[..copy_len]
+                        .copy_from_slice(&packet[copied..copied + copy_len]);
+                    copied += copy_len;
+                    if copied == read_len {
+                        break;
+                    }
+                }
+            }
+
+            if msg.msg_name != 0 {
+                let mut sockaddr = [0u8; 16];
+                sockaddr[0..2].copy_from_slice(&2u16.to_ne_bytes());
+                sockaddr[2..4].copy_from_slice(&src_ep.port.to_be_bytes());
+                let smoltcp::wire::IpAddress::Ipv4(ipv4) = src_ep.addr;
+                sockaddr[4..8].copy_from_slice(&ipv4.0);
+                let name_len = (msg.msg_namelen as usize).min(sockaddr.len());
+                let mut name_bufs = crate::mm::translated_byte_buffer_mut(
+                    &mm,
+                    msg.msg_name as *mut u8,
+                    name_len,
+                );
+                let mut name_copied = 0usize;
+                for name_buf in name_bufs.iter_mut() {
+                    let copy_len = name_buf.len().min(name_len - name_copied);
+                    name_buf[..copy_len]
+                        .copy_from_slice(&sockaddr[name_copied..name_copied + copy_len]);
+                    name_copied += copy_len;
+                }
+                msg.msg_namelen = 16;
+            } else {
+                msg.msg_namelen = 0;
+            }
+            msg.msg_flags = 0;
+            crate::mm::translated_write(&mm, msg_ptr, msg);
+            return read_len as isize;
+        }
+    }
 
     if !file.readable() {
         return crate::syscall::errno::Errno::EBADF.as_isize();

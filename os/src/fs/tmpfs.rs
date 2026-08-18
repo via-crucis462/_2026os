@@ -546,6 +546,44 @@ fn mount_if_missing(parent: &Arc<Dentry>, name: &str, inode: Arc<dyn VfsInode>) 
         .unwrap_or_else(|| parent.mount_child(name.to_string(), inode))
 }
 
+fn mount_if_missing_or_empty(
+    parent: &Arc<Dentry>,
+    name: &str,
+    inode: Arc<dyn VfsInode>,
+) -> Arc<Dentry> {
+    if let Some(existing) = parent.find_child(name) {
+        if existing.inode.get_size() != 0 {
+            return existing;
+        }
+    }
+    parent.mount_child(name.to_string(), inode)
+}
+
+fn setup_network_config(root: &Arc<Dentry>) {
+    let etc_dentry = existing_or_mount_dir(root, "etc", 0o755);
+
+    #[cfg(board = "visionfive2")]
+    let resolv_conf_content = "nameserver 1.1.1.1\noptions timeout:2 attempts:2\n";
+    #[cfg(not(board = "visionfive2"))]
+    let resolv_conf_content = "nameserver 10.0.2.3\noptions timeout:2 attempts:2\n";
+    mount_if_missing_or_empty(
+        &etc_dentry,
+        "resolv.conf",
+        Arc::new(TmpfsFileInode::new_with_data(
+            resolv_conf_content.as_bytes(),
+        )),
+    );
+    #[cfg(board = "visionfive2")]
+    let hosts_content = "127.0.0.1 localhost\n192.168.1.101 shellcore\n";
+    #[cfg(not(board = "visionfive2"))]
+    let hosts_content = "127.0.0.1 localhost\n10.0.2.15 shellcore\n";
+    mount_if_missing_or_empty(
+        &etc_dentry,
+        "hosts",
+        Arc::new(TmpfsFileInode::new_with_data(hosts_content.as_bytes())),
+    );
+}
+
 fn setup_common_env(root: &Arc<Dentry>) {
     // Reuse rootfs standard directories. A trimmed image receives only the
     // missing writable directories as Tmpfs, so a full image keeps its shell,
@@ -633,27 +671,6 @@ fn setup_preliminary_compat_env(root: &Arc<Dentry>) {
         &etc_dentry,
         "group",
         Arc::new(TmpfsFileInode::new_with_data(group_content.as_bytes())),
-    );
-
-    #[cfg(board = "visionfive2")]
-    let resolv_conf_content = "nameserver 1.1.1.1\noptions timeout:2 attempts:2\n";
-    #[cfg(not(board = "visionfive2"))]
-    let resolv_conf_content = "nameserver 10.0.2.3\noptions timeout:2 attempts:2\n";
-    mount_if_missing(
-        &etc_dentry,
-        "resolv.conf",
-        Arc::new(TmpfsFileInode::new_with_data(
-            resolv_conf_content.as_bytes(),
-        )),
-    );
-    #[cfg(board = "visionfive2")]
-    let hosts_content = "127.0.0.1 localhost\n192.168.1.101 shellcore\n";
-    #[cfg(not(board = "visionfive2"))]
-    let hosts_content = "127.0.0.1 localhost\n10.0.2.15 shellcore\n";
-    mount_if_missing(
-        &etc_dentry,
-        "hosts",
-        Arc::new(TmpfsFileInode::new_with_data(hosts_content.as_bytes())),
     );
 
     let var_dentry = existing_or_mount_dir(root, "var", 0o755);
@@ -852,6 +869,7 @@ pub fn set_up_env_final() {
     let profile = rootfs_profile(&root);
     info!("[VFS] Setting up rootfs environment: {:?}", profile);
     setup_common_env(&root);
+    setup_network_config(&root);
 
     match profile {
         RootfsProfile::FinalDebian => setup_final_glibc_env(&root),
