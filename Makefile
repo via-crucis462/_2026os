@@ -54,7 +54,7 @@ ifeq ($(BOARD),visionfive2)
 	cd os && cp target/riscv64gc-unknown-none-elf/$(MODE)/os ../kernel-rv-$(BOARD)
 	@echo "  -> Making binary for VisionFive2..."
 	rust-objcopy -O binary kernel-rv-$(BOARD) kernel-rv-$(BOARD).bin
-	mkdir -p $(TFTP_ROOT) && cp -f kernel-rv-$(BOARD).bin $(TFTP_ROOT)
+	sudo mkdir -p $(TFTP_ROOT) && sudo cp -f kernel-rv-$(BOARD).bin $(TFTP_ROOT)
 	sudo ip link set enp3s0 up
 	sudo ip addr replace 192.168.1.100/24 dev enp3s0
 endif

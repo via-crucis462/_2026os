@@ -939,7 +939,9 @@ fn wrap_raw_payload_in_ipv4(
     if total_len > u16::MAX as usize {
         return None;
     }
-    let source = {
+    let source = if destination[0] == 127 {
+        [127, 0, 0, 1]
+    } else {
         let iface = crate::net::NET_IFACE.exclusive_access();
         iface.ip_addrs().iter().find_map(|cidr| {
             let smoltcp::wire::IpAddress::Ipv4(address) = cidr.address();

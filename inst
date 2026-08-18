@@ -43,4 +43,59 @@ pv alpine-linux-riscv64-ext4fs.img | sudo dd of=/dev/sdb bs=4M conv=fsync
 sync
 pv sdcard.img.xz | xz -d > sdcard.img
 pv final.tar.gz | tar -xz --overwrite
+sudo sysctl -w net.ipv4.ip_forward=1
+#!/bin/bash
 
+# 开启 Linux IPv4 转发
+# 允许电脑作为板子的网关
+sudo sysctl -w net.ipv4.ip_forward=1
+
+
+# NAT:
+# 把板子网段 192.168.1.0/24
+# 出口 wlan0 的时候伪装成宿主机地址
+#
+# 板子:
+# 192.168.1.101
+#
+# 出去:
+# 192.168.79.97
+sudo iptables -t nat -A POSTROUTING \
+    -s 192.168.1.0/24 \
+    -o wlan0 \
+    -j MASQUERADE
+
+
+# 允许:
+# 板子 -> 外网
+sudo iptables -A FORWARD \
+    -i enp3s0 \
+    -o wlan0 \
+    -s 192.168.1.0/24 \
+    -j ACCEPT
+
+
+# 允许:
+# 外网回复 -> 板子
+sudo iptables -A FORWARD \
+    -i wlan0 \
+    -o enp3s0 \
+    -d 192.168.1.0/24 \
+    -m conntrack \
+    --ctstate ESTABLISHED,RELATED \
+    -j ACCEPT
+
+
+echo "nameserver 223.5.5.5" > /etc/resolv.conf
+
+如果没有 DHCP：
+
+ip addr add 192.168.1.101/24 dev eth0
+
+默认网关：
+
+ip route add default via 192.168.1.100
+
+DNS：
+
+echo "nameserver 223.5.5.5" > /etc/resolv.conf

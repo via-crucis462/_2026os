@@ -1087,7 +1087,7 @@ impl RawSocket {
         let total_len = data.len();
         if data.len() >= 20 {
             let dst_ip_bytes = [data[16], data[17], data[18], data[19]];
-            let is_local = {
+            let is_local = dst_ip_bytes[0] == 127 || {
                 let iface = crate::net::NET_IFACE.exclusive_access();
                 iface.ip_addrs().iter().any(|cidr| {
                     let smoltcp::wire::IpAddress::Ipv4(ipv4) = cidr.address();

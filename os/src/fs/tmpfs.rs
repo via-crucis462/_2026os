@@ -563,9 +563,17 @@ fn setup_network_config(root: &Arc<Dentry>) {
     let etc_dentry = existing_or_mount_dir(root, "etc", 0o755);
 
     #[cfg(any(board = "visionfive2", board = "2k1000"))]
-    let resolv_conf_content = "nameserver 1.1.1.1\noptions timeout:2 attempts:2\n";
+    let resolv_conf_content = "nameserver 223.5.5.5\noptions timeout:2 attempts:2\n";
     #[cfg(not(any(board = "visionfive2", board = "2k1000")))]
     let resolv_conf_content = "nameserver 10.0.2.3\noptions timeout:2 attempts:2\n";
+    #[cfg(any(board = "visionfive2", board = "2k1000"))]
+    etc_dentry.mount_child(
+        "resolv.conf".to_string(),
+        Arc::new(TmpfsFileInode::new_with_data(
+            resolv_conf_content.as_bytes(),
+        )),
+    );
+    #[cfg(not(any(board = "visionfive2", board = "2k1000")))]
     mount_if_missing_or_empty(
         &etc_dentry,
         "resolv.conf",
