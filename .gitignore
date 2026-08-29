@@ -68,3 +68,9 @@ recovered-buildstorm/
 alpine_linux.tar.gz
 RESULTS.md
 lmbench_tuning_playbook.md
+inst
+notes.md
+boot/busybox
+benchmarks/build/
+*.qcow2*
+ref/
